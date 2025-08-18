@@ -1,6 +1,16 @@
 [package]
 name = "dio"
 version = "0.1.0"
-edition = "2024"
+edition = "2021"
 
 [dependencies]
+# Parsing
+nom = "7.1"
+
+# Error handling & diagnostics
+thiserror = "1.0"
+ariadne = "0.4"
+
+[dev-dependencies]
+# Testing
+proptest = "1.4"
