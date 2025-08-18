@@ -1,0 +1,7 @@
+# Seeds for failure cases proptest has generated in the past. It is
+# automatically read and these particular cases re-run before any
+# novel cases are generated.
+#
+# It is recommended to check this file in to source control so that
+# everyone who runs the test benefits from these saved cases.
+cc eb2cb9b60aa3460621d40bbb79e05a3f453099ed316c2920064ee679f88110fe # shrinks to expr = Add([Sub(Column("A"), Literal(Float64(OrderedFloat64(0.0))))])

@@ -11,6 +11,22 @@ nom = "7.1"
 thiserror = "1.0"
 ariadne = "0.4"
 
+# JIT compilation
+cranelift = "0.105"
+cranelift-jit = "0.105"
+cranelift-module = "0.105"
+cranelift-frontend = "0.105"
+cranelift-codegen = "0.105"
+cranelift-native = "0.105"
+
+# Arrow arrays - removed due to compatibility issues, using raw arrays for POC
+
+# Graph algorithms for SSA
+petgraph = "0.6"
+
+# Performance utilities
+ahash = "0.8"
+
 [dev-dependencies]
 # Testing
 proptest = "1.4"
