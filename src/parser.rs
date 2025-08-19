@@ -1,4 +1,4 @@
-use crate::ast::{Expr, Value, OrderedFloat64, Type, TypedParam};
+use crate::ast::{Expr, OrderedFloat64, Type, TypedParam, Value};
 use crate::error::ParseError;
 use nom::{
     branch::alt,
@@ -21,7 +21,7 @@ impl<'a> Input<'a> {
     pub fn new(input: &'a str) -> Self {
         Input { input, offset: 0 }
     }
-    
+
     pub fn span_to(&self, end_input: &Input) -> Range<usize> {
         let start = self.offset;
         let end = end_input.offset;
@@ -32,7 +32,7 @@ impl<'a> Input<'a> {
 /// Main entry point for parsing expressions
 pub fn parse_expr(input: &str) -> Result<Expr, ParseError> {
     let _input_wrapper = Input::new(input);
-    
+
     match expression(input) {
         Ok((remaining, expr)) => {
             let remaining = remaining.trim();
@@ -46,14 +46,10 @@ pub fn parse_expr(input: &str) -> Result<Expr, ParseError> {
                 })
             }
         }
-        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => {
-            Err(convert_nom_error(input, e))
-        }
-        Err(nom::Err::Incomplete(_)) => {
-            Err(ParseError::UnexpectedEof { 
-                span: input.len()..input.len() 
-            })
-        }
+        Err(nom::Err::Error(e)) | Err(nom::Err::Failure(e)) => Err(convert_nom_error(input, e)),
+        Err(nom::Err::Incomplete(_)) => Err(ParseError::UnexpectedEof {
+            span: input.len()..input.len(),
+        }),
     }
 }
 
@@ -77,9 +73,9 @@ fn list_expression(input: &str) -> IResult<&str, Expr> {
                 parse_sum,
                 parse_count,
                 parse_let,
-            )))
+            ))),
         ),
-        preceded(multispace0, cut(char(')')))
+        preceded(multispace0, cut(char(')'))),
     )(input)
 }
 
@@ -95,14 +91,14 @@ fn atom(input: &str) -> IResult<&str, Expr> {
 fn parse_add(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("+")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.is_empty() {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Many1,
         )));
     }
-    
+
     Ok((input, Expr::Add(operands)))
 }
 
@@ -110,32 +106,32 @@ fn parse_add(input: &str) -> IResult<&str, Expr> {
 fn parse_sub(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("-")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.len() != 2 {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Count,
         )));
     }
-    
-    Ok((input, Expr::Sub(
-        Box::new(operands[0].clone()),
-        Box::new(operands[1].clone()),
-    )))
+
+    Ok((
+        input,
+        Expr::Sub(Box::new(operands[0].clone()), Box::new(operands[1].clone())),
+    ))
 }
 
 /// Parse multiplication: (* expr1 expr2 ...)
 fn parse_mul(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("*")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.is_empty() {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Many1,
         )));
     }
-    
+
     Ok((input, Expr::Mul(operands)))
 }
 
@@ -143,32 +139,32 @@ fn parse_mul(input: &str) -> IResult<&str, Expr> {
 fn parse_div(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("/")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.len() != 2 {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Count,
         )));
     }
-    
-    Ok((input, Expr::Div(
-        Box::new(operands[0].clone()),
-        Box::new(operands[1].clone()),
-    )))
+
+    Ok((
+        input,
+        Expr::Div(Box::new(operands[0].clone()), Box::new(operands[1].clone())),
+    ))
 }
 
 /// Parse sum reduction: (sum expr)
 fn parse_sum(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("sum")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.len() != 1 {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Count,
         )));
     }
-    
+
     Ok((input, Expr::Sum(Box::new(operands[0].clone()))))
 }
 
@@ -176,14 +172,14 @@ fn parse_sum(input: &str) -> IResult<&str, Expr> {
 fn parse_count(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("count")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
-    
+
     if operands.len() != 1 {
         return Err(nom::Err::Failure(nom::error::Error::new(
             input,
             nom::error::ErrorKind::Count,
         )));
     }
-    
+
     Ok((input, Expr::Count(Box::new(operands[0].clone()))))
 }
 
@@ -194,7 +190,7 @@ fn parse_let(input: &str) -> IResult<&str, Expr> {
     let (input, var_name) = cut(identifier)(input)?;
     let (input, _) = cut(multispace1)(input)?;
     let (input, expr) = cut(expression)(input)?;
-    
+
     Ok((input, Expr::Let(var_name, Box::new(expr))))
 }
 
@@ -211,12 +207,15 @@ fn parse_lambda(input: &str) -> IResult<&str, Expr> {
     let (input, _) = cut(char(')'))(input)?;
     let (input, _) = cut(multispace1)(input)?;
     let (input, body) = cut(expression)(input)?;
-    
-    Ok((input, Expr::Lambda {
-        params,
-        return_type,
-        body: Box::new(body),
-    }))
+
+    Ok((
+        input,
+        Expr::Lambda {
+            params,
+            return_type,
+            body: Box::new(body),
+        },
+    ))
 }
 
 /// Parse typed parameters: [Type var] [Type var] ...
@@ -233,7 +232,7 @@ fn parse_typed_param(input: &str) -> IResult<&str, TypedParam> {
     let (input, name) = identifier(input)?;
     let (input, _) = multispace0(input)?;
     let (input, _) = char(']')(input)?;
-    
+
     Ok((input, TypedParam { name, type_ }))
 }
 
@@ -263,7 +262,7 @@ fn number(input: &str) -> IResult<&str, Value> {
                 opt(one_of("+-")),
                 digit1,
                 opt(tuple((char('.'), digit1))),
-                opt(tuple((one_of("eE"), opt(one_of("+-")), digit1)))
+                opt(tuple((one_of("eE"), opt(one_of("+-")), digit1))),
             ))),
             |s: &str| {
                 if s.contains('.') || s.contains('e') || s.contains('E') {
@@ -271,17 +270,14 @@ fn number(input: &str) -> IResult<&str, Value> {
                         .map(|f| Value::Float64(OrderedFloat64::from(f)))
                         .map_err(|_| ())
                 } else {
-                    s.parse::<i64>()
-                        .map(Value::Int64)
-                        .map_err(|_| ())
+                    s.parse::<i64>().map(Value::Int64).map_err(|_| ())
                 }
-            }
+            },
         ),
         // Integer: just digits with optional sign
-        map_res(
-            recognize(pair(opt(one_of("+-")), digit1)),
-            |s: &str| s.parse::<i64>().map(Value::Int64).map_err(|_| ())
-        ),
+        map_res(recognize(pair(opt(one_of("+-")), digit1)), |s: &str| {
+            s.parse::<i64>().map(Value::Int64).map_err(|_| ())
+        }),
     ))(input)
 }
 
@@ -289,7 +285,7 @@ fn number(input: &str) -> IResult<&str, Value> {
 fn identifier(input: &str) -> IResult<&str, String> {
     map(
         take_while1(|c: char| c.is_alphanumeric() || c == '_'),
-        |s: &str| s.to_string()
+        |s: &str| s.to_string(),
     )(input)
 }
 
@@ -297,7 +293,7 @@ fn identifier(input: &str) -> IResult<&str, String> {
 fn convert_nom_error(input: &str, error: nom::error::Error<&str>) -> ParseError {
     let offset = input.offset(error.input);
     let span = offset..offset + error.input.len().min(1);
-    
+
     match error.code {
         nom::error::ErrorKind::Char => ParseError::UnexpectedToken {
             expected: "character".to_string(),
@@ -306,7 +302,12 @@ fn convert_nom_error(input: &str, error: nom::error::Error<&str>) -> ParseError 
         },
         nom::error::ErrorKind::Tag => ParseError::UnexpectedToken {
             expected: "keyword".to_string(),
-            found: error.input.split_whitespace().next().unwrap_or("").to_string(),
+            found: error
+                .input
+                .split_whitespace()
+                .next()
+                .unwrap_or("")
+                .to_string(),
             span,
         },
         nom::error::ErrorKind::Many1 => ParseError::WrongArgumentCount {
@@ -344,124 +345,157 @@ mod tests {
     #[test]
     fn test_parse_float_literal() {
         let result = parse_expr("3.14").unwrap();
-        assert_eq!(result, Expr::Literal(Value::Float64(OrderedFloat64::from(3.14))));
+        assert_eq!(
+            result,
+            Expr::Literal(Value::Float64(OrderedFloat64::from(3.14)))
+        );
     }
 
     #[test]
     fn test_parse_negative_numbers() {
         let result = parse_expr("-42").unwrap();
         assert_eq!(result, Expr::Literal(Value::Int64(-42)));
-        
+
         let result = parse_expr("-3.14").unwrap();
-        assert_eq!(result, Expr::Literal(Value::Float64(OrderedFloat64::from(-3.14))));
+        assert_eq!(
+            result,
+            Expr::Literal(Value::Float64(OrderedFloat64::from(-3.14)))
+        );
     }
 
     #[test]
     fn test_parse_scientific_notation() {
         let result = parse_expr("1.23e4").unwrap();
-        assert_eq!(result, Expr::Literal(Value::Float64(OrderedFloat64::from(12300.0))));
-        
+        assert_eq!(
+            result,
+            Expr::Literal(Value::Float64(OrderedFloat64::from(12300.0)))
+        );
+
         let result = parse_expr("1.5E-3").unwrap();
-        assert_eq!(result, Expr::Literal(Value::Float64(OrderedFloat64::from(0.0015))));
+        assert_eq!(
+            result,
+            Expr::Literal(Value::Float64(OrderedFloat64::from(0.0015)))
+        );
     }
 
     #[test]
     fn test_parse_simple_addition() {
         let result = parse_expr("(+ a b)").unwrap();
-        assert_eq!(result, Expr::Add(vec![
-            Expr::Column("a".to_string()),
-            Expr::Column("b".to_string()),
-        ]));
+        assert_eq!(
+            result,
+            Expr::Add(vec![
+                Expr::Column("a".to_string()),
+                Expr::Column("b".to_string()),
+            ])
+        );
     }
 
     #[test]
     fn test_parse_nary_addition() {
         let result = parse_expr("(+ a b c 42)").unwrap();
-        assert_eq!(result, Expr::Add(vec![
-            Expr::Column("a".to_string()),
-            Expr::Column("b".to_string()),
-            Expr::Column("c".to_string()),
-            Expr::Literal(Value::Int64(42)),
-        ]));
+        assert_eq!(
+            result,
+            Expr::Add(vec![
+                Expr::Column("a".to_string()),
+                Expr::Column("b".to_string()),
+                Expr::Column("c".to_string()),
+                Expr::Literal(Value::Int64(42)),
+            ])
+        );
     }
 
     #[test]
     fn test_parse_subtraction() {
         let result = parse_expr("(- x y)").unwrap();
-        assert_eq!(result, Expr::Sub(
-            Box::new(Expr::Column("x".to_string())),
-            Box::new(Expr::Column("y".to_string())),
-        ));
+        assert_eq!(
+            result,
+            Expr::Sub(
+                Box::new(Expr::Column("x".to_string())),
+                Box::new(Expr::Column("y".to_string())),
+            )
+        );
     }
 
     #[test]
     fn test_parse_multiplication() {
         let result = parse_expr("(* a 2 b)").unwrap();
-        assert_eq!(result, Expr::Mul(vec![
-            Expr::Column("a".to_string()),
-            Expr::Literal(Value::Int64(2)),
-            Expr::Column("b".to_string()),
-        ]));
+        assert_eq!(
+            result,
+            Expr::Mul(vec![
+                Expr::Column("a".to_string()),
+                Expr::Literal(Value::Int64(2)),
+                Expr::Column("b".to_string()),
+            ])
+        );
     }
 
     #[test]
     fn test_parse_division() {
         let result = parse_expr("(/ x 2.0)").unwrap();
-        assert_eq!(result, Expr::Div(
-            Box::new(Expr::Column("x".to_string())),
-            Box::new(Expr::Literal(Value::Float64(OrderedFloat64::from(2.0)))),
-        ));
+        assert_eq!(
+            result,
+            Expr::Div(
+                Box::new(Expr::Column("x".to_string())),
+                Box::new(Expr::Literal(Value::Float64(OrderedFloat64::from(2.0)))),
+            )
+        );
     }
 
     #[test]
     fn test_parse_sum_reduction() {
         let result = parse_expr("(sum a)").unwrap();
-        assert_eq!(result, Expr::Sum(
-            Box::new(Expr::Column("a".to_string()))
-        ));
+        assert_eq!(result, Expr::Sum(Box::new(Expr::Column("a".to_string()))));
     }
 
     #[test]
     fn test_parse_count_reduction() {
         let result = parse_expr("(count x)").unwrap();
-        assert_eq!(result, Expr::Count(
-            Box::new(Expr::Column("x".to_string()))
-        ));
+        assert_eq!(result, Expr::Count(Box::new(Expr::Column("x".to_string()))));
     }
 
     #[test]
     fn test_parse_let_binding() {
         let result = parse_expr("(let tmp (+ a b))").unwrap();
-        assert_eq!(result, Expr::Let(
-            "tmp".to_string(),
-            Box::new(Expr::Add(vec![
-                Expr::Column("a".to_string()),
-                Expr::Column("b".to_string()),
-            ]))
-        ));
+        assert_eq!(
+            result,
+            Expr::Let(
+                "tmp".to_string(),
+                Box::new(Expr::Add(vec![
+                    Expr::Column("a".to_string()),
+                    Expr::Column("b".to_string()),
+                ]))
+            )
+        );
     }
 
     #[test]
     fn test_parse_nested_expression() {
         let result = parse_expr("(+ a (* b c) (- d 1))").unwrap();
-        assert_eq!(result, Expr::Add(vec![
-            Expr::Column("a".to_string()),
-            Expr::Mul(vec![
-                Expr::Column("b".to_string()),
-                Expr::Column("c".to_string()),
-            ]),
-            Expr::Sub(
-                Box::new(Expr::Column("d".to_string())),
-                Box::new(Expr::Literal(Value::Int64(1))),
-            ),
-        ]));
+        assert_eq!(
+            result,
+            Expr::Add(vec![
+                Expr::Column("a".to_string()),
+                Expr::Mul(vec![
+                    Expr::Column("b".to_string()),
+                    Expr::Column("c".to_string()),
+                ]),
+                Expr::Sub(
+                    Box::new(Expr::Column("d".to_string())),
+                    Box::new(Expr::Literal(Value::Int64(1))),
+                ),
+            ])
+        );
     }
 
     #[test]
     fn test_parse_typed_lambda_simple() {
         let result = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
         match result {
-            Expr::Lambda { params, return_type, body } => {
+            Expr::Lambda {
+                params,
+                return_type,
+                body,
+            } => {
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "x");
                 assert_eq!(params[0].type_, Type::U64Array);
@@ -485,7 +519,11 @@ mod tests {
     fn test_parse_typed_lambda_sum() {
         let result = parse_expr("(lambda ([U64Array x] U64) (sum x))").unwrap();
         match result {
-            Expr::Lambda { params, return_type, body } => {
+            Expr::Lambda {
+                params,
+                return_type,
+                body,
+            } => {
                 assert_eq!(params.len(), 1);
                 assert_eq!(params[0].name, "x");
                 assert_eq!(params[0].type_, Type::U64Array);
@@ -505,7 +543,11 @@ mod tests {
     fn test_parse_typed_lambda_i64_arrays() {
         let result = parse_expr("(lambda ([I64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
         match result {
-            Expr::Lambda { params, return_type, body } => {
+            Expr::Lambda {
+                params,
+                return_type,
+                body,
+            } => {
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].name, "x");
                 assert_eq!(params[0].type_, Type::I64Array);
@@ -529,7 +571,11 @@ mod tests {
     fn test_parse_mixed_type_lambda() {
         let result = parse_expr("(lambda ([U64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
         match result {
-            Expr::Lambda { params, return_type, body: _ } => {
+            Expr::Lambda {
+                params,
+                return_type,
+                body: _,
+            } => {
                 assert_eq!(params.len(), 2);
                 assert_eq!(params[0].type_, Type::U64Array);
                 assert_eq!(params[1].type_, Type::I64Array);
@@ -543,8 +589,14 @@ mod tests {
     fn test_parse_typed_lambda_display() {
         let expr = Expr::Lambda {
             params: vec![
-                TypedParam { name: "x".to_string(), type_: Type::U64Array },
-                TypedParam { name: "y".to_string(), type_: Type::U64Array },
+                TypedParam {
+                    name: "x".to_string(),
+                    type_: Type::U64Array,
+                },
+                TypedParam {
+                    name: "y".to_string(),
+                    type_: Type::U64Array,
+                },
             ],
             return_type: Type::U64Array,
             body: Box::new(Expr::Add(vec![
@@ -552,14 +604,18 @@ mod tests {
                 Expr::Column("y".to_string()),
             ])),
         };
-        assert_eq!(expr.to_string(), "(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))");
+        assert_eq!(
+            expr.to_string(),
+            "(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))"
+        );
     }
 
     #[test]
     fn test_parse_complex_nested_expression() {
         let result = parse_expr("(sum (+ a (* b 2.5) (/ c (- d 1))))").unwrap();
-        assert_eq!(result, Expr::Sum(
-            Box::new(Expr::Add(vec![
+        assert_eq!(
+            result,
+            Expr::Sum(Box::new(Expr::Add(vec![
                 Expr::Column("a".to_string()),
                 Expr::Mul(vec![
                     Expr::Column("b".to_string()),
@@ -572,18 +628,21 @@ mod tests {
                         Box::new(Expr::Literal(Value::Int64(1))),
                     )),
                 ),
-            ]))
-        ));
+            ])))
+        );
     }
 
     #[test]
     fn test_parse_with_whitespace() {
         let result = parse_expr("  ( +   a   b   c  )  ").unwrap();
-        assert_eq!(result, Expr::Add(vec![
-            Expr::Column("a".to_string()),
-            Expr::Column("b".to_string()),
-            Expr::Column("c".to_string()),
-        ]));
+        assert_eq!(
+            result,
+            Expr::Add(vec![
+                Expr::Column("a".to_string()),
+                Expr::Column("b".to_string()),
+                Expr::Column("c".to_string()),
+            ])
+        );
     }
 
     #[test]
@@ -602,7 +661,7 @@ mod tests {
     fn test_parse_error_wrong_arg_count_subtraction() {
         let result = parse_expr("(- a)");
         assert!(result.is_err());
-        
+
         let result = parse_expr("(- a b c)");
         assert!(result.is_err());
     }
@@ -611,7 +670,7 @@ mod tests {
     fn test_parse_error_wrong_arg_count_sum() {
         let result = parse_expr("(sum)");
         assert!(result.is_err());
-        
+
         let result = parse_expr("(sum a b)");
         assert!(result.is_err());
     }

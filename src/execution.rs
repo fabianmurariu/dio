@@ -1,5 +1,5 @@
 use crate::array_support::{
-    create_output_array, dio_type_to_arrow, extract_mut_data_ptr, ArrayMetadata,
+    buffer_to_array_ref, create_output_buffer, dio_type_to_arrow, ArrayMetadata,
 };
 use crate::ast::Expr;
 use crate::ast::Type;
@@ -8,6 +8,7 @@ use crate::cranelift_backend::CraneliftBackend;
 use crate::error::DioError;
 use crate::ssa::ast_to_ssa;
 use arrow::array::ArrayRef;
+use arrow::buffer::MutableBuffer;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
 
@@ -102,15 +103,14 @@ impl CompiledFunction {
     pub unsafe fn call_nary_add(
         &self,
         input_arrays: &[ArrayRef],
-        output_array: &ArrayRef,
+        output_buffer: &mut MutableBuffer,
+        array_length: usize,
     ) -> Result<(), DioError> {
         if input_arrays.is_empty() {
             return Err(DioError::Runtime(
                 "Must provide at least one input array".to_string(),
             ));
         }
-
-        let array_length = input_arrays[0].len();
 
         // Verify all arrays have the same length
         for (i, array) in input_arrays.iter().enumerate() {
@@ -124,12 +124,6 @@ impl CompiledFunction {
             }
         }
 
-        if output_array.len() != array_length {
-            return Err(DioError::Runtime(
-                "Output array length doesn't match input length".to_string(),
-            ));
-        }
-
         // Extract metadata from all input arrays
         let input_metadata: Result<Vec<_>, _> = input_arrays
             .iter()
@@ -140,8 +134,8 @@ impl CompiledFunction {
         // Create array of input data pointers
         let input_ptrs: Vec<*const u8> = input_metadata.iter().map(|meta| meta.data_ptr).collect();
 
-        // Get output array data pointer
-        let output_ptr = extract_mut_data_ptr(output_array)?;
+        // Get output buffer data pointer
+        let output_ptr = output_buffer.as_mut_ptr();
 
         // Cast function pointer and call with variadic signature
         type NaryAddFunction = extern "C" fn(*const *const u8, u32, *mut u8, u64);
@@ -163,18 +157,20 @@ impl CompiledFunction {
 pub fn execute_add_u64(expr: &Expr, a: &[u64], b: &[u64]) -> Result<Vec<u64>, DioError> {
     use crate::array_support::create_u64_array_from_vec;
     use arrow::array::UInt64Array;
-    
+
     // Convert to Arrow arrays
     let a_array = create_u64_array_from_vec(a.to_vec())?;
     let b_array = create_u64_array_from_vec(b.to_vec())?;
-    
+
     // Use generic execution
     let result_array = execute_generic(expr, &[a_array, b_array])?;
-    
+
     // Convert back to Vec<u64>
-    let result_u64 = result_array.as_any().downcast_ref::<UInt64Array>()
+    let result_u64 = result_array
+        .as_any()
+        .downcast_ref::<UInt64Array>()
         .ok_or_else(|| DioError::Runtime("Expected UInt64Array result".to_string()))?;
-    
+
     Ok(result_u64.values().to_vec())
 }
 
@@ -183,18 +179,20 @@ pub fn execute_add_u64(expr: &Expr, a: &[u64], b: &[u64]) -> Result<Vec<u64>, Di
 pub fn execute_add_i64(expr: &Expr, a: &[i64], b: &[i64]) -> Result<Vec<i64>, DioError> {
     use crate::array_support::create_i64_array_from_vec;
     use arrow::array::Int64Array;
-    
+
     // Convert to Arrow arrays
     let a_array = create_i64_array_from_vec(a.to_vec())?;
     let b_array = create_i64_array_from_vec(b.to_vec())?;
-    
+
     // Use generic execution
     let result_array = execute_generic(expr, &[a_array, b_array])?;
-    
+
     // Convert back to Vec<i64>
-    let result_i64 = result_array.as_any().downcast_ref::<Int64Array>()
+    let result_i64 = result_array
+        .as_any()
+        .downcast_ref::<Int64Array>()
         .ok_or_else(|| DioError::Runtime("Expected Int64Array result".to_string()))?;
-    
+
     Ok(result_i64.values().to_vec())
 }
 
@@ -202,20 +200,22 @@ pub fn execute_add_i64(expr: &Expr, a: &[i64], b: &[i64]) -> Result<Vec<i64>, Di
 /// Returns I64 array as per casting rules (signed takes precedence)
 /// Now uses the generic execution system for compatibility
 pub fn execute_add_mixed_u64_i64(expr: &Expr, a: &[u64], b: &[i64]) -> Result<Vec<i64>, DioError> {
-    use crate::array_support::{create_u64_array_from_vec, create_i64_array_from_vec};
+    use crate::array_support::{create_i64_array_from_vec, create_u64_array_from_vec};
     use arrow::array::Int64Array;
-    
+
     // Convert to Arrow arrays
     let a_array = create_u64_array_from_vec(a.to_vec())?;
     let b_array = create_i64_array_from_vec(b.to_vec())?;
-    
+
     // Use generic execution (will coerce to I64Array)
     let result_array = execute_generic(expr, &[a_array, b_array])?;
-    
+
     // Convert back to Vec<i64>
-    let result_i64 = result_array.as_any().downcast_ref::<Int64Array>()
+    let result_i64 = result_array
+        .as_any()
+        .downcast_ref::<Int64Array>()
         .ok_or_else(|| DioError::Runtime("Expected Int64Array result".to_string()))?;
-    
+
     Ok(result_i64.values().to_vec())
 }
 
@@ -252,8 +252,8 @@ pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRe
     let output_type = coerce_nary_op_types(&dio_types)?;
     let output_arrow_type = dio_type_to_arrow(&output_type)?;
 
-    // Create output array
-    let output_array = create_output_array(&output_arrow_type, array_length)?;
+    // Create output buffer
+    let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
 
     // AST -> SSA IR
     let ssa_program = ast_to_ssa(expr)?;
@@ -265,10 +265,12 @@ pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRe
     // Execute with Arrow arrays
     let compiled_fn = CompiledFunction::new(code_ptr);
     unsafe {
-        compiled_fn.call_nary_add(input_arrays, &output_array)?;
+        compiled_fn.call_nary_add(input_arrays, &mut output_buffer, array_length)?;
     }
 
-    Ok(output_array)
+    // Convert buffer to ArrayRef
+    let result_array = buffer_to_array_ref(output_buffer, &output_arrow_type)?;
+    Ok(result_array)
 }
 
 /// Cached generic execute function using Arrow ArrayRef with function caching
@@ -337,16 +339,18 @@ pub fn execute_generic_cached(
         }
     };
 
-    // Create output array
-    let output_array = create_output_array(&output_arrow_type, array_length)?;
+    // Create output buffer
+    let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
 
     // Execute with Arrow arrays using cached or newly compiled function
     let compiled_fn = CompiledFunction::new(code_ptr);
     unsafe {
-        compiled_fn.call_nary_add(input_arrays, &output_array)?;
+        compiled_fn.call_nary_add(input_arrays, &mut output_buffer, array_length)?;
     }
 
-    Ok(output_array)
+    // Convert buffer to ArrayRef
+    let result_array = buffer_to_array_ref(output_buffer, &output_arrow_type)?;
+    Ok(result_array)
 }
 
 /// Clear the function cache (useful for testing or memory management)

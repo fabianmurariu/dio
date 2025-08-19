@@ -1,7 +1,7 @@
-use std::collections::HashMap;
 use crate::ast::{Expr, Type, TypedParam};
 use crate::casting::coerce_nary_op_types;
 use crate::error::DioError;
+use std::collections::HashMap;
 
 /// SSA Value identifier
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
@@ -22,29 +22,50 @@ pub enum DataType {
 #[derive(Debug, Clone)]
 pub enum SsaInstruction {
     /// Load array parameter: %0 = LoadArrayParam { param_index: 0 }
-    LoadArrayParam { dest: SsaValue, param_index: u32, data_type: DataType },
-    
+    LoadArrayParam {
+        dest: SsaValue,
+        param_index: u32,
+        data_type: DataType,
+    },
+
     /// Load length parameter: %1 = LoadLengthParam { param_index: 2 }  
     LoadLengthParam { dest: SsaValue, param_index: u32 },
-    
+
     /// Load scalar constant: %2 = LoadScalar { value: 0 }
     LoadScalar { dest: SsaValue, value: u64 },
-    
+
     /// Array element access: %3 = ArrayAccess { array: %0, index: %loop_var }
-    ArrayAccess { dest: SsaValue, array: SsaValue, index: SsaValue },
-    
+    ArrayAccess {
+        dest: SsaValue,
+        array: SsaValue,
+        index: SsaValue,
+    },
+
     /// Addition: %4 = Add { lhs: %3, rhs: %5 }
-    Add { dest: SsaValue, lhs: SsaValue, rhs: SsaValue },
-    
+    Add {
+        dest: SsaValue,
+        lhs: SsaValue,
+        rhs: SsaValue,
+    },
+
     /// Store to output array: StoreArrayElement { array: %output, index: %loop_var, value: %4 }
-    StoreArrayElement { array: SsaValue, index: SsaValue, value: SsaValue },
-    
+    StoreArrayElement {
+        array: SsaValue,
+        index: SsaValue,
+        value: SsaValue,
+    },
+
     /// Loop: Loop { index_var: %loop_var, start: %start, end: %length, body: block1 }
-    Loop { index_var: SsaValue, start: SsaValue, end: SsaValue, body: BlockId },
-    
+    Loop {
+        index_var: SsaValue,
+        start: SsaValue,
+        end: SsaValue,
+        body: BlockId,
+    },
+
     /// Jump to another block: Jump { target: block0 }
     Jump { target: BlockId },
-    
+
     /// Return: Return { value: %output_array }
     Return { value: Option<SsaValue> },
 }
@@ -76,24 +97,27 @@ impl SsaProgram {
             next_block_id: 0,
         }
     }
-    
+
     pub fn new_value(&mut self, data_type: DataType) -> SsaValue {
         let value = SsaValue(self.next_value_id);
         self.next_value_id += 1;
         self.value_types.insert(value, data_type);
         value
     }
-    
+
     pub fn new_block(&mut self) -> BlockId {
         let block_id = BlockId(self.next_block_id);
         self.next_block_id += 1;
-        self.blocks.insert(block_id, SsaBlock {
-            id: block_id,
-            instructions: Vec::new(),
-        });
+        self.blocks.insert(
+            block_id,
+            SsaBlock {
+                id: block_id,
+                instructions: Vec::new(),
+            },
+        );
         block_id
     }
-    
+
     pub fn add_instruction(&mut self, block_id: BlockId, instruction: SsaInstruction) {
         if let Some(block) = self.blocks.get_mut(&block_id) {
             block.instructions.push(instruction);
@@ -125,199 +149,263 @@ pub fn ast_to_ssa(expr: &Expr) -> Result<SsaProgram, DioError> {
 /// Generated function signature: fn(a_ptr: *const u64, b_ptr: *const u64, length: u64, output_ptr: *mut u64)
 fn convert_simple_addition(_col_a: &str, _col_b: &str) -> Result<SsaProgram, DioError> {
     let mut program = SsaProgram::new();
-    
+
     // Create blocks
     let entry_block = program.new_block();
     let loop_body = program.new_block();
     let exit_block = program.new_block();
     program.entry_block = entry_block;
-    
+
     // Entry block: load parameters and setup loop
     // Function params: (a_ptr: *const u64, b_ptr: *const u64, length: u64, output_ptr: *mut u64)
-    let a_array = program.new_value(DataType::ArrayU64);      // %0 = param 0 (a_ptr)
-    let b_array = program.new_value(DataType::ArrayU64);      // %1 = param 1 (b_ptr) 
-    let length = program.new_value(DataType::U64);            // %2 = param 2 (length)
+    let a_array = program.new_value(DataType::ArrayU64); // %0 = param 0 (a_ptr)
+    let b_array = program.new_value(DataType::ArrayU64); // %1 = param 1 (b_ptr)
+    let length = program.new_value(DataType::U64); // %2 = param 2 (length)
     let output_array = program.new_value(DataType::ArrayU64); // %3 = param 3 (output_ptr)
-    
-    let loop_start = program.new_value(DataType::U64);        // %4 = 0
-    let loop_var = program.new_value(DataType::U64);          // %5 = loop variable
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
-        dest: a_array,
-        param_index: 0,
-        data_type: DataType::ArrayU64,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
-        dest: b_array,
-        param_index: 1,
-        data_type: DataType::ArrayU64,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
-        dest: length,
-        param_index: 2,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
-        dest: output_array,
-        param_index: 3,
-        data_type: DataType::ArrayU64,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadScalar {
-        dest: loop_start,
-        value: 0,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::Loop {
-        index_var: loop_var,
-        start: loop_start,
-        end: length,
-        body: loop_body,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::Jump {
-        target: exit_block,
-    });
-    
+
+    let loop_start = program.new_value(DataType::U64); // %4 = 0
+    let loop_var = program.new_value(DataType::U64); // %5 = loop variable
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: a_array,
+            param_index: 0,
+            data_type: DataType::ArrayU64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: b_array,
+            param_index: 1,
+            data_type: DataType::ArrayU64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadLengthParam {
+            dest: length,
+            param_index: 2,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: output_array,
+            param_index: 3,
+            data_type: DataType::ArrayU64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadScalar {
+            dest: loop_start,
+            value: 0,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::Loop {
+            index_var: loop_var,
+            start: loop_start,
+            end: length,
+            body: loop_body,
+        },
+    );
+
+    program.add_instruction(entry_block, SsaInstruction::Jump { target: exit_block });
+
     // Loop body: a[i] + b[i] -> output[i]
-    let a_element = program.new_value(DataType::U64);         // %6 = a[loop_var]
-    let b_element = program.new_value(DataType::U64);         // %7 = b[loop_var]
-    let sum = program.new_value(DataType::U64);               // %8 = %6 + %7
-    
-    program.add_instruction(loop_body, SsaInstruction::ArrayAccess {
-        dest: a_element,
-        array: a_array,
-        index: loop_var,
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::ArrayAccess {
-        dest: b_element,
-        array: b_array,
-        index: loop_var,
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::Add {
-        dest: sum,
-        lhs: a_element,
-        rhs: b_element,
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::StoreArrayElement {
-        array: output_array,
-        index: loop_var,
-        value: sum,
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::Jump {
-        target: entry_block, // Continue loop
-    });
-    
+    let a_element = program.new_value(DataType::U64); // %6 = a[loop_var]
+    let b_element = program.new_value(DataType::U64); // %7 = b[loop_var]
+    let sum = program.new_value(DataType::U64); // %8 = %6 + %7
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::ArrayAccess {
+            dest: a_element,
+            array: a_array,
+            index: loop_var,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::ArrayAccess {
+            dest: b_element,
+            array: b_array,
+            index: loop_var,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::Add {
+            dest: sum,
+            lhs: a_element,
+            rhs: b_element,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::StoreArrayElement {
+            array: output_array,
+            index: loop_var,
+            value: sum,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::Jump {
+            target: entry_block, // Continue loop
+        },
+    );
+
     // Exit block: return
-    program.add_instruction(exit_block, SsaInstruction::Return {
-        value: None, // void return - output written to output_ptr
-    });
-    
+    program.add_instruction(
+        exit_block,
+        SsaInstruction::Return {
+            value: None, // void return - output written to output_ptr
+        },
+    );
+
     Ok(program)
 }
 
 /// Convert N-ary addition to SSA IR: (+ a b c d ...)
 /// Generated function signature: fn(inputs: *const *const u8, input_count: u32, length: u64, output: *mut u8)
-fn convert_nary_addition(_column_names: &[&str], operand_count: usize) -> Result<SsaProgram, DioError> {
+fn convert_nary_addition(
+    _column_names: &[&str],
+    operand_count: usize,
+) -> Result<SsaProgram, DioError> {
     // For now, we'll create a simplified SSA program that mirrors the binary case
     // but with knowledge of the operand count for the Cranelift backend
     let mut program = SsaProgram::new();
-    
+
     // Create blocks similar to binary case
     let entry_block = program.new_block();
     let loop_body = program.new_block();
     let exit_block = program.new_block();
     program.entry_block = entry_block;
-    
+
     // For the initial implementation, we'll use the same structure as binary addition
     // The Cranelift backend will be responsible for handling the variable number of inputs
-    
+
     // Entry block: load parameters and setup loop
-    let inputs_ptr = program.new_value(DataType::ArrayU64);   // Array of input pointers
-    let input_count_val = program.new_value(DataType::U64);   // Number of inputs
-    let length = program.new_value(DataType::U64);            // Array length  
+    let inputs_ptr = program.new_value(DataType::ArrayU64); // Array of input pointers
+    let input_count_val = program.new_value(DataType::U64); // Number of inputs
+    let length = program.new_value(DataType::U64); // Array length
     let output_array = program.new_value(DataType::ArrayU64); // Output array
-    let loop_start = program.new_value(DataType::U64);        // Loop start (0)
-    let loop_var = program.new_value(DataType::U64);          // Loop variable
-    
+    let loop_start = program.new_value(DataType::U64); // Loop start (0)
+    let loop_var = program.new_value(DataType::U64); // Loop variable
+
     // Load function parameters
-    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
-        dest: inputs_ptr,
-        param_index: 0,
-        data_type: DataType::ArrayU64,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
-        dest: input_count_val,
-        param_index: 1,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
-        dest: length,
-        param_index: 2,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
-        dest: output_array,
-        param_index: 3,
-        data_type: DataType::ArrayU64,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::LoadScalar {
-        dest: loop_start,
-        value: 0,
-    });
-    
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: inputs_ptr,
+            param_index: 0,
+            data_type: DataType::ArrayU64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadLengthParam {
+            dest: input_count_val,
+            param_index: 1,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadLengthParam {
+            dest: length,
+            param_index: 2,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: output_array,
+            param_index: 3,
+            data_type: DataType::ArrayU64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadScalar {
+            dest: loop_start,
+            value: 0,
+        },
+    );
+
     // Set up loop
-    program.add_instruction(entry_block, SsaInstruction::Loop {
-        index_var: loop_var,
-        start: loop_start,
-        end: length,
-        body: loop_body,
-    });
-    
-    program.add_instruction(entry_block, SsaInstruction::Jump {
-        target: exit_block,
-    });
-    
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::Loop {
+            index_var: loop_var,
+            start: loop_start,
+            end: length,
+            body: loop_body,
+        },
+    );
+
+    program.add_instruction(entry_block, SsaInstruction::Jump { target: exit_block });
+
     // Loop body: The Cranelift backend will handle N-ary addition using the operand_count
     // For now, we create a special SSA instruction that encodes the operand count
     let sum_result = program.new_value(DataType::U64);
-    
+
     // This is a placeholder instruction that the Cranelift backend will recognize
     // and generate appropriate code for N-ary addition
-    program.add_instruction(loop_body, SsaInstruction::LoadScalar {
-        dest: sum_result,
-        value: operand_count as u64, // Encode operand count for Cranelift
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::StoreArrayElement {
-        array: output_array,
-        index: loop_var,
-        value: sum_result,
-    });
-    
-    program.add_instruction(loop_body, SsaInstruction::Jump {
-        target: entry_block, // Continue loop
-    });
-    
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::LoadScalar {
+            dest: sum_result,
+            value: operand_count as u64, // Encode operand count for Cranelift
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::StoreArrayElement {
+            array: output_array,
+            index: loop_var,
+            value: sum_result,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::Jump {
+            target: entry_block, // Continue loop
+        },
+    );
+
     // Exit block: return
-    program.add_instruction(exit_block, SsaInstruction::Return {
-        value: None,
-    });
-    
+    program.add_instruction(exit_block, SsaInstruction::Return { value: None });
+
     Ok(program)
 }
 
 /// Convert typed lambda to SSA IR
 /// Supports integer array addition with automatic type coercion
-fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) -> Result<SsaProgram, DioError> {
+fn convert_typed_lambda(
+    params: &[TypedParam],
+    return_type: &Type,
+    body: &Expr,
+) -> Result<SsaProgram, DioError> {
     match (params, return_type, body) {
         // Pattern: (lambda ([IntArray x] [IntArray y] [IntArray z]... IntArray) (+ x y z...))
         // where IntArray is U64Array or I64Array
@@ -399,17 +487,17 @@ mod tests {
     fn test_typed_lambda_addition_ast_to_ssa() {
         let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should have 3 blocks: entry, loop_body, exit
         assert_eq!(ssa_program.blocks.len(), 3);
-        
+
         // Should have entry block
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
-        
+
         // Entry block should have parameter loads and loop setup
         let entry_block = &ssa_program.blocks[&ssa_program.entry_block];
         assert!(!entry_block.instructions.is_empty());
-        
+
         // Should have proper value types
         assert!(!ssa_program.value_types.is_empty());
     }
@@ -418,7 +506,7 @@ mod tests {
     fn test_typed_lambda_i64_arrays() {
         let expr = parse_expr("(lambda ([I64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should compile successfully
         assert_eq!(ssa_program.blocks.len(), 3);
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
@@ -429,7 +517,7 @@ mod tests {
         // Mixed U64Array + I64Array should coerce to I64Array
         let expr = parse_expr("(lambda ([U64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should compile successfully
         assert_eq!(ssa_program.blocks.len(), 3);
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
@@ -439,26 +527,28 @@ mod tests {
     fn test_simple_addition_ast_to_ssa() {
         let expr = parse_expr("(+ a b)").unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should have 3 blocks: entry, loop_body, exit
         assert_eq!(ssa_program.blocks.len(), 3);
-        
+
         // Should have entry block
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
-        
+
         // Entry block should have parameter loads and loop setup
         let entry_block = &ssa_program.blocks[&ssa_program.entry_block];
         assert!(!entry_block.instructions.is_empty());
-        
+
         // Should have proper value types
         assert!(!ssa_program.value_types.is_empty());
     }
-    
+
     #[test]
     fn test_typed_lambda_ternary_addition() {
-        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y z))").unwrap();
+        let expr =
+            parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y z))")
+                .unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should compile successfully with 3 operands
         assert_eq!(ssa_program.blocks.len(), 3);
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
@@ -467,9 +557,12 @@ mod tests {
     #[test]
     fn test_typed_lambda_quaternary_mixed_types() {
         // Mixed types: U64Array + I64Array + U64Array + I64Array should coerce to I64Array
-        let expr = parse_expr("(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))").unwrap();
+        let expr = parse_expr(
+            "(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))",
+        )
+        .unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
-        
+
         // Should compile successfully with mixed types
         assert_eq!(ssa_program.blocks.len(), 3);
         assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
@@ -480,31 +573,32 @@ mod tests {
         // Should reject non-lambda expressions (now required)
         let expr = parse_expr("(- a b)").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject invalid lambda types
         let expr = parse_expr("(lambda ([F64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject lambda with wrong parameter count
-        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y))").unwrap();
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y))")
+            .unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject literals in lambda body
         let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x 42))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject mismatched parameter names
         let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ a b))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject sum (not implemented in vertical slice)
         let expr = parse_expr("(lambda ([U64Array x] U64) (sum x))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
-        
+
         // Should reject wrong return type for mixed coercion
         let expr = parse_expr("(lambda ([U64Array x] [I64Array y] U64Array) (+ x y))").unwrap();
         assert!(ast_to_ssa(&expr).is_err()); // Should be I64Array, not U64Array
-        
+
         // Should reject float types (not implemented)
         let expr = parse_expr("(lambda ([F64Array x] [F64Array y] F64Array) (+ x y))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());

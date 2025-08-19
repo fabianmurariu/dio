@@ -29,31 +29,31 @@ pub struct TypedParam {
 pub enum Expr {
     /// Column reference: "a", "b", "x"
     Column(String),
-    
+
     /// Literal constants: 42, 3.14
     Literal(Value),
-    
+
     /// Addition: (+ a b c) - supports n-ary operations
     Add(Vec<Expr>),
-    
+
     /// Subtraction: (- x y) - binary operation
     Sub(Box<Expr>, Box<Expr>),
-    
+
     /// Multiplication: (* a b c) - supports n-ary operations
     Mul(Vec<Expr>),
-    
+
     /// Division: (/ x y) - binary operation
     Div(Box<Expr>, Box<Expr>),
-    
+
     /// Sum reduction: (sum (+ a b)) - reduces array to scalar
     Sum(Box<Expr>),
-    
+
     /// Count reduction: (count a) - counts non-null values
     Count(Box<Expr>),
-    
+
     /// Variable binding: (let a (+ x y)) - future extension
     Let(String, Box<Expr>),
-    
+
     /// Typed lambda expression: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))
     Lambda {
         params: Vec<TypedParam>,
@@ -118,7 +118,11 @@ impl fmt::Display for Value {
             Value::Int64(i) => write!(f, "{}", i),
             Value::Float64(OrderedFloat64(fl)) => {
                 // Check if it's a whole number that fits in i64 range
-                if fl.fract() == 0.0 && fl.is_finite() && *fl >= i64::MIN as f64 && *fl <= i64::MAX as f64 {
+                if fl.fract() == 0.0
+                    && fl.is_finite()
+                    && *fl >= i64::MIN as f64
+                    && *fl <= i64::MAX as f64
+                {
                     write!(f, "{}", *fl as i64)
                 } else {
                     write!(f, "{}", fl)
@@ -152,7 +156,11 @@ impl fmt::Display for Expr {
             Expr::Sum(expr) => write!(f, "(sum {})", expr),
             Expr::Count(expr) => write!(f, "(count {})", expr),
             Expr::Let(name, expr) => write!(f, "(let {} {})", name, expr),
-            Expr::Lambda { params, return_type, body } => {
+            Expr::Lambda {
+                params,
+                return_type,
+                body,
+            } => {
                 write!(f, "(lambda (")?;
                 for (i, param) in params.iter().enumerate() {
                     if i > 0 {
@@ -175,19 +183,24 @@ impl Expr {
             Expr::Add(_) | Expr::Sub(_, _) | Expr::Mul(_) | Expr::Div(_, _) => true,
             Expr::Sum(_) | Expr::Count(_) => false, // Reductions produce scalars
             Expr::Let(_, expr) => expr.is_elementwise(),
-            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64Array | Type::I64Array | Type::F64Array),
+            Expr::Lambda { return_type, .. } => matches!(
+                return_type,
+                Type::U64Array | Type::I64Array | Type::F64Array
+            ),
         }
     }
-    
+
     /// Returns true if this expression is a reduction operation
     pub fn is_reduction(&self) -> bool {
         match self {
             Expr::Sum(_) | Expr::Count(_) => true,
-            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64 | Type::I64 | Type::F64),
+            Expr::Lambda { return_type, .. } => {
+                matches!(return_type, Type::U64 | Type::I64 | Type::F64)
+            }
             _ => false,
         }
     }
-    
+
     /// Get all column references in this expression
     pub fn get_column_references(&self) -> Vec<&str> {
         let mut columns = Vec::new();
@@ -196,7 +209,7 @@ impl Expr {
         columns.dedup();
         columns
     }
-    
+
     fn collect_columns<'a>(&'a self, columns: &mut Vec<&'a str>) {
         match self {
             Expr::Column(name) => columns.push(name),
@@ -221,7 +234,7 @@ impl Expr {
             }
         }
     }
-    
+
     /// Estimate the complexity of this expression (for optimization decisions)
     pub fn complexity(&self) -> usize {
         match self {
@@ -229,18 +242,12 @@ impl Expr {
             Expr::Add(operands) | Expr::Mul(operands) => {
                 1 + operands.iter().map(|e| e.complexity()).sum::<usize>()
             }
-            Expr::Sub(lhs, rhs) | Expr::Div(lhs, rhs) => {
-                1 + lhs.complexity() + rhs.complexity()
-            }
+            Expr::Sub(lhs, rhs) | Expr::Div(lhs, rhs) => 1 + lhs.complexity() + rhs.complexity(),
             Expr::Sum(expr) | Expr::Count(expr) => {
                 2 + expr.complexity() // Reductions are more expensive
             }
-            Expr::Let(_, expr) => {
-                1 + expr.complexity()
-            }
-            Expr::Lambda { body, .. } => {
-                1 + body.complexity()
-            }
+            Expr::Let(_, expr) => 1 + expr.complexity(),
+            Expr::Lambda { body, .. } => 1 + body.complexity(),
         }
     }
 }
@@ -296,7 +303,7 @@ mod tests {
             ),
             Expr::Column("c".to_string()),
         ]);
-        
+
         let mut columns = expr.get_column_references();
         columns.sort();
         assert_eq!(columns, vec!["a", "b", "c"]);
@@ -306,13 +313,13 @@ mod tests {
     fn test_complexity() {
         assert_eq!(Expr::Column("a".to_string()).complexity(), 1);
         assert_eq!(Expr::Literal(Value::Int64(42)).complexity(), 1);
-        
+
         let simple_add = Expr::Add(vec![
             Expr::Column("a".to_string()),
             Expr::Column("b".to_string()),
         ]);
         assert_eq!(simple_add.complexity(), 3); // 1 for Add + 1 for each column
-        
+
         let sum_expr = Expr::Sum(Box::new(Expr::Column("a".to_string())));
         assert_eq!(sum_expr.complexity(), 3); // 2 for Sum + 1 for column
     }
@@ -322,14 +329,14 @@ mod tests {
         let f1 = OrderedFloat64(3.14);
         let f2 = OrderedFloat64(3.14);
         let f3 = OrderedFloat64(2.71);
-        
+
         assert_eq!(f1, f2);
         assert_ne!(f1, f3);
-        
+
         // Test hash consistency
         use std::collections::hash_map::DefaultHasher;
         use std::hash::{Hash, Hasher};
-        
+
         let mut hasher1 = DefaultHasher::new();
         let mut hasher2 = DefaultHasher::new();
         f1.hash(&mut hasher1);
