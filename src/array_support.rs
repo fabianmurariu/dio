@@ -1,7 +1,8 @@
 use crate::ast::Type;
 use crate::error::DioError;
-use arrow::array::{Array, ArrayRef, UInt64Array, Int64Array};
-use arrow::datatypes::DataType as ArrowDataType;
+use arrow::array::{Array, ArrayRef, UInt64Array, Int64Array, PrimitiveArray};
+use arrow::datatypes::{DataType as ArrowDataType, UInt64Type, Int64Type};
+use arrow::buffer::MutableBuffer;
 use std::sync::Arc;
 
 /// Metadata extracted from Arrow arrays for JIT compilation
@@ -100,21 +101,35 @@ pub fn arrow_type_to_dio_array(arrow_type: &ArrowDataType) -> Result<Type, DioEr
     }
 }
 
-/// Create an Arrow array from raw data for output
+/// Create an Arrow array from raw data for output using MutableBuffer
 pub fn create_output_array(
     data_type: &ArrowDataType,
     length: usize,
 ) -> Result<ArrayRef, DioError> {
     match data_type {
         ArrowDataType::UInt64 => {
-            let mut builder = UInt64Array::builder(length);
-            builder.append_nulls(length);
-            Ok(Arc::new(builder.finish()))
+            // Create a mutable buffer for u64 values
+            let mut buffer = MutableBuffer::new(length * std::mem::size_of::<u64>());
+            buffer.resize(length * std::mem::size_of::<u64>(), 0);
+            
+            // Create PrimitiveArray from the buffer
+            let array = PrimitiveArray::<UInt64Type>::new(
+                buffer.into(),
+                None, // No null bitmap
+            );
+            Ok(Arc::new(array))
         }
         ArrowDataType::Int64 => {
-            let mut builder = Int64Array::builder(length);
-            builder.append_nulls(length); 
-            Ok(Arc::new(builder.finish()))
+            // Create a mutable buffer for i64 values  
+            let mut buffer = MutableBuffer::new(length * std::mem::size_of::<i64>());
+            buffer.resize(length * std::mem::size_of::<i64>(), 0);
+            
+            // Create PrimitiveArray from the buffer
+            let array = PrimitiveArray::<Int64Type>::new(
+                buffer.into(),
+                None, // No null bitmap
+            );
+            Ok(Arc::new(array))
         }
         _ => Err(DioError::Runtime(format!(
             "Cannot create output array for type: {:?}",
@@ -129,18 +144,19 @@ pub unsafe fn extract_mut_data_ptr(array: &ArrayRef) -> Result<*mut u8, DioError
         ArrowDataType::UInt64 => {
             let typed_array = array
                 .as_any()
-                .downcast_ref::<UInt64Array>()
+                .downcast_ref::<PrimitiveArray<UInt64Type>>()
                 .ok_or_else(|| DioError::Runtime("Failed to downcast to UInt64Array".to_string()))?;
             
             // SAFETY: This is unsafe because we're getting a mutable pointer to array data
             // The caller must ensure exclusive access and proper lifetime management
+            // We know this is safe because we created the array with a MutableBuffer
             let ptr = typed_array.values().as_ptr() as *mut u8;
             Ok(ptr)
         }
         ArrowDataType::Int64 => {
             let typed_array = array
                 .as_any()
-                .downcast_ref::<Int64Array>()
+                .downcast_ref::<PrimitiveArray<Int64Type>>()
                 .ok_or_else(|| DioError::Runtime("Failed to downcast to Int64Array".to_string()))?;
             
             let ptr = typed_array.values().as_ptr() as *mut u8;

@@ -159,61 +159,64 @@ impl CompiledFunction {
 }
 
 /// High-level function to compile and execute (+ a b) expression with U64 arrays
+/// Now uses the generic execution system for compatibility
 pub fn execute_add_u64(expr: &Expr, a: &[u64], b: &[u64]) -> Result<Vec<u64>, DioError> {
-    // AST -> SSA IR
-    let ssa_program = ast_to_ssa(expr)?;
-
-    // SSA IR -> Cranelift -> Machine Code
-    let mut backend = CraneliftBackend::new()?;
-    let code_ptr = backend.compile(&ssa_program)?;
-
-    // Execute with raw arrays
-    let compiled_fn = CompiledFunction::new(code_ptr);
-    unsafe { compiled_fn.call_u64_add(a, b) }
+    use crate::array_support::create_u64_array_from_vec;
+    use arrow::array::UInt64Array;
+    
+    // Convert to Arrow arrays
+    let a_array = create_u64_array_from_vec(a.to_vec())?;
+    let b_array = create_u64_array_from_vec(b.to_vec())?;
+    
+    // Use generic execution
+    let result_array = execute_generic(expr, &[a_array, b_array])?;
+    
+    // Convert back to Vec<u64>
+    let result_u64 = result_array.as_any().downcast_ref::<UInt64Array>()
+        .ok_or_else(|| DioError::Runtime("Expected UInt64Array result".to_string()))?;
+    
+    Ok(result_u64.values().to_vec())
 }
 
 /// High-level function to compile and execute (+ a b) expression with I64 arrays
+/// Now uses the generic execution system for compatibility
 pub fn execute_add_i64(expr: &Expr, a: &[i64], b: &[i64]) -> Result<Vec<i64>, DioError> {
-    // AST -> SSA IR
-    let ssa_program = ast_to_ssa(expr)?;
-
-    // SSA IR -> Cranelift -> Machine Code
-    let mut backend = CraneliftBackend::new()?;
-    let code_ptr = backend.compile(&ssa_program)?;
-
-    // Execute with raw arrays - reinterpret cast since bit representation is the same
-    let compiled_fn = CompiledFunction::new(code_ptr);
-    unsafe {
-        let a_u64: &[u64] = std::slice::from_raw_parts(a.as_ptr() as *const u64, a.len());
-        let b_u64: &[u64] = std::slice::from_raw_parts(b.as_ptr() as *const u64, b.len());
-        let result_u64 = compiled_fn.call_u64_add(a_u64, b_u64)?;
-
-        // Convert result back to i64
-        let result_i64: Vec<i64> = result_u64.into_iter().map(|x| x as i64).collect();
-        Ok(result_i64)
-    }
+    use crate::array_support::create_i64_array_from_vec;
+    use arrow::array::Int64Array;
+    
+    // Convert to Arrow arrays
+    let a_array = create_i64_array_from_vec(a.to_vec())?;
+    let b_array = create_i64_array_from_vec(b.to_vec())?;
+    
+    // Use generic execution
+    let result_array = execute_generic(expr, &[a_array, b_array])?;
+    
+    // Convert back to Vec<i64>
+    let result_i64 = result_array.as_any().downcast_ref::<Int64Array>()
+        .ok_or_else(|| DioError::Runtime("Expected Int64Array result".to_string()))?;
+    
+    Ok(result_i64.values().to_vec())
 }
 
 /// High-level function to compile and execute (+ a b) expression with mixed U64/I64 arrays
 /// Returns I64 array as per casting rules (signed takes precedence)
+/// Now uses the generic execution system for compatibility
 pub fn execute_add_mixed_u64_i64(expr: &Expr, a: &[u64], b: &[i64]) -> Result<Vec<i64>, DioError> {
-    // AST -> SSA IR
-    let ssa_program = ast_to_ssa(expr)?;
-
-    // SSA IR -> Cranelift -> Machine Code
-    let mut backend = CraneliftBackend::new()?;
-    let code_ptr = backend.compile(&ssa_program)?;
-
-    // Execute with raw arrays - reinterpret cast for I64 input
-    let compiled_fn = CompiledFunction::new(code_ptr);
-    unsafe {
-        let b_u64: &[u64] = std::slice::from_raw_parts(b.as_ptr() as *const u64, b.len());
-        let result_u64 = compiled_fn.call_u64_add(a, b_u64)?;
-
-        // Convert result to i64 (signed output)
-        let result_i64: Vec<i64> = result_u64.into_iter().map(|x| x as i64).collect();
-        Ok(result_i64)
-    }
+    use crate::array_support::{create_u64_array_from_vec, create_i64_array_from_vec};
+    use arrow::array::Int64Array;
+    
+    // Convert to Arrow arrays
+    let a_array = create_u64_array_from_vec(a.to_vec())?;
+    let b_array = create_i64_array_from_vec(b.to_vec())?;
+    
+    // Use generic execution (will coerce to I64Array)
+    let result_array = execute_generic(expr, &[a_array, b_array])?;
+    
+    // Convert back to Vec<i64>
+    let result_i64 = result_array.as_any().downcast_ref::<Int64Array>()
+        .ok_or_else(|| DioError::Runtime("Expected Int64Array result".to_string()))?;
+    
+    Ok(result_i64.values().to_vec())
 }
 
 /// Generic execute function using Arrow ArrayRef with N-ary operations and type erasure
