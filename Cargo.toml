@@ -19,7 +19,7 @@ cranelift-frontend = "0.105"
 cranelift-codegen = "0.105"
 cranelift-native = "0.105"
 
-# Arrow arrays - removed due to compatibility issues, using raw arrays for POC
+arrow = "53.4.1"
 
 # Graph algorithms for SSA
 petgraph = "0.6"

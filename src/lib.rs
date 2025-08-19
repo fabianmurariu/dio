@@ -5,7 +5,7 @@ pub mod ssa;
 pub mod cranelift_backend;
 pub mod execution;
 
-pub use ast::{Expr, Value};
+pub use ast::{Expr, Value, Type, TypedParam};
 pub use parser::parse_expr;
 pub use error::{DioError, ParseError};
 pub use ssa::{SsaProgram, SsaInstruction, SsaValue, BlockId};

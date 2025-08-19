@@ -1,5 +1,25 @@
 use std::fmt;
 
+/// Type definitions for the typed Lisp
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub enum Type {
+    /// U64 scalar type
+    U64,
+    /// U64 array type
+    U64Array,
+    /// F64 scalar type (future extension)
+    F64,
+    /// F64 array type (future extension)
+    F64Array,
+}
+
+/// Typed parameter for lambda expressions
+#[derive(Debug, Clone, Hash, PartialEq, Eq)]
+pub struct TypedParam {
+    pub name: String,
+    pub type_: Type,
+}
+
 /// Abstract Syntax Tree for Dio expressions
 #[derive(Debug, Clone, Hash, PartialEq, Eq)]
 pub enum Expr {
@@ -29,6 +49,13 @@ pub enum Expr {
     
     /// Variable binding: (let a (+ x y)) - future extension
     Let(String, Box<Expr>),
+    
+    /// Typed lambda expression: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))
+    Lambda {
+        params: Vec<TypedParam>,
+        return_type: Type,
+        body: Box<Expr>,
+    },
 }
 
 /// Literal values that can appear in expressions
@@ -59,6 +86,23 @@ impl From<f64> for OrderedFloat64 {
 impl From<OrderedFloat64> for f64 {
     fn from(f: OrderedFloat64) -> Self {
         f.0
+    }
+}
+
+impl fmt::Display for Type {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Type::U64 => write!(f, "U64"),
+            Type::U64Array => write!(f, "U64Array"),
+            Type::F64 => write!(f, "F64"),
+            Type::F64Array => write!(f, "F64Array"),
+        }
+    }
+}
+
+impl fmt::Display for TypedParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "[{} {}]", self.type_, self.name)
     }
 }
 
@@ -102,6 +146,16 @@ impl fmt::Display for Expr {
             Expr::Sum(expr) => write!(f, "(sum {})", expr),
             Expr::Count(expr) => write!(f, "(count {})", expr),
             Expr::Let(name, expr) => write!(f, "(let {} {})", name, expr),
+            Expr::Lambda { params, return_type, body } => {
+                write!(f, "(lambda (")?;
+                for (i, param) in params.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{}", param)?;
+                }
+                write!(f, " {}) {})", return_type, body)
+            }
         }
     }
 }
@@ -115,6 +169,7 @@ impl Expr {
             Expr::Add(_) | Expr::Sub(_, _) | Expr::Mul(_) | Expr::Div(_, _) => true,
             Expr::Sum(_) | Expr::Count(_) => false, // Reductions produce scalars
             Expr::Let(_, expr) => expr.is_elementwise(),
+            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64Array | Type::F64Array),
         }
     }
     
@@ -122,6 +177,7 @@ impl Expr {
     pub fn is_reduction(&self) -> bool {
         match self {
             Expr::Sum(_) | Expr::Count(_) => true,
+            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64 | Type::F64),
             _ => false,
         }
     }
@@ -154,6 +210,9 @@ impl Expr {
             Expr::Let(_, expr) => {
                 expr.collect_columns(columns);
             }
+            Expr::Lambda { body, .. } => {
+                body.collect_columns(columns);
+            }
         }
     }
     
@@ -172,6 +231,9 @@ impl Expr {
             }
             Expr::Let(_, expr) => {
                 1 + expr.complexity()
+            }
+            Expr::Lambda { body, .. } => {
+                1 + body.complexity()
             }
         }
     }

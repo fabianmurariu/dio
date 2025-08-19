@@ -1,5 +1,5 @@
 use std::collections::HashMap;
-use crate::ast::Expr;
+use crate::ast::{Expr, Type, TypedParam};
 use crate::error::DioError;
 
 /// SSA Value identifier
@@ -100,9 +100,14 @@ impl SsaProgram {
     }
 }
 
-/// Convert AST to SSA IR for simple addition: (+ a b)
+/// Convert AST to SSA IR - now supports typed lambda expressions
 pub fn ast_to_ssa(expr: &Expr) -> Result<SsaProgram, DioError> {
     match expr {
+        // Handle typed lambda expressions
+        Expr::Lambda { params, return_type, body } => {
+            convert_typed_lambda(params, return_type, body)
+        }
+        // Legacy support for bare addition (for backwards compatibility)
         Expr::Add(operands) if operands.len() == 2 => {
             // Only support (+ a b) for now
             if let (Expr::Column(col_a), Expr::Column(col_b)) = (&operands[0], &operands[1]) {
@@ -111,7 +116,7 @@ pub fn ast_to_ssa(expr: &Expr) -> Result<SsaProgram, DioError> {
                 Err(DioError::Compilation("Only column addition supported in vertical slice".to_string()))
             }
         }
-        _ => Err(DioError::Compilation("Only simple addition (+ a b) supported in vertical slice".to_string()))
+        _ => Err(DioError::Compilation("Only typed lambda expressions supported. Use: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))".to_string()))
     }
 }
 
@@ -216,10 +221,76 @@ fn convert_simple_addition(_col_a: &str, _col_b: &str) -> Result<SsaProgram, Dio
     Ok(program)
 }
 
+/// Convert typed lambda to SSA IR
+/// Supports (lambda ([U64Array x] [U64Array y] U64Array) (+ x y)) format
+fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) -> Result<SsaProgram, DioError> {
+    // For the vertical slice, only support specific patterns
+    match (params, return_type, body) {
+        // Pattern: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))
+        (params, Type::U64Array, Expr::Add(operands)) 
+            if params.len() == 2 
+            && params.iter().all(|p| matches!(p.type_, Type::U64Array))
+            && operands.len() == 2 => {
+            
+            // Verify the operands match the parameter names
+            let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
+            if let (Expr::Column(col1), Expr::Column(col2)) = (&operands[0], &operands[1]) {
+                if param_names.contains(&col1.as_str()) && param_names.contains(&col2.as_str()) {
+                    convert_simple_addition(col1, col2)
+                } else {
+                    Err(DioError::Compilation("Column references in lambda body must match parameter names".to_string()))
+                }
+            } else {
+                Err(DioError::Compilation("Lambda body must be column addition for vertical slice".to_string()))
+            }
+        }
+        
+        // Pattern: (lambda ([U64Array x] U64) (sum x))
+        (params, Type::U64, Expr::Sum(inner)) 
+            if params.len() == 1 
+            && matches!(params[0].type_, Type::U64Array) => {
+            
+            if let Expr::Column(col) = inner.as_ref() {
+                if col == &params[0].name {
+                    // For now, sum reductions are not implemented in the vertical slice
+                    Err(DioError::Compilation("Sum reductions not implemented in vertical slice".to_string()))
+                } else {
+                    Err(DioError::Compilation("Column reference in lambda body must match parameter name".to_string()))
+                }
+            } else {
+                Err(DioError::Compilation("Lambda body must be simple column reference for sum".to_string()))
+            }
+        }
+        
+        _ => Err(DioError::Compilation(
+            "Only (lambda ([U64Array x] [U64Array y] U64Array) (+ x y)) supported in vertical slice".to_string()
+        ))
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
     use crate::parse_expr;
+
+    #[test]
+    fn test_typed_lambda_addition_ast_to_ssa() {
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+        
+        // Should have 3 blocks: entry, loop_body, exit
+        assert_eq!(ssa_program.blocks.len(), 3);
+        
+        // Should have entry block
+        assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
+        
+        // Entry block should have parameter loads and loop setup
+        let entry_block = &ssa_program.blocks[&ssa_program.entry_block];
+        assert!(!entry_block.instructions.is_empty());
+        
+        // Should have proper value types
+        assert!(!ssa_program.value_types.is_empty());
+    }
 
     #[test]
     fn test_simple_addition_ast_to_ssa() {
@@ -242,16 +313,28 @@ mod tests {
     
     #[test]
     fn test_unsupported_expressions() {
-        // Should reject non-addition
+        // Should reject non-lambda expressions (now required)
         let expr = parse_expr("(- a b)").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
         
-        // Should reject non-binary addition
-        let expr = parse_expr("(+ a b c)").unwrap();
+        // Should reject invalid lambda types
+        let expr = parse_expr("(lambda ([F64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
         
-        // Should reject literals in addition
-        let expr = parse_expr("(+ a 42)").unwrap();
+        // Should reject lambda with wrong parameter count
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y))").unwrap();
+        assert!(ast_to_ssa(&expr).is_err());
+        
+        // Should reject literals in lambda body
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x 42))").unwrap();
+        assert!(ast_to_ssa(&expr).is_err());
+        
+        // Should reject mismatched parameter names
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ a b))").unwrap();
+        assert!(ast_to_ssa(&expr).is_err());
+        
+        // Should reject sum (not implemented in vertical slice)
+        let expr = parse_expr("(lambda ([U64Array x] U64) (sum x))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
     }
 }

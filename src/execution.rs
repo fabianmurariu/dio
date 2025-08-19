@@ -73,7 +73,7 @@ mod tests {
     #[test]
     fn test_end_to_end_simple_addition() {
         // Test the complete vertical slice: AST -> SSA -> Cranelift -> Execution
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         
         // Create test arrays
         let a = vec![1, 2, 3, 4, 5];
@@ -89,7 +89,7 @@ mod tests {
     
     #[test]
     fn test_empty_arrays() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = vec![];
         let b = vec![];
         
@@ -99,7 +99,7 @@ mod tests {
     
     #[test]
     fn test_single_element() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = vec![42];
         let b = vec![58];
         
@@ -109,7 +109,7 @@ mod tests {
     
     #[test]
     fn test_large_arrays() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         
         // Create large test arrays
         let size = 10000;
@@ -127,7 +127,7 @@ mod tests {
     
     #[test]
     fn test_mismatched_array_lengths() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = vec![1, 2, 3];
         let b = vec![4, 5];
         
@@ -137,7 +137,7 @@ mod tests {
     
     #[test]
     fn test_zero_values() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = vec![0, 0, 0];
         let b = vec![1, 2, 3];
         
@@ -147,7 +147,7 @@ mod tests {
     
     #[test]
     fn test_max_values() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = vec![u64::MAX / 2, 100];
         let b = vec![u64::MAX / 2, 200];
         

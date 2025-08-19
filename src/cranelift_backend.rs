@@ -174,7 +174,7 @@ mod tests {
 
     #[test]
     fn test_cranelift_compilation() {
-        let expr = parse_expr("(+ a b)").unwrap();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let ssa_program = ast_to_ssa(&expr).unwrap();
 
         let mut backend = CraneliftBackend::new().unwrap();

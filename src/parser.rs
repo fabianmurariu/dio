@@ -1,4 +1,4 @@
-use crate::ast::{Expr, Value, OrderedFloat64};
+use crate::ast::{Expr, Value, OrderedFloat64, Type, TypedParam};
 use crate::error::ParseError;
 use nom::{
     branch::alt,
@@ -69,6 +69,7 @@ fn list_expression(input: &str) -> IResult<&str, Expr> {
         preceded(
             multispace0,
             cut(alt((
+                parse_lambda,
                 parse_add,
                 parse_sub,
                 parse_mul,
@@ -195,6 +196,55 @@ fn parse_let(input: &str) -> IResult<&str, Expr> {
     let (input, expr) = cut(expression)(input)?;
     
     Ok((input, Expr::Let(var_name, Box::new(expr))))
+}
+
+/// Parse lambda: (lambda ([Type var] [Type var] ... RetType) body)
+fn parse_lambda(input: &str) -> IResult<&str, Expr> {
+    let (input, _) = tag("lambda")(input)?;
+    let (input, _) = cut(multispace1)(input)?;
+    let (input, _) = cut(char('('))(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, params) = parse_typed_params(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, return_type) = cut(parse_type)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = cut(char(')'))(input)?;
+    let (input, _) = cut(multispace1)(input)?;
+    let (input, body) = cut(expression)(input)?;
+    
+    Ok((input, Expr::Lambda {
+        params,
+        return_type,
+        body: Box::new(body),
+    }))
+}
+
+/// Parse typed parameters: [Type var] [Type var] ...
+fn parse_typed_params(input: &str) -> IResult<&str, Vec<TypedParam>> {
+    many0(preceded(multispace0, parse_typed_param))(input)
+}
+
+/// Parse a single typed parameter: [Type var]
+fn parse_typed_param(input: &str) -> IResult<&str, TypedParam> {
+    let (input, _) = char('[')(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, type_) = parse_type(input)?;
+    let (input, _) = multispace1(input)?;
+    let (input, name) = identifier(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = char(']')(input)?;
+    
+    Ok((input, TypedParam { name, type_ }))
+}
+
+/// Parse type: U64, U64Array, F64, F64Array
+fn parse_type(input: &str) -> IResult<&str, Type> {
+    alt((
+        map(tag("U64Array"), |_| Type::U64Array),
+        map(tag("U64"), |_| Type::U64),
+        map(tag("F64Array"), |_| Type::F64Array),
+        map(tag("F64"), |_| Type::F64),
+    ))(input)
 }
 
 /// Parse a list of expressions separated by whitespace
@@ -403,6 +453,66 @@ mod tests {
                 Box::new(Expr::Literal(Value::Int64(1))),
             ),
         ]));
+    }
+
+    #[test]
+    fn test_parse_typed_lambda_simple() {
+        let result = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))").unwrap();
+        match result {
+            Expr::Lambda { params, return_type, body } => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "x");
+                assert_eq!(params[0].type_, Type::U64Array);
+                assert_eq!(params[1].name, "y");
+                assert_eq!(params[1].type_, Type::U64Array);
+                assert_eq!(return_type, Type::U64Array);
+                match body.as_ref() {
+                    Expr::Add(operands) => {
+                        assert_eq!(operands.len(), 2);
+                        assert_eq!(operands[0], Expr::Column("x".to_string()));
+                        assert_eq!(operands[1], Expr::Column("y".to_string()));
+                    }
+                    _ => panic!("Expected Add expression in lambda body"),
+                }
+            }
+            _ => panic!("Expected lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_lambda_sum() {
+        let result = parse_expr("(lambda ([U64Array x] U64) (sum x))").unwrap();
+        match result {
+            Expr::Lambda { params, return_type, body } => {
+                assert_eq!(params.len(), 1);
+                assert_eq!(params[0].name, "x");
+                assert_eq!(params[0].type_, Type::U64Array);
+                assert_eq!(return_type, Type::U64);
+                match body.as_ref() {
+                    Expr::Sum(inner) => {
+                        assert_eq!(inner.as_ref(), &Expr::Column("x".to_string()));
+                    }
+                    _ => panic!("Expected Sum expression in lambda body"),
+                }
+            }
+            _ => panic!("Expected lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_lambda_display() {
+        let expr = Expr::Lambda {
+            params: vec![
+                TypedParam { name: "x".to_string(), type_: Type::U64Array },
+                TypedParam { name: "y".to_string(), type_: Type::U64Array },
+            ],
+            return_type: Type::U64Array,
+            body: Box::new(Expr::Add(vec![
+                Expr::Column("x".to_string()),
+                Expr::Column("y".to_string()),
+            ])),
+        };
+        assert_eq!(expr.to_string(), "(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))");
     }
 
     #[test]
