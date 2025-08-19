@@ -14,6 +14,13 @@ pub enum DioError {
     
     #[error("Runtime error: {0}")]
     Runtime(String),
+    
+    #[error("Type mismatch: expected {expected}, found {found}. {context}")]
+    TypeMismatch {
+        expected: String,
+        found: String,
+        context: String,
+    },
 }
 
 /// Parsing-specific errors with source location information

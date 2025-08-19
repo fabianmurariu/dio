@@ -7,6 +7,10 @@ pub enum Type {
     U64,
     /// U64 array type
     U64Array,
+    /// I64 scalar type  
+    I64,
+    /// I64 array type
+    I64Array,
     /// F64 scalar type (future extension)
     F64,
     /// F64 array type (future extension)
@@ -94,6 +98,8 @@ impl fmt::Display for Type {
         match self {
             Type::U64 => write!(f, "U64"),
             Type::U64Array => write!(f, "U64Array"),
+            Type::I64 => write!(f, "I64"),
+            Type::I64Array => write!(f, "I64Array"),
             Type::F64 => write!(f, "F64"),
             Type::F64Array => write!(f, "F64Array"),
         }
@@ -169,7 +175,7 @@ impl Expr {
             Expr::Add(_) | Expr::Sub(_, _) | Expr::Mul(_) | Expr::Div(_, _) => true,
             Expr::Sum(_) | Expr::Count(_) => false, // Reductions produce scalars
             Expr::Let(_, expr) => expr.is_elementwise(),
-            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64Array | Type::F64Array),
+            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64Array | Type::I64Array | Type::F64Array),
         }
     }
     
@@ -177,7 +183,7 @@ impl Expr {
     pub fn is_reduction(&self) -> bool {
         match self {
             Expr::Sum(_) | Expr::Count(_) => true,
-            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64 | Type::F64),
+            Expr::Lambda { return_type, .. } => matches!(return_type, Type::U64 | Type::I64 | Type::F64),
             _ => false,
         }
     }

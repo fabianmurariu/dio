@@ -47,7 +47,7 @@ impl CompiledFunction {
     }
 }
 
-/// High-level function to compile and execute (+ a b) expression
+/// High-level function to compile and execute (+ a b) expression with U64 arrays
 pub fn execute_add_u64(
     expr: &Expr,
     a: &[u64],
@@ -63,6 +63,62 @@ pub fn execute_add_u64(
     // Execute with raw arrays
     let compiled_fn = CompiledFunction::new(code_ptr);
     unsafe { compiled_fn.call_u64_add(a, b) }
+}
+
+/// High-level function to compile and execute (+ a b) expression with I64 arrays
+pub fn execute_add_i64(
+    expr: &Expr,
+    a: &[i64],
+    b: &[i64],
+) -> Result<Vec<i64>, DioError> {
+    // AST -> SSA IR
+    let ssa_program = ast_to_ssa(expr)?;
+    
+    // SSA IR -> Cranelift -> Machine Code
+    let mut backend = CraneliftBackend::new()?;
+    let code_ptr = backend.compile(&ssa_program)?;
+    
+    // Execute with raw arrays - reinterpret cast since bit representation is the same
+    let compiled_fn = CompiledFunction::new(code_ptr);
+    unsafe { 
+        let a_u64: &[u64] = std::slice::from_raw_parts(a.as_ptr() as *const u64, a.len());
+        let b_u64: &[u64] = std::slice::from_raw_parts(b.as_ptr() as *const u64, b.len());
+        let result_u64 = compiled_fn.call_u64_add(a_u64, b_u64)?;
+        
+        // Convert result back to i64
+        let result_i64: Vec<i64> = result_u64.into_iter()
+            .map(|x| x as i64)
+            .collect();
+        Ok(result_i64)
+    }
+}
+
+/// High-level function to compile and execute (+ a b) expression with mixed U64/I64 arrays
+/// Returns I64 array as per casting rules (signed takes precedence)
+pub fn execute_add_mixed_u64_i64(
+    expr: &Expr,
+    a: &[u64],
+    b: &[i64],
+) -> Result<Vec<i64>, DioError> {
+    // AST -> SSA IR
+    let ssa_program = ast_to_ssa(expr)?;
+    
+    // SSA IR -> Cranelift -> Machine Code
+    let mut backend = CraneliftBackend::new()?;
+    let code_ptr = backend.compile(&ssa_program)?;
+    
+    // Execute with raw arrays - reinterpret cast for I64 input
+    let compiled_fn = CompiledFunction::new(code_ptr);
+    unsafe { 
+        let b_u64: &[u64] = std::slice::from_raw_parts(b.as_ptr() as *const u64, b.len());
+        let result_u64 = compiled_fn.call_u64_add(a, b_u64)?;
+        
+        // Convert result to i64 (signed output)
+        let result_i64: Vec<i64> = result_u64.into_iter()
+            .map(|x| x as i64)
+            .collect();
+        Ok(result_i64)
+    }
 }
 
 #[cfg(test)]
@@ -156,5 +212,48 @@ mod tests {
         // First element: should be close to u64::MAX (with potential overflow)
         // Second element: should be 300
         assert_eq!(result[1], 300);
+    }
+
+    #[test]
+    fn test_end_to_end_i64_addition() {
+        // Test with I64Array types
+        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
+        
+        let a = vec![-1i64, -2, -3, 4, 5];
+        let b = vec![10i64, 20, 30, -40, -50];
+        
+        let result = execute_add_i64(&expr, &a, &b).unwrap();
+        
+        // Verify results with negative numbers
+        let expected = vec![9i64, 18, 27, -36, -45];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_mixed_type_addition() {
+        // Test mixed U64Array + I64Array -> I64Array (coercion to signed)
+        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
+        
+        let a = vec![1u64, 2, 3, 4, 5];
+        let b = vec![-1i64, -2, -3, 4, 5];
+        
+        let result = execute_add_mixed_u64_i64(&expr, &a, &b).unwrap();
+        
+        // Verify results: 1-1=0, 2-2=0, 3-3=0, 4+4=8, 5+5=10
+        let expected = vec![0i64, 0, 0, 8, 10];
+        assert_eq!(result, expected);
+    }
+
+    #[test]
+    fn test_i64_large_values() {
+        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
+        
+        let a = vec![i64::MAX / 2, -100];
+        let b = vec![i64::MAX / 2, 50];
+        
+        let result = execute_add_i64(&expr, &a, &b).unwrap();
+        
+        // Second element should be -50
+        assert_eq!(result[1], -50);
     }
 }

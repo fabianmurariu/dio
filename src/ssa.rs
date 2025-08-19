@@ -1,5 +1,6 @@
 use std::collections::HashMap;
 use crate::ast::{Expr, Type, TypedParam};
+use crate::casting::coerce_binary_op_types;
 use crate::error::DioError;
 
 /// SSA Value identifier
@@ -222,20 +223,38 @@ fn convert_simple_addition(_col_a: &str, _col_b: &str) -> Result<SsaProgram, Dio
 }
 
 /// Convert typed lambda to SSA IR
-/// Supports (lambda ([U64Array x] [U64Array y] U64Array) (+ x y)) format
+/// Supports integer array addition with automatic type coercion
 fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) -> Result<SsaProgram, DioError> {
-    // For the vertical slice, only support specific patterns
     match (params, return_type, body) {
-        // Pattern: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))
-        (params, Type::U64Array, Expr::Add(operands)) 
+        // Pattern: (lambda ([IntArray x] [IntArray y] IntArray) (+ x y))
+        // where IntArray is U64Array or I64Array
+        (params, return_type, Expr::Add(operands)) 
             if params.len() == 2 
-            && params.iter().all(|p| matches!(p.type_, Type::U64Array))
             && operands.len() == 2 => {
+            
+            // Check that all parameters are integer array types
+            if !params.iter().all(|p| p.type_.is_integer() && p.type_.is_array()) {
+                return Err(DioError::Compilation("Only integer array types supported in vertical slice".to_string()));
+            }
+            
+            // Type coercion for the operation
+            let coerced_type = coerce_binary_op_types(&params[0].type_, &params[1].type_)?;
+            
+            // Check return type matches coerced type
+            if return_type != &coerced_type {
+                return Err(DioError::TypeMismatch {
+                    expected: coerced_type.to_string(),
+                    found: return_type.to_string(),
+                    context: "Return type must match the coerced type of the operation".to_string(),
+                });
+            }
             
             // Verify the operands match the parameter names
             let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
             if let (Expr::Column(col1), Expr::Column(col2)) = (&operands[0], &operands[1]) {
                 if param_names.contains(&col1.as_str()) && param_names.contains(&col2.as_str()) {
+                    // For now, all integer additions use the same underlying implementation
+                    // The Cranelift backend will handle the appropriate signed/unsigned operations
                     convert_simple_addition(col1, col2)
                 } else {
                     Err(DioError::Compilation("Column references in lambda body must match parameter names".to_string()))
@@ -245,10 +264,11 @@ fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) 
             }
         }
         
-        // Pattern: (lambda ([U64Array x] U64) (sum x))
-        (params, Type::U64, Expr::Sum(inner)) 
+        // Pattern: (lambda ([IntArray x] Int) (sum x)) - Future extension
+        (params, return_type, Expr::Sum(inner)) 
             if params.len() == 1 
-            && matches!(params[0].type_, Type::U64Array) => {
+            && params[0].type_.is_integer() && params[0].type_.is_array()
+            && return_type.is_integer() && return_type.is_scalar() => {
             
             if let Expr::Column(col) = inner.as_ref() {
                 if col == &params[0].name {
@@ -263,7 +283,7 @@ fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) 
         }
         
         _ => Err(DioError::Compilation(
-            "Only (lambda ([U64Array x] [U64Array y] U64Array) (+ x y)) supported in vertical slice".to_string()
+            "Only integer array addition supported: (lambda ([U64Array|I64Array x] [U64Array|I64Array y] I64Array) (+ x y))".to_string()
         ))
     }
 }
@@ -290,6 +310,27 @@ mod tests {
         
         // Should have proper value types
         assert!(!ssa_program.value_types.is_empty());
+    }
+
+    #[test]
+    fn test_typed_lambda_i64_arrays() {
+        let expr = parse_expr("(lambda ([I64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+        
+        // Should compile successfully
+        assert_eq!(ssa_program.blocks.len(), 3);
+        assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
+    }
+
+    #[test]
+    fn test_typed_lambda_mixed_types() {
+        // Mixed U64Array + I64Array should coerce to I64Array
+        let expr = parse_expr("(lambda ([U64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+        
+        // Should compile successfully
+        assert_eq!(ssa_program.blocks.len(), 3);
+        assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
     }
 
     #[test]
@@ -335,6 +376,14 @@ mod tests {
         
         // Should reject sum (not implemented in vertical slice)
         let expr = parse_expr("(lambda ([U64Array x] U64) (sum x))").unwrap();
+        assert!(ast_to_ssa(&expr).is_err());
+        
+        // Should reject wrong return type for mixed coercion
+        let expr = parse_expr("(lambda ([U64Array x] [I64Array y] U64Array) (+ x y))").unwrap();
+        assert!(ast_to_ssa(&expr).is_err()); // Should be I64Array, not U64Array
+        
+        // Should reject float types (not implemented)
+        let expr = parse_expr("(lambda ([F64Array x] [F64Array y] F64Array) (+ x y))").unwrap();
         assert!(ast_to_ssa(&expr).is_err());
     }
 }

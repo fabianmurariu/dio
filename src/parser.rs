@@ -237,12 +237,14 @@ fn parse_typed_param(input: &str) -> IResult<&str, TypedParam> {
     Ok((input, TypedParam { name, type_ }))
 }
 
-/// Parse type: U64, U64Array, F64, F64Array
+/// Parse type: U64, U64Array, I64, I64Array, F64, F64Array
 fn parse_type(input: &str) -> IResult<&str, Type> {
     alt((
         map(tag("U64Array"), |_| Type::U64Array),
-        map(tag("U64"), |_| Type::U64),
+        map(tag("I64Array"), |_| Type::I64Array),
         map(tag("F64Array"), |_| Type::F64Array),
+        map(tag("U64"), |_| Type::U64),
+        map(tag("I64"), |_| Type::I64),
         map(tag("F64"), |_| Type::F64),
     ))(input)
 }
@@ -494,6 +496,44 @@ mod tests {
                     }
                     _ => panic!("Expected Sum expression in lambda body"),
                 }
+            }
+            _ => panic!("Expected lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_typed_lambda_i64_arrays() {
+        let result = parse_expr("(lambda ([I64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
+        match result {
+            Expr::Lambda { params, return_type, body } => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].name, "x");
+                assert_eq!(params[0].type_, Type::I64Array);
+                assert_eq!(params[1].name, "y");
+                assert_eq!(params[1].type_, Type::I64Array);
+                assert_eq!(return_type, Type::I64Array);
+                match body.as_ref() {
+                    Expr::Add(operands) => {
+                        assert_eq!(operands.len(), 2);
+                        assert_eq!(operands[0], Expr::Column("x".to_string()));
+                        assert_eq!(operands[1], Expr::Column("y".to_string()));
+                    }
+                    _ => panic!("Expected Add expression in lambda body"),
+                }
+            }
+            _ => panic!("Expected lambda expression"),
+        }
+    }
+
+    #[test]
+    fn test_parse_mixed_type_lambda() {
+        let result = parse_expr("(lambda ([U64Array x] [I64Array y] I64Array) (+ x y))").unwrap();
+        match result {
+            Expr::Lambda { params, return_type, body: _ } => {
+                assert_eq!(params.len(), 2);
+                assert_eq!(params[0].type_, Type::U64Array);
+                assert_eq!(params[1].type_, Type::I64Array);
+                assert_eq!(return_type, Type::I64Array);
             }
             _ => panic!("Expected lambda expression"),
         }

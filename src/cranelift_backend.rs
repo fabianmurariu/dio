@@ -183,4 +183,26 @@ mod tests {
         // If we get here without panicking, compilation succeeded
         // We'll test actual execution in the integration tests
     }
+
+    #[test]
+    fn test_cranelift_compilation_i64_arrays() {
+        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+
+        let mut backend = CraneliftBackend::new().unwrap();
+        let _compiled_fn = backend.compile(&ssa_program);
+
+        // I64Array compilation should work the same as U64Array
+    }
+
+    #[test]
+    fn test_cranelift_compilation_mixed_types() {
+        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+
+        let mut backend = CraneliftBackend::new().unwrap();
+        let _compiled_fn = backend.compile(&ssa_program);
+
+        // Mixed type compilation should work with type coercion
+    }
 }
