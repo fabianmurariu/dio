@@ -117,6 +117,26 @@ impl Type {
     }
 }
 
+/// Type coercion for N-ary operations following SQL rules
+/// Determines the common type for operations like (+ a b c d...)
+pub fn coerce_nary_op_types(operand_types: &[Type]) -> Result<Type, DioError> {
+    if operand_types.is_empty() {
+        return Err(DioError::TypeMismatch {
+            expected: "at least one operand".to_string(),
+            found: "no operands".to_string(),
+            context: "N-ary operations require at least one operand".to_string(),
+        });
+    }
+    
+    // Start with the first type and coerce with each subsequent type
+    let mut result_type = operand_types[0].clone();
+    for operand_type in &operand_types[1..] {
+        result_type = coerce_binary_op_types(&result_type, operand_type)?;
+    }
+    
+    Ok(result_type)
+}
+
 /// Type coercion for binary operations following SQL rules
 pub fn coerce_binary_op_types(left: &Type, right: &Type) -> Result<Type, DioError> {
     use Type::*;
@@ -203,5 +223,35 @@ mod tests {
         // Mixed scalar/array should error
         assert!(coerce_binary_op_types(&Type::U64, &Type::U64Array).is_err());
         assert!(coerce_binary_op_types(&Type::I64Array, &Type::I64).is_err());
+    }
+    
+    #[test]
+    fn test_nary_coercion() {
+        // Single type
+        assert_eq!(coerce_nary_op_types(&[Type::U64Array]).unwrap(), Type::U64Array);
+        
+        // Two types (same as binary)
+        assert_eq!(coerce_nary_op_types(&[Type::U64Array, Type::I64Array]).unwrap(), Type::I64Array);
+        
+        // Multiple types - should coerce to most general (signed)
+        assert_eq!(
+            coerce_nary_op_types(&[Type::U64Array, Type::U64Array, Type::I64Array]).unwrap(), 
+            Type::I64Array
+        );
+        
+        // All signed should stay signed
+        assert_eq!(
+            coerce_nary_op_types(&[Type::I64Array, Type::I64Array, Type::I64Array]).unwrap(), 
+            Type::I64Array
+        );
+    }
+    
+    #[test]
+    fn test_nary_coercion_errors() {
+        // Empty operands
+        assert!(coerce_nary_op_types(&[]).is_err());
+        
+        // Mixed scalar/array in N-ary
+        assert!(coerce_nary_op_types(&[Type::U64Array, Type::U64]).is_err());
     }
 }

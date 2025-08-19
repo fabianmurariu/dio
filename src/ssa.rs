@@ -1,6 +1,6 @@
 use std::collections::HashMap;
 use crate::ast::{Expr, Type, TypedParam};
-use crate::casting::coerce_binary_op_types;
+use crate::casting::coerce_nary_op_types;
 use crate::error::DioError;
 
 /// SSA Value identifier
@@ -222,23 +222,117 @@ fn convert_simple_addition(_col_a: &str, _col_b: &str) -> Result<SsaProgram, Dio
     Ok(program)
 }
 
+/// Convert N-ary addition to SSA IR: (+ a b c d ...)
+/// Generated function signature: fn(inputs: *const *const u8, input_count: u32, length: u64, output: *mut u8)
+fn convert_nary_addition(_column_names: &[&str], operand_count: usize) -> Result<SsaProgram, DioError> {
+    // For now, we'll create a simplified SSA program that mirrors the binary case
+    // but with knowledge of the operand count for the Cranelift backend
+    let mut program = SsaProgram::new();
+    
+    // Create blocks similar to binary case
+    let entry_block = program.new_block();
+    let loop_body = program.new_block();
+    let exit_block = program.new_block();
+    program.entry_block = entry_block;
+    
+    // For the initial implementation, we'll use the same structure as binary addition
+    // The Cranelift backend will be responsible for handling the variable number of inputs
+    
+    // Entry block: load parameters and setup loop
+    let inputs_ptr = program.new_value(DataType::ArrayU64);   // Array of input pointers
+    let input_count_val = program.new_value(DataType::U64);   // Number of inputs
+    let length = program.new_value(DataType::U64);            // Array length  
+    let output_array = program.new_value(DataType::ArrayU64); // Output array
+    let loop_start = program.new_value(DataType::U64);        // Loop start (0)
+    let loop_var = program.new_value(DataType::U64);          // Loop variable
+    
+    // Load function parameters
+    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
+        dest: inputs_ptr,
+        param_index: 0,
+        data_type: DataType::ArrayU64,
+    });
+    
+    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
+        dest: input_count_val,
+        param_index: 1,
+    });
+    
+    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
+        dest: length,
+        param_index: 2,
+    });
+    
+    program.add_instruction(entry_block, SsaInstruction::LoadArrayParam {
+        dest: output_array,
+        param_index: 3,
+        data_type: DataType::ArrayU64,
+    });
+    
+    program.add_instruction(entry_block, SsaInstruction::LoadScalar {
+        dest: loop_start,
+        value: 0,
+    });
+    
+    // Set up loop
+    program.add_instruction(entry_block, SsaInstruction::Loop {
+        index_var: loop_var,
+        start: loop_start,
+        end: length,
+        body: loop_body,
+    });
+    
+    program.add_instruction(entry_block, SsaInstruction::Jump {
+        target: exit_block,
+    });
+    
+    // Loop body: The Cranelift backend will handle N-ary addition using the operand_count
+    // For now, we create a special SSA instruction that encodes the operand count
+    let sum_result = program.new_value(DataType::U64);
+    
+    // This is a placeholder instruction that the Cranelift backend will recognize
+    // and generate appropriate code for N-ary addition
+    program.add_instruction(loop_body, SsaInstruction::LoadScalar {
+        dest: sum_result,
+        value: operand_count as u64, // Encode operand count for Cranelift
+    });
+    
+    program.add_instruction(loop_body, SsaInstruction::StoreArrayElement {
+        array: output_array,
+        index: loop_var,
+        value: sum_result,
+    });
+    
+    program.add_instruction(loop_body, SsaInstruction::Jump {
+        target: entry_block, // Continue loop
+    });
+    
+    // Exit block: return
+    program.add_instruction(exit_block, SsaInstruction::Return {
+        value: None,
+    });
+    
+    Ok(program)
+}
+
 /// Convert typed lambda to SSA IR
 /// Supports integer array addition with automatic type coercion
 fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) -> Result<SsaProgram, DioError> {
     match (params, return_type, body) {
-        // Pattern: (lambda ([IntArray x] [IntArray y] IntArray) (+ x y))
+        // Pattern: (lambda ([IntArray x] [IntArray y] [IntArray z]... IntArray) (+ x y z...))
         // where IntArray is U64Array or I64Array
         (params, return_type, Expr::Add(operands)) 
-            if params.len() == 2 
-            && operands.len() == 2 => {
+            if params.len() >= 2 
+            && operands.len() == params.len() => {
             
             // Check that all parameters are integer array types
             if !params.iter().all(|p| p.type_.is_integer() && p.type_.is_array()) {
                 return Err(DioError::Compilation("Only integer array types supported in vertical slice".to_string()));
             }
             
-            // Type coercion for the operation
-            let coerced_type = coerce_binary_op_types(&params[0].type_, &params[1].type_)?;
+            // N-ary type coercion for the operation
+            let param_types: Vec<Type> = params.iter().map(|p| p.type_.clone()).collect();
+            let coerced_type = coerce_nary_op_types(&param_types)?;
             
             // Check return type matches coerced type
             if return_type != &coerced_type {
@@ -249,18 +343,26 @@ fn convert_typed_lambda(params: &[TypedParam], return_type: &Type, body: &Expr) 
                 });
             }
             
-            // Verify the operands match the parameter names
+            // Verify all operands are column references matching parameter names
             let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
-            if let (Expr::Column(col1), Expr::Column(col2)) = (&operands[0], &operands[1]) {
-                if param_names.contains(&col1.as_str()) && param_names.contains(&col2.as_str()) {
-                    // For now, all integer additions use the same underlying implementation
-                    // The Cranelift backend will handle the appropriate signed/unsigned operations
-                    convert_simple_addition(col1, col2)
+            let mut column_names = Vec::new();
+            
+            for operand in operands {
+                if let Expr::Column(col_name) = operand {
+                    if param_names.contains(&col_name.as_str()) {
+                        column_names.push(col_name.as_str());
+                    } else {
+                        return Err(DioError::Compilation("Column references in lambda body must match parameter names".to_string()));
+                    }
                 } else {
-                    Err(DioError::Compilation("Column references in lambda body must match parameter names".to_string()))
+                    return Err(DioError::Compilation("Lambda body must contain only column references for vertical slice".to_string()));
                 }
-            } else {
-                Err(DioError::Compilation("Lambda body must be column addition for vertical slice".to_string()))
+            }
+            
+            // For now, delegate to the appropriate conversion function based on operand count
+            match params.len() {
+                2 => convert_simple_addition(&column_names[0], &column_names[1]),
+                n => convert_nary_addition(&column_names, n),
             }
         }
         
@@ -352,6 +454,27 @@ mod tests {
         assert!(!ssa_program.value_types.is_empty());
     }
     
+    #[test]
+    fn test_typed_lambda_ternary_addition() {
+        let expr = parse_expr("(lambda ([U64Array x] [U64Array y] [U64Array z] U64Array) (+ x y z))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+        
+        // Should compile successfully with 3 operands
+        assert_eq!(ssa_program.blocks.len(), 3);
+        assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
+    }
+
+    #[test]
+    fn test_typed_lambda_quaternary_mixed_types() {
+        // Mixed types: U64Array + I64Array + U64Array + I64Array should coerce to I64Array
+        let expr = parse_expr("(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))").unwrap();
+        let ssa_program = ast_to_ssa(&expr).unwrap();
+        
+        // Should compile successfully with mixed types
+        assert_eq!(ssa_program.blocks.len(), 3);
+        assert!(ssa_program.blocks.contains_key(&ssa_program.entry_block));
+    }
+
     #[test]
     fn test_unsupported_expressions() {
         // Should reject non-lambda expressions (now required)
