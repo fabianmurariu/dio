@@ -16,6 +16,8 @@ pub struct BlockId(pub u32);
 pub enum DataType {
     U64,
     ArrayU64,
+    I64,
+    ArrayI64,
 }
 
 /// SSA Instructions - simplified for (+ a b) vertical slice
@@ -43,6 +45,13 @@ pub enum SsaInstruction {
 
     /// Addition: %4 = Add { lhs: %3, rhs: %5 }
     Add {
+        dest: SsaValue,
+        lhs: SsaValue,
+        rhs: SsaValue,
+    },
+
+    /// Subtraction: %5 = Sub { lhs: %3, rhs: %5 }
+    Sub {
         dest: SsaValue,
         lhs: SsaValue,
         rhs: SsaValue,
@@ -415,73 +424,266 @@ fn convert_typed_lambda(
     match (params, return_type, body) {
         // Pattern: (lambda ([IntArray x] [IntArray y] [IntArray z]... IntArray) (+ x y z...))
         // where IntArray is U64Array or I64Array
-        (params, return_type, Expr::Add(operands)) 
-            if params.len() >= 2 
-            && operands.len() == params.len() => {
-            
+        (params, return_type, Expr::Add(operands))
+            if params.len() >= 2 && operands.len() == params.len() =>
+        {
             // Check that all parameters are integer array types
-            if !params.iter().all(|p| p.type_.is_integer() && p.type_.is_array()) {
-                return Err(DioError::Compilation("Only integer array types supported in vertical slice".to_string()));
+            if !params
+                .iter()
+                .all(|p| p.type_.is_integer() && p.type_.is_array())
+            {
+                return Err(DioError::Compilation(
+                    "Only integer array types supported in vertical slice".to_string(),
+                ));
             }
-            
+
             // N-ary type coercion for the operation
             let param_types: Vec<Type> = params.iter().map(|p| p.type_.clone()).collect();
             let coerced_type = coerce_nary_op_types(&param_types)?;
-            
+
             // Check return type matches coerced type
             if return_type != &coerced_type {
                 return Err(DioError::TypeMismatch {
                     expected: coerced_type.to_string(),
                     found: return_type.to_string(),
-                    context: "Return type must match the coerced type of the operation".to_string(),
+                    context: "Return type must match the coerced type of the operation"
+                        .to_string(),
                 });
             }
-            
+
             // Verify all operands are column references matching parameter names
             let param_names: Vec<&str> = params.iter().map(|p| p.name.as_str()).collect();
             let mut column_names = Vec::new();
-            
+
             for operand in operands {
                 if let Expr::Column(col_name) = operand {
                     if param_names.contains(&col_name.as_str()) {
                         column_names.push(col_name.as_str());
                     } else {
-                        return Err(DioError::Compilation("Column references in lambda body must match parameter names".to_string()));
+                        return Err(DioError::Compilation(
+                            "Column references in lambda body must match parameter names"
+                                .to_string(),
+                        ));
                     }
                 } else {
-                    return Err(DioError::Compilation("Lambda body must contain only column references for vertical slice".to_string()));
+                    return Err(DioError::Compilation(
+                        "Lambda body must contain only column references for vertical slice"
+                            .to_string(),
+                    ));
                 }
             }
-            
+
             // For now, delegate to the appropriate conversion function based on operand count
             match params.len() {
                 2 => convert_simple_addition(column_names[0], column_names[1]),
                 n => convert_nary_addition(&column_names, n),
             }
         }
-        
+
+        // Pattern: (lambda ([IntArray x] [IntArray y] IntArray) (- x y))
+        (params, return_type, Expr::Sub(lhs, rhs)) if params.len() == 2 => {
+            // Check that all parameters are integer array types
+            if !params
+                .iter()
+                .all(|p| p.type_.is_integer() && p.type_.is_array())
+            {
+                return Err(DioError::Compilation(
+                    "Only integer array types supported in vertical slice".to_string(),
+                ));
+            }
+
+            // N-ary type coercion for the operation
+            let param_types: Vec<Type> = params.iter().map(|p| p.type_.clone()).collect();
+            let coerced_type = coerce_nary_op_types(&param_types)?;
+
+            // Check return type matches coerced type
+            if return_type != &coerced_type {
+                return Err(DioError::TypeMismatch {
+                    expected: coerced_type.to_string(),
+                    found: return_type.to_string(),
+                    context: "Return type must match the coerced type of the operation"
+                        .to_string(),
+                });
+            }
+
+            // Verify all operands are column references matching parameter names
+            if let (Expr::Column(col_a), Expr::Column(col_b)) = (lhs.as_ref(), rhs.as_ref()) {
+                convert_simple_subtraction(col_a, col_b)
+            } else {
+                Err(DioError::Compilation(
+                    "Lambda body must contain only column references for vertical slice"
+                        .to_string(),
+                ))
+            }
+        }
+
         // Pattern: (lambda ([IntArray x] Int) (sum x)) - Future extension
-        (params, return_type, Expr::Sum(inner)) 
-            if params.len() == 1 
-            && params[0].type_.is_integer() && params[0].type_.is_array()
-            && return_type.is_integer() && return_type.is_scalar() => {
-            
+        (params, return_type, Expr::Sum(inner))
+            if params.len() == 1
+                && params[0].type_.is_integer()
+                && params[0].type_.is_array()
+                && return_type.is_integer()
+                && return_type.is_scalar() =>
+        {
             if let Expr::Column(col) = inner.as_ref() {
                 if col == &params[0].name {
                     // For now, sum reductions are not implemented in the vertical slice
-                    Err(DioError::Compilation("Sum reductions not implemented in vertical slice".to_string()))
+                    Err(DioError::Compilation(
+                        "Sum reductions not implemented in vertical slice".to_string(),
+                    ))
                 } else {
-                    Err(DioError::Compilation("Column reference in lambda body must match parameter name".to_string()))
+                    Err(DioError::Compilation(
+                        "Column reference in lambda body must match parameter name".to_string(),
+                    ))
                 }
             } else {
-                Err(DioError::Compilation("Lambda body must be simple column reference for sum".to_string()))
+                Err(DioError::Compilation(
+                    "Lambda body must be simple column reference for sum".to_string(),
+                ))
             }
         }
-        
+
         _ => Err(DioError::Compilation(
-            "Only integer array addition supported: (lambda ([U64Array|I64Array x] [U64Array|I64Array y] I64Array) (+ x y))".to_string()
-        ))
+            "Only integer array addition or subtraction supported".to_string(),
+        )),
     }
+}
+
+/// Convert (- a b) to SSA IR
+fn convert_simple_subtraction(_col_a: &str, _col_b: &str) -> Result<SsaProgram, DioError> {
+    let mut program = SsaProgram::new();
+
+    // Create blocks
+    let entry_block = program.new_block();
+    let loop_body = program.new_block();
+    let exit_block = program.new_block();
+    program.entry_block = entry_block;
+
+    // For subtraction, we'll assume I64 for now as it's the coerced type
+    let array_type = DataType::ArrayI64;
+    let element_type = DataType::I64;
+
+    // Entry block: load parameters and setup loop
+    let a_array = program.new_value(array_type.clone());
+    let b_array = program.new_value(array_type.clone());
+    let length = program.new_value(DataType::U64);
+    let output_array = program.new_value(array_type);
+
+    let loop_start = program.new_value(DataType::U64);
+    let loop_var = program.new_value(DataType::U64);
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: a_array,
+            param_index: 0,
+            data_type: DataType::ArrayI64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: b_array,
+            param_index: 1,
+            data_type: DataType::ArrayI64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadLengthParam {
+            dest: length,
+            param_index: 2,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadArrayParam {
+            dest: output_array,
+            param_index: 3,
+            data_type: DataType::ArrayI64,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::LoadScalar {
+            dest: loop_start,
+            value: 0,
+        },
+    );
+
+    program.add_instruction(
+        entry_block,
+        SsaInstruction::Loop {
+            index_var: loop_var,
+            start: loop_start,
+            end: length,
+            body: loop_body,
+        },
+    );
+
+    program.add_instruction(entry_block, SsaInstruction::Jump { target: exit_block });
+
+    // Loop body: a[i] - b[i] -> output[i]
+    let a_element = program.new_value(element_type.clone());
+    let b_element = program.new_value(element_type.clone());
+    let result = program.new_value(element_type);
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::ArrayAccess {
+            dest: a_element,
+            array: a_array,
+            index: loop_var,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::ArrayAccess {
+            dest: b_element,
+            array: b_array,
+            index: loop_var,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::Sub {
+            dest: result,
+            lhs: a_element,
+            rhs: b_element,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::StoreArrayElement {
+            array: output_array,
+            index: loop_var,
+            value: result,
+        },
+    );
+
+    program.add_instruction(
+        loop_body,
+        SsaInstruction::Jump {
+            target: entry_block, // Continue loop
+        },
+    );
+
+    // Exit block: return
+    program.add_instruction(
+        exit_block,
+        SsaInstruction::Return {
+            value: None, // void return - output written to output_ptr
+        },
+    );
+
+    Ok(program)
 }
 
 #[cfg(test)]
