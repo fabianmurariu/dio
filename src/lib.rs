@@ -10,8 +10,7 @@ pub mod ssa;
 pub use ast::{Expr, Type, TypedParam, Value};
 pub use error::{DioError, ParseError};
 pub use execution::{
-    clear_function_cache, execute_add_i64, execute_add_mixed_u64_i64, execute_add_u64,
-    execute_generic, execute_generic_cached, CompiledFunction,
+    clear_function_cache, execute_generic, execute_generic_cached, CompiledFunction,
 };
 pub use parser::parse_expr;
 pub use ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue};
