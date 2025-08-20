@@ -23,9 +23,9 @@ fn main() {
     for expr_str in &test_expressions {
         match parse_expr(expr_str) {
             Ok(expr) => {
-                println!("✅ Input:  {}", expr_str);
-                println!("   AST:    {:?}", expr);
-                println!("   Pretty: {}", expr);
+                println!("✅ Input:  {expr_str}");
+                println!("   AST:    {expr:?}");
+                println!("   Pretty: {expr}");
 
                 // Show expression properties
                 if expr.is_elementwise() {
@@ -38,15 +38,15 @@ fn main() {
 
                 let columns = expr.get_column_references();
                 if !columns.is_empty() {
-                    println!("   Columns: {:?}", columns);
+                    println!("   Columns: {columns:?}");
                 }
 
                 println!("   Complexity: {}", expr.complexity());
                 println!();
             }
             Err(e) => {
-                println!("❌ Input: {}", expr_str);
-                println!("   Error: {}", e);
+                println!("❌ Input: {expr_str}");
+                println!("   Error: {e}");
                 println!();
             }
         }
@@ -66,12 +66,12 @@ fn main() {
     for expr_str in &error_expressions {
         match parse_expr(expr_str) {
             Ok(expr) => {
-                println!("✅ Unexpected success for: {}", expr_str);
-                println!("   Result: {}", expr);
+                println!("✅ Unexpected success for: {expr_str}");
+                println!("   Result: {expr}");
             }
             Err(e) => {
-                println!("❌ Input: {}", expr_str);
-                println!("   Error: {}", e);
+                println!("❌ Input: {expr_str}");
+                println!("   Error: {e}");
 
                 // Show error span information
                 println!("   Error type: Parse error");

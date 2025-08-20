@@ -67,8 +67,20 @@ impl CompiledFunction {
     }
 
     /// Execute the compiled function with variadic Arrow arrays
+    ///
     /// Function signature: fn(inputs: *const *const u8, input_count: u32, output: *mut u8, length: u64)
-    /// Safety: This is unsafe because we're calling JIT-compiled code and working with raw pointers
+    ///
+    /// # Safety
+    ///
+    /// This function is unsafe because it involves:
+    /// 1.  Calling a raw function pointer (`code_ptr`) that has been JIT-compiled. The caller must
+    ///     ensure that this pointer is valid, executable, and has the correct signature.
+    /// 2.  Dereferencing raw pointers for both input arrays and the output buffer. The caller must
+    ///     ensure that these pointers are valid for the entire duration of the function call and
+    ///     point to memory layouts compatible with the JIT-compiled function's expectations.
+    /// 3.  The `std::mem::transmute` call assumes that the `code_ptr` correctly corresponds to the
+    ///     `NaryAddFunction` signature. Mismatch between the actual compiled function and this
+    ///     signature will lead to undefined behavior.
     pub unsafe fn call_nary_add(
         &self,
         input_arrays: &[ArrayRef],

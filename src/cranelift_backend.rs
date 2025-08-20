@@ -16,9 +16,9 @@ impl CraneliftBackend {
     pub fn new() -> Result<Self, DioError> {
         let builder = JITBuilder::with_isa(
             cranelift_native::builder()
-                .map_err(|e| DioError::Compilation(format!("Failed to create ISA builder: {}", e)))?
+                .map_err(|e| DioError::Compilation(format!("Failed to create ISA builder: {e}")))?
                 .finish(settings::Flags::new(settings::builder()))
-                .map_err(|e| DioError::Compilation(format!("Failed to create ISA: {}", e)))?,
+                .map_err(|e| DioError::Compilation(format!("Failed to create ISA: {e}")))?,
             default_libcall_names(),
         );
 
@@ -209,16 +209,16 @@ impl CraneliftBackend {
                 Linkage::Export,
                 &self.context.func.signature,
             )
-            .map_err(|e| DioError::Compilation(format!("Failed to declare function: {}", e)))?;
+            .map_err(|e| DioError::Compilation(format!("Failed to declare function: {e}")))?;
 
         self.module
             .define_function(func_id, &mut self.context)
-            .map_err(|e| DioError::Compilation(format!("Failed to define function: {}", e)))?;
+            .map_err(|e| DioError::Compilation(format!("Failed to define function: {e}")))?;
 
         self.module.clear_context(&mut self.context);
         self.module
             .finalize_definitions()
-            .map_err(|e| DioError::Compilation(format!("Failed to finalize definitions: {}", e)))?;
+            .map_err(|e| DioError::Compilation(format!("Failed to finalize definitions: {e}")))?;
 
         let code_ptr = self.module.get_finalized_function(func_id);
 

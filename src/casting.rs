@@ -154,20 +154,20 @@ pub fn coerce_binary_op_types(left: &Type, right: &Type) -> Result<Type, DioErro
 
         // Mixed scalar/array is an error
         (scalar, array) if scalar.is_scalar() && array.is_array() => Err(DioError::TypeMismatch {
-            expected: format!("compatible types"),
-            found: format!("{} and {}", scalar, array),
+            expected: "compatible types".to_string(),
+            found: format!("{scalar} and {array}"),
             context: "Cannot mix scalar and array types in binary operations".to_string(),
         }),
         (array, scalar) if array.is_array() && scalar.is_scalar() => Err(DioError::TypeMismatch {
-            expected: format!("compatible types"),
-            found: format!("{} and {}", array, scalar),
+            expected: "compatible types".to_string(),
+            found: format!("{array} and {scalar}"),
             context: "Cannot mix scalar and array types in binary operations".to_string(),
         }),
 
         // Future: Add float coercion rules
         _ => Err(DioError::TypeMismatch {
-            expected: format!("compatible types"),
-            found: format!("{} and {}", left, right),
+            expected: "compatible types".to_string(),
+            found: format!("{left} and {right}"),
             context: "Unsupported type combination for binary operation".to_string(),
         }),
     }

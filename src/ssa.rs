@@ -87,6 +87,12 @@ pub struct SsaProgram {
     pub next_block_id: u32,
 }
 
+impl Default for SsaProgram {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 impl SsaProgram {
     pub fn new() -> Self {
         Self {
@@ -449,7 +455,7 @@ fn convert_typed_lambda(
             
             // For now, delegate to the appropriate conversion function based on operand count
             match params.len() {
-                2 => convert_simple_addition(&column_names[0], &column_names[1]),
+                2 => convert_simple_addition(column_names[0], column_names[1]),
                 n => convert_nary_addition(&column_names, n),
             }
         }

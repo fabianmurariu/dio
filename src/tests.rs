@@ -24,8 +24,8 @@ fn test_atoms() {
 
     // Float literals
     assert_eq!(
-        parse_expr("3.14").unwrap(),
-        Expr::Literal(Value::Float64(OrderedFloat64::from(3.14)))
+        parse_expr("3.141592653589793").unwrap(),
+        Expr::Literal(Value::Float64(OrderedFloat64::from(std::f64::consts::PI)))
     );
     assert_eq!(
         parse_expr("-2.5").unwrap(),
@@ -315,7 +315,7 @@ fn test_parse_errors() {
     assert!(parse_expr("(unknown a b)").is_err()); // Unknown operation
 
     // Invalid numbers
-    assert!(parse_expr("3.14.15").is_err()); // Multiple decimal points
+    assert!(parse_expr("std::f64::consts::PI.15").is_err()); // Multiple decimal points
 
     // Trailing tokens
     assert!(parse_expr("(+ a b) extra").is_err());
@@ -349,8 +349,8 @@ fn test_display_formatting() {
     assert_eq!(Expr::Column("test".to_string()).to_string(), "test");
     assert_eq!(Expr::Literal(Value::Int64(42)).to_string(), "42");
     assert_eq!(
-        Expr::Literal(Value::Float64(OrderedFloat64::from(3.14))).to_string(),
-        "3.14"
+        Expr::Literal(Value::Float64(OrderedFloat64::from(std::f64::consts::PI))).to_string(),
+        "3.141592653589793"
     );
 
     let expr = Expr::Add(vec![

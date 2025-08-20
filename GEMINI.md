@@ -47,5 +47,5 @@ cargo run --example basic_parser
 
 *   **Code Style:** The code follows standard Rust conventions and is formatted with `rustfmt`.
 *   **Error Handling:** The project uses the `thiserror` library for ergonomic error handling, with a custom `DioError` enum.
-*   **Testing:** The project has a comprehensive test suite, including unit tests for each module and property-based tests for the parser.
+*   **Testing:** The project has a comprehensive test suite, including unit tests for each module and property-based tests for the parser. **ALWAYS RUN THE TESTS BEFORE A TASK IS CONSIDERED COMPLETE!**
 *   **Modularity:** The codebase is well-structured, with clear separation of concerns between the parser, AST, SSA, and backend modules.

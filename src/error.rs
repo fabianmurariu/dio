@@ -85,7 +85,7 @@ impl ParseError {
 
         let report = Report::build(ReportKind::Error, filename, self.span().start)
             .with_code(1001)
-            .with_message(format!("{}", self))
+            .with_message(format!("{self}"))
             .with_label(
                 Label::new((filename, self.span()))
                     .with_message(self.error_message())
@@ -103,15 +103,15 @@ impl ParseError {
             ParseError::UnexpectedEof { .. } => "Expression ended unexpectedly".to_string(),
             ParseError::UnexpectedToken {
                 expected, found, ..
-            } => format!("Expected '{}' but found '{}'", expected, found),
-            ParseError::InvalidNumber { value, .. } => format!("'{}' is not a valid number", value),
+            } => format!("Expected '{expected}' but found '{found}'"),
+            ParseError::InvalidNumber { value, .. } => format!("'{value}' is not a valid number"),
             ParseError::InvalidIdentifier { value, .. } => {
-                format!("'{}' is not a valid identifier", value)
+                format!("'{value}' is not a valid identifier")
             }
             ParseError::UnbalancedParens { .. } => "Missing closing parenthesis".to_string(),
             ParseError::EmptyExpression { .. } => "Expression cannot be empty".to_string(),
             ParseError::UnknownOperation { op, .. } => {
-                format!("'{}' is not a recognized operation", op)
+                format!("'{op}' is not a recognized operation")
             }
             ParseError::WrongArgumentCount {
                 op,
@@ -119,8 +119,7 @@ impl ParseError {
                 found,
                 ..
             } => format!(
-                "'{}' expects {} arguments, but {} were provided",
-                op, expected, found
+                "'{op}' expects {expected} arguments, but {found} were provided"
             ),
             ParseError::NomError(msg) => msg.clone(),
         }
@@ -130,7 +129,7 @@ impl ParseError {
 /// Convert nom errors to our ParseError type
 impl From<nom::Err<nom::error::Error<&str>>> for ParseError {
     fn from(err: nom::Err<nom::error::Error<&str>>) -> Self {
-        ParseError::NomError(format!("{:?}", err))
+        ParseError::NomError(format!("{err:?}"))
     }
 }
 

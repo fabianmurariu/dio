@@ -82,8 +82,8 @@ fn list_expression(input: &str) -> IResult<&str, Expr> {
 /// Parse atomic expressions (literals, column references)
 fn atom(input: &str) -> IResult<&str, Expr> {
     alt((
-        map(number, |v| Expr::Literal(v)),
-        map(identifier, |s| Expr::Column(s)),
+        map(number, Expr::Literal),
+        map(identifier, Expr::Column),
     ))(input)
 }
 
@@ -322,7 +322,7 @@ fn convert_nom_error(input: &str, error: nom::error::Error<&str>) -> ParseError 
             found: 0, // We don't have the actual count here
             span,
         },
-        _ => ParseError::NomError(format!("{:?}", error)),
+        _ => ParseError::NomError(format!("{error:?}")),
     }
 }
 
@@ -344,10 +344,10 @@ mod tests {
 
     #[test]
     fn test_parse_float_literal() {
-        let result = parse_expr("3.14").unwrap();
+        let result = parse_expr("3.141592653589793").unwrap();
         assert_eq!(
             result,
-            Expr::Literal(Value::Float64(OrderedFloat64::from(3.14)))
+            Expr::Literal(Value::Float64(OrderedFloat64::from(std::f64::consts::PI)))
         );
     }
 
@@ -356,10 +356,10 @@ mod tests {
         let result = parse_expr("-42").unwrap();
         assert_eq!(result, Expr::Literal(Value::Int64(-42)));
 
-        let result = parse_expr("-3.14").unwrap();
+        let result = parse_expr("-3.141592653589793").unwrap();
         assert_eq!(
             result,
-            Expr::Literal(Value::Float64(OrderedFloat64::from(-3.14)))
+            Expr::Literal(Value::Float64(OrderedFloat64::from(-std::f64::consts::PI)))
         );
     }
 
@@ -677,7 +677,7 @@ mod tests {
 
     #[test]
     fn test_parse_error_invalid_number() {
-        let result = parse_expr("3.14.15");
+        let result = parse_expr("std::f64::consts::PI.15");
         assert!(result.is_err());
     }
 }

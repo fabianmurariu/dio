@@ -30,7 +30,7 @@ pub enum Expr {
     /// Column reference: "a", "b", "x"
     Column(String),
 
-    /// Literal constants: 42, 3.14
+    /// Literal constants: 42, std::f64::consts::PI
     Literal(Value),
 
     /// Addition: (+ a b c) - supports n-ary operations
@@ -115,7 +115,7 @@ impl fmt::Display for TypedParam {
 impl fmt::Display for Value {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Value::Int64(i) => write!(f, "{}", i),
+            Value::Int64(i) => write!(f, "{i}"),
             Value::Float64(OrderedFloat64(fl)) => {
                 // Check if it's a whole number that fits in i64 range
                 if fl.fract() == 0.0
@@ -125,7 +125,7 @@ impl fmt::Display for Value {
                 {
                     write!(f, "{}", *fl as i64)
                 } else {
-                    write!(f, "{}", fl)
+                    write!(f, "{fl}")
                 }
             }
         }
@@ -135,27 +135,27 @@ impl fmt::Display for Value {
 impl fmt::Display for Expr {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Expr::Column(name) => write!(f, "{}", name),
-            Expr::Literal(value) => write!(f, "{}", value),
+            Expr::Column(name) => write!(f, "{name}"),
+            Expr::Literal(value) => write!(f, "{value}"),
             Expr::Add(operands) => {
                 write!(f, "(+")?;
                 for operand in operands {
-                    write!(f, " {}", operand)?;
+                    write!(f, " {operand}")?;
                 }
                 write!(f, ")")
             }
-            Expr::Sub(lhs, rhs) => write!(f, "(- {} {})", lhs, rhs),
+            Expr::Sub(lhs, rhs) => write!(f, "(- {lhs} {rhs})"),
             Expr::Mul(operands) => {
                 write!(f, "(*")?;
                 for operand in operands {
-                    write!(f, " {}", operand)?;
+                    write!(f, " {operand}")?;
                 }
                 write!(f, ")")
             }
-            Expr::Div(lhs, rhs) => write!(f, "(/ {} {})", lhs, rhs),
-            Expr::Sum(expr) => write!(f, "(sum {})", expr),
-            Expr::Count(expr) => write!(f, "(count {})", expr),
-            Expr::Let(name, expr) => write!(f, "(let {} {})", name, expr),
+            Expr::Div(lhs, rhs) => write!(f, "(/ {lhs} {rhs})"),
+            Expr::Sum(expr) => write!(f, "(sum {expr})"),
+            Expr::Count(expr) => write!(f, "(count {expr})"),
+            Expr::Let(name, expr) => write!(f, "(let {name} {expr})"),
             Expr::Lambda {
                 params,
                 return_type,
@@ -166,9 +166,9 @@ impl fmt::Display for Expr {
                     if i > 0 {
                         write!(f, " ")?;
                     }
-                    write!(f, "{}", param)?;
+                    write!(f, "{param}")?;
                 }
-                write!(f, " {}) {})", return_type, body)
+                write!(f, " {return_type}) {body})")
             }
         }
     }
@@ -272,10 +272,10 @@ mod tests {
             Expr::Column("x".to_string()),
             Expr::Mul(vec![
                 Expr::Column("y".to_string()),
-                Expr::Literal(Value::Float64(3.14.into())),
+                Expr::Literal(Value::Float64(std::f64::consts::PI.into())),
             ]),
         ])));
-        assert_eq!(expr.to_string(), "(sum (+ x (* y 3.14)))");
+        assert_eq!(expr.to_string(), "(sum (+ x (* y 3.141592653589793)))");
     }
 
     #[test]
@@ -326,8 +326,8 @@ mod tests {
 
     #[test]
     fn test_ordered_float64() {
-        let f1 = OrderedFloat64(3.14);
-        let f2 = OrderedFloat64(3.14);
+        let f1 = OrderedFloat64(std::f64::consts::PI);
+        let f2 = OrderedFloat64(std::f64::consts::PI);
         let f3 = OrderedFloat64(2.71);
 
         assert_eq!(f1, f2);

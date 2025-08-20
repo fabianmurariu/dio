@@ -11,13 +11,13 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Demo 1: Pure U64Array addition
     println!("1️⃣ U64Array + U64Array -> U64Array");
     let expr_u64 = parse_expr("(lambda ([U64Array x] [U64Array y] U64Array) (+ x y))")?;
-    println!("   Expression: {}", expr_u64);
+    println!("   Expression: {expr_u64}");
 
     let a_u64_vec = vec![1u64, 2, 3];
     let b_u64_vec = vec![10u64, 20, 30];
     let a_u64 = create_u64_array_from_vec(a_u64_vec.clone())?;
     let b_u64 = create_u64_array_from_vec(b_u64_vec.clone())?;
-    println!("   Input: {:?} + {:?}", a_u64_vec, b_u64_vec);
+    println!("   Input: {a_u64_vec:?} + {b_u64_vec:?}");
 
     let result_u64_array = execute_generic_cached(&expr_u64, &[a_u64, b_u64])?;
     let result_u64 = result_u64_array
@@ -26,18 +26,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Expected UInt64Array")?
         .values()
         .to_vec();
-    println!("   Result: {:?}\n", result_u64);
+    println!("   Result: {result_u64:?}\n");
 
     // Demo 2: Pure I64Array addition (with negative numbers)
     println!("2️⃣ I64Array + I64Array -> I64Array");
     let expr_i64 = parse_expr("(lambda ([I64Array x] [I64Array y] I64Array) (+ x y))")?;
-    println!("   Expression: {}", expr_i64);
+    println!("   Expression: {expr_i64}");
 
     let a_i64_vec = vec![-5i64, 10, -15];
     let b_i64_vec = vec![3i64, -7, 25];
     let a_i64 = create_i64_array_from_vec(a_i64_vec.clone())?;
     let b_i64 = create_i64_array_from_vec(b_i64_vec.clone())?;
-    println!("   Input: {:?} + {:?}", a_i64_vec, b_i64_vec);
+    println!("   Input: {a_i64_vec:?} + {b_i64_vec:?}");
 
     let result_i64_array = execute_generic_cached(&expr_i64, &[a_i64, b_i64])?;
     let result_i64 = result_i64_array
@@ -46,18 +46,18 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Expected Int64Array")?
         .values()
         .to_vec();
-    println!("   Result: {:?}\n", result_i64);
+    println!("   Result: {result_i64:?}\n");
 
     // Demo 3: Mixed type addition with automatic coercion
     println!("3️⃣ U64Array + I64Array -> I64Array (type coercion)");
     let expr_mixed = parse_expr("(lambda ([U64Array x] [I64Array y] I64Array) (+ x y))")?;
-    println!("   Expression: {}", expr_mixed);
+    println!("   Expression: {expr_mixed}");
 
     let a_mixed_u64_vec = vec![100u64, 200, 300];
     let b_mixed_i64_vec = vec![-50i64, -75, -100];
     let a_mixed_u64 = create_u64_array_from_vec(a_mixed_u64_vec.clone())?;
     let b_mixed_i64 = create_i64_array_from_vec(b_mixed_i64_vec.clone())?;
-    println!("   Input: {:?} + {:?}", a_mixed_u64_vec, b_mixed_i64_vec);
+    println!("   Input: {a_mixed_u64_vec:?} + {b_mixed_i64_vec:?}");
 
     let result_mixed_array = execute_generic_cached(&expr_mixed, &[a_mixed_u64, b_mixed_i64])?;
     let result_mixed = result_mixed_array
@@ -66,7 +66,7 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
         .ok_or("Expected Int64Array")?
         .values()
         .to_vec();
-    println!("   Result: {:?}", result_mixed);
+    println!("   Result: {result_mixed:?}");
     println!("   Note: Unsigned values automatically cast to signed (SQL standard)\n");
 
     // Demo 4: Show type safety

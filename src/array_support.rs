@@ -44,8 +44,7 @@ impl ArrayMetadata {
             }
             _ => {
                 return Err(DioError::Runtime(format!(
-                    "Unsupported array type for JIT compilation: {:?}",
-                    data_type
+                    "Unsupported array type for JIT compilation: {data_type:?}"
                 )));
             }
         };
@@ -97,8 +96,7 @@ pub fn arrow_type_to_dio_array(arrow_type: &ArrowDataType) -> Result<Type, DioEr
         ArrowDataType::Int64 => Ok(Type::I64Array),
         ArrowDataType::Float64 => Ok(Type::F64Array),
         _ => Err(DioError::Runtime(format!(
-            "Unsupported Arrow type conversion: {:?}",
-            arrow_type
+            "Unsupported Arrow type conversion: {arrow_type:?}"
         ))),
     }
 }
@@ -120,8 +118,7 @@ pub fn create_output_buffer(
             Ok(buffer)
         }
         _ => Err(DioError::Runtime(format!(
-            "Cannot create output buffer for type: {:?}",
-            data_type
+            "Cannot create output buffer for type: {data_type:?}"
         ))),
     }
 }
@@ -147,8 +144,7 @@ pub fn buffer_to_array_ref(
             Ok(Arc::new(array))
         }
         _ => Err(DioError::Runtime(format!(
-            "Cannot create array for type: {:?}",
-            data_type
+            "Cannot create array for type: {data_type:?}"
         ))),
     }
 }
