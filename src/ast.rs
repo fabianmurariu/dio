@@ -7,7 +7,7 @@ pub enum Type {
     U64,
     /// U64 array type
     U64Array,
-    /// I64 scalar type  
+    /// I64 scalar type
     I64,
     /// I64 array type
     I64Array,
@@ -15,6 +15,24 @@ pub enum Type {
     F64,
     /// F64 array type (future extension)
     F64Array,
+}
+
+impl Type {
+    pub fn is_integer(&self) -> bool {
+        matches!(self, Type::U64 | Type::I64 | Type::U64Array | Type::I64Array)
+    }
+
+    pub fn is_i64(&self) -> bool {
+        matches!(self, Type::I64 | Type::I64Array)
+    }
+
+    pub fn is_array(&self) -> bool {
+        matches!(self, Type::U64Array | Type::I64Array | Type::F64Array)
+    }
+
+    pub fn is_scalar(&self) -> bool {
+        !self.is_array()
+    }
 }
 
 /// Typed parameter for lambda expressions
