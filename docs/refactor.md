@@ -80,3 +80,25 @@ While the project has a decent number of tests for the parser, the execution and
 
 - **Gap:** There are no tests that check what happens when the SSA or backend layers receive unsupported input.
 - **Recommendation:** Add tests to verify that `ast_to_ssa` and `backend.compile` return a `DioError::Compilation` error when they encounter an AST variant or SSA instruction they cannot handle. This will be crucial as the functionality is expanded incrementally.
+
+So there are quite a few problems with the generated IR, basically it's not what I wanted,
+also we have no tests for substractions,        
+   in this project we do not consider anything done unless tests can prove it.                                                                   
+                                                                                                                                                 
+   But the main issue is the IR is not what I wanted for an expression like (+ a b c)                                                            
+   in the IR I want something like the following pseudocode                                                                                      
+                                                                                                                                                 
+   function (arrays, limit, out_array, <.. other things that we might need>):                                                                    
+    a = arrays[0]                                                                                                                                
+    b = arrays[1]                                                                                                                                
+    b = arrays[2]
+   for i in 0 .. limit:                                                                                                                         
+        out_array[i] = a[i] + b[i] + c[i]                                                                                                           
+                                                                                                                                                    
+      what you've done has an extra for loop over the input arrays that I don't want,                                                               
+      make the changes required then change generic_execution.md to mention the IR output that I expect                                             
+      also we don't seem to be translating our SsaProgram into IR very effectively in fact we only use it to determine the operation                
+      I want the SsaProgram to be easily translatable into cranelift IR, change it if you need to such that we can just use                         
+      some pattern matching to translate to Cranelift, also break things down into smaller functions in cranelift_backend.rs with good              
+      documentation on them so I understand, last thing make a environment variable that I can enable to print the Cranelift IR output
+        so I can see what is being generated, this will help me understand the IR generation process.

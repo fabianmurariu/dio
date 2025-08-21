@@ -74,7 +74,10 @@ impl CompiledFunction {
         output_buffer: &mut MutableBuffer,
     ) -> Result<(), DioError> {
         let array_length = input_arrays[0].len();
-        let meta: Result<Vec<_>, _> = input_arrays.iter().map(ArrayMetadata::from_array_ref).collect();
+        let meta: Result<Vec<_>, _> = input_arrays
+            .iter()
+            .map(ArrayMetadata::from_array_ref)
+            .collect();
         let meta = meta?;
         let ptrs: Vec<*const u8> = meta.iter().map(|m| m.data_ptr).collect();
 
@@ -95,12 +98,16 @@ impl CompiledFunction {
 /// Generic execute function using Arrow ArrayRef with N-ary operations and type erasure
 pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRef, DioError> {
     if input_arrays.is_empty() {
-        return Err(DioError::Runtime("Must provide at least one input array".to_string()));
+        return Err(DioError::Runtime(
+            "Must provide at least one input array".to_string(),
+        ));
     }
     let array_length = input_arrays[0].len();
     for array in input_arrays.iter().skip(1) {
         if array.len() != array_length {
-            return Err(DioError::Runtime("All input arrays must have the same length".to_string()));
+            return Err(DioError::Runtime(
+                "All input arrays must have the same length".to_string(),
+            ));
         }
     }
 
@@ -132,12 +139,16 @@ pub fn execute_generic_cached(
     input_arrays: &[ArrayRef],
 ) -> Result<ArrayRef, DioError> {
     if input_arrays.is_empty() {
-        return Err(DioError::Runtime("Must provide at least one input array".to_string()));
+        return Err(DioError::Runtime(
+            "Must provide at least one input array".to_string(),
+        ));
     }
     let array_length = input_arrays[0].len();
     for array in input_arrays.iter().skip(1) {
         if array.len() != array_length {
-            return Err(DioError::Runtime("All input arrays must have the same length".to_string()));
+            return Err(DioError::Runtime(
+                "All input arrays must have the same length".to_string(),
+            ));
         }
     }
 
@@ -183,9 +194,9 @@ pub fn clear_function_cache() {
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::array_support::{create_i64_array_from_vec, create_u64_array_from_vec};
     use crate::parse_expr;
     use arrow::array::{Int64Array, UInt64Array};
-    use crate::array_support::{create_i64_array_from_vec, create_u64_array_from_vec};
 
     #[test]
     fn test_generic_execute_binary_u64() {
@@ -290,7 +301,9 @@ mod tests {
 
     #[test]
     fn test_generic_execute_ternary_addition() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))").unwrap();
+        let expr =
+            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))")
+                .unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
         let c = create_u64_array_from_vec(vec![100, 200, 300]).unwrap();
@@ -301,7 +314,10 @@ mod tests {
 
     #[test]
     fn test_generic_execute_quaternary_mixed() {
-        let expr = parse_expr("(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))").unwrap();
+        let expr = parse_expr(
+            "(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))",
+        )
+        .unwrap();
         let w = create_u64_array_from_vec(vec![1, 2]).unwrap();
         let x = create_i64_array_from_vec(vec![10, 20]).unwrap();
         let y = create_u64_array_from_vec(vec![100, 200]).unwrap();
@@ -314,7 +330,9 @@ mod tests {
     #[test]
     fn test_cached_execute_ternary() {
         clear_function_cache();
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))").unwrap();
+        let expr =
+            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))")
+                .unwrap();
         let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
         let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
@@ -324,5 +342,40 @@ mod tests {
         let result2 = execute_generic_cached(&expr, &[a, b, c]).unwrap();
         let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(result2_u64.values(), &[111, 222]);
+    }
+
+    #[test]
+    fn test_generic_execute_subtraction_u64() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (- a b))").unwrap();
+        let a = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
+        let b = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
+        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        assert_eq!(result_u64.values(), &[9, 18, 27, 36, 45]);
+    }
+
+    #[test]
+    fn test_generic_execute_subtraction_mixed_types() {
+        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (- a b))").unwrap();
+        let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let b = create_i64_array_from_vec(vec![-5, 15, -10]).unwrap();
+        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(result_i64.values(), &[15, 5, 40]); // 10-(-5)=15, 20-15=5, 30-(-10)=40
+    }
+
+    #[test]
+    fn test_cached_execute_subtraction() {
+        clear_function_cache();
+        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (- a b))").unwrap();
+        let a = create_i64_array_from_vec(vec![100, 50, 0]).unwrap();
+        let b = create_i64_array_from_vec(vec![25, 60, -10]).unwrap();
+        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
+        let result1_i64 = result1.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(result1_i64.values(), &[75, -10, 10]); // 100-25=75, 50-60=-10, 0-(-10)=10
+                                                          // Second call should use cache
+        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
+        let result2_i64 = result2.as_any().downcast_ref::<Int64Array>().unwrap();
+        assert_eq!(result2_i64.values(), &[75, -10, 10]);
     }
 }
