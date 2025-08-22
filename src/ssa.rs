@@ -18,17 +18,27 @@ pub enum DataType {
     ArrayU64,
     I64,
     ArrayI64,
+    Bool,  // For comparison results and branch conditions
 }
 
 /// SSA Instructions
 #[derive(Debug, Clone)]
 pub enum SsaInstruction {
+    // Data operations
     LoadArrayParam { dest: SsaValue, param_index: u32, data_type: DataType },
     LoadLengthParam { dest: SsaValue, param_index: u32 },
+    LoadConstant { dest: SsaValue, value: i64 },
     ArrayAccess { dest: SsaValue, array: SsaValue, index: SsaValue },
     Add { dest: SsaValue, lhs: SsaValue, rhs: SsaValue },
     Sub { dest: SsaValue, lhs: SsaValue, rhs: SsaValue },
     StoreArrayElement { array: SsaValue, index: SsaValue, value: SsaValue },
+    
+    // Comparison operations
+    LessThan { dest: SsaValue, lhs: SsaValue, rhs: SsaValue },
+    
+    // Control flow
+    Jump { target: BlockId },
+    Branch { condition: SsaValue, true_target: BlockId, false_target: BlockId },
     Return { value: Option<SsaValue> },
 }
 
@@ -111,6 +121,7 @@ fn convert_typed_lambda(
 
     let element_type = if coerced_type.is_i64() { DataType::I64 } else { DataType::U64 };
     
+    // Load array parameters
     let mut param_values = Vec::new();
     for (i, param) in params.iter().enumerate() {
         let data_type = if param.type_.is_i64() { DataType::ArrayI64 } else { DataType::ArrayU64 };
@@ -123,21 +134,61 @@ fn convert_typed_lambda(
         param_values.push(param_val);
     }
 
+    // Load array length (assume it's passed as additional parameter)
+    let length_val = program.new_value(DataType::U64);
+    program.add_instruction(entry_block, SsaInstruction::LoadLengthParam {
+        dest: length_val,
+        param_index: params.len() as u32,
+    });
+
+    // Load constants
+    let zero_val = program.new_value(DataType::U64);
+    program.add_instruction(entry_block, SsaInstruction::LoadConstant {
+        dest: zero_val,
+        value: 0,
+    });
+
+    // Create loop blocks
+    let loop_header = program.new_block();
+    let loop_body = program.new_block(); 
+    let exit_block = program.new_block();
+
+    // Jump from entry to loop header with i = 0
+    // Note: We'll handle the initial jump value in the Cranelift backend
+    program.add_instruction(entry_block, SsaInstruction::Jump { target: loop_header });
+
+    // Loop header: check condition i < length
+    // The loop index will be a block parameter, but we need a placeholder SSA value for it
+    let loop_index = program.new_value(DataType::U64); // This represents the current loop index
+    let condition_val = program.new_value(DataType::Bool);
+    program.add_instruction(loop_header, SsaInstruction::LessThan {
+        dest: condition_val,
+        lhs: loop_index,
+        rhs: length_val,
+    });
+    program.add_instruction(loop_header, SsaInstruction::Branch {
+        condition: condition_val,
+        true_target: loop_body,
+        false_target: exit_block,
+    });
+
+    // Loop body: compute the operation for this element
     let mut operand_elements = Vec::new();
     for operand in operands {
         if let Expr::Column(name) = operand {
             let param_index = params.iter().position(|p| &p.name == name).unwrap();
             let array_val = param_values[param_index];
             let element_val = program.new_value(element_type.clone());
-            program.add_instruction(entry_block, SsaInstruction::ArrayAccess {
+            program.add_instruction(loop_body, SsaInstruction::ArrayAccess {
                 dest: element_val,
                 array: array_val,
-                index: SsaValue(0), // Placeholder index
+                index: loop_index, // Use actual loop index
             });
             operand_elements.push(element_val);
         }
     }
 
+    // Perform the operation
     let mut acc = operand_elements[0];
     for &rhs in &operand_elements[1..] {
         let dest = program.new_value(element_type.clone());
@@ -146,17 +197,33 @@ fn convert_typed_lambda(
             "sub" => SsaInstruction::Sub { dest, lhs: acc, rhs },
             _ => unreachable!(),
         };
-        program.add_instruction(entry_block, instruction);
+        program.add_instruction(loop_body, instruction);
         acc = dest;
     }
 
-    program.add_instruction(entry_block, SsaInstruction::StoreArrayElement {
-        array: SsaValue(params.len() as u32), // Placeholder for output array
-        index: SsaValue(0), // Placeholder index
+    // Store result to output array
+    program.add_instruction(loop_body, SsaInstruction::StoreArrayElement {
+        array: SsaValue(params.len() as u32), // Output array parameter
+        index: loop_index,
         value: acc,
     });
 
-    program.add_instruction(entry_block, SsaInstruction::Return { value: None });
+    // Increment loop index and jump back to header
+    let one_val = program.new_value(DataType::U64);
+    program.add_instruction(loop_body, SsaInstruction::LoadConstant {
+        dest: one_val,
+        value: 1,
+    });
+    let next_index = program.new_value(DataType::U64);
+    program.add_instruction(loop_body, SsaInstruction::Add {
+        dest: next_index,
+        lhs: loop_index,
+        rhs: one_val,
+    });
+    program.add_instruction(loop_body, SsaInstruction::Jump { target: loop_header });
+
+    // Exit block
+    program.add_instruction(exit_block, SsaInstruction::Return { value: None });
 
     Ok(program)
 }
