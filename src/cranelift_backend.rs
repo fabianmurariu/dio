@@ -63,6 +63,21 @@ impl CraneliftBackend {
         let output_ptr = builder.block_params(entry_block)[2];
         let length = builder.block_params(entry_block)[3];
         
+        // Pre-load all array pointers outside the loop (hoist invariant loads)
+        if let Some(entry_ssa_block) = program.blocks.get(&program.entry_block) {
+            for instruction in &entry_ssa_block.instructions {
+                if let SsaInstruction::LoadArrayParam { dest, param_index, data_type: _ } = instruction {
+                    // Load array pointer from inputs[param_index] once, outside the loop
+                    let param_offset = builder.ins().iconst(types::I64, (*param_index as i64) * 8);
+                    let array_ptr_addr = builder.ins().iadd(inputs_ptr, param_offset);
+                    let array_ptr = builder.ins().load(types::I64, MemFlags::trusted(), array_ptr_addr, 0);
+                    
+                    // Store the array pointer for this SSA value
+                    ssa_to_cranelift.insert(*dest, array_ptr);
+                }
+            }
+        }
+        
         // Since SSA doesn't have explicit loops, we need to infer the loop structure
         // The pattern is: process each instruction for each array element
         
@@ -87,18 +102,12 @@ impl CraneliftBackend {
         let eight = builder.ins().iconst(types::I64, 8);
         let element_offset = builder.ins().imul(i, eight);
         
-        // Process the entry block instructions
+        // Process the entry block instructions (skip LoadArrayParam since already hoisted)
         if let Some(entry_ssa_block) = program.blocks.get(&program.entry_block) {
             for instruction in &entry_ssa_block.instructions {
                 match instruction {
-                    SsaInstruction::LoadArrayParam { dest, param_index, data_type: _ } => {
-                        // Load array pointer from inputs[param_index]
-                        let param_offset = builder.ins().iconst(types::I64, (*param_index as i64) * 8);
-                        let array_ptr_addr = builder.ins().iadd(inputs_ptr, param_offset);
-                        let array_ptr = builder.ins().load(types::I64, MemFlags::trusted(), array_ptr_addr, 0);
-                        
-                        // Store the array pointer for this SSA value
-                        ssa_to_cranelift.insert(*dest, array_ptr);
+                    SsaInstruction::LoadArrayParam { .. } => {
+                        // Already handled outside the loop - skip
                     },
                     SsaInstruction::ArrayAccess { dest, array, index: _ } => {
                         // Get the array pointer and compute element address
