@@ -82,10 +82,15 @@ impl CraneliftBackend {
 
         // Create all Cranelift blocks first, but use the entry block we already have
         ssa_to_cranelift_blocks.insert(program.entry_block, entry_block);
-        for block_id in program.blocks.keys() {
-            if *block_id != program.entry_block {
+        
+        // Sort block IDs for deterministic iteration order
+        let mut block_ids: Vec<_> = program.blocks.keys().cloned().collect();
+        block_ids.sort_by_key(|id| id.0);
+        
+        for block_id in block_ids {
+            if block_id != program.entry_block {
                 let cranelift_block = builder.create_block();
-                ssa_to_cranelift_blocks.insert(*block_id, cranelift_block);
+                ssa_to_cranelift_blocks.insert(block_id, cranelift_block);
             }
         }
 
@@ -112,8 +117,12 @@ impl CraneliftBackend {
             }
         }
 
-        // For each SSA block that needs loop parameters, add them
-        for (block_id, ssa_block) in &program.blocks {
+        // For each SSA block that needs loop parameters, add them (using sorted order)
+        let mut block_ids: Vec<_> = program.blocks.keys().cloned().collect();
+        block_ids.sort_by_key(|id| id.0);
+        
+        for block_id in &block_ids {
+            let ssa_block = &program.blocks[block_id];
             let cranelift_block = ssa_to_cranelift_blocks[block_id];
 
             // Check if this block needs loop index parameter (has LessThan instruction)
@@ -191,13 +200,17 @@ impl CraneliftBackend {
             }
         }
 
-        // Process other blocks
-        for (block_id, ssa_block) in &program.blocks {
-            if *block_id == program.entry_block {
+        // Process other blocks (using sorted order for deterministic behavior)
+        let mut block_ids: Vec<_> = program.blocks.keys().cloned().collect();
+        block_ids.sort_by_key(|id| id.0);
+        
+        for block_id in block_ids {
+            if block_id == program.entry_block {
                 continue; // Already processed
             }
 
-            let cranelift_block = ssa_to_cranelift_blocks[block_id];
+            let ssa_block = &program.blocks[&block_id];
+            let cranelift_block = ssa_to_cranelift_blocks[&block_id];
             builder.switch_to_block(cranelift_block);
 
             // Handle block parameters (e.g., loop index)
