@@ -180,9 +180,26 @@ impl CraneliftBackend {
                 SsaInstruction::Jump { target } => {
                     let target_block = ssa_to_cranelift_blocks[target];
                     // Jump to loop header with initial value (0)
-                    if let Some(&zero_val) = ssa_to_cranelift.get(&SsaValue(3)) {
-                        // zero constant
-                        builder.ins().jump(target_block, &[zero_val]);
+                    // Find the zero constant SSA value in the entry block
+                    let zero_ssa_value = entry_ssa_block.instructions.iter().find_map(|inst| {
+                        if let SsaInstruction::LoadConstant { dest, value } = inst {
+                            if *value == 0 {
+                                Some(*dest)
+                            } else {
+                                None
+                            }
+                        } else {
+                            None
+                        }
+                    });
+                    
+                    if let Some(zero_ssa) = zero_ssa_value {
+                        if let Some(&zero_val) = ssa_to_cranelift.get(&zero_ssa) {
+                            builder.ins().jump(target_block, &[zero_val]);
+                        } else {
+                            let zero = builder.ins().iconst(types::I64, 0);
+                            builder.ins().jump(target_block, &[zero]);
+                        }
                     } else {
                         let zero = builder.ins().iconst(types::I64, 0);
                         builder.ins().jump(target_block, &[zero]);
@@ -333,20 +350,19 @@ impl CraneliftBackend {
                     }
                     SsaInstruction::Jump { target } => {
                         let target_block = ssa_to_cranelift_blocks[target];
-                        // This is likely the back-edge jump with incremented index
-                        // Look for the incremented value in the current block
-                        let incremented_value =
-                            ssa_block.instructions.iter().find_map(|inst| match inst {
-                                SsaInstruction::Add { dest, .. } => {
-                                    // This might be the i + 1 instruction
-                                    if let Some(&val) = ssa_to_cranelift.get(dest) {
-                                        Some(val)
-                                    } else {
-                                        None
-                                    }
+                        // This is the back-edge jump with incremented index
+                        // Find the last Add instruction in the block (should be the loop increment)
+                        let incremented_value = ssa_block.instructions.iter().rev().find_map(|inst| match inst {
+                            SsaInstruction::Add { dest, .. } => {
+                                // The last Add instruction should be the loop increment
+                                if let Some(&val) = ssa_to_cranelift.get(dest) {
+                                    Some(val)
+                                } else {
+                                    None
                                 }
-                                _ => None,
-                            });
+                            }
+                            _ => None,
+                        });
 
                         if let Some(inc_val) = incremented_value {
                             builder.ins().jump(target_block, &[inc_val]);
