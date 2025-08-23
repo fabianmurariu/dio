@@ -33,7 +33,7 @@ impl CraneliftBackend {
     }
 
     /// Set up the function signature for the variadic JIT function
-    fn setup_function_signature(&mut self) {
+    fn setup_function_signature(&mut self, is_reduction: bool) {
         self.context
             .func
             .signature
@@ -44,11 +44,23 @@ impl CraneliftBackend {
             .signature
             .params
             .push(AbiParam::new(types::I32)); // input_count
-        self.context
-            .func
-            .signature
-            .params
-            .push(AbiParam::new(types::I64)); // output ptr
+        
+        if is_reduction {
+            // For reductions, we return a scalar value instead of writing to output buffer
+            self.context
+                .func
+                .signature
+                .returns
+                .push(AbiParam::new(types::I64)); // scalar result
+        } else {
+            // For elementwise, we write to output buffer
+            self.context
+                .func
+                .signature
+                .params
+                .push(AbiParam::new(types::I64)); // output ptr
+        }
+        
         self.context
             .func
             .signature
@@ -59,7 +71,14 @@ impl CraneliftBackend {
     /// Compile SSA program by interpreting SSA instructions directly
     /// Maps SSA instructions to Cranelift IR with single-loop optimization
     pub fn compile(&mut self, program: &SsaProgram) -> Result<*const u8, DioError> {
-        self.setup_function_signature();
+        // Detect if this is a reduction by checking for InitAccumulator instruction
+        let is_reduction = program.blocks.values().any(|block| {
+            block.instructions.iter().any(|inst| {
+                matches!(inst, SsaInstruction::InitAccumulator { .. })
+            })
+        });
+        
+        self.setup_function_signature(is_reduction);
 
         let mut builder = FunctionBuilder::new(&mut self.context.func, &mut self.builder_context);
 
@@ -74,8 +93,13 @@ impl CraneliftBackend {
         // Map function parameters
         let inputs_ptr = builder.block_params(entry_block)[0];
         let _input_count = builder.block_params(entry_block)[1];
-        let output_ptr = builder.block_params(entry_block)[2];
-        let length = builder.block_params(entry_block)[3];
+        let (output_ptr, length) = if is_reduction {
+            // For reductions: inputs_ptr, input_count, length (no output_ptr)
+            (None, builder.block_params(entry_block)[2])
+        } else {
+            // For elementwise: inputs_ptr, input_count, output_ptr, length
+            (Some(builder.block_params(entry_block)[2]), builder.block_params(entry_block)[3])
+        };
 
         // Create a mapping from SSA blocks to Cranelift blocks
         let mut ssa_to_cranelift_blocks: HashMap<BlockId, Block> = HashMap::new();
@@ -125,14 +149,21 @@ impl CraneliftBackend {
             let ssa_block = &program.blocks[block_id];
             let cranelift_block = ssa_to_cranelift_blocks[block_id];
 
-            // Check if this block needs loop index parameter (has LessThan instruction)
-            let needs_loop_param = ssa_block
+            // Check if this block needs loop parameters
+            let has_less_than = ssa_block
+                .instructions
+                .iter()
+                .any(|inst| matches!(inst, SsaInstruction::LessThan { .. }));
+            let has_accumulator = is_reduction && ssa_block
                 .instructions
                 .iter()
                 .any(|inst| matches!(inst, SsaInstruction::LessThan { .. }));
 
-            if needs_loop_param {
+            if has_less_than {
                 builder.append_block_param(cranelift_block, types::I64); // loop index
+                if has_accumulator {
+                    builder.append_block_param(cranelift_block, types::I64); // accumulator
+                }
             }
         }
 
@@ -152,6 +183,10 @@ impl CraneliftBackend {
                 } => {
                     // Map to function parameter
                     ssa_to_cranelift.insert(*dest, length);
+                }
+                SsaInstruction::InitAccumulator { dest, initial_value, .. } => {
+                    let constant_val = builder.ins().iconst(types::I64, *initial_value);
+                    ssa_to_cranelift.insert(*dest, constant_val);
                 }
                 SsaInstruction::LoadConstant { dest, value } => {
                     let constant_val = builder.ins().iconst(types::I64, *value);
@@ -193,20 +228,60 @@ impl CraneliftBackend {
                         }
                     });
                     
-                    if let Some(zero_ssa) = zero_ssa_value {
+                    let zero_val = if let Some(zero_ssa) = zero_ssa_value {
                         if let Some(&zero_val) = ssa_to_cranelift.get(&zero_ssa) {
-                            builder.ins().jump(target_block, &[zero_val]);
+                            zero_val
                         } else {
-                            let zero = builder.ins().iconst(types::I64, 0);
-                            builder.ins().jump(target_block, &[zero]);
+                            builder.ins().iconst(types::I64, 0)
                         }
                     } else {
-                        let zero = builder.ins().iconst(types::I64, 0);
-                        builder.ins().jump(target_block, &[zero]);
+                        builder.ins().iconst(types::I64, 0)
+                    };
+
+                    if is_reduction {
+                        // For reductions, pass both loop index (0) and initial accumulator (0)
+                        // Find the initial accumulator value from InitAccumulator instruction
+                        let init_acc_ssa = entry_ssa_block.instructions.iter().find_map(|inst| {
+                            if let SsaInstruction::InitAccumulator { dest, .. } = inst {
+                                Some(*dest)
+                            } else {
+                                None
+                            }
+                        });
+                        
+                        let init_acc = if let Some(acc_ssa) = init_acc_ssa {
+                            if let Some(&acc_val) = ssa_to_cranelift.get(&acc_ssa) {
+                                acc_val
+                            } else {
+                                builder.ins().iconst(types::I64, 0)
+                            }
+                        } else {
+                            builder.ins().iconst(types::I64, 0)
+                        };
+                        builder.ins().jump(target_block, &[zero_val, init_acc]);
+                    } else {
+                        // For elementwise, just pass loop index (0)
+                        builder.ins().jump(target_block, &[zero_val]);
                     }
                 }
-                SsaInstruction::Return { .. } => {
-                    builder.ins().return_(&[]);
+                SsaInstruction::UpdateAccumulator { .. } => {
+                    return Err(DioError::Compilation(
+                        "UpdateAccumulator should not be used in new reduction implementation".to_string()
+                    ));
+                }
+                SsaInstruction::Return { value } => {
+                    if let Some(ret_val) = value {
+                        if let Some(&cranelift_val) = ssa_to_cranelift.get(ret_val) {
+                            builder.ins().return_(&[cranelift_val]);
+                        } else {
+                            return Err(DioError::Compilation(format!(
+                                "Return value {:?} not found in SSA mapping",
+                                ret_val
+                            )));
+                        }
+                    } else {
+                        builder.ins().return_(&[]);
+                    }
                 }
                 _ => {
                     return Err(DioError::Compilation(format!(
@@ -230,11 +305,10 @@ impl CraneliftBackend {
             let cranelift_block = ssa_to_cranelift_blocks[&block_id];
             builder.switch_to_block(cranelift_block);
 
-            // Handle block parameters (e.g., loop index)
+            // Handle block parameters (e.g., loop index and accumulator)
             let block_params = builder.block_params(cranelift_block);
-            if !block_params.is_empty() && block_params.len() == 1 {
-                // This is likely a loop header with index parameter
-                // Map the loop index SSA value to the block parameter
+            if !block_params.is_empty() {
+                // Find the loop index SSA value (used in LessThan)
                 let loop_index_ssa = ssa_block.instructions.iter().find_map(|inst| match inst {
                     SsaInstruction::LessThan { lhs, .. } => Some(*lhs),
                     _ => None,
@@ -242,6 +316,80 @@ impl CraneliftBackend {
 
                 if let Some(loop_index) = loop_index_ssa {
                     ssa_to_cranelift.insert(loop_index, block_params[0]);
+                }
+
+                // If this is a reduction with 2 parameters, find the accumulator SSA value
+                if block_params.len() == 2 && is_reduction {
+                    if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                        println!("DEBUG: Found block with 2 params for reduction, looking for accumulator...");
+                    }
+                    // Look for the accumulator update Add instruction in the loop body
+                    // It's the Add instruction where one operand comes from an inner expression
+                    // Find the accumulator update Add instruction
+                    // This is the Add where rhs comes from inner expr and lhs is NOT used as lhs in another Add
+                    let accumulator_ssa = program.blocks.values()
+                        .flat_map(|block| &block.instructions)
+                        .find_map(|inst| match inst {
+                            SsaInstruction::Add { dest: _, lhs, rhs } => {
+                                // Check if rhs comes from inner expression (Add/Sub) or direct ArrayAccess
+                                let rhs_from_inner_expr = program.blocks.values()
+                                    .flat_map(|b| &b.instructions)
+                                    .any(|i| match i {
+                                        SsaInstruction::Add { dest, .. } => dest == rhs,
+                                        SsaInstruction::Sub { dest, .. } => dest == rhs,
+                                        _ => false,
+                                    });
+                                
+                                let rhs_from_array_access = program.blocks.values()
+                                    .flat_map(|b| &b.instructions)
+                                    .any(|i| match i {
+                                        SsaInstruction::ArrayAccess { dest, .. } => dest == rhs,
+                                        _ => false,
+                                    });
+                                
+                                // Make sure this is not the loop increment (lhs should not be loop index)
+                                let lhs_is_loop_index = program.blocks.values()
+                                    .flat_map(|b| &b.instructions)
+                                    .any(|i| match i {
+                                        SsaInstruction::LessThan { lhs: loop_idx, .. } => loop_idx == lhs,
+                                        _ => false,
+                                    });
+                                
+                                // Check if lhs is defined anywhere (accumulator should not be defined, it's a block param)
+                                let lhs_is_defined = program.blocks.values()
+                                    .flat_map(|b| &b.instructions)
+                                    .any(|i| match i {
+                                        SsaInstruction::LoadArrayParam { dest, .. } => dest == lhs,
+                                        SsaInstruction::LoadLengthParam { dest, .. } => dest == lhs,
+                                        SsaInstruction::LoadConstant { dest, .. } => dest == lhs,
+                                        SsaInstruction::ArrayAccess { dest, .. } => dest == lhs,
+                                        SsaInstruction::Add { dest, .. } => dest == lhs,
+                                        SsaInstruction::Sub { dest, .. } => dest == lhs,
+                                        SsaInstruction::InitAccumulator { dest, .. } => dest == lhs,
+                                        _ => false,
+                                    });
+                                
+                                // The accumulator update has undefined lhs (block param) and defined rhs (inner expr result)
+                                if (rhs_from_inner_expr || rhs_from_array_access) && !lhs_is_loop_index && !lhs_is_defined {
+                                    if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                                        println!("DEBUG: Found accumulator update: lhs={:?}, rhs={:?}", lhs, rhs);
+                                    }
+                                    Some(*lhs)
+                                } else {
+                                    None
+                                }
+                            }
+                            _ => None,
+                        });
+
+                    if let Some(accumulator) = accumulator_ssa {
+                        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                            println!("DEBUG: Mapping accumulator {:?} to block_params[1]", accumulator);
+                        }
+                        ssa_to_cranelift.insert(accumulator, block_params[1]);
+                    } else if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                        println!("DEBUG: Could not find accumulator SSA value");
+                    }
                 }
             }
 
@@ -257,6 +405,10 @@ impl CraneliftBackend {
                     } => {
                         // Map to function parameter
                         ssa_to_cranelift.insert(*dest, length);
+                    }
+                    SsaInstruction::InitAccumulator { dest, initial_value, .. } => {
+                        let constant_val = builder.ins().iconst(types::I64, *initial_value);
+                        ssa_to_cranelift.insert(*dest, constant_val);
                     }
                     SsaInstruction::LoadConstant { dest, value } => {
                         let constant_val = builder.ins().iconst(types::I64, *value);
@@ -331,43 +483,77 @@ impl CraneliftBackend {
                         index,
                         value,
                     } => {
-                        // Store the result to output[index]
-                        if let (Some(&result_val), Some(&index_val)) =
-                            (ssa_to_cranelift.get(value), ssa_to_cranelift.get(index))
-                        {
-                            let eight = builder.ins().iconst(types::I64, 8);
-                            let element_offset = builder.ins().imul(index_val, eight);
-                            let output_addr = builder.ins().iadd(output_ptr, element_offset);
-                            builder
-                                .ins()
-                                .store(MemFlags::trusted(), result_val, output_addr, 0);
+                        // Store the result to output[index] (only for elementwise operations)
+                        if let Some(out_ptr) = output_ptr {
+                            if let (Some(&result_val), Some(&index_val)) =
+                                (ssa_to_cranelift.get(value), ssa_to_cranelift.get(index))
+                            {
+                                let eight = builder.ins().iconst(types::I64, 8);
+                                let element_offset = builder.ins().imul(index_val, eight);
+                                let output_addr = builder.ins().iadd(out_ptr, element_offset);
+                                builder
+                                    .ins()
+                                    .store(MemFlags::trusted(), result_val, output_addr, 0);
+                            } else {
+                                return Err(DioError::Compilation(format!(
+                                    "Store value {:?} or index {:?} not found",
+                                    value, index
+                                )));
+                            }
                         } else {
-                            return Err(DioError::Compilation(format!(
-                                "Store value {:?} or index {:?} not found",
-                                value, index
-                            )));
+                            return Err(DioError::Compilation(
+                                "StoreArrayElement not supported in reduction operations".to_string()
+                            ));
                         }
                     }
                     SsaInstruction::Jump { target } => {
                         let target_block = ssa_to_cranelift_blocks[target];
-                        // This is the back-edge jump with incremented index
-                        // Find the last Add instruction in the block (should be the loop increment)
-                        let incremented_value = ssa_block.instructions.iter().rev().find_map(|inst| match inst {
-                            SsaInstruction::Add { dest, .. } => {
-                                // The last Add instruction should be the loop increment
-                                if let Some(&val) = ssa_to_cranelift.get(dest) {
-                                    Some(val)
-                                } else {
-                                    None
+                        
+                        if is_reduction {
+                            // For reductions, we need both incremented index and updated accumulator
+                            // Find the Add instructions (there should be 2: accumulator update and index increment)
+                            let mut add_values = Vec::new();
+                            for inst in &ssa_block.instructions {
+                                if let SsaInstruction::Add { dest, .. } = inst {
+                                    if let Some(&val) = ssa_to_cranelift.get(dest) {
+                                        add_values.push(val);
+                                    }
                                 }
                             }
-                            _ => None,
-                        });
-
-                        if let Some(inc_val) = incremented_value {
-                            builder.ins().jump(target_block, &[inc_val]);
+                            
+                            if add_values.len() >= 3 {
+                                // For complex reduction with multiple Add instructions
+                                // The last Add is always index increment, second-to-last is accumulator update
+                                let incremented_index = add_values[add_values.len() - 1];   // last: index increment
+                                let updated_accumulator = add_values[add_values.len() - 2]; // second-to-last: accumulator update
+                                builder.ins().jump(target_block, &[incremented_index, updated_accumulator]);
+                            } else if add_values.len() >= 2 {
+                                // For simple reduction: [accumulator_update, index_increment]
+                                let updated_accumulator = add_values[0]; // accumulator update
+                                let incremented_index = add_values[1];   // index increment
+                                builder.ins().jump(target_block, &[incremented_index, updated_accumulator]);
+                            } else {
+                                builder.ins().jump(target_block, &[]);
+                            }
                         } else {
-                            builder.ins().jump(target_block, &[]);
+                            // For elementwise, find the loop increment
+                            let incremented_value = ssa_block.instructions.iter().rev().find_map(|inst| match inst {
+                                SsaInstruction::Add { dest, .. } => {
+                                    // The last Add instruction should be the loop increment
+                                    if let Some(&val) = ssa_to_cranelift.get(dest) {
+                                        Some(val)
+                                    } else {
+                                        None
+                                    }
+                                }
+                                _ => None,
+                            });
+
+                            if let Some(inc_val) = incremented_value {
+                                builder.ins().jump(target_block, &[inc_val]);
+                            } else {
+                                builder.ins().jump(target_block, &[]);
+                            }
                         }
                     }
                     SsaInstruction::Branch {
@@ -388,8 +574,24 @@ impl CraneliftBackend {
                             )));
                         }
                     }
-                    SsaInstruction::Return { .. } => {
-                        builder.ins().return_(&[]);
+                    SsaInstruction::UpdateAccumulator { .. } => {
+                        return Err(DioError::Compilation(
+                            "UpdateAccumulator should not be used in new reduction implementation".to_string()
+                        ));
+                    }
+                    SsaInstruction::Return { value } => {
+                        if let Some(ret_val) = value {
+                            if let Some(&cranelift_val) = ssa_to_cranelift.get(ret_val) {
+                                builder.ins().return_(&[cranelift_val]);
+                            } else {
+                                return Err(DioError::Compilation(format!(
+                                    "Return value {:?} not found in SSA mapping",
+                                    ret_val
+                                )));
+                            }
+                        } else {
+                            builder.ins().return_(&[]);
+                        }
                     }
                 }
             }

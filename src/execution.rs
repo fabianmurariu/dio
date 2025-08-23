@@ -93,6 +93,32 @@ impl CompiledFunction {
 
         Ok(())
     }
+
+    /// Executes a reduction JIT-compiled function.
+    /// # Safety
+    /// This function is unsafe because it calls a raw function pointer from JIT-compiled code.
+    /// The caller must ensure the pointer is valid and has the correct reduction signature.
+    pub unsafe fn call_reduction_op(&self, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
+        let array_length = input_arrays[0].len();
+        let meta: Result<Vec<_>, _> = input_arrays
+            .iter()
+            .map(ArrayMetadata::from_array_ref)
+            .collect();
+        let meta = meta?;
+        let ptrs: Vec<*const u8> = meta.iter().map(|m| m.data_ptr).collect();
+
+        // Reduction function signature: (inputs_ptr, input_count, length) -> result
+        type ReductionFn = extern "C" fn(*const *const u8, u32, u64) -> i64;
+        let func: ReductionFn = std::mem::transmute(self.code_ptr);
+
+        let result = func(
+            ptrs.as_ptr(),
+            input_arrays.len() as u32,
+            array_length as u64,
+        );
+
+        Ok(result)
+    }
 }
 
 /// Generic execute function using Arrow ArrayRef with N-ary operations and type erasure
@@ -183,6 +209,78 @@ pub fn execute_generic_cached(
     }
 
     buffer_to_array_ref(output_buffer, &output_arrow_type)
+}
+
+/// Execute a reduction operation, returning a scalar value
+pub fn execute_reduction(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
+    if input_arrays.is_empty() {
+        return Err(DioError::Runtime(
+            "Must provide at least one input array".to_string(),
+        ));
+    }
+    let array_length = input_arrays[0].len();
+    for array in input_arrays.iter().skip(1) {
+        if array.len() != array_length {
+            return Err(DioError::Runtime(
+                "All input arrays must have the same length".to_string(),
+            ));
+        }
+    }
+
+    let ssa_program = ast_to_ssa(expr)?;
+    let mut backend = CraneliftBackend::new()?;
+    let code_ptr = backend.compile(&ssa_program)?;
+
+    let compiled_fn = CompiledFunction::new(code_ptr);
+    unsafe { compiled_fn.call_reduction_op(input_arrays) }
+}
+
+/// Execute a reduction operation with caching
+pub fn execute_reduction_cached(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
+    if input_arrays.is_empty() {
+        return Err(DioError::Runtime(
+            "Must provide at least one input array".to_string(),
+        ));
+    }
+    let array_length = input_arrays[0].len();
+    for array in input_arrays.iter().skip(1) {
+        if array.len() != array_length {
+            return Err(DioError::Runtime(
+                "All input arrays must have the same length".to_string(),
+            ));
+        }
+    }
+
+    let dio_types: Result<Vec<_>, _> = input_arrays
+        .iter()
+        .map(|array| crate::array_support::arrow_type_to_dio_array(array.data_type()))
+        .collect();
+    let dio_types = dio_types?;
+
+    // For reductions, the output type should be scalar
+    let output_type = if dio_types.iter().all(|t| t.is_i64()) {
+        Type::I64
+    } else {
+        Type::U64
+    };
+
+    let signature = FunctionSignature::new(dio_types, output_type, expr);
+
+    let code_ptr = {
+        let mut cache = FUNCTION_CACHE.lock().unwrap();
+        if let Some(cached_ptr) = cache.get(&signature) {
+            cached_ptr.as_ptr()
+        } else {
+            let ssa_program = ast_to_ssa(expr)?;
+            let mut backend = CraneliftBackend::new()?;
+            let new_code_ptr = backend.compile(&ssa_program)?;
+            cache.insert(signature, SafeFunctionPtr::new(new_code_ptr));
+            new_code_ptr
+        }
+    };
+
+    let compiled_fn = CompiledFunction::new(code_ptr);
+    unsafe { compiled_fn.call_reduction_op(input_arrays) }
 }
 
 /// Clear the function cache (useful for testing or memory management)
@@ -342,6 +440,75 @@ mod tests {
         let result2 = execute_generic_cached(&expr, &[a, b, c]).unwrap();
         let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(result2_u64.values(), &[111, 222]);
+    }
+
+    #[test]
+    fn test_execute_reduction_sum_single_array() {
+        let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2, 3, 4]).unwrap();
+        let result = execute_reduction(&expr, &[a]).unwrap();
+        assert_eq!(result, 10); // 1 + 2 + 3 + 4 = 10
+    }
+
+    #[test]
+    fn test_execute_reduction_sum_binary_addition() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
+    }
+
+    #[test]
+    fn test_execute_reduction_sum_ternary_addition() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (sum (+ a b c)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
+        let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
+        let result = execute_reduction(&expr, &[a, b, c]).unwrap();
+        assert_eq!(result, 333); // (1+10+100) + (2+20+200) = 111 + 222 = 333
+    }
+
+    #[test]
+    fn test_execute_reduction_sum_mixed_types() {
+        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64) (sum (+ a b)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
+        let b = create_i64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
+    }
+
+    #[test]
+    fn test_execute_reduction_sum_subtraction() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (- a b)))").unwrap();
+        let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let b = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
+        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        assert_eq!(result, 54); // (10-1) + (20-2) + (30-3) = 9 + 18 + 27 = 54
+    }
+
+    #[test]
+    fn test_execute_reduction_cached() {
+        clear_function_cache();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
+        
+        // First call
+        let result1 = execute_reduction_cached(&expr, &[a.clone(), b.clone()]).unwrap();
+        assert_eq!(result1, 33); // (1+10) + (2+20) = 11 + 22 = 33
+        
+        // Second call should use cached version
+        let result2 = execute_reduction_cached(&expr, &[a, b]).unwrap();
+        assert_eq!(result2, 33);
+    }
+
+    #[test]
+    fn test_execute_reduction_empty_arrays() {
+        let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
+        let a = create_u64_array_from_vec(vec![]).unwrap();
+        let result = execute_reduction(&expr, &[a]).unwrap();
+        assert_eq!(result, 0); // Sum of empty array is 0
     }
 
     #[test]
