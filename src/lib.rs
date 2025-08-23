@@ -13,7 +13,8 @@ pub use execution::{
     clear_function_cache, execute_generic, execute_generic_cached, CompiledFunction,
 };
 pub use parser::parse_expr;
-pub use ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue};
+pub use ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue, 
+              BinaryOpKind, SsaInstructionV2, SsaBlockV2, SsaProgramV2, ast_to_ssa_v2};
 
 #[cfg(test)]
 mod tests;

@@ -1,5 +1,6 @@
 use crate::error::DioError;
-use crate::ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue};
+use crate::ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue, 
+                BinaryOpKind, SsaInstructionV2, SsaBlockV2, SsaProgramV2};
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -609,6 +610,161 @@ impl CraneliftBackend {
         self.finalize_and_get_function_ptr()
     }
 
+    /// Compile SSA v2 program with explicit block parameters
+    /// This provides cleaner mapping to Cranelift IR
+    pub fn compile_v2(&mut self, program: &SsaProgramV2) -> Result<*const u8, DioError> {
+        // Detect if this is a reduction by checking return instruction
+        let is_reduction = program.blocks.iter().any(|block| {
+            block.instructions.iter().any(|inst| {
+                matches!(inst, SsaInstructionV2::Return { value: Some(_) })
+            })
+        });
+        
+        self.setup_function_signature(is_reduction);
+
+        let mut builder = FunctionBuilder::new(&mut self.context.func, &mut self.builder_context);
+
+        // Create entry block
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+
+        // Track SSA value mappings to Cranelift values
+        let mut ssa_to_cranelift: HashMap<SsaValue, Value> = HashMap::new();
+        // Track block mappings
+        let mut block_map: HashMap<BlockId, Block> = HashMap::new();
+
+        // Map function parameters
+        let inputs_ptr = builder.block_params(entry_block)[0];
+        let _input_count = builder.block_params(entry_block)[1];
+        let (output_ptr, length) = if is_reduction {
+            (None, builder.block_params(entry_block)[2])
+        } else {
+            (Some(builder.block_params(entry_block)[2]), builder.block_params(entry_block)[3])
+        };
+
+        // Create all blocks first
+        for ssa_block in &program.blocks {
+            let cranelift_block = if ssa_block.id == program.entry_block {
+                entry_block
+            } else {
+                builder.create_block()
+            };
+            block_map.insert(ssa_block.id, cranelift_block);
+
+            // Add block parameters
+            for (ssa_param, _data_type) in &ssa_block.parameters {
+                let cranelift_param = builder.append_block_param(cranelift_block, types::I64);
+                ssa_to_cranelift.insert(*ssa_param, cranelift_param);
+            }
+        }
+
+        // Compile each block in order
+        for ssa_block in &program.blocks {
+            let cranelift_block = block_map[&ssa_block.id];
+            
+            if ssa_block.id != program.entry_block {
+                builder.switch_to_block(cranelift_block);
+            }
+
+            // Compile instructions
+            for instruction in &ssa_block.instructions {
+                match instruction {
+                    SsaInstructionV2::Parameter { dest, param_index, .. } => {
+                        // Parameters should already be mapped from function params
+                        match *param_index {
+                            0..=1 => {
+                                // input arrays are loaded on demand
+                            }
+                            _ => {
+                                // length or output params
+                                let value = if *param_index as usize == 2 { length } else { output_ptr.unwrap() };
+                                ssa_to_cranelift.insert(*dest, value);
+                            }
+                        }
+                    }
+                    SsaInstructionV2::Constant { dest, value, .. } => {
+                        let cranelift_val = builder.ins().iconst(types::I64, *value);
+                        ssa_to_cranelift.insert(*dest, cranelift_val);
+                    }
+                    SsaInstructionV2::BinaryOp { dest, op, lhs, rhs } => {
+                        let lhs_val = ssa_to_cranelift[lhs];
+                        let rhs_val = ssa_to_cranelift[rhs];
+                        let result = match op {
+                            BinaryOpKind::Add => builder.ins().iadd(lhs_val, rhs_val),
+                            BinaryOpKind::Sub => builder.ins().isub(lhs_val, rhs_val),
+                            BinaryOpKind::Mul => builder.ins().imul(lhs_val, rhs_val),
+                            BinaryOpKind::Div => builder.ins().sdiv(lhs_val, rhs_val),
+                            BinaryOpKind::Lt => builder.ins().icmp(IntCC::SignedLessThan, lhs_val, rhs_val),
+                            BinaryOpKind::Le => builder.ins().icmp(IntCC::SignedLessThanOrEqual, lhs_val, rhs_val),
+                            BinaryOpKind::Gt => builder.ins().icmp(IntCC::SignedGreaterThan, lhs_val, rhs_val),
+                            BinaryOpKind::Ge => builder.ins().icmp(IntCC::SignedGreaterThanOrEqual, lhs_val, rhs_val),
+                            BinaryOpKind::Eq => builder.ins().icmp(IntCC::Equal, lhs_val, rhs_val),
+                            BinaryOpKind::Ne => builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val),
+                        };
+                        ssa_to_cranelift.insert(*dest, result);
+                    }
+                    SsaInstructionV2::Load { dest, address, offset, .. } => {
+                        let addr_val = ssa_to_cranelift[address];
+                        let offset_val = if *offset != 0 {
+                            let offset_const = builder.ins().iconst(types::I64, *offset as i64);
+                            builder.ins().iadd(addr_val, offset_const)
+                        } else {
+                            addr_val
+                        };
+                        let loaded = builder.ins().load(types::I64, MemFlags::trusted(), offset_val, 0);
+                        ssa_to_cranelift.insert(*dest, loaded);
+                    }
+                    SsaInstructionV2::Store { address, offset, value } => {
+                        let addr_val = ssa_to_cranelift[address];
+                        let val = ssa_to_cranelift[value];
+                        let offset_val = if *offset != 0 {
+                            let offset_const = builder.ins().iconst(types::I64, *offset as i64);
+                            builder.ins().iadd(addr_val, offset_const)
+                        } else {
+                            addr_val
+                        };
+                        builder.ins().store(MemFlags::trusted(), val, offset_val, 0);
+                    }
+                    SsaInstructionV2::Branch { condition, true_block, false_block } => {
+                        let cond_val = ssa_to_cranelift[condition];
+                        let true_cranelift_block = block_map[true_block];
+                        let false_cranelift_block = block_map[false_block];
+                        builder.ins().brif(cond_val, true_cranelift_block, &[], false_cranelift_block, &[]);
+                    }
+                    SsaInstructionV2::Jump { target_block } => {
+                        let target_cranelift_block = block_map[target_block];
+                        builder.ins().jump(target_cranelift_block, &[]);
+                    }
+                    SsaInstructionV2::Return { value } => {
+                        if let Some(return_val) = value {
+                            let val = ssa_to_cranelift[return_val];
+                            builder.ins().return_(&[val]);
+                        } else {
+                            builder.ins().return_(&[]);
+                        }
+                    }
+                }
+            }
+        }
+
+        // Seal all blocks after generating all instructions
+        for ssa_block in &program.blocks {
+            let cranelift_block = block_map[&ssa_block.id];
+            builder.seal_block(cranelift_block);
+        }
+
+        builder.finalize();
+
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("--- Cranelift IR (SSA v2) ---");
+            println!("{}", self.context.func.display());
+            println!("------------------------------");
+        }
+
+        self.finalize_and_get_function_ptr()
+    }
+
     /// Finalize the function and return the executable pointer
     fn finalize_and_get_function_ptr(&mut self) -> Result<*const u8, DioError> {
         let func_id = self
@@ -660,5 +816,23 @@ mod tests {
         let ssa_program = ast_to_ssa(&expr).unwrap();
         let mut backend = CraneliftBackend::new().unwrap();
         backend.compile(&ssa_program).unwrap();
+    }
+
+    #[test] 
+    fn test_cranelift_v2_compilation_add() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
+        let ssa_program_v2 = crate::ssa::ast_to_ssa_v2(&expr).unwrap();
+        let mut backend = CraneliftBackend::new().unwrap();
+        let result = backend.compile_v2(&ssa_program_v2);
+        assert!(result.is_ok(), "SSA v2 Cranelift compilation failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_cranelift_v2_compilation_reduction() {
+        let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
+        let ssa_program_v2 = crate::ssa::ast_to_ssa_v2(&expr).unwrap();
+        let mut backend = CraneliftBackend::new().unwrap();
+        let result = backend.compile_v2(&ssa_program_v2);
+        assert!(result.is_ok(), "SSA v2 reduction Cranelift compilation failed: {:?}", result);
     }
 }
