@@ -1,6 +1,6 @@
 use crate::ast::*;
 use crate::error::DioError;
-use crate::ssa::{SsaProgramV2, SsaInstructionV2, BlockId, DataType as SsaDataType};
+use crate::ssa::{SsaProgramV2, SsaInstructionV2, BlockId, SsaValue, DataType as SsaDataType};
 use std::fmt;
 
 /// ByteCode intermediate representation - C-like imperative code
@@ -182,24 +182,43 @@ impl ByteCodeCompiler {
             });
         }
         
-        // For now, just create a simple return statement
-        // TODO: Implement full expression compilation
+        // Compile the lambda body into ByteCode statements
         match body {
-            Expr::Add(_) | Expr::Sub(_, _) | Expr::Mul(_) | Expr::Div(_, _) => {
-                // Elementwise operation - return void
-                self.statements.push(Statement::Return { value: None });
+            Expr::Add(operands) => {
+                // Elementwise addition: for(i = 0; i < length; i++) output[i] = a[i] + b[i] + ...
+                if ret_type.is_array() {
+                    self.compile_elementwise_operation(operands, BinaryOperator::Add)?;
+                } else {
+                    return Err(DioError::Compilation("Add with scalar return type not supported".to_string()));
+                }
             }
-            Expr::Sum(_) => {
-                // Reduction - return a value
-                self.statements.push(Statement::Return { 
-                    value: Some(Expression::Variable("acc".to_string())) 
-                });
-                
-                // Add accumulator local variable
-                self.locals.push(LocalVar {
-                    name: "acc".to_string(),
-                    data_type: ret_type.clone(),
-                });
+            Expr::Sub(lhs, rhs) => {
+                // Elementwise subtraction: for(i = 0; i < length; i++) output[i] = lhs[i] - rhs[i]
+                if ret_type.is_array() {
+                    self.compile_elementwise_operation(&[*lhs.clone(), *rhs.clone()], BinaryOperator::Sub)?;
+                } else {
+                    return Err(DioError::Compilation("Sub with scalar return type not supported".to_string()));
+                }
+            }
+            Expr::Mul(operands) => {
+                // Elementwise multiplication: for(i = 0; i < length; i++) output[i] = a[i] * b[i] * ...
+                if ret_type.is_array() {
+                    self.compile_elementwise_operation(operands, BinaryOperator::Mul)?;
+                } else {
+                    return Err(DioError::Compilation("Mul with scalar return type not supported".to_string()));
+                }
+            }
+            Expr::Div(lhs, rhs) => {
+                // Elementwise division: for(i = 0; i < length; i++) output[i] = lhs[i] / rhs[i]
+                if ret_type.is_array() {
+                    self.compile_elementwise_operation(&[*lhs.clone(), *rhs.clone()], BinaryOperator::Div)?;
+                } else {
+                    return Err(DioError::Compilation("Div with scalar return type not supported".to_string()));
+                }
+            }
+            Expr::Sum(inner) => {
+                // Reduction operation: sum over the inner expression
+                self.compile_reduction_operation(inner, &ret_type)?;
             }
             _ => {
                 return Err(DioError::Compilation("Unsupported operation in lambda body".to_string()));
@@ -213,44 +232,390 @@ impl ByteCodeCompiler {
             statements: self.statements.clone(),
         })
     }
+    
+    /// Compile elementwise operations like (+ a b), (- a b), etc.
+    fn compile_elementwise_operation(&mut self, operands: &[Expr], op: BinaryOperator) -> Result<(), DioError> {
+        // Add loop index variable
+        let index_var = "i".to_string();
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+        
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+        
+        // Build the expression for the operation
+        let mut expr = self.compile_expression(&operands[0])?;
+        for operand in &operands[1..] {
+            let right_expr = self.compile_expression(operand)?;
+            expr = Expression::BinaryOp {
+                op: op.clone(),
+                left: Box::new(expr),
+                right: Box::new(right_expr),
+            };
+        }
+        
+        // output[i] = expr
+        loop_body.push(Statement::ArrayAssign {
+            array: "output".to_string(),
+            index: Expression::Variable(index_var.clone()),
+            value: expr,
+        });
+        
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var,
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+        
+        // Return void for elementwise operations
+        self.statements.push(Statement::Return { value: None });
+        
+        Ok(())
+    }
+    
+    /// Compile reduction operations like (sum expr)
+    fn compile_reduction_operation(&mut self, inner: &Expr, ret_type: &DataType) -> Result<(), DioError> {
+        // Add accumulator variable
+        let acc_var = "acc".to_string();
+        self.locals.push(LocalVar {
+            name: acc_var.clone(),
+            data_type: ret_type.clone(),
+        });
+        
+        // Add loop index variable
+        let index_var = "i".to_string();
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+        
+        // Initialize accumulator: acc = 0
+        self.statements.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::Literal(0),
+        });
+        
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+        
+        // Compile the inner expression (e.g., a[i] + b[i] for sum(+ a b))
+        let inner_expr = self.compile_expression(inner)?;
+        
+        // acc = acc + inner_expr
+        loop_body.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::BinaryOp {
+                op: BinaryOperator::Add,
+                left: Box::new(Expression::Variable(acc_var.clone())),
+                right: Box::new(inner_expr),
+            },
+        });
+        
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var,
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+        
+        // Return the accumulator
+        self.statements.push(Statement::Return { 
+            value: Some(Expression::Variable(acc_var)) 
+        });
+        
+        Ok(())
+    }
+    
+    /// Compile an expression to a ByteCode expression
+    fn compile_expression(&mut self, expr: &Expr) -> Result<Expression, DioError> {
+        match expr {
+            Expr::Column(name) => {
+                // For array access, return array[i] where i is the current loop index
+                Ok(Expression::ArrayAccess {
+                    array: name.clone(),
+                    index: Box::new(Expression::Variable("i".to_string())),
+                })
+            }
+            Expr::Literal(value) => {
+                match value {
+                    Value::Int64(i) => Ok(Expression::Literal(*i)),
+                    Value::Float64(_) => Err(DioError::Compilation("Float literals not supported yet".to_string())),
+                }
+            }
+            Expr::Add(operands) => {
+                // Build nested binary operations
+                let mut result = self.compile_expression(&operands[0])?;
+                for operand in &operands[1..] {
+                    let right = self.compile_expression(operand)?;
+                    result = Expression::BinaryOp {
+                        op: BinaryOperator::Add,
+                        left: Box::new(result),
+                        right: Box::new(right),
+                    };
+                }
+                Ok(result)
+            }
+            Expr::Sub(lhs, rhs) => {
+                let left = self.compile_expression(lhs)?;
+                let right = self.compile_expression(rhs)?;
+                Ok(Expression::BinaryOp {
+                    op: BinaryOperator::Sub,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
+            }
+            Expr::Mul(operands) => {
+                // Build nested binary operations
+                let mut result = self.compile_expression(&operands[0])?;
+                for operand in &operands[1..] {
+                    let right = self.compile_expression(operand)?;
+                    result = Expression::BinaryOp {
+                        op: BinaryOperator::Mul,
+                        left: Box::new(result),
+                        right: Box::new(right),
+                    };
+                }
+                Ok(result)
+            }
+            Expr::Div(lhs, rhs) => {
+                let left = self.compile_expression(lhs)?;
+                let right = self.compile_expression(rhs)?;
+                Ok(Expression::BinaryOp {
+                    op: BinaryOperator::Div,
+                    left: Box::new(left),
+                    right: Box::new(right),
+                })
+            }
+            _ => Err(DioError::Compilation(format!("Unsupported expression: {:?}", expr))),
+        }
+    }
 }
 
-/// Convert ByteCode to SSA v2 (simplified version)
+/// Convert ByteCode to SSA v2 
 pub fn bytecode_to_ssa_v2(program: &ByteCodeProgram) -> Result<SsaProgramV2, DioError> {
     let mut ssa_program = SsaProgramV2::new();
     
     // Create entry block parameters
     let mut entry_params = Vec::new();
+    let mut param_mapping = std::collections::HashMap::new();
+    
     for input in &program.inputs {
         let ssa_data_type = convert_bytecode_to_ssa_datatype(&input.data_type);
         let ssa_value = ssa_program.new_value(ssa_data_type.clone());
         entry_params.push((ssa_value, ssa_data_type));
+        param_mapping.insert(input.name.clone(), ssa_value);
     }
     
     // Create entry block
     let entry_block_id = ssa_program.new_block(entry_params);
     ssa_program.entry_block = entry_block_id;
     
-    // Add a simple return instruction
-    if program.return_type.is_scalar() {
-        // For scalar returns (reductions), return a constant value
-        let return_value = ssa_program.new_value(convert_bytecode_to_ssa_datatype(&program.return_type));
-        ssa_program.add_instruction(entry_block_id, SsaInstructionV2::Constant {
-            dest: return_value,
-            value: 42, // Placeholder value
-            data_type: convert_bytecode_to_ssa_datatype(&program.return_type),
-        });
-        ssa_program.add_instruction(entry_block_id, SsaInstructionV2::Return {
-            value: Some(return_value),
-        });
-    } else {
-        // For array returns, just return void
-        ssa_program.add_instruction(entry_block_id, SsaInstructionV2::Return {
-            value: None,
-        });
-    }
+    // Convert ByteCode statements to SSA
+    let mut converter = ByteCodeToSsaConverter {
+        ssa_program: &mut ssa_program,
+        current_block: entry_block_id,
+        param_mapping,
+        local_mapping: std::collections::HashMap::new(),
+    };
+    
+    converter.convert_statements(&program.statements, &program.locals)?;
     
     Ok(ssa_program)
+}
+
+struct ByteCodeToSsaConverter<'a> {
+    ssa_program: &'a mut SsaProgramV2,
+    current_block: BlockId,
+    param_mapping: std::collections::HashMap<String, SsaValue>,
+    local_mapping: std::collections::HashMap<String, SsaValue>,
+}
+
+impl<'a> ByteCodeToSsaConverter<'a> {
+    fn convert_statements(&mut self, statements: &[Statement], locals: &[LocalVar]) -> Result<(), DioError> {
+        // Initialize local variables
+        for local in locals {
+            let ssa_data_type = convert_bytecode_to_ssa_datatype(&local.data_type);
+            let ssa_value = self.ssa_program.new_value(ssa_data_type);
+            self.local_mapping.insert(local.name.clone(), ssa_value);
+        }
+        
+        // Convert each statement
+        for statement in statements {
+            self.convert_statement(statement)?;
+        }
+        
+        Ok(())
+    }
+    
+    fn convert_statement(&mut self, statement: &Statement) -> Result<(), DioError> {
+        match statement {
+            Statement::Assign { target, expr } => {
+                let value = self.convert_expression(expr)?;
+                // Update the mapping for this variable
+                self.local_mapping.insert(target.clone(), value);
+            }
+            Statement::ArrayAssign { array, index, value } => {
+                let array_ssa = self.get_variable(array)?;
+                let index_ssa = self.convert_expression(index)?;
+                let value_ssa = self.convert_expression(value)?;
+                
+                // For now, we'll skip array assignments in SSA v2 since they're complex
+                // In a full implementation, this would need proper memory operations
+                // TODO: Implement proper array element stores
+            }
+            Statement::ForLoop { index_var, start, end, step: _, body } => {
+                // Convert for loop to SSA loop structure
+                self.convert_for_loop(index_var, start, end, body)?;
+            }
+            Statement::Return { value } => {
+                match value {
+                    Some(expr) => {
+                        let return_value = self.convert_expression(expr)?;
+                        self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Return {
+                            value: Some(return_value),
+                        });
+                    }
+                    None => {
+                        self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Return {
+                            value: None,
+                        });
+                    }
+                }
+            }
+        }
+        Ok(())
+    }
+    
+    fn convert_for_loop(&mut self, index_var: &str, start: &Expression, end: &Expression, _body: &[Statement]) -> Result<(), DioError> {
+        // For now, create a simple loop structure
+        // This is a simplified version - a full implementation would need proper loop handling
+        
+        let start_value = self.convert_expression(start)?;
+        let end_value = self.convert_expression(end)?;
+        
+        // Create new SSA values for the loop parameters
+        let loop_index_param = self.ssa_program.new_value(crate::ssa::DataType::U64);
+        let loop_body_index_param = self.ssa_program.new_value(crate::ssa::DataType::U64);
+        
+        // Create loop header and body blocks
+        let loop_header = self.ssa_program.new_block(vec![
+            (loop_index_param, crate::ssa::DataType::U64)
+        ]);
+        
+        let loop_body = self.ssa_program.new_block(vec![
+            (loop_body_index_param, crate::ssa::DataType::U64)
+        ]);
+        
+        let exit_block = self.ssa_program.new_block(vec![]);
+        
+        // Jump from entry to loop header
+        self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Jump {
+            target_block: loop_header,
+            args: vec![start_value],
+        });
+        
+        // Loop header: check condition (use the block parameter)
+        let condition = self.ssa_program.new_value(crate::ssa::DataType::Bool);
+        self.ssa_program.add_instruction(loop_header, SsaInstructionV2::BinaryOp {
+            dest: condition,
+            op: crate::ssa::BinaryOpKind::Lt,
+            lhs: loop_index_param, // Use the block parameter
+            rhs: end_value,
+        });
+        
+        self.ssa_program.add_instruction(loop_header, SsaInstructionV2::Branch {
+            condition,
+            true_block: loop_body,
+            false_block: exit_block,
+            args: vec![loop_index_param], // Pass the block parameter
+        });
+        
+        // Loop body: increment and jump back (use the body block parameter)
+        let one = self.ssa_program.new_value(crate::ssa::DataType::U64);
+        self.ssa_program.add_instruction(loop_body, SsaInstructionV2::Constant {
+            dest: one,
+            value: 1,
+            data_type: crate::ssa::DataType::U64,
+        });
+        
+        let next_index = self.ssa_program.new_value(crate::ssa::DataType::U64);
+        self.ssa_program.add_instruction(loop_body, SsaInstructionV2::BinaryOp {
+            dest: next_index,
+            op: crate::ssa::BinaryOpKind::Add,
+            lhs: loop_body_index_param, // Use the body block parameter
+            rhs: one,
+        });
+        
+        self.ssa_program.add_instruction(loop_body, SsaInstructionV2::Jump {
+            target_block: loop_header,
+            args: vec![next_index],
+        });
+        
+        // Continue from exit block
+        self.current_block = exit_block;
+        
+        Ok(())
+    }
+    
+    fn convert_expression(&mut self, expr: &Expression) -> Result<SsaValue, DioError> {
+        match expr {
+            Expression::Variable(name) => {
+                self.get_variable(name)
+            }
+            Expression::Literal(value) => {
+                let ssa_value = self.ssa_program.new_value(crate::ssa::DataType::I64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Constant {
+                    dest: ssa_value,
+                    value: *value,
+                    data_type: crate::ssa::DataType::I64,
+                });
+                Ok(ssa_value)
+            }
+            Expression::ArrayAccess { array, index: _ } => {
+                // For now, just return the array base (simplified)
+                self.get_variable(array)
+            }
+            Expression::BinaryOp { op, left, right } => {
+                let lhs = self.convert_expression(left)?;
+                let rhs = self.convert_expression(right)?;
+                let result = self.ssa_program.new_value(crate::ssa::DataType::U64);
+                
+                let ssa_op = match op {
+                    BinaryOperator::Add => crate::ssa::BinaryOpKind::Add,
+                    BinaryOperator::Sub => crate::ssa::BinaryOpKind::Sub,
+                    BinaryOperator::Mul => crate::ssa::BinaryOpKind::Mul,
+                    BinaryOperator::Div => crate::ssa::BinaryOpKind::Div,
+                    BinaryOperator::Lt => crate::ssa::BinaryOpKind::Lt,
+                };
+                
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::BinaryOp {
+                    dest: result,
+                    op: ssa_op,
+                    lhs,
+                    rhs,
+                });
+                
+                Ok(result)
+            }
+        }
+    }
+    
+    fn get_variable(&self, name: &str) -> Result<SsaValue, DioError> {
+        if let Some(&value) = self.local_mapping.get(name) {
+            Ok(value)
+        } else if let Some(&value) = self.param_mapping.get(name) {
+            Ok(value)
+        } else {
+            Err(DioError::Compilation(format!("Unknown variable: {}", name)))
+        }
+    }
 }
 
 fn convert_bytecode_to_ssa_datatype(data_type: &DataType) -> SsaDataType {
