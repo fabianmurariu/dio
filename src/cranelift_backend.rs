@@ -662,10 +662,12 @@ impl CraneliftBackend {
                 // Map entry block parameters to function parameters
                 let func_params = builder.block_params(entry_block);
                 for (i, (ssa_param, _data_type)) in ssa_block.parameters.iter().enumerate() {
-                    let func_param_idx = if is_reduction && i == 1 {
-                        // For reductions, map length parameter (SSA index 1) to function param 2
-                        2
+                    let func_param_idx = if is_reduction {
+                        // For reductions with single input: (array, length) -> (inputs_ptr, input_count, length)
+                        // Map: SSA[0] -> func[0], SSA[1] -> func[2] (skip input_count)
+                        if i == 0 { 0 } else if i == 1 { 2 } else { i }
                     } else {
+                        // For elementwise: direct mapping
                         i
                     };
                     
@@ -876,5 +878,32 @@ mod tests {
         let mut backend = CraneliftBackend::new().unwrap();
         let result = backend.compile_v2(&ssa_program_v2);
         assert!(result.is_ok(), "SSA v2 reduction Cranelift compilation failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_cranelift_v2_compilation_compound_reduction() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
+        let ssa_program_v2 = crate::ssa::ast_to_ssa_v2(&expr).unwrap();
+        let mut backend = CraneliftBackend::new().unwrap();
+        let result = backend.compile_v2(&ssa_program_v2);
+        assert!(result.is_ok(), "SSA v2 compound reduction compilation failed: {:?}", result);
+    }
+
+    #[test]
+    fn test_cranelift_v2_compilation_nested_arithmetic() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a (+ b c)))").unwrap();
+        let ssa_program_v2 = crate::ssa::ast_to_ssa_v2(&expr).unwrap();
+        let mut backend = CraneliftBackend::new().unwrap();
+        let result = backend.compile_v2(&ssa_program_v2);
+        assert!(result.is_ok(), "SSA v2 nested arithmetic compilation failed: {:?}", result);
+    }
+
+    #[test] 
+    fn test_cranelift_v2_compilation_complex_compound() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (sum (+ (+ a b) c)))").unwrap();
+        let ssa_program_v2 = crate::ssa::ast_to_ssa_v2(&expr).unwrap();
+        let mut backend = CraneliftBackend::new().unwrap();
+        let result = backend.compile_v2(&ssa_program_v2);
+        assert!(result.is_ok(), "SSA v2 complex compound compilation failed: {:?}", result);
     }
 }

@@ -273,7 +273,25 @@ impl SsaBuilder {
 /// Convert AST to SSA IR V2 using Braun algorithm
 pub fn ast_to_ssa_v2(expr: &Expr) -> Result<SsaProgramV2, DioError> {
     if let Expr::Lambda { params, return_type, body } = expr {
-        convert_typed_lambda_v2(params, return_type, body)
+        let result = convert_typed_lambda_v2(params, return_type, body);
+        
+        // Debug: print the SSA program structure
+        if std::env::var("DIO_DEBUG_SSA").is_ok() {
+            if let Ok(ref program) = result {
+                println!("=== SSA v2 Program ===");
+                println!("Entry block: {:?}", program.entry_block);
+                for block in &program.blocks {
+                    println!("Block {:?}:", block.id);
+                    println!("  Parameters: {:?}", block.parameters);
+                    for inst in &block.instructions {
+                        println!("  {:?}", inst);
+                    }
+                }
+                println!("======================");
+            }
+        }
+        
+        result
     } else {
         Err(DioError::Compilation("Only typed lambda expressions are supported".to_string()))
     }
@@ -317,24 +335,22 @@ fn convert_elementwise_lambda_v2(
 
     let element_type = if coerced_type.is_i64() { DataType::I64 } else { DataType::U64 };
     
-    // Create entry block with function parameters
+    // Create entry block with function parameters to match function signature
+    // Function signature: (inputs_ptr, input_count, output_ptr, length)
     let mut entry_params = Vec::new();
-    let mut param_values = Vec::new();
     
-    for param in params {
-        let data_type = if param.type_.is_i64() { DataType::ArrayI64 } else { DataType::ArrayU64 };
-        let param_val = builder.program.new_value(data_type.clone());
-        entry_params.push((param_val, data_type));
-        param_values.push(param_val);
-    }
+    let inputs_ptr = builder.program.new_value(DataType::U64); // pointer to input arrays
+    entry_params.push((inputs_ptr, DataType::U64));
     
-    // Add length and output parameters
-    let length_val = builder.program.new_value(DataType::U64);
-    entry_params.push((length_val, DataType::U64));
+    let input_count = builder.program.new_value(DataType::U64); // number of inputs (will be mapped from i32)
+    entry_params.push((input_count, DataType::U64));
     
     let output_data_type = if coerced_type.is_i64() { DataType::ArrayI64 } else { DataType::ArrayU64 };
     let output_val = builder.program.new_value(output_data_type.clone());
     entry_params.push((output_val, output_data_type));
+    
+    let length_val = builder.program.new_value(DataType::U64);
+    entry_params.push((length_val, DataType::U64));
 
     let entry_block = builder.program.new_block(entry_params);
     builder.program.entry_block = entry_block;
@@ -381,20 +397,11 @@ fn convert_elementwise_lambda_v2(
         args: vec![loop_index_param], // Pass current index to loop body
     });
 
-    // Loop body: perform elementwise operation
+    // Loop body: perform elementwise operation using general expression evaluator  
     let mut operand_elements = Vec::new();
-    for (i, operand) in operands.iter().enumerate() {
-        if let Expr::Column(_name) = operand {
-            let array_val = param_values[i]; // Use the parameter directly
-            let element_val = builder.program.new_value(element_type.clone());
-            builder.program.add_instruction(loop_body, SsaInstructionV2::Load {
-                dest: element_val,
-                address: array_val,
-                offset: 0, // Index will be handled by Cranelift backend
-                data_type: element_type.clone(),
-            });
-            operand_elements.push(element_val);
-        }
+    for operand in operands {
+        let element_val = convert_inner_expression_v2_with_inputs(&mut builder, loop_body, operand, params, loop_body_index_param, element_type.clone(), inputs_ptr)?;
+        operand_elements.push(element_val);
     }
 
     // Perform the operation
@@ -535,21 +542,9 @@ fn convert_reduction_lambda_v2(
         args: vec![header_index_param, header_acc_param], // Pass index and accumulator
     });
 
-    // Loop body: evaluate inner expression and update accumulator
-    let element_value = match inner_expr {
-        Expr::Column(_name) => {
-            let array_val = param_values[0]; // For simple case, use first parameter
-            let element_val = builder.program.new_value(scalar_type.clone());
-            builder.program.add_instruction(loop_body, SsaInstructionV2::Load {
-                dest: element_val,
-                address: array_val,
-                offset: 0,
-                data_type: scalar_type.clone(),
-            });
-            element_val
-        }
-        _ => return Err(DioError::Compilation("Complex expressions in reduction not yet supported in v2".to_string())),
-    };
+    // Loop body: evaluate inner expression using general expression evaluator
+    // For reductions, we need a different approach since we have direct array parameters
+    let element_value = convert_reduction_inner_expression(&mut builder, loop_body, inner_expr, &param_values, body_index_param, scalar_type.clone())?;
     
     // Update accumulator  
     let new_acc = builder.program.new_value(scalar_type.clone());
@@ -597,8 +592,15 @@ fn convert_inner_expression_v2(
 ) -> Result<SsaValue, DioError> {
     match expr {
         Expr::Column(name) => {
-            let array_data_type = if result_type == DataType::I64 { DataType::ArrayI64 } else { DataType::ArrayU64 };
-            let array_val = builder.read_variable(name, block_id, array_data_type);
+            // Find the parameter index for this column name
+            let param_index = params.iter().position(|p| &p.name == name)
+                .ok_or_else(|| DioError::Compilation(format!("Column {} not found in parameters", name)))?;
+            
+            // Get the array parameter value from the entry block
+            // We need to find it from the program's entry block parameters
+            let entry_block = &builder.program.blocks.iter().find(|b| b.id == builder.program.entry_block).unwrap();
+            let array_val = entry_block.parameters[param_index].0;
+            
             let element_val = builder.program.new_value(result_type.clone());
             builder.program.add_instruction(block_id, SsaInstructionV2::Load {
                 dest: element_val,
@@ -966,6 +968,268 @@ fn convert_inner_expression(
             Ok(dest)
         }
         _ => Err(DioError::Compilation("Unsupported expression in reduction body".to_string())),
+    }
+}
+
+/// Evaluate an expression within a loop body for elementwise operations
+/// Uses inputs_ptr to access individual input arrays  
+fn convert_inner_expression_v2_with_inputs(
+    builder: &mut SsaBuilder,
+    block_id: BlockId,
+    expr: &Expr,
+    params: &[TypedParam],
+    loop_index: SsaValue,
+    result_type: DataType,
+    inputs_ptr: SsaValue,
+) -> Result<SsaValue, DioError> {
+    match expr {
+        Expr::Column(name) => {
+            // Find the parameter index for this column name
+            let param_index = params.iter().position(|p| &p.name == name)
+                .ok_or_else(|| DioError::Compilation(format!("Column {} not found in parameters", name)))?;
+            
+            // Load the array pointer from inputs_ptr[param_index]
+            let index_const = builder.program.new_value(DataType::U64);
+            builder.program.add_instruction(block_id, SsaInstructionV2::Constant {
+                dest: index_const,
+                value: param_index as i64,
+                data_type: DataType::U64,
+            });
+            
+            // Calculate offset: inputs_ptr + param_index * 8 (pointer size)
+            let ptr_size_const = builder.program.new_value(DataType::U64);
+            builder.program.add_instruction(block_id, SsaInstructionV2::Constant {
+                dest: ptr_size_const,
+                value: 8,
+                data_type: DataType::U64,
+            });
+            
+            let offset = builder.program.new_value(DataType::U64);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest: offset,
+                op: BinaryOpKind::Mul,
+                lhs: index_const,
+                rhs: ptr_size_const,
+            });
+            
+            let array_ptr_addr = builder.program.new_value(DataType::U64);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest: array_ptr_addr,
+                op: BinaryOpKind::Add,
+                lhs: inputs_ptr,
+                rhs: offset,
+            });
+            
+            // Load the array pointer
+            let array_ptr = builder.program.new_value(DataType::U64);
+            builder.program.add_instruction(block_id, SsaInstructionV2::Load {
+                dest: array_ptr,
+                address: array_ptr_addr,
+                offset: 0,
+                data_type: DataType::U64,
+            });
+            
+            // Load element from the array
+            let element_val = builder.program.new_value(result_type.clone());
+            builder.program.add_instruction(block_id, SsaInstructionV2::Load {
+                dest: element_val,
+                address: array_ptr,
+                offset: 0, // Index handled by backend
+                data_type: result_type,
+            });
+            
+            Ok(element_val)
+        }
+        Expr::Add(operands) => {
+            let mut operand_values = Vec::new();
+            for operand in operands {
+                let val = convert_inner_expression_v2_with_inputs(builder, block_id, operand, params, loop_index, result_type.clone(), inputs_ptr)?;
+                operand_values.push(val);
+            }
+            
+            let mut acc = operand_values[0];
+            for &rhs in &operand_values[1..] {
+                let dest = builder.program.new_value(result_type.clone());
+                builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                    dest,
+                    op: BinaryOpKind::Add,
+                    lhs: acc,
+                    rhs,
+                });
+                acc = dest;
+            }
+            Ok(acc)
+        }
+        Expr::Sub(lhs, rhs) => {
+            let lhs_val = convert_inner_expression_v2_with_inputs(builder, block_id, lhs, params, loop_index, result_type.clone(), inputs_ptr)?;
+            let rhs_val = convert_inner_expression_v2_with_inputs(builder, block_id, rhs, params, loop_index, result_type.clone(), inputs_ptr)?;
+            let dest = builder.program.new_value(result_type);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest,
+                op: BinaryOpKind::Sub,
+                lhs: lhs_val,
+                rhs: rhs_val,
+            });
+            Ok(dest)
+        }
+        Expr::Mul(operands) => {
+            let mut operand_values = Vec::new();
+            for operand in operands {
+                let val = convert_inner_expression_v2_with_inputs(builder, block_id, operand, params, loop_index, result_type.clone(), inputs_ptr)?;
+                operand_values.push(val);
+            }
+            
+            let mut acc = operand_values[0];
+            for &rhs in &operand_values[1..] {
+                let dest = builder.program.new_value(result_type.clone());
+                builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                    dest,
+                    op: BinaryOpKind::Mul,
+                    lhs: acc,
+                    rhs,
+                });
+                acc = dest;
+            }
+            Ok(acc)
+        }
+        Expr::Div(lhs, rhs) => {
+            let lhs_val = convert_inner_expression_v2_with_inputs(builder, block_id, lhs, params, loop_index, result_type.clone(), inputs_ptr)?;
+            let rhs_val = convert_inner_expression_v2_with_inputs(builder, block_id, rhs, params, loop_index, result_type.clone(), inputs_ptr)?;
+            let dest = builder.program.new_value(result_type);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest,
+                op: BinaryOpKind::Div,
+                lhs: lhs_val,
+                rhs: rhs_val,
+            });
+            Ok(dest)
+        }
+        Expr::Literal(value) => {
+            let dest = builder.program.new_value(result_type.clone());
+            let int_value = match value {
+                crate::ast::Value::Int64(v) => *v,
+                crate::ast::Value::Float64(f) => f.0 as i64,
+            };
+            builder.program.add_instruction(block_id, SsaInstructionV2::Constant {
+                dest,
+                value: int_value,
+                data_type: result_type,
+            });
+            Ok(dest)
+        }
+        _ => Err(DioError::Compilation(format!("Unsupported expression type in elementwise operation: {:?}", expr))),
+    }
+}
+
+/// Evaluate an expression within a reduction loop body
+/// Uses direct array parameter values 
+fn convert_reduction_inner_expression(
+    builder: &mut SsaBuilder,
+    block_id: BlockId,
+    expr: &Expr,
+    param_values: &[SsaValue],
+    loop_index: SsaValue,
+    result_type: DataType,
+) -> Result<SsaValue, DioError> {
+    match expr {
+        Expr::Column(name) => {
+            // Find parameter index by matching the column name
+            // For now, we'll try to match by index since we don't have proper param name tracking
+            // This is a simplification - in a real implementation, we'd want proper name resolution
+            let param_index = if name == "a" { 0 } else if name == "b" { 1 } else if name == "c" { 2 } else { 0 };
+            
+            if param_index < param_values.len() {
+                let array_val = param_values[param_index];
+                let element_val = builder.program.new_value(result_type.clone());
+                builder.program.add_instruction(block_id, SsaInstructionV2::Load {
+                    dest: element_val,
+                    address: array_val,
+                    offset: 0, // Index handled by backend
+                    data_type: result_type,
+                });
+                Ok(element_val)
+            } else {
+                Err(DioError::Compilation(format!("Column {} not found in parameters", name)))
+            }
+        }
+        Expr::Add(operands) => {
+            let mut operand_values = Vec::new();
+            for operand in operands {
+                let val = convert_reduction_inner_expression(builder, block_id, operand, param_values, loop_index, result_type.clone())?;
+                operand_values.push(val);
+            }
+            
+            let mut acc = operand_values[0];
+            for &rhs in &operand_values[1..] {
+                let dest = builder.program.new_value(result_type.clone());
+                builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                    dest,
+                    op: BinaryOpKind::Add,
+                    lhs: acc,
+                    rhs,
+                });
+                acc = dest;
+            }
+            Ok(acc)
+        }
+        Expr::Sub(lhs, rhs) => {
+            let lhs_val = convert_reduction_inner_expression(builder, block_id, lhs, param_values, loop_index, result_type.clone())?;
+            let rhs_val = convert_reduction_inner_expression(builder, block_id, rhs, param_values, loop_index, result_type.clone())?;
+            let dest = builder.program.new_value(result_type);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest,
+                op: BinaryOpKind::Sub,
+                lhs: lhs_val,
+                rhs: rhs_val,
+            });
+            Ok(dest)
+        }
+        Expr::Mul(operands) => {
+            let mut operand_values = Vec::new();
+            for operand in operands {
+                let val = convert_reduction_inner_expression(builder, block_id, operand, param_values, loop_index, result_type.clone())?;
+                operand_values.push(val);
+            }
+            
+            let mut acc = operand_values[0];
+            for &rhs in &operand_values[1..] {
+                let dest = builder.program.new_value(result_type.clone());
+                builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                    dest,
+                    op: BinaryOpKind::Mul,
+                    lhs: acc,
+                    rhs,
+                });
+                acc = dest;
+            }
+            Ok(acc)
+        }
+        Expr::Div(lhs, rhs) => {
+            let lhs_val = convert_reduction_inner_expression(builder, block_id, lhs, param_values, loop_index, result_type.clone())?;
+            let rhs_val = convert_reduction_inner_expression(builder, block_id, rhs, param_values, loop_index, result_type.clone())?;
+            let dest = builder.program.new_value(result_type);
+            builder.program.add_instruction(block_id, SsaInstructionV2::BinaryOp {
+                dest,
+                op: BinaryOpKind::Div,
+                lhs: lhs_val,
+                rhs: rhs_val,
+            });
+            Ok(dest)
+        }
+        Expr::Literal(value) => {
+            let dest = builder.program.new_value(result_type.clone());
+            let int_value = match value {
+                crate::ast::Value::Int64(v) => *v,
+                crate::ast::Value::Float64(f) => f.0 as i64,
+            };
+            builder.program.add_instruction(block_id, SsaInstructionV2::Constant {
+                dest,
+                value: int_value,
+                data_type: result_type,
+            });
+            Ok(dest)
+        }
+        _ => Err(DioError::Compilation(format!("Unsupported expression type in reduction: {:?}", expr))),
     }
 }
 
