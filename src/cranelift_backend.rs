@@ -1,6 +1,6 @@
 use crate::error::DioError;
 use crate::ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue, 
-                BinaryOpKind, SsaInstructionV2, SsaBlockV2, SsaProgramV2};
+                BinaryOpKind, SsaInstructionV2, SsaProgramV2};
 use cranelift::prelude::*;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -800,7 +800,7 @@ impl CraneliftBackend {
 
         builder.finalize();
 
-        if env::var("DIO_DEBUG_JIT").is_ok() {
+        if env::var("DIO_DEBUG_JIT").is_ok() || env::var("DIO_DEBUG_PIPELINE").is_ok() {
             println!("--- Cranelift IR (SSA v2) ---");
             println!("{}", self.context.func.display());
             println!("------------------------------");

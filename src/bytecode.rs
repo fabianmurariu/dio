@@ -1,6 +1,7 @@
 use crate::ast::*;
 use crate::error::DioError;
-use crate::ssa::{SsaProgramV2, SsaInstructionV2, SsaValue, BlockId, DataType as SsaDataType};
+use crate::ssa::{SsaProgramV2, SsaInstructionV2, BlockId, DataType as SsaDataType};
+use std::fmt;
 
 /// ByteCode intermediate representation - C-like imperative code
 /// This bridges the gap between high-level vectorized Lisp and low-level SSA
@@ -261,10 +262,149 @@ fn convert_bytecode_to_ssa_datatype(data_type: &DataType) -> SsaDataType {
     }
 }
 
-/// Create a complete pipeline function: AST -> ByteCode -> SSA v2
+/// Display implementations for C-like syntax debugging
+impl fmt::Display for DataType {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            DataType::U64 => write!(f, "u64"),
+            DataType::I64 => write!(f, "i64"),
+            DataType::ArrayU64 => write!(f, "u64[]"),
+            DataType::ArrayI64 => write!(f, "i64[]"),
+        }
+    }
+}
+
+impl fmt::Display for InputParam {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.data_type, self.name)
+    }
+}
+
+impl fmt::Display for LocalVar {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        write!(f, "{} {}", self.data_type, self.name)
+    }
+}
+
+impl fmt::Display for Expression {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Expression::Variable(name) => write!(f, "{}", name),
+            Expression::Literal(value) => write!(f, "{}", value),
+            Expression::ArrayAccess { array, index } => write!(f, "{}[{}]", array, index),
+            Expression::BinaryOp { op, left, right } => {
+                write!(f, "({} {} {})", left, op, right)
+            }
+        }
+    }
+}
+
+impl fmt::Display for BinaryOperator {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            BinaryOperator::Add => write!(f, "+"),
+            BinaryOperator::Sub => write!(f, "-"),
+            BinaryOperator::Mul => write!(f, "*"),
+            BinaryOperator::Div => write!(f, "/"),
+            BinaryOperator::Lt => write!(f, "<"),
+        }
+    }
+}
+
+impl fmt::Display for Statement {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Statement::Assign { target, expr } => write!(f, "{} = {};", target, expr),
+            Statement::ArrayAssign { array, index, value } => {
+                write!(f, "{}[{}] = {};", array, index, value)
+            }
+            Statement::ForLoop { index_var, start, end, step, body } => {
+                writeln!(f, "for ({} = {}; {} < {}; {} += {}) {{", 
+                         index_var, start, index_var, end, index_var, step)?;
+                for stmt in body {
+                    writeln!(f, "  {}", stmt)?;
+                }
+                write!(f, "}}")
+            }
+            Statement::Return { value } => {
+                match value {
+                    Some(v) => write!(f, "return {};", v),
+                    None => write!(f, "return;"),
+                }
+            }
+        }
+    }
+}
+
+impl fmt::Display for ByteCodeProgram {
+    fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
+        // Function signature
+        write!(f, "function(")?;
+        for (i, input) in self.inputs.iter().enumerate() {
+            if i > 0 { write!(f, ", ")?; }
+            write!(f, "{}", input)?;
+        }
+        writeln!(f, ") -> {} {{", self.return_type)?;
+        
+        // Local variables
+        if !self.locals.is_empty() {
+            writeln!(f, "  // Local variables:")?;
+            for local in &self.locals {
+                writeln!(f, "  {};", local)?;
+            }
+            writeln!(f)?;
+        }
+        
+        // Statements
+        for stmt in &self.statements {
+            writeln!(f, "  {}", stmt)?;
+        }
+        
+        write!(f, "}}")
+    }
+}
+
+/// Create a complete pipeline function: AST -> ByteCode -> SSA v2 with optional debug tracing
 pub fn ast_to_ssa_v2_via_bytecode(expr: &Expr) -> Result<SsaProgramV2, DioError> {
+    if std::env::var("DIO_DEBUG_PIPELINE").is_ok() {
+        println!("=== PIPELINE DEBUG ===");
+        println!("--- Input AST ---");
+        println!("{}", expr);
+        println!();
+    }
+    
     let bytecode = ast_to_bytecode(expr)?;
-    bytecode_to_ssa_v2(&bytecode)
+    
+    if std::env::var("DIO_DEBUG_PIPELINE").is_ok() {
+        println!("--- ByteCode (C-like) ---");
+        println!("{}", bytecode);
+        println!();
+    }
+    
+    let ssa_program = bytecode_to_ssa_v2(&bytecode)?;
+    
+    if std::env::var("DIO_DEBUG_PIPELINE").is_ok() {
+        println!("--- SSA v2 ---");
+        println!("Entry block: {:?}", ssa_program.entry_block);
+        for (i, block) in ssa_program.blocks.iter().enumerate() {
+            let block_id = BlockId(i as u32); // Reconstruct BlockId from index
+            println!("Block {:?}:", block_id);
+            if !block.parameters.is_empty() {
+                print!("  Parameters: ");
+                for (j, (value, data_type)) in block.parameters.iter().enumerate() {
+                    if j > 0 { print!(", "); }
+                    print!("{:?}: {:?}", value, data_type);
+                }
+                println!();
+            }
+            for instruction in &block.instructions {
+                println!("  {:?}", instruction);
+            }
+        }
+        println!("======================");
+    }
+    
+    Ok(ssa_program)
 }
 
 #[cfg(test)]
