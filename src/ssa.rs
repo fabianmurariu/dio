@@ -123,8 +123,8 @@ pub enum SsaInstructionV2 {
     Store { address: SsaValue, offset: i32, value: SsaValue },
     
     // Control flow with explicit block parameters
-    Branch { condition: SsaValue, true_block: BlockId, false_block: BlockId },
-    Jump { target_block: BlockId },
+    Branch { condition: SsaValue, true_block: BlockId, false_block: BlockId, args: Vec<SsaValue> },
+    Jump { target_block: BlockId, args: Vec<SsaValue> },
     Return { value: Option<SsaValue> },
 }
 
@@ -361,7 +361,10 @@ fn convert_elementwise_lambda_v2(
     let exit_block = builder.program.new_block(vec![]);
 
     // Entry: jump to loop header with index = 0
-    builder.program.add_instruction(entry_block, SsaInstructionV2::Jump { target_block: loop_header });
+    builder.program.add_instruction(entry_block, SsaInstructionV2::Jump { 
+        target_block: loop_header, 
+        args: vec![zero_val] 
+    });
 
     // Loop header: check condition i < length  
     let condition_val = builder.program.new_value(DataType::Bool);
@@ -375,6 +378,7 @@ fn convert_elementwise_lambda_v2(
         condition: condition_val,
         true_block: loop_body,
         false_block: exit_block,
+        args: vec![loop_index_param], // Pass current index to loop body
     });
 
     // Loop body: perform elementwise operation
@@ -429,7 +433,10 @@ fn convert_elementwise_lambda_v2(
     });
 
     // Jump back to header with updated index
-    builder.program.add_instruction(loop_body, SsaInstructionV2::Jump { target_block: loop_header });
+    builder.program.add_instruction(loop_body, SsaInstructionV2::Jump { 
+        target_block: loop_header, 
+        args: vec![next_index] 
+    });
 
     // Exit block
     builder.program.add_instruction(exit_block, SsaInstructionV2::Return { value: None });
@@ -508,7 +515,10 @@ fn convert_reduction_lambda_v2(
     ]);
 
     // Entry: jump to loop header with initial values
-    builder.program.add_instruction(entry_block, SsaInstructionV2::Jump { target_block: loop_header });
+    builder.program.add_instruction(entry_block, SsaInstructionV2::Jump { 
+        target_block: loop_header, 
+        args: vec![zero_val, initial_acc] 
+    });
 
     // Loop header: check condition
     let condition_val = builder.program.new_value(DataType::Bool);
@@ -522,6 +532,7 @@ fn convert_reduction_lambda_v2(
         condition: condition_val,
         true_block: loop_body,
         false_block: exit_block,
+        args: vec![header_index_param, header_acc_param], // Pass index and accumulator
     });
 
     // Loop body: evaluate inner expression and update accumulator
@@ -565,7 +576,10 @@ fn convert_reduction_lambda_v2(
     });
 
     // Jump back to header with updated values
-    builder.program.add_instruction(loop_body, SsaInstructionV2::Jump { target_block: loop_header });
+    builder.program.add_instruction(loop_body, SsaInstructionV2::Jump { 
+        target_block: loop_header, 
+        args: vec![next_index, new_acc] 
+    });
 
     // Exit block: return final accumulator
     builder.program.add_instruction(exit_block, SsaInstructionV2::Return { value: Some(final_acc_param) });

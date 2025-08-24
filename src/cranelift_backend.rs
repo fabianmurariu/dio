@@ -652,10 +652,27 @@ impl CraneliftBackend {
             };
             block_map.insert(ssa_block.id, cranelift_block);
 
-            // Add block parameters
-            for (ssa_param, _data_type) in &ssa_block.parameters {
-                let cranelift_param = builder.append_block_param(cranelift_block, types::I64);
-                ssa_to_cranelift.insert(*ssa_param, cranelift_param);
+            // Add block parameters (skip entry block since its params come from function signature)
+            if ssa_block.id != program.entry_block {
+                for (ssa_param, _data_type) in &ssa_block.parameters {
+                    let cranelift_param = builder.append_block_param(cranelift_block, types::I64);
+                    ssa_to_cranelift.insert(*ssa_param, cranelift_param);
+                }
+            } else {
+                // Map entry block parameters to function parameters
+                let func_params = builder.block_params(entry_block);
+                for (i, (ssa_param, _data_type)) in ssa_block.parameters.iter().enumerate() {
+                    let func_param_idx = if is_reduction && i == 1 {
+                        // For reductions, map length parameter (SSA index 1) to function param 2
+                        2
+                    } else {
+                        i
+                    };
+                    
+                    if func_param_idx < func_params.len() {
+                        ssa_to_cranelift.insert(*ssa_param, func_params[func_param_idx]);
+                    }
+                }
             }
         }
 
@@ -726,46 +743,40 @@ impl CraneliftBackend {
                         };
                         builder.ins().store(MemFlags::trusted(), val, offset_val, 0);
                     }
-                    SsaInstructionV2::Branch { condition, true_block, false_block } => {
+                    SsaInstructionV2::Branch { condition, true_block, false_block, args } => {
                         let cond_val = ssa_to_cranelift[condition];
                         let true_cranelift_block = block_map[true_block];
                         let false_cranelift_block = block_map[false_block];
-                        builder.ins().brif(cond_val, true_cranelift_block, &[], false_cranelift_block, &[]);
-                    }
-                    SsaInstructionV2::Jump { target_block } => {
-                        let target_cranelift_block = block_map[target_block];
                         
-                        // We need to pass the right arguments when jumping
-                        // For now, pass empty args - this needs proper SSA value tracking
-                        let args = match ssa_block.id {
-                            // Entry block jumping to loop header - pass initial index (0)
-                            id if id == program.entry_block => {
-                                if let Some(target_block) = program.blocks.iter().find(|b| b.id == *target_block) {
-                                    if target_block.parameters.len() == 1 {
-                                        // Pass zero as initial loop index
-                                        let zero = ssa_to_cranelift.get(&SsaValue(4)).copied() // The zero constant we created
-                                            .or_else(|| ssa_to_cranelift.get(&SsaValue(2)).copied()) // Alternative zero constant
-                                            .unwrap_or_else(|| builder.ins().iconst(types::I64, 0));
-                                        vec![zero]
-                                    } else {
-                                        // Initial values for reduction: (zero_index, initial_accumulator)
-                                        let zero = builder.ins().iconst(types::I64, 0);
-                                        let initial_acc = builder.ins().iconst(types::I64, 0);
-                                        vec![zero, initial_acc]
-                                    }
-                                } else {
-                                    vec![]
-                                }
-                            }
-                            // Loop body jumping back to header - pass updated values
-                            _ => {
-                                // This is complex - for now pass empty and let it fail
-                                // TODO: Track which SSA values correspond to block parameters
-                                vec![]
-                            }
+                        // Convert SSA args to Cranelift values
+                        let cranelift_args: Vec<Value> = args.iter()
+                            .map(|&arg| ssa_to_cranelift[&arg])
+                            .collect();
+                        
+                        // Handle arguments for true and false blocks separately
+                        let false_block_info = program.blocks.iter().find(|b| b.id == *false_block);
+                        let false_block_param_count = false_block_info.map_or(0, |b| b.parameters.len());
+                        
+                        let false_args = if false_block_param_count == 0 {
+                            vec![]  // Exit block with no parameters
+                        } else if false_block_param_count == 1 && cranelift_args.len() == 2 {
+                            // Reduction case: exit block takes only accumulator (second argument)
+                            vec![cranelift_args[1]]
+                        } else {
+                            cranelift_args.clone()
                         };
                         
-                        builder.ins().jump(target_cranelift_block, &args);
+                        builder.ins().brif(cond_val, true_cranelift_block, &cranelift_args, false_cranelift_block, &false_args);
+                    }
+                    SsaInstructionV2::Jump { target_block, args } => {
+                        let target_cranelift_block = block_map[target_block];
+                        
+                        // Convert SSA args to Cranelift values
+                        let cranelift_args: Vec<Value> = args.iter()
+                            .map(|&arg| ssa_to_cranelift[&arg])
+                            .collect();
+                        
+                        builder.ins().jump(target_cranelift_block, &cranelift_args);
                     }
                     SsaInstructionV2::Return { value } => {
                         if let Some(return_val) = value {
