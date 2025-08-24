@@ -175,12 +175,14 @@ impl ByteCodeCompiler {
         });
         
         // For array returns, add output parameter
-        if ret_type.is_array() {
-            self.inputs.push(InputParam {
+        let output_param = if ret_type.is_array() {
+            Some(InputParam {
                 name: "output".to_string(),
                 data_type: ret_type.clone(),
-            });
-        }
+            })
+        } else {
+            None
+        };
         
         // Compile the lambda body into ByteCode statements
         match body {
@@ -402,17 +404,32 @@ impl ByteCodeCompiler {
 pub fn bytecode_to_ssa_v2(program: &ByteCodeProgram) -> Result<SsaProgramV2, DioError> {
     let mut ssa_program = SsaProgramV2::new();
     
-    // Create entry block parameters
+    // Create entry block parameters to match Cranelift backend signature
     let mut entry_params = Vec::new();
     let mut param_mapping = std::collections::HashMap::new();
-    
-    for input in &program.inputs {
-        let ssa_data_type = convert_bytecode_to_ssa_datatype(&input.data_type);
-        let ssa_value = ssa_program.new_value(ssa_data_type.clone());
-        entry_params.push((ssa_value, ssa_data_type));
-        param_mapping.insert(input.name.clone(), ssa_value);
+
+    // 1. inputs*: *mut *mut u64
+    let inputs_ptr = ssa_program.new_value(SsaDataType::U64);
+    entry_params.push((inputs_ptr, SsaDataType::U64));
+    param_mapping.insert("inputs".to_string(), inputs_ptr);
+
+    // 2. input_count: u64
+    let input_count = ssa_program.new_value(SsaDataType::U64);
+    entry_params.push((input_count, SsaDataType::U64));
+    param_mapping.insert("input_count".to_string(), input_count);
+
+    // 3. output*: *mut u64 (if elementwise)
+    if program.return_type.is_array() {
+        let output_ptr = ssa_program.new_value(SsaDataType::U64);
+        entry_params.push((output_ptr, SsaDataType::U64));
+        param_mapping.insert("output".to_string(), output_ptr);
     }
-    
+
+    // 4. length: u64
+    let length = ssa_program.new_value(SsaDataType::U64);
+    entry_params.push((length, SsaDataType::U64));
+    param_mapping.insert("length".to_string(), length);
+
     // Create entry block
     let entry_block_id = ssa_program.new_block(entry_params);
     ssa_program.entry_block = entry_block_id;
@@ -425,7 +442,7 @@ pub fn bytecode_to_ssa_v2(program: &ByteCodeProgram) -> Result<SsaProgramV2, Dio
         local_mapping: std::collections::HashMap::new(),
     };
     
-    converter.convert_statements(&program.statements, &program.locals)?;
+    converter.convert_statements(&program.statements, &program.locals, &program.inputs)?;
     
     Ok(ssa_program)
 }
@@ -438,12 +455,36 @@ struct ByteCodeToSsaConverter<'a> {
 }
 
 impl<'a> ByteCodeToSsaConverter<'a> {
-    fn convert_statements(&mut self, statements: &[Statement], locals: &[LocalVar]) -> Result<(), DioError> {
+    fn convert_statements(&mut self, statements: &[Statement], locals: &[LocalVar], inputs: &[InputParam]) -> Result<(), DioError> {
         // Initialize local variables
         for local in locals {
             let ssa_data_type = convert_bytecode_to_ssa_datatype(&local.data_type);
             let ssa_value = self.ssa_program.new_value(ssa_data_type);
             self.local_mapping.insert(local.name.clone(), ssa_value);
+        }
+
+        // Load array pointers from the inputs array
+        let inputs_ptr = self.param_mapping["inputs"];
+        for (i, input) in inputs.iter().enumerate() {
+            if input.data_type.is_array() {
+                let index_val = self.ssa_program.new_value_with_const(self.current_block, i as i64);
+                let array_ptr_addr = self.ssa_program.new_value(SsaDataType::U64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::GetElementPtr {
+                    dest: array_ptr_addr,
+                    address: inputs_ptr,
+                    index: index_val,
+                    element_size: 8,
+                });
+
+                let array_ptr = self.ssa_program.new_value(SsaDataType::U64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Load {
+                    dest: array_ptr,
+                    address: array_ptr_addr,
+                    offset: 0,
+                    data_type: SsaDataType::U64,
+                });
+                self.param_mapping.insert(input.name.clone(), array_ptr);
+            }
         }
         
         // Convert each statement
@@ -465,18 +506,22 @@ impl<'a> ByteCodeToSsaConverter<'a> {
                 let array_ssa = self.get_variable(array)?;
                 let index_ssa = self.convert_expression(index)?;
                 let value_ssa = self.convert_expression(value)?;
-                
-                // Implement array element store as: store_element(array_base, index, value)
-                // For SSA v2, we'll add this as a Store instruction
-                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Store {
+
+                // Calculate element address: GEP(array_ptr, index)
+                let element_addr = self.ssa_program.new_value(SsaDataType::U64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::GetElementPtr {
+                    dest: element_addr,
                     address: array_ssa,
-                    offset: 0, // We'll use the index for actual offset calculation in Cranelift
+                    index: index_ssa,
+                    element_size: 8, // Assuming 64-bit elements
+                });
+
+                // Store the value at the calculated address
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Store {
+                    address: element_addr,
+                    offset: 0,
                     value: value_ssa,
                 });
-                
-                // Note: This is a simplified implementation. In a full implementation,
-                // we'd need to calculate the proper memory offset: array_base + (index * element_size)
-                // For now, we're relying on Cranelift to handle the addressing
             }
             Statement::ForLoop { index_var, start, end, step: _, body } => {
                 // Convert for loop to SSA loop structure
@@ -603,17 +648,25 @@ impl<'a> ByteCodeToSsaConverter<'a> {
                 Ok(ssa_value)
             }
             Expression::ArrayAccess { array, index } => {
-                // Load array element: load(array_base + index * element_size)
                 let array_ssa = self.get_variable(array)?;
                 let index_ssa = self.convert_expression(index)?;
-                
-                // Create a Load instruction to get the array element
-                let element_value = self.ssa_program.new_value(crate::ssa::DataType::U64);
+
+                // Calculate element address: GEP(array_ptr, index)
+                let element_addr = self.ssa_program.new_value(SsaDataType::U64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::GetElementPtr {
+                    dest: element_addr,
+                    address: array_ssa,
+                    index: index_ssa,
+                    element_size: 8, // Assuming 64-bit elements
+                });
+
+                // Load the value from the calculated address
+                let element_value = self.ssa_program.new_value(SsaDataType::U64);
                 self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Load {
                     dest: element_value,
-                    address: array_ssa,
-                    offset: 0, // We'll use the index for actual offset calculation in Cranelift
-                    data_type: crate::ssa::DataType::U64,
+                    address: element_addr,
+                    offset: 0,
+                    data_type: SsaDataType::U64,
                 });
                 
                 Ok(element_value)

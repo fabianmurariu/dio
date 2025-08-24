@@ -44,7 +44,7 @@ impl CraneliftBackend {
             .func
             .signature
             .params
-            .push(AbiParam::new(types::I32)); // input_count
+            .push(AbiParam::new(types::I64)); // input_count
         
         if is_reduction {
             // For reductions, we return a scalar value instead of writing to output buffer
@@ -722,6 +722,18 @@ impl CraneliftBackend {
                             BinaryOpKind::Ne => builder.ins().icmp(IntCC::NotEqual, lhs_val, rhs_val),
                         };
                         ssa_to_cranelift.insert(*dest, result);
+                    }
+                    SsaInstructionV2::GetElementPtr { dest, address, index, element_size } => {
+                        let addr_val = ssa_to_cranelift[address];
+                        let index_val = ssa_to_cranelift[index];
+                        
+                        // offset = index * element_size
+                        let element_size_val = builder.ins().iconst(types::I64, *element_size as i64);
+                        let offset_val = builder.ins().imul(index_val, element_size_val);
+                        
+                        // element_addr = base_addr + offset
+                        let element_addr = builder.ins().iadd(addr_val, offset_val);
+                        ssa_to_cranelift.insert(*dest, element_addr);
                     }
                     SsaInstructionV2::Load { dest, address, offset, .. } => {
                         let addr_val = ssa_to_cranelift[address];

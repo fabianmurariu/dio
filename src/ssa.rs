@@ -119,6 +119,7 @@ pub enum SsaInstructionV2 {
     BinaryOp { dest: SsaValue, op: BinaryOpKind, lhs: SsaValue, rhs: SsaValue },
     
     // Memory operations
+    GetElementPtr { dest: SsaValue, address: SsaValue, index: SsaValue, element_size: u32 },
     Load { dest: SsaValue, address: SsaValue, offset: i32, data_type: DataType },
     Store { address: SsaValue, offset: i32, value: SsaValue },
     
@@ -170,6 +171,16 @@ impl SsaProgramV2 {
         self.next_value_id += 1;
         self.value_types.insert(value, data_type);
         value
+    }
+
+    pub fn new_value_with_const(&mut self, block_id: BlockId, value: i64) -> SsaValue {
+        let ssa_value = self.new_value(DataType::I64);
+        self.add_instruction(block_id, SsaInstructionV2::Constant {
+            dest: ssa_value,
+            value,
+            data_type: DataType::I64,
+        });
+        ssa_value
     }
 
     pub fn new_block(&mut self, parameters: Vec<(SsaValue, DataType)>) -> BlockId {
