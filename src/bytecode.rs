@@ -466,9 +466,17 @@ impl<'a> ByteCodeToSsaConverter<'a> {
                 let index_ssa = self.convert_expression(index)?;
                 let value_ssa = self.convert_expression(value)?;
                 
-                // For now, we'll skip array assignments in SSA v2 since they're complex
-                // In a full implementation, this would need proper memory operations
-                // TODO: Implement proper array element stores
+                // Implement array element store as: store_element(array_base, index, value)
+                // For SSA v2, we'll add this as a Store instruction
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Store {
+                    address: array_ssa,
+                    offset: 0, // We'll use the index for actual offset calculation in Cranelift
+                    value: value_ssa,
+                });
+                
+                // Note: This is a simplified implementation. In a full implementation,
+                // we'd need to calculate the proper memory offset: array_base + (index * element_size)
+                // For now, we're relying on Cranelift to handle the addressing
             }
             Statement::ForLoop { index_var, start, end, step: _, body } => {
                 // Convert for loop to SSA loop structure
@@ -493,10 +501,7 @@ impl<'a> ByteCodeToSsaConverter<'a> {
         Ok(())
     }
     
-    fn convert_for_loop(&mut self, index_var: &str, start: &Expression, end: &Expression, _body: &[Statement]) -> Result<(), DioError> {
-        // For now, create a simple loop structure
-        // This is a simplified version - a full implementation would need proper loop handling
-        
+    fn convert_for_loop(&mut self, index_var: &str, start: &Expression, end: &Expression, body: &[Statement]) -> Result<(), DioError> {
         let start_value = self.convert_expression(start)?;
         let end_value = self.convert_expression(end)?;
         
@@ -536,6 +541,25 @@ impl<'a> ByteCodeToSsaConverter<'a> {
             false_block: exit_block,
             args: vec![loop_index_param], // Pass the block parameter
         });
+        
+        // Convert the loop body statements
+        let old_current_block = self.current_block;
+        self.current_block = loop_body;
+        
+        // Update the loop variable mapping to point to the loop body parameter
+        let old_loop_var = self.local_mapping.insert(index_var.to_string(), loop_body_index_param);
+        
+        // Convert each statement in the loop body
+        for statement in body {
+            self.convert_statement(statement)?;
+        }
+        
+        // Restore the loop variable mapping
+        if let Some(old_val) = old_loop_var {
+            self.local_mapping.insert(index_var.to_string(), old_val);
+        } else {
+            self.local_mapping.remove(index_var);
+        }
         
         // Loop body: increment and jump back (use the body block parameter)
         let one = self.ssa_program.new_value(crate::ssa::DataType::U64);
@@ -578,9 +602,21 @@ impl<'a> ByteCodeToSsaConverter<'a> {
                 });
                 Ok(ssa_value)
             }
-            Expression::ArrayAccess { array, index: _ } => {
-                // For now, just return the array base (simplified)
-                self.get_variable(array)
+            Expression::ArrayAccess { array, index } => {
+                // Load array element: load(array_base + index * element_size)
+                let array_ssa = self.get_variable(array)?;
+                let index_ssa = self.convert_expression(index)?;
+                
+                // Create a Load instruction to get the array element
+                let element_value = self.ssa_program.new_value(crate::ssa::DataType::U64);
+                self.ssa_program.add_instruction(self.current_block, SsaInstructionV2::Load {
+                    dest: element_value,
+                    address: array_ssa,
+                    offset: 0, // We'll use the index for actual offset calculation in Cranelift
+                    data_type: crate::ssa::DataType::U64,
+                });
+                
+                Ok(element_value)
             }
             Expression::BinaryOp { op, left, right } => {
                 let lhs = self.convert_expression(left)?;

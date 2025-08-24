@@ -11,7 +11,7 @@ pub mod ssa;
 pub use ast::{Expr, Type, TypedParam, Value};
 pub use error::{DioError, ParseError};
 pub use execution::{
-    clear_function_cache, execute_generic, execute_generic_cached, CompiledFunction,
+    clear_function_cache, execute_generic, execute_generic_cached, execute_generic_bytecode, CompiledFunction,
 };
 pub use parser::parse_expr;
 pub use ssa::{BlockId, SsaInstruction, SsaProgram, SsaValue, 

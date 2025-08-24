@@ -159,6 +159,46 @@ pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRe
     buffer_to_array_ref(output_buffer, &output_arrow_type)
 }
 
+/// Execute function using the new ByteCode pipeline: AST -> ByteCode -> SSA v2 -> Cranelift
+pub fn execute_generic_bytecode(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRef, DioError> {
+    if input_arrays.is_empty() {
+        return Err(DioError::Runtime(
+            "Must provide at least one input array".to_string(),
+        ));
+    }
+    let array_length = input_arrays[0].len();
+    for array in input_arrays.iter().skip(1) {
+        if array.len() != array_length {
+            return Err(DioError::Runtime(
+                "All input arrays must have the same length".to_string(),
+            ));
+        }
+    }
+
+    let dio_types: Result<Vec<_>, _> = input_arrays
+        .iter()
+        .map(|array| crate::array_support::arrow_type_to_dio_array(array.data_type()))
+        .collect();
+    let dio_types = dio_types?;
+
+    let output_type = coerce_nary_op_types(&dio_types)?;
+    let output_arrow_type = dio_type_to_arrow(&output_type)?;
+
+    let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
+    
+    // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2
+    let ssa_program_v2 = crate::bytecode::ast_to_ssa_v2_via_bytecode(expr)?;
+    let mut backend = CraneliftBackend::new()?;
+    let code_ptr = backend.compile_v2(&ssa_program_v2)?;
+
+    let compiled_fn = CompiledFunction::new(code_ptr);
+    unsafe {
+        compiled_fn.call_nary_op(input_arrays, &mut output_buffer)?;
+    }
+
+    buffer_to_array_ref(output_buffer, &output_arrow_type)
+}
+
 /// Cached generic execute function using Arrow ArrayRef with function caching
 pub fn execute_generic_cached(
     expr: &Expr,
@@ -301,7 +341,9 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        
+        // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2 -> Cranelift
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(result_u64.values(), &[11, 22, 33, 44, 55]);
     }
