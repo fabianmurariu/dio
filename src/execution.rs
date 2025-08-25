@@ -7,7 +7,7 @@ use crate::casting::coerce_nary_op_types;
 use crate::cranelift_backend::CraneliftBackend;
 use crate::error::DioError;
 use crate::ssa::ast_to_ssa;
-use arrow::array::ArrayRef;
+use arrow::array::{ArrayRef, Scalar};
 use arrow::buffer::MutableBuffer;
 use std::collections::HashMap;
 use std::sync::{LazyLock, Mutex};
@@ -160,7 +160,10 @@ pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRe
 }
 
 /// Execute function using the new ByteCode pipeline: AST -> ByteCode -> SSA v2 -> Cranelift
-pub fn execute_generic_bytecode(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRef, DioError> {
+pub fn execute_generic_bytecode(
+    expr: &Expr,
+    input_arrays: &[ArrayRef],
+) -> Result<ArrayRef, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(
             "Must provide at least one input array".to_string(),
@@ -185,7 +188,7 @@ pub fn execute_generic_bytecode(expr: &Expr, input_arrays: &[ArrayRef]) -> Resul
     let output_arrow_type = dio_type_to_arrow(&output_type)?;
 
     let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
-    
+
     // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2
     let ssa_program_v2 = crate::bytecode::ast_to_ssa_v2_via_bytecode(expr)?;
     let mut backend = CraneliftBackend::new()?;
@@ -341,7 +344,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
-        
+
         // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2 -> Cranelift
         let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
@@ -503,7 +506,9 @@ mod tests {
 
     #[test]
     fn test_execute_reduction_sum_ternary_addition() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (sum (+ a b c)))").unwrap();
+        let expr =
+            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (sum (+ a b c)))")
+                .unwrap();
         let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
         let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
@@ -535,11 +540,11 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
-        
+
         // First call
         let result1 = execute_reduction_cached(&expr, &[a.clone(), b.clone()]).unwrap();
         assert_eq!(result1, 33); // (1+10) + (2+20) = 11 + 22 = 33
-        
+
         // Second call should use cached version
         let result2 = execute_reduction_cached(&expr, &[a, b]).unwrap();
         assert_eq!(result2, 33);

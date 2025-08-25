@@ -81,10 +81,7 @@ fn list_expression(input: &str) -> IResult<&str, Expr> {
 
 /// Parse atomic expressions (literals, column references)
 fn atom(input: &str) -> IResult<&str, Expr> {
-    alt((
-        map(number, Expr::Literal),
-        map(identifier, Expr::Column),
-    ))(input)
+    alt((map(number, Expr::Literal), map(identifier, Expr::Column)))(input)
 }
 
 /// Parse addition: (+ expr1 expr2 ...)
@@ -168,7 +165,7 @@ fn parse_sum(input: &str) -> IResult<&str, Expr> {
     Ok((input, Expr::Sum(Box::new(operands[0].clone()))))
 }
 
-/// Parse count reduction: (count expr)  
+/// Parse count reduction: (count expr)
 fn parse_count(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("count")(input)?;
     let (input, operands) = cut(parse_expression_list)(input)?;
