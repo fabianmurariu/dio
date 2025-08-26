@@ -1,8 +1,8 @@
+use arrow::array::{Int64Array, UInt64Array};
 use dio::{
     array_support::{create_i64_array_from_vec, create_u64_array_from_vec},
     execute_generic_cached, parse_expr,
 };
-use arrow::array::{Int64Array, UInt64Array};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     println!("🔢 Dio Mixed Type Support Demo");
@@ -82,4 +82,3 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
 
     Ok(())
 }
-

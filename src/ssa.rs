@@ -1,13 +1,35 @@
+//! SSA (Static Single Assignment) Intermediate Representation - V1
+//! 
+//! # Deprecated
+//! This module contains the original SSA v1 IR implementation which has been superseded
+//! by the new ByteCode -> SSA v2 pipeline. The new pipeline provides better debuggability
+//! through the intermediate ByteCode representation and more consistent code generation.
+//! 
+//! All functions and types in this module are deprecated in favor of the new pipeline:
+//! - `ast_to_ssa()` -> Use `ast_to_ssa_v2_via_bytecode()` from bytecode.rs
+//! - `SsaProgram` -> Use `SsaProgramV2` from bytecode.rs
+//! - `SsaInstruction` -> Use `SsaInstructionV2` from bytecode.rs
+
 use crate::ast::{Expr, Type, TypedParam};
 use crate::casting::coerce_nary_op_types;
 use crate::error::DioError;
 use std::collections::HashMap;
 
 /// SSA Value identifier
+/// 
+/// # Deprecated
+/// This type is part of the deprecated SSA v1 pipeline. Use `SsaValue` from the SSA v2 
+/// implementation in bytecode.rs instead.
+#[deprecated(since = "0.2.0", note = "Use SsaValue from bytecode.rs SSA v2 implementation")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
 pub struct SsaValue(pub u32);
 
 /// Basic Block identifier
+/// 
+/// # Deprecated  
+/// This type is part of the deprecated SSA v1 pipeline. Use `BlockId` from the SSA v2
+/// implementation in bytecode.rs instead.
+#[deprecated(since = "0.2.0", note = "Use BlockId from bytecode.rs SSA v2 implementation")]
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash, Default)]
 pub struct BlockId(pub u32);
 
@@ -54,6 +76,11 @@ pub struct SsaBlock {
 }
 
 /// Complete SSA program
+/// 
+/// # Deprecated
+/// This type is part of the deprecated SSA v1 pipeline. Use `SsaProgramV2` from the
+/// new ByteCode -> SSA v2 pipeline instead.
+#[deprecated(since = "0.2.0", note = "Use SsaProgramV2 from bytecode.rs instead")]
 #[derive(Debug, Clone, Default)]
 pub struct SsaProgram {
     pub blocks: HashMap<BlockId, SsaBlock>,
@@ -658,6 +685,11 @@ fn convert_inner_expression_v2(
 }
 
 /// Convert AST to SSA IR
+/// 
+/// # Deprecated
+/// This function is deprecated in favor of `ast_to_ssa_v2_via_bytecode()` from bytecode.rs
+/// which uses the new Lisp -> ByteCode -> SSA v2 pipeline.
+#[deprecated(since = "0.2.0", note = "Use `ast_to_ssa_v2_via_bytecode()` from bytecode.rs instead")]
 pub fn ast_to_ssa(expr: &Expr) -> Result<SsaProgram, DioError> {
     if let Expr::Lambda { params, return_type, body } = expr {
         convert_typed_lambda(params, return_type, body)

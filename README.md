@@ -1,168 +1,174 @@
-# Dio Expression Evaluator
+# Dio v3: JIT Compiled Columnar Expression Evaluator
 
-A high-performance JIT compiled columnar expression evaluator for arithmetic operations on Apache Arrow arrays.
+A high-performance JIT compiled columnar expression evaluator that transforms arithmetic expressions written in a Lisp-like DSL into optimized machine code using a multi-stage compilation pipeline.
 
-## Phase 1: Lisp Parser to AST ✅
+## 📚 **NEW: Complete Documentation Available**
 
-This phase implements a robust parser for Lisp-like arithmetic expressions, converting them into an Abstract Syntax Tree (AST).
+**📖 [Read the full Dio v3 documentation →](docs/dio3.md)**
 
-### Features Implemented
+**⚡ [Understanding Generic Execution →](docs/generic_execution.md)**
 
-- **Complete Lisp Expression Parser** using nom combinators
-- **Rich AST** with support for:
-  - Column references (`a`, `column_name`)
-  - Numeric literals (integers and floats with scientific notation)
-  - Arithmetic operations (`+`, `-`, `*`, `/`)
-  - Reduction operations (`sum`, `count`)
-  - Variable bindings (`let`)
-- **Comprehensive Error Handling** with detailed error messages
-- **Property-based Testing** with proptest for robustness
-- **Zero-copy Parsing** for optimal performance
+The new documentation covers:
+- Complete architecture overview of the new ByteCode pipeline
+- Detailed explanation of all compilation stages
+- Performance characteristics and optimization opportunities  
+- Getting started guide for new contributors
+- Comprehensive API reference
 
-### Expression Syntax
+## 🆕 New ByteCode Pipeline (v3)
 
-#### Basic Operations
-```lisp
-a                          ; Column reference
-42                         ; Integer literal
-3.14                       ; Float literal  
-1.5e-3                     ; Scientific notation
+Dio v3 introduces a revolutionary **4-stage compilation pipeline**:
 
-(+ a b c)                  ; N-ary addition
-(- x y)                    ; Binary subtraction
-(* price 1.1)              ; N-ary multiplication
-(/ total count)            ; Binary division
+```
+Lisp Expression → ByteCode IR → SSA v2 IR → Cranelift IR → Native Machine Code
 ```
 
-#### Reductions
-```lisp
-(sum sales)                ; Sum reduction
-(count records)            ; Count reduction
-(sum (+ price tax))        ; Sum of expression
-```
+### Key Features
 
-#### Nested Expressions
-```lisp
-(+ a (* b 2))                              ; Simple nesting
-(/ (sum revenue) (count customers))        ; Average pattern
-(sum (+ price (* quantity discount)))      ; Complex expression
-```
+- **🔍 Debuggable Pipeline**: Full visibility into every transformation stage
+- **🚀 Zero-Copy Execution**: Direct Arrow array pointer passing
+- **⚡ Unified Code Generation**: Both elementwise and reductions use consistent patterns
+- **🎯 Direct Type Extraction**: Lambda expressions provide explicit return types
+- **🔄 Expression Caching**: Compiled functions cached by expression hash
 
-#### Variable Bindings (Future)
-```lisp
-(let tmp (+ a b))          ; Variable binding
-```
-
-### Usage
+### Quick Start
 
 ```rust
-use dio::parse_expr;
+use dio::{parse_expr, execute_generic_bytecode};
+use dio::array_support::create_u64_array_from_vec;
 
 fn main() {
-    // Parse a simple expression
-    let expr = parse_expr("(+ a (* b 2))").unwrap();
-    println!("Parsed: {}", expr);
+    // Parse a Lambda expression with explicit types
+    let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
     
-    // Check expression properties
-    if expr.is_elementwise() {
-        println!("This is an elementwise operation");
-    }
+    // Create input arrays
+    let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
+    let b = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
     
-    let columns = expr.get_column_references();
-    println!("Columns used: {:?}", columns);
-    
-    println!("Complexity: {}", expr.complexity());
+    // Execute using the new ByteCode pipeline
+    let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+    println!("Result: {:?}", result); // [11, 22, 33, 44, 55]
 }
 ```
 
-### Error Handling
+### Lambda Expression Syntax
 
-The parser provides detailed error messages with source location information:
+Dio v3 uses **typed Lambda expressions** for explicit type information:
 
-```rust
-match parse_expr("(+ a b") {
-    Ok(expr) => println!("Success: {}", expr),
-    Err(e) => println!("Error: {}", e),
-}
+```lisp
+; Elementwise addition
+(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))
+
+; Elementwise operations with multiple operands
+(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))
+
+; Reduction operations (unified as length-1 vectors)
+(lambda ([U64Array a] U64) (sum a))
+(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))
+
+; Mixed operations
+(lambda ([U64Array x] [U64Array y] U64Array) (+ (* x 2) y))
 ```
 
-Example error output:
-```
-Parse error: Expected 'character', found ' '
-```
+**Supported Types:**
+- `U64Array`, `I64Array` - Array types for unsigned/signed 64-bit integers
+- `U64`, `I64` - Scalar types (for reduction results)
 
-### Testing
+## 🔧 Development
 
-Run the comprehensive test suite:
+### Debug Pipeline Transformations
+
+Enable debug tracing to see transformations at each stage:
 
 ```bash
+DIO_DEBUG_PIPELINE=1 cargo test test_generic_execute_binary_u64 -- --nocapture
+```
+
+Example output:
+```
+=== PIPELINE DEBUG ===
+--- Input AST ---
+(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))
+
+--- ByteCode (C-like) ---
+function(u64[] a, u64[] b, u64 length) -> u64[] {
+  for (i = 0; i < length; i += 1) {
+    output[i] = (a[i] + b[i]);
+  }
+  return;
+}
+
+--- SSA v2 ---
+Entry block: BlockId(0)
+Block BlockId(0):
+  Parameters: SsaValue(0): U64, ...
+
+--- Cranelift IR (SSA v2) ---
+function u0:0(i64, i64, i64, i64) apple_aarch64 {
+  ...
+}
+```
+
+### Build Commands
+
+```bash
+# Build the project
+cargo build
+
+# Run all tests
 cargo test
+
+# Run specific test with debug output  
+DIO_DEBUG_PIPELINE=1 cargo test test_name -- --nocapture
+
+# Check compilation without building
+cargo check
 ```
 
-Run the interactive demo:
-```bash
-cargo run --example basic_parser
+## 🏗️ Architecture
+
+The v3 pipeline provides significant improvements:
+
+### Before v3 (Deprecated):
 ```
-
-### Performance
-
-- **Zero-copy parsing**: Input strings are parsed without allocation
-- **Efficient AST**: Compact representation with minimal overhead
-- **Fast combinators**: nom-based parser is highly optimized
-- **Property testing**: Ensures correctness across diverse inputs
-
-### Architecture
-
+Lisp → SSA v1 → Cranelift → Machine Code
 ```
-Input String → nom Parser → AST (Expr enum)
+- Complex type inference
+- Separate code paths for elementwise/reductions
+- Limited debuggability
+
+### v3 Pipeline:
 ```
-
-The parser uses nom combinators for:
-- **Whitespace handling**: Flexible whitespace between tokens
-- **Error recovery**: Meaningful error messages with cut combinators
-- **Recursive parsing**: Proper handling of nested expressions
-- **Type-safe parsing**: Strong typing throughout the pipeline
-
-### AST Structure
-
-```rust
-pub enum Expr {
-    Column(String),                    // Column reference
-    Literal(Value),                    // Numeric literal
-    Add(Vec<Expr>),                    // N-ary addition
-    Sub(Box<Expr>, Box<Expr>),         // Binary subtraction
-    Mul(Vec<Expr>),                    // N-ary multiplication
-    Div(Box<Expr>, Box<Expr>),         // Binary division
-    Sum(Box<Expr>),                    // Sum reduction
-    Count(Box<Expr>),                  // Count reduction
-    Let(String, Box<Expr>),            // Variable binding
-}
-
-pub enum Value {
-    Int64(i64),                        // Integer values
-    Float64(OrderedFloat64),           // Float values (with Eq/Hash)
-}
+Lisp → ByteCode → SSA v2 → Cranelift → Machine Code
 ```
+- Direct Lambda return type usage  
+- Unified vector approach (reductions as length-1 arrays)
+- Full pipeline visibility with debug tracing
+- Consistent code generation patterns
 
-### What's Next
+## 📖 Documentation
 
-This parser implementation is the foundation for the complete Dio expression evaluator. Future phases will add:
+- **[docs/dio3.md](docs/dio3.md)** - Complete project documentation
+- **[docs/generic_execution.md](docs/generic_execution.md)** - Generic execution system details
 
-1. **SSA IR Generation**: Convert AST to Static Single Assignment form
-2. **Optimization Passes**: Dead code elimination, common subexpression elimination
-3. **Cranelift Integration**: JIT compilation to machine code
-4. **Arrow Integration**: Zero-copy execution on columnar data
-5. **Advanced Features**: Null handling, more data types, SIMD optimization
+## 🧪 Current Status
 
-See `docs/dio1.md` for the complete architecture plan.
+### ✅ Working Features
+- **Elementwise Operations**: `+`, `-`, `*`, `/` with proper array indexing
+- **Debug Pipeline**: Complete visibility into all transformation stages
+- **Type System**: Robust typed Lambda expressions  
+- **Zero-Copy Execution**: Direct Arrow array pointer passing
+- **Unified Approach**: Both elementwise and reductions use consistent patterns
 
-## Dependencies
+### 🚧 Known Issues
+- **Reduction SSA Generation**: Variable scoping across loop boundaries needs phi nodes
+- **Limited Type Support**: Currently only U64/I64 integers
 
-- **nom**: Parser combinators for flexible, efficient parsing
-- **thiserror**: Ergonomic error handling
-- **ariadne**: Beautiful diagnostic error reporting
-- **proptest**: Property-based testing for robustness
+### 📋 Future Enhancements
+- **Additional Types**: F64 floating point support
+- **More Operations**: Comparison operators, conditional expressions
+- **Advanced Optimizations**: Loop unrolling, vectorization hints
 
-## License
+## 📄 License
 
 This project is part of the Dio expression evaluator research implementation.

@@ -122,6 +122,12 @@ impl CompiledFunction {
 }
 
 /// Generic execute function using Arrow ArrayRef with N-ary operations and type erasure
+/// 
+/// # Deprecated
+/// This function is deprecated in favor of `execute_generic_bytecode()` which uses the new
+/// Lisp -> ByteCode -> SSA v2 -> Cranelift pipeline. The old pipeline (Lisp -> SSA v1 -> Cranelift)
+/// has been superseded by the more maintainable and debuggable ByteCode intermediate representation.
+#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` instead")]
 pub fn execute_generic(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<ArrayRef, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(
@@ -218,6 +224,11 @@ pub fn execute_generic_bytecode(
 }
 
 /// Cached generic execute function using Arrow ArrayRef with function caching
+/// 
+/// # Deprecated
+/// This function is deprecated in favor of the new ByteCode pipeline. Caching will be
+/// integrated into `execute_generic_bytecode()` in a future version.
+#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` instead")]
 pub fn execute_generic_cached(
     expr: &Expr,
     input_arrays: &[ArrayRef],
@@ -270,6 +281,12 @@ pub fn execute_generic_cached(
 }
 
 /// Execute a reduction operation, returning a scalar value
+/// 
+/// # Deprecated
+/// This function is deprecated in favor of `execute_generic_bytecode()` which treats reductions
+/// as length-1 arrays internally, providing a unified code generation approach for both
+/// elementwise operations and reductions.
+#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` with length-1 arrays instead")]
 pub fn execute_reduction(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(
@@ -294,6 +311,11 @@ pub fn execute_reduction(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, 
 }
 
 /// Execute a reduction operation with caching
+/// 
+/// # Deprecated
+/// This function is deprecated in favor of `execute_generic_bytecode()` which treats reductions
+/// as length-1 arrays internally, providing a unified code generation approach.
+#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` with length-1 arrays instead")]
 pub fn execute_reduction_cached(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(

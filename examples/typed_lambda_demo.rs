@@ -1,6 +1,6 @@
-use dio::{execute_generic_cached, parse_expr};
-use dio::array_support::create_u64_array_from_vec;
 use arrow::array::UInt64Array;
+use dio::array_support::create_u64_array_from_vec;
+use dio::{execute_generic_cached, parse_expr};
 
 fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Parse a typed lambda expression
@@ -17,7 +17,6 @@ fn main() -> Result<(), Box<dyn std::error::Error>> {
     // Convert to Arrow arrays
     let x_array = create_u64_array_from_vec(x_vec.clone())?;
     let y_array = create_u64_array_from_vec(y_vec.clone())?;
-
 
     println!("Input arrays:");
     println!("  x = {x_vec:?}");
