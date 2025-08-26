@@ -353,10 +353,14 @@ impl ByteCodeCompiler {
             body: loop_body,
         });
 
-        // Return the accumulator
-        self.statements.push(Statement::Return {
-            value: Some(Expression::Variable(acc_var)),
+        // Simplification 2: Treat reductions as length-1 vectors - store result in output[0]
+        self.statements.push(Statement::ArrayAssign {
+            array: "output".to_string(),
+            index: Expression::Literal(0),
+            value: Expression::Variable(acc_var),
         });
+        // Return void (no explicit return value needed)
+        self.statements.push(Statement::Return { value: None });
 
         Ok(())
     }
@@ -447,12 +451,10 @@ pub fn bytecode_to_ssa_v2(program: &ByteCodeProgram) -> Result<SsaProgramV2, Dio
     entry_params.push((input_count, SsaDataType::U64));
     param_mapping.insert("input_count".to_string(), input_count);
 
-    // 3. output*: *mut u64 (if elementwise)
-    if program.return_type.is_array() {
-        let output_ptr = ssa_program.new_value(SsaDataType::U64);
-        entry_params.push((output_ptr, SsaDataType::U64));
-        param_mapping.insert("output".to_string(), output_ptr);
-    }
+    // 3. output*: *mut u64 (always needed since both elementwise and reductions write to output)  
+    let output_ptr = ssa_program.new_value(SsaDataType::U64);
+    entry_params.push((output_ptr, SsaDataType::U64));
+    param_mapping.insert("output".to_string(), output_ptr);
 
     // 4. length: u64
     let length = ssa_program.new_value(SsaDataType::U64);
@@ -982,8 +984,8 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let bytecode = ast_to_bytecode(&expr).unwrap();
 
-        // Should have: a, b, length, output parameters
-        assert_eq!(bytecode.inputs.len(), 4);
+        // Should have: a, b, length parameters (output is now handled via direct assignments)
+        assert_eq!(bytecode.inputs.len(), 3);
         assert_eq!(bytecode.return_type, DataType::ArrayU64);
     }
 

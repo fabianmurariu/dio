@@ -178,16 +178,31 @@ pub fn execute_generic_bytecode(
         }
     }
 
-    let dio_types: Result<Vec<_>, _> = input_arrays
-        .iter()
-        .map(|array| crate::array_support::arrow_type_to_dio_array(array.data_type()))
-        .collect();
-    let dio_types = dio_types?;
-
-    let output_type = coerce_nary_op_types(&dio_types)?;
+    // Simplification 1: Extract output type directly from Lambda return_type
+    let (output_type, output_length) = match expr {
+        Expr::Lambda { return_type, body, .. } => {
+            // Simplification 2: Treat reductions as length-1 vectors instead of scalars
+            let is_reduction = matches!(**body, Expr::Sum(_) | Expr::Count(_));
+            if is_reduction && return_type.is_scalar() {
+                // For reductions with scalar return type, create a length-1 array internally
+                let array_type = match return_type {
+                    Type::U64 => Type::U64Array,
+                    Type::I64 => Type::I64Array,
+                    Type::F64 => Type::F64Array,
+                    _ => return_type.clone(),
+                };
+                (array_type, 1)
+            } else {
+                (return_type.clone(), array_length)
+            }
+        },
+        _ => return Err(DioError::Runtime(
+            "execute_generic_bytecode expects a Lambda expression".to_string(),
+        )),
+    };
     let output_arrow_type = dio_type_to_arrow(&output_type)?;
 
-    let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
+    let mut output_buffer = create_output_buffer(&output_arrow_type, output_length)?;
 
     // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2
     let ssa_program_v2 = crate::bytecode::ast_to_ssa_v2_via_bytecode(expr)?;
