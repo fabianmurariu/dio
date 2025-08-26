@@ -11,12 +11,12 @@ pub mod ssa;
 pub use ast::{Expr, Type, TypedParam, Value};
 pub use error::{DioError, ParseError};
 pub use execution::{
-    // Deprecated old pipeline functions
-    clear_function_cache,
-    execute_generic,
     // New ByteCode pipeline (recommended)
     execute_generic_bytecode,
     execute_generic_cached,
+    // Deprecated old pipeline functions (but still exported for backward compatibility)
+    clear_function_cache,
+    execute_generic,
     // Still needed for internal use
     CompiledFunction,
 };

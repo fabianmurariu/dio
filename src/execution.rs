@@ -227,12 +227,7 @@ pub fn execute_generic_bytecode(
     buffer_to_array_ref(output_buffer, &output_arrow_type)
 }
 
-/// Cached generic execute function using Arrow ArrayRef with function caching
-///
-/// # Deprecated
-/// This function is deprecated in favor of the new ByteCode pipeline. Caching will be
-/// integrated into `execute_generic_bytecode()` in a future version.
-#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` instead")]
+/// Cached generic execute function using the new ByteCode pipeline with function caching
 pub fn execute_generic_cached(
     expr: &Expr,
     input_arrays: &[ArrayRef],
@@ -251,31 +246,58 @@ pub fn execute_generic_cached(
         }
     }
 
+    // Simplification 1: Extract output type directly from Lambda return_type
+    let (output_type, output_length) = match expr {
+        Expr::Lambda {
+            return_type, body, ..
+        } => {
+            // Simplification 2: Treat reductions as length-1 vectors instead of scalars
+            let is_reduction = matches!(**body, Expr::Sum(_) | Expr::Count(_));
+            if is_reduction && return_type.is_scalar() {
+                // For reductions with scalar return type, create a length-1 array internally
+                let array_type = match return_type {
+                    Type::U64 => Type::U64Array,
+                    Type::I64 => Type::I64Array,
+                    Type::F64 => Type::F64Array,
+                    _ => return_type.clone(),
+                };
+                (array_type, 1)
+            } else {
+                (return_type.clone(), array_length)
+            }
+        }
+        _ => {
+            return Err(DioError::Runtime(
+                "execute_generic_cached expects a Lambda expression".to_string(),
+            ))
+        }
+    };
+    let output_arrow_type = dio_type_to_arrow(&output_type)?;
+
+    // Create cache signature using extracted types
     let dio_types: Result<Vec<_>, _> = input_arrays
         .iter()
         .map(|array| crate::array_support::arrow_type_to_dio_array(array.data_type()))
         .collect();
     let dio_types = dio_types?;
-
-    let output_type = coerce_nary_op_types(&dio_types)?;
-    let output_arrow_type = dio_type_to_arrow(&output_type)?;
-
     let signature = FunctionSignature::new(dio_types, output_type.clone(), expr);
 
+    // Check cache or compile using new ByteCode pipeline
     let code_ptr = {
         let mut cache = FUNCTION_CACHE.lock().unwrap();
         if let Some(ptr) = cache.get(&signature) {
             ptr.as_ptr()
         } else {
-            let ssa_program = ast_to_ssa(expr)?;
+            // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2
+            let ssa_program_v2 = crate::bytecode::ast_to_ssa_v2_via_bytecode(expr)?;
             let mut backend = CraneliftBackend::new()?;
-            let new_code_ptr = backend.compile(&ssa_program)?;
+            let new_code_ptr = backend.compile_v2(&ssa_program_v2)?;
             cache.insert(signature, SafeFunctionPtr::new(new_code_ptr));
             new_code_ptr
         }
     };
 
-    let mut output_buffer = create_output_buffer(&output_arrow_type, array_length)?;
+    let mut output_buffer = create_output_buffer(&output_arrow_type, output_length)?;
     let compiled_fn = CompiledFunction::new(code_ptr);
     unsafe {
         compiled_fn.call_nary_op(input_arrays, &mut output_buffer)?;
@@ -497,7 +519,7 @@ mod tests {
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
         let c = create_u64_array_from_vec(vec![100, 200, 300]).unwrap();
-        let result = execute_generic(&expr, &[a, b, c]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
         let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(result_u64.values(), &[111, 222, 333]);
     }
@@ -512,7 +534,7 @@ mod tests {
         let x = create_i64_array_from_vec(vec![10, 20]).unwrap();
         let y = create_u64_array_from_vec(vec![100, 200]).unwrap();
         let z = create_i64_array_from_vec(vec![1000, 2000]).unwrap();
-        let result = execute_generic(&expr, &[w, x, y, z]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[w, x, y, z]).unwrap();
         let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result_i64.values(), &[1111, 2222]);
     }
@@ -538,7 +560,9 @@ mod tests {
     fn test_execute_reduction_sum_single_array() {
         let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3, 4]).unwrap();
-        let result = execute_reduction(&expr, &[a]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 10); // 1 + 2 + 3 + 4 = 10
     }
 
@@ -547,7 +571,9 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
     }
 
@@ -559,7 +585,9 @@ mod tests {
         let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
         let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
         let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
-        let result = execute_reduction(&expr, &[a, b, c]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 333); // (1+10+100) + (2+20+200) = 111 + 222 = 333
     }
 
@@ -568,7 +596,9 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64) (sum (+ a b)))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_i64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
     }
 
@@ -577,7 +607,9 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (- a b)))").unwrap();
         let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
         let b = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let result = execute_reduction(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 54); // (10-1) + (20-2) + (30-3) = 9 + 18 + 27 = 54
     }
 
@@ -589,11 +621,15 @@ mod tests {
         let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
 
         // First call
-        let result1 = execute_reduction_cached(&expr, &[a.clone(), b.clone()]).unwrap();
+        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
+        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result1 = result1_u64.value(0);
         assert_eq!(result1, 33); // (1+10) + (2+20) = 11 + 22 = 33
 
         // Second call should use cached version
-        let result2 = execute_reduction_cached(&expr, &[a, b]).unwrap();
+        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
+        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result2 = result2_u64.value(0);
         assert_eq!(result2, 33);
     }
 
@@ -601,7 +637,9 @@ mod tests {
     fn test_execute_reduction_empty_arrays() {
         let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
         let a = create_u64_array_from_vec(vec![]).unwrap();
-        let result = execute_reduction(&expr, &[a]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
         assert_eq!(result, 0); // Sum of empty array is 0
     }
 
@@ -610,7 +648,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (- a b))").unwrap();
         let a = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
         let b = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
         assert_eq!(result_u64.values(), &[9, 18, 27, 36, 45]);
     }
@@ -620,7 +658,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (- a b))").unwrap();
         let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
         let b = create_i64_array_from_vec(vec![-5, 15, -10]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result_i64.values(), &[15, 5, 40]); // 10-(-5)=15, 20-15=5, 30-(-10)=40
     }
