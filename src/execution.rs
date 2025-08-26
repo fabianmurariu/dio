@@ -122,7 +122,7 @@ impl CompiledFunction {
 }
 
 /// Generic execute function using Arrow ArrayRef with N-ary operations and type erasure
-/// 
+///
 /// # Deprecated
 /// This function is deprecated in favor of `execute_generic_bytecode()` which uses the new
 /// Lisp -> ByteCode -> SSA v2 -> Cranelift pipeline. The old pipeline (Lisp -> SSA v1 -> Cranelift)
@@ -186,7 +186,9 @@ pub fn execute_generic_bytecode(
 
     // Simplification 1: Extract output type directly from Lambda return_type
     let (output_type, output_length) = match expr {
-        Expr::Lambda { return_type, body, .. } => {
+        Expr::Lambda {
+            return_type, body, ..
+        } => {
             // Simplification 2: Treat reductions as length-1 vectors instead of scalars
             let is_reduction = matches!(**body, Expr::Sum(_) | Expr::Count(_));
             if is_reduction && return_type.is_scalar() {
@@ -201,10 +203,12 @@ pub fn execute_generic_bytecode(
             } else {
                 (return_type.clone(), array_length)
             }
-        },
-        _ => return Err(DioError::Runtime(
-            "execute_generic_bytecode expects a Lambda expression".to_string(),
-        )),
+        }
+        _ => {
+            return Err(DioError::Runtime(
+                "execute_generic_bytecode expects a Lambda expression".to_string(),
+            ))
+        }
     };
     let output_arrow_type = dio_type_to_arrow(&output_type)?;
 
@@ -224,7 +228,7 @@ pub fn execute_generic_bytecode(
 }
 
 /// Cached generic execute function using Arrow ArrayRef with function caching
-/// 
+///
 /// # Deprecated
 /// This function is deprecated in favor of the new ByteCode pipeline. Caching will be
 /// integrated into `execute_generic_bytecode()` in a future version.
@@ -281,12 +285,15 @@ pub fn execute_generic_cached(
 }
 
 /// Execute a reduction operation, returning a scalar value
-/// 
+///
 /// # Deprecated
 /// This function is deprecated in favor of `execute_generic_bytecode()` which treats reductions
 /// as length-1 arrays internally, providing a unified code generation approach for both
 /// elementwise operations and reductions.
-#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` with length-1 arrays instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `execute_generic_bytecode()` with length-1 arrays instead"
+)]
 pub fn execute_reduction(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(
@@ -311,11 +318,14 @@ pub fn execute_reduction(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, 
 }
 
 /// Execute a reduction operation with caching
-/// 
+///
 /// # Deprecated
 /// This function is deprecated in favor of `execute_generic_bytecode()` which treats reductions
 /// as length-1 arrays internally, providing a unified code generation approach.
-#[deprecated(since = "0.2.0", note = "Use `execute_generic_bytecode()` with length-1 arrays instead")]
+#[deprecated(
+    since = "0.2.0",
+    note = "Use `execute_generic_bytecode()` with length-1 arrays instead"
+)]
 pub fn execute_reduction_cached(expr: &Expr, input_arrays: &[ArrayRef]) -> Result<i64, DioError> {
     if input_arrays.is_empty() {
         return Err(DioError::Runtime(
@@ -393,7 +403,7 @@ mod tests {
         let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
         let a = create_i64_array_from_vec(vec![-1, -2, 3, 4, 5]).unwrap();
         let b = create_i64_array_from_vec(vec![10, 20, -30, 40, 50]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result_i64.values(), &[9, 18, -27, 44, 55]);
     }
@@ -403,7 +413,7 @@ mod tests {
         let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (- a b))").unwrap();
         let a = create_i64_array_from_vec(vec![-1, 20, 3, 40, 5]).unwrap();
         let b = create_i64_array_from_vec(vec![10, -2, -30, 4, 50]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result_i64.values(), &[-11, 22, 33, 36, -45]);
     }
@@ -413,7 +423,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
         let b = create_i64_array_from_vec(vec![-1, -2, -3, 4, 5]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result_i64.values(), &[0, 0, 0, 8, 10]);
     }
@@ -423,7 +433,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = create_u64_array_from_vec(vec![]).unwrap();
         let b = create_u64_array_from_vec(vec![]).unwrap();
-        let result = execute_generic(&expr, &[a, b]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
         assert_eq!(result.len(), 0);
     }
 
@@ -432,7 +442,7 @@ mod tests {
         let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_u64_array_from_vec(vec![4, 5]).unwrap();
-        assert!(execute_generic(&expr, &[a, b]).is_err());
+        assert!(execute_generic_bytecode(&expr, &[a, b]).is_err());
     }
 
     #[test]
