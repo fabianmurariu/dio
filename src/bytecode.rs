@@ -618,27 +618,64 @@ impl<'a> ByteCodeToSsaConverter<'a> {
         let start_value = self.convert_expression(start)?;
         let end_value = self.convert_expression(end)?;
 
-        // Create new SSA values for the loop parameters
+        // Detect accumulator variables that are updated inside the loop
+        let mut loop_variables = std::collections::HashMap::new();
+        let mut initial_values = std::collections::HashMap::new();
+        
+        for statement in body {
+            if let Statement::Assign { target, expr } = statement {
+                // Check if this is an accumulator pattern: acc = acc + something
+                if let Expression::BinaryOp { op: BinaryOperator::Add, left, right: _ } = expr {
+                    if let Expression::Variable(var_name) = left.as_ref() {
+                        if var_name == target {
+                            // This is an accumulator update: var = var + something
+                            // Check if we have an initial value for this variable
+                            if let Some(&initial_val) = self.local_mapping.get(target) {
+                                loop_variables.insert(target.clone(), crate::ssa::DataType::U64);
+                                initial_values.insert(target.clone(), initial_val);
+                            }
+                        }
+                    }
+                }
+            }
+        }
+
+        // Create loop parameters: index + any accumulator variables
         let loop_index_param = self.ssa_program.new_value(crate::ssa::DataType::U64);
         let loop_body_index_param = self.ssa_program.new_value(crate::ssa::DataType::U64);
+        
+        let mut loop_header_params = vec![(loop_index_param, crate::ssa::DataType::U64)];
+        let mut loop_body_params = vec![(loop_body_index_param, crate::ssa::DataType::U64)];
+        let mut loop_var_params = std::collections::HashMap::new();
+        let mut loop_body_var_params = std::collections::HashMap::new();
+
+        for (var_name, data_type) in &loop_variables {
+            let header_param = self.ssa_program.new_value(data_type.clone());
+            let body_param = self.ssa_program.new_value(data_type.clone());
+            loop_header_params.push((header_param, data_type.clone()));
+            loop_body_params.push((body_param, data_type.clone()));
+            loop_var_params.insert(var_name.clone(), header_param);
+            loop_body_var_params.insert(var_name.clone(), body_param);
+        }
 
         // Create loop header and body blocks
-        let loop_header = self
-            .ssa_program
-            .new_block(vec![(loop_index_param, crate::ssa::DataType::U64)]);
-
-        let loop_body = self
-            .ssa_program
-            .new_block(vec![(loop_body_index_param, crate::ssa::DataType::U64)]);
-
+        let loop_header = self.ssa_program.new_block(loop_header_params);
+        let loop_body = self.ssa_program.new_block(loop_body_params);
         let exit_block = self.ssa_program.new_block(vec![]);
 
-        // Jump from entry to loop header
+        // Jump from entry to loop header (pass index + initial accumulator values)
+        let mut initial_args = vec![start_value];
+        for (var_name, _) in &loop_variables {
+            if let Some(&initial_val) = initial_values.get(var_name) {
+                initial_args.push(initial_val);
+            }
+        }
+        
         self.ssa_program.add_instruction(
             self.current_block,
             SsaInstructionV2::Jump {
                 target_block: loop_header,
-                args: vec![start_value],
+                args: initial_args,
             },
         );
 
@@ -654,13 +691,21 @@ impl<'a> ByteCodeToSsaConverter<'a> {
             },
         );
 
+        // Branch: pass index + current accumulator values to loop body
+        let mut branch_args = vec![loop_index_param];
+        for (var_name, _) in &loop_variables {
+            if let Some(&header_param) = loop_var_params.get(var_name) {
+                branch_args.push(header_param);
+            }
+        }
+        
         self.ssa_program.add_instruction(
             loop_header,
             SsaInstructionV2::Branch {
                 condition,
                 true_block: loop_body,
                 false_block: exit_block,
-                args: vec![loop_index_param], // Pass the block parameter
+                args: branch_args,
             },
         );
 
@@ -668,21 +713,45 @@ impl<'a> ByteCodeToSsaConverter<'a> {
         let old_current_block = self.current_block;
         self.current_block = loop_body;
 
-        // Update the loop variable mapping to point to the loop body parameter
+        // Update variable mappings to point to loop body parameters
         let old_loop_var = self
             .local_mapping
             .insert(index_var.to_string(), loop_body_index_param);
+
+        let mut old_accumulator_vars = std::collections::HashMap::new();
+        for (var_name, _) in &loop_variables {
+            if let Some(&body_param) = loop_body_var_params.get(var_name) {
+                let old_val = self.local_mapping.insert(var_name.clone(), body_param);
+                old_accumulator_vars.insert(var_name.clone(), old_val);
+            }
+        }
 
         // Convert each statement in the loop body
         for statement in body {
             self.convert_statement(statement)?;
         }
 
-        // Restore the loop variable mapping
+        // Collect updated accumulator values after processing the loop body
+        let mut updated_accumulator_values = std::collections::HashMap::new();
+        for (var_name, _) in &loop_variables {
+            if let Some(&updated_val) = self.local_mapping.get(var_name) {
+                updated_accumulator_values.insert(var_name.clone(), updated_val);
+            }
+        }
+
+        // Restore variable mappings
         if let Some(old_val) = old_loop_var {
             self.local_mapping.insert(index_var.to_string(), old_val);
         } else {
             self.local_mapping.remove(index_var);
+        }
+
+        for (var_name, old_val) in old_accumulator_vars {
+            if let Some(old_val) = old_val {
+                self.local_mapping.insert(var_name, old_val);
+            } else {
+                self.local_mapping.remove(&var_name);
+            }
         }
 
         // Loop body: increment and jump back (use the body block parameter)
@@ -707,16 +776,31 @@ impl<'a> ByteCodeToSsaConverter<'a> {
             },
         );
 
+        // Jump back to loop header with updated index and accumulator values
+        let mut jump_back_args = vec![next_index];
+        for (var_name, _) in &loop_variables {
+            if let Some(&updated_val) = updated_accumulator_values.get(var_name) {
+                jump_back_args.push(updated_val);
+            }
+        }
+        
         self.ssa_program.add_instruction(
             loop_body,
             SsaInstructionV2::Jump {
                 target_block: loop_header,
-                args: vec![next_index],
+                args: jump_back_args,
             },
         );
 
         // Continue from exit block
         self.current_block = exit_block;
+        
+        // Update variable mappings to point to the loop header parameters (final accumulator values)
+        for (var_name, _) in &loop_variables {
+            if let Some(&header_param) = loop_var_params.get(var_name) {
+                self.local_mapping.insert(var_name.clone(), header_param);
+            }
+        }
 
         Ok(())
     }
