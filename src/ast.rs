@@ -69,8 +69,13 @@ pub enum Expr {
     /// Count reduction: (count a) - counts non-null values
     Count(Box<Expr>),
 
-    /// Variable binding: (let a (+ x y)) - future extension
-    Let(String, Box<Expr>),
+    /// Variable binding: (let [var_name binding_expr] body_expr)
+    /// Binding expressions must be reductive functions like (sum a) or (count a)
+    Let {
+        var_name: String,
+        binding: Box<Expr>,
+        body: Box<Expr>,
+    },
 
     /// Typed lambda expression: (lambda ([U64Array x] [U64Array y] U64Array) (+ x y))
     Lambda {
@@ -173,7 +178,9 @@ impl fmt::Display for Expr {
             Expr::Div(lhs, rhs) => write!(f, "(/ {lhs} {rhs})"),
             Expr::Sum(expr) => write!(f, "(sum {expr})"),
             Expr::Count(expr) => write!(f, "(count {expr})"),
-            Expr::Let(name, expr) => write!(f, "(let {name} {expr})"),
+            Expr::Let { var_name, binding, body } => {
+                write!(f, "(let [{var_name} {binding}] {body})")
+            }
             Expr::Lambda {
                 params,
                 return_type,
@@ -200,7 +207,7 @@ impl Expr {
             Expr::Literal(_) => false, // Scalars
             Expr::Add(_) | Expr::Sub(_, _) | Expr::Mul(_) | Expr::Div(_, _) => true,
             Expr::Sum(_) | Expr::Count(_) => false, // Reductions produce scalars
-            Expr::Let(_, expr) => expr.is_elementwise(),
+            Expr::Let { body, .. } => body.is_elementwise(),
             Expr::Lambda { return_type, .. } => matches!(
                 return_type,
                 Type::U64Array | Type::I64Array | Type::F64Array
@@ -244,8 +251,9 @@ impl Expr {
             Expr::Sum(expr) | Expr::Count(expr) => {
                 expr.collect_columns(columns);
             }
-            Expr::Let(_, expr) => {
-                expr.collect_columns(columns);
+            Expr::Let { binding, body, .. } => {
+                binding.collect_columns(columns);
+                body.collect_columns(columns);
             }
             Expr::Lambda { body, .. } => {
                 body.collect_columns(columns);
@@ -264,7 +272,7 @@ impl Expr {
             Expr::Sum(expr) | Expr::Count(expr) => {
                 2 + expr.complexity() // Reductions are more expensive
             }
-            Expr::Let(_, expr) => 1 + expr.complexity(),
+            Expr::Let { binding, body, .. } => 1 + binding.complexity() + body.complexity(),
             Expr::Lambda { body, .. } => 1 + body.complexity(),
         }
     }

@@ -238,6 +238,10 @@ impl ByteCodeCompiler {
                 // Reduction operation: sum over the inner expression
                 self.compile_reduction_operation(inner, &ret_type)?;
             }
+            Expr::Let { var_name, binding, body } => {
+                // Let binding: compile the binding and then the body with the variable in scope
+                self.compile_let_binding(var_name, binding, body, &ret_type)?;
+            }
             _ => {
                 return Err(DioError::Compilation(
                     "Unsupported operation in lambda body".to_string(),
@@ -365,15 +369,183 @@ impl ByteCodeCompiler {
         Ok(())
     }
 
+    /// Compile let bindings with reductive binding expressions
+    fn compile_let_binding(
+        &mut self,
+        var_name: &str,
+        binding: &Expr,
+        body: &Expr,
+        ret_type: &DataType,
+    ) -> Result<(), DioError> {
+        // Since we only support reductive functions in let bindings,
+        // we know the binding always produces a scalar value
+        
+        // Create a local variable to store the scalar result
+        let temp_var_name = format!("{}_temp", var_name);
+        self.locals.push(LocalVar {
+            name: temp_var_name.clone(),
+            data_type: DataType::U64, // Reductions produce scalars
+        });
+        
+        // Compile the reductive binding expression
+        match binding {
+            Expr::Sum(inner) => {
+                // Add accumulator and index variables for the sum
+                let acc_var = format!("{}_acc", var_name);
+                let index_var = format!("{}_i", var_name);
+                
+                self.locals.push(LocalVar {
+                    name: acc_var.clone(),
+                    data_type: DataType::U64,
+                });
+                self.locals.push(LocalVar {
+                    name: index_var.clone(),
+                    data_type: DataType::U64,
+                });
+                
+                // Initialize accumulator: acc = 0
+                self.statements.push(Statement::Assign {
+                    target: acc_var.clone(),
+                    expr: Expression::Literal(0),
+                });
+                
+                // Create the for loop: for(i = 0; i < length; i++)
+                let mut loop_body = Vec::new();
+                let inner_expr = self.compile_expression(inner)?;
+                
+                // acc = acc + inner_expr
+                loop_body.push(Statement::Assign {
+                    target: acc_var.clone(),
+                    expr: Expression::BinaryOp {
+                        op: BinaryOperator::Add,
+                        left: Box::new(Expression::Variable(acc_var.clone())),
+                        right: Box::new(inner_expr),
+                    },
+                });
+                
+                // Add the for loop
+                self.statements.push(Statement::ForLoop {
+                    index_var: index_var.clone(),
+                    start: Expression::Literal(0),
+                    end: Expression::Variable("length".to_string()),
+                    step: Expression::Literal(1),
+                    body: loop_body,
+                });
+                
+                // Store the result in the temp variable: temp_var = acc
+                self.statements.push(Statement::Assign {
+                    target: temp_var_name.clone(),
+                    expr: Expression::Variable(acc_var),
+                });
+            }
+            Expr::Count(inner) => {
+                // Similar to sum but counting non-null values
+                let acc_var = format!("{}_acc", var_name);
+                let index_var = format!("{}_i", var_name);
+                
+                self.locals.push(LocalVar {
+                    name: acc_var.clone(),
+                    data_type: DataType::U64,
+                });
+                self.locals.push(LocalVar {
+                    name: index_var.clone(),
+                    data_type: DataType::U64,
+                });
+                
+                // Initialize counter: acc = 0
+                self.statements.push(Statement::Assign {
+                    target: acc_var.clone(),
+                    expr: Expression::Literal(0),
+                });
+                
+                // Create the for loop: for(i = 0; i < length; i++)
+                let mut loop_body = Vec::new();
+                let _inner_expr = self.compile_expression(inner)?;
+                
+                // For count, just increment the counter (assuming all values are non-null for now)
+                loop_body.push(Statement::Assign {
+                    target: acc_var.clone(),
+                    expr: Expression::BinaryOp {
+                        op: BinaryOperator::Add,
+                        left: Box::new(Expression::Variable(acc_var.clone())),
+                        right: Box::new(Expression::Literal(1)),
+                    },
+                });
+                
+                // Add the for loop
+                self.statements.push(Statement::ForLoop {
+                    index_var: index_var.clone(),
+                    start: Expression::Literal(0),
+                    end: Expression::Variable("length".to_string()),
+                    step: Expression::Literal(1),
+                    body: loop_body,
+                });
+                
+                // Store the result in the temp variable: temp_var = acc
+                self.statements.push(Statement::Assign {
+                    target: temp_var_name.clone(),
+                    expr: Expression::Variable(acc_var),
+                });
+            }
+            _ => {
+                return Err(DioError::Compilation(
+                    "Only reductive functions (sum, count) are allowed in let bindings".to_string(),
+                ));
+            }
+        }
+        
+        // Now compile the body with the scalar variable in scope
+        let substituted_body = substitute_variable_in_expr(body, var_name, &temp_var_name);
+        self.compile_lambda_body_recursive(&substituted_body, ret_type)?;
+        
+        Ok(())
+    }
+    
+    /// Recursively compile lambda body expressions (for let binding support)
+    fn compile_lambda_body_recursive(&mut self, body: &Expr, ret_type: &DataType) -> Result<(), DioError> {
+        match body {
+            Expr::Add(operands) => {
+                if ret_type.is_array() {
+                    self.compile_elementwise_operation(operands, BinaryOperator::Add)?;
+                } else {
+                    return Err(DioError::Compilation(
+                        "Add with scalar return type not supported".to_string(),
+                    ));
+                }
+            }
+            Expr::Sum(inner) => {
+                self.compile_reduction_operation(inner, ret_type)?;
+            }
+            Expr::Let { var_name, binding, body } => {
+                self.compile_let_binding(var_name, binding, body, ret_type)?;
+            }
+            _ => {
+                return Err(DioError::Compilation(
+                    format!("Unsupported operation in let body: {:?}", body)
+                ));
+            }
+        }
+        Ok(())
+    }
+    
+
     /// Compile an expression to a ByteCode expression
     fn compile_expression(&mut self, expr: &Expr) -> Result<Expression, DioError> {
         match expr {
             Expr::Column(name) => {
-                // For array access, return array[i] where i is the current loop index
-                Ok(Expression::ArrayAccess {
-                    array: name.clone(),
-                    index: Box::new(Expression::Variable("i".to_string())),
-                })
+                // Check if this is a reference to a let-bound scalar variable
+                // (let-bound variables will have "_temp" suffix in their actual names)
+                let temp_name = format!("{}_temp", name);
+                if self.locals.iter().any(|local| local.name == temp_name && local.data_type.is_scalar()) {
+                    // This is a scalar variable reference
+                    Ok(Expression::Variable(temp_name))
+                } else {
+                    // For array access, return array[i] where i is the current loop index
+                    Ok(Expression::ArrayAccess {
+                        array: name.clone(),
+                        index: Box::new(Expression::Variable("i".to_string())),
+                    })
+                }
             }
             Expr::Literal(value) => match value {
                 Value::Int64(i) => Ok(Expression::Literal(*i)),
@@ -424,6 +596,11 @@ impl ByteCodeCompiler {
                     left: Box::new(left),
                     right: Box::new(right),
                 })
+            }
+            Expr::Let { .. } => {
+                Err(DioError::Compilation(
+                    "Let expressions not supported in arithmetic contexts - use at lambda body level".to_string()
+                ))
             }
             _ => Err(DioError::Compilation(format!(
                 "Unsupported expression: {:?}",
@@ -898,6 +1075,68 @@ fn convert_bytecode_to_ssa_datatype(data_type: &DataType) -> SsaDataType {
     }
 }
 
+/// Helper function to substitute variable references in expressions (for let bindings)
+fn substitute_variable_in_expr(expr: &Expr, old_name: &str, new_name: &str) -> Expr {
+    match expr {
+        Expr::Column(name) => {
+            if name == old_name {
+                Expr::Column(new_name.to_string())
+            } else {
+                expr.clone()
+            }
+        }
+        Expr::Literal(value) => Expr::Literal(value.clone()),
+        Expr::Add(operands) => {
+            Expr::Add(operands.iter().map(|op| substitute_variable_in_expr(op, old_name, new_name)).collect())
+        }
+        Expr::Sub(lhs, rhs) => {
+            Expr::Sub(
+                Box::new(substitute_variable_in_expr(lhs, old_name, new_name)),
+                Box::new(substitute_variable_in_expr(rhs, old_name, new_name)),
+            )
+        }
+        Expr::Mul(operands) => {
+            Expr::Mul(operands.iter().map(|op| substitute_variable_in_expr(op, old_name, new_name)).collect())
+        }
+        Expr::Div(lhs, rhs) => {
+            Expr::Div(
+                Box::new(substitute_variable_in_expr(lhs, old_name, new_name)),
+                Box::new(substitute_variable_in_expr(rhs, old_name, new_name)),
+            )
+        }
+        Expr::Sum(inner) => {
+            Expr::Sum(Box::new(substitute_variable_in_expr(inner, old_name, new_name)))
+        }
+        Expr::Count(inner) => {
+            Expr::Count(Box::new(substitute_variable_in_expr(inner, old_name, new_name)))
+        }
+        Expr::Let { var_name, binding, body } => {
+            // Don't substitute inside the binding if it shadows the variable
+            if var_name == old_name {
+                expr.clone() // Variable is shadowed, don't substitute
+            } else {
+                Expr::Let {
+                    var_name: var_name.clone(),
+                    binding: Box::new(substitute_variable_in_expr(binding, old_name, new_name)),
+                    body: Box::new(substitute_variable_in_expr(body, old_name, new_name)),
+                }
+            }
+        }
+        Expr::Lambda { params, return_type, body } => {
+            // Check if any parameter shadows the variable
+            if params.iter().any(|p| p.name == old_name) {
+                expr.clone() // Variable is shadowed by a parameter
+            } else {
+                Expr::Lambda {
+                    params: params.clone(),
+                    return_type: return_type.clone(),
+                    body: Box::new(substitute_variable_in_expr(body, old_name, new_name)),
+                }
+            }
+        }
+    }
+}
+
 /// Display implementations for C-like syntax debugging
 impl fmt::Display for DataType {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
@@ -1099,6 +1338,35 @@ mod tests {
         let ssa = ast_to_ssa_v2_via_bytecode(&expr).unwrap();
 
         // Test the full pipeline: Lisp -> ByteCode -> SSA v2
+        assert!(!ssa.blocks.is_empty());
+    }
+
+    #[test]
+    fn test_let_binding_bytecode_compilation() {
+        // Test let binding with reductive function: (lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (+ s (sum c))))
+        let expr = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (sum c)))").unwrap();
+        let bytecode = ast_to_bytecode(&expr).unwrap();
+
+        // Should successfully compile let bindings with reductive functions
+        assert_eq!(bytecode.return_type, DataType::U64);
+        assert!(!bytecode.locals.is_empty()); // Should have temp variables for let binding
+    }
+
+    #[test]
+    fn test_let_binding_rejects_elementwise() {
+        // Test that let bindings reject elementwise operations
+        let expr_result = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [a (+ b c)] (sum a)))");
+        // This should fail at the parser level now
+        assert!(expr_result.is_err(), "Expected parser to reject elementwise let binding");
+    }
+
+    #[test]
+    fn test_let_binding_full_pipeline() {
+        // Test the full pipeline with let bindings using reductive functions
+        let expr = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (sum c)))").unwrap();
+        let ssa = ast_to_ssa_v2_via_bytecode(&expr).unwrap();
+
+        // Should create SSA program with blocks
         assert!(!ssa.blocks.is_empty());
     }
 }

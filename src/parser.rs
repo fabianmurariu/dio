@@ -180,15 +180,34 @@ fn parse_count(input: &str) -> IResult<&str, Expr> {
     Ok((input, Expr::Count(Box::new(operands[0].clone()))))
 }
 
-/// Parse let binding: (let var expr)
+/// Parse let binding: (let [var_name binding_expr] body_expr)
+/// Only allows reductive functions (sum, count) in binding expressions
 fn parse_let(input: &str) -> IResult<&str, Expr> {
     let (input, _) = tag("let")(input)?;
     let (input, _) = cut(multispace1)(input)?;
+    let (input, _) = cut(char('['))(input)?;
+    let (input, _) = multispace0(input)?;
     let (input, var_name) = cut(identifier)(input)?;
     let (input, _) = cut(multispace1)(input)?;
-    let (input, expr) = cut(expression)(input)?;
+    let (input, binding_expr) = cut(expression)(input)?;
+    let (input, _) = multispace0(input)?;
+    let (input, _) = cut(char(']'))(input)?;
+    let (input, _) = cut(multispace1)(input)?;
+    let (input, body_expr) = cut(expression)(input)?;
 
-    Ok((input, Expr::Let(var_name, Box::new(expr))))
+    // Validate that binding expression is reductive
+    if !binding_expr.is_reduction() {
+        return Err(nom::Err::Failure(nom::error::Error::new(
+            input,
+            nom::error::ErrorKind::Verify,
+        )));
+    }
+
+    Ok((input, Expr::Let {
+        var_name,
+        binding: Box::new(binding_expr),
+        body: Box::new(body_expr),
+    }))
 }
 
 /// Parse lambda: (lambda ([Type var] [Type var] ... RetType) body)
@@ -452,17 +471,26 @@ mod tests {
 
     #[test]
     fn test_parse_let_binding() {
-        let result = parse_expr("(let tmp (+ a b))").unwrap();
+        // Let bindings now only allow reductive functions
+        let result = parse_expr("(let [s (sum a)] (+ s b))").unwrap();
         assert_eq!(
             result,
-            Expr::Let(
-                "tmp".to_string(),
-                Box::new(Expr::Add(vec![
-                    Expr::Column("a".to_string()),
+            Expr::Let {
+                var_name: "s".to_string(),
+                binding: Box::new(Expr::Sum(Box::new(Expr::Column("a".to_string())))),
+                body: Box::new(Expr::Add(vec![
+                    Expr::Column("s".to_string()),
                     Expr::Column("b".to_string()),
                 ]))
-            )
+            }
         );
+    }
+
+    #[test]
+    fn test_parse_let_binding_rejects_elementwise() {
+        // Let bindings should reject elementwise operations like (+ a b)
+        let result = parse_expr("(let [tmp (+ a b)] (sum tmp))");
+        assert!(result.is_err(), "Expected error for elementwise binding in let");
     }
 
     #[test]
