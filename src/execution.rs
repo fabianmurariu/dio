@@ -677,4 +677,58 @@ mod tests {
         let result2_i64 = result2.as_any().downcast_ref::<Int64Array>().unwrap();
         assert_eq!(result2_i64.values(), &[75, -10, 10]);
     }
+
+    #[test]
+    fn test_execute_let_binding_single_variable() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 t (sum b)] (+ s t)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
+        assert_eq!(result, 66); // sum(a) + sum(b) = 6 + 60 = 66
+    }
+
+    #[test]
+    fn test_execute_let_binding_multiple_variables() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
+        assert_eq!(result, 9); // sum(a) + count(b) = 6 + 3 = 9
+    }
+
+    #[test]
+    fn test_execute_let_binding_with_complex_expression() {
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (let [U64 s (sum (+ a b)) U64 t (sum c)] (+ s t)))").unwrap();
+        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
+        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
+        let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
+        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
+        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result = result_u64.value(0);
+        assert_eq!(result, 333); // sum(a+b) + sum(c) = (11+22) + (100+200) = 33 + 300 = 333
+    }
+
+    #[test]
+    fn test_execute_let_binding_cached() {
+        clear_function_cache();
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
+        let a = create_u64_array_from_vec(vec![5, 10]).unwrap();
+        let b = create_u64_array_from_vec(vec![1, 2]).unwrap();
+        
+        // First call
+        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
+        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result1 = result1_u64.value(0);
+        assert_eq!(result1, 17); // sum(a) + count(b) = 15 + 2 = 17
+        
+        // Second call should use cached version
+        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
+        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result2 = result2_u64.value(0);
+        assert_eq!(result2, 17);
+    }
 }
