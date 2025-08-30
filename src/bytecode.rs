@@ -127,6 +127,7 @@ struct ByteCodeCompiler {
     inputs: Vec<InputParam>,
     locals: Vec<LocalVar>,
     statements: Vec<Statement>,
+    current_loop_index: Option<String>, // Track the current loop index variable
 }
 
 impl ByteCodeCompiler {
@@ -135,6 +136,7 @@ impl ByteCodeCompiler {
             inputs: Vec::new(),
             locals: Vec::new(),
             statements: Vec::new(),
+            current_loop_index: None,
         }
     }
 
@@ -273,6 +275,10 @@ impl ByteCodeCompiler {
         // Create the for loop: for(i = 0; i < length; i++)
         let mut loop_body = Vec::new();
 
+        // Set the current loop index context before compiling expressions
+        let old_loop_index = self.current_loop_index.clone();
+        self.current_loop_index = Some(index_var.clone());
+
         // Build the expression for the operation
         let mut expr = self.compile_expression(&operands[0])?;
         for operand in &operands[1..] {
@@ -283,6 +289,9 @@ impl ByteCodeCompiler {
                 right: Box::new(right_expr),
             };
         }
+        
+        // Restore the previous loop index context
+        self.current_loop_index = old_loop_index;
 
         // output[i] = expr
         loop_body.push(Statement::ArrayAssign {
@@ -460,8 +469,15 @@ impl ByteCodeCompiler {
         // Create the for loop: for(i = 0; i < length; i++)
         let mut loop_body = Vec::new();
 
+        // Set the current loop index context before compiling the inner expression
+        let old_loop_index = self.current_loop_index.clone();
+        self.current_loop_index = Some(index_var.clone());
+        
         // Compile the inner expression (e.g., a[i] + b[i] for sum(+ a b))
         let inner_expr = self.compile_expression(inner)?;
+        
+        // Restore the previous loop index context
+        self.current_loop_index = old_loop_index;
 
         // acc = acc + inner_expr
         loop_body.push(Statement::Assign {
@@ -519,7 +535,15 @@ impl ByteCodeCompiler {
 
         // Create the for loop: for(i = 0; i < length; i++)
         let mut loop_body = Vec::new();
+        
+        // Set the current loop index context before compiling the inner expression
+        let old_loop_index = self.current_loop_index.clone();
+        self.current_loop_index = Some(index_var.clone());
+        
         let _inner_expr = self.compile_expression(inner)?;
+        
+        // Restore the previous loop index context
+        self.current_loop_index = old_loop_index;
 
         // For count, just increment the counter (assuming all values are non-null for now)
         loop_body.push(Statement::Assign {
@@ -602,9 +626,12 @@ impl ByteCodeCompiler {
                     Ok(Expression::Variable(name.clone()))
                 } else {
                     // For array access, return array[i] where i is the current loop index
+                    let index_var = self.current_loop_index.as_ref()
+                        .cloned()
+                        .unwrap_or_else(|| "i".to_string()); // Fallback to "i" for backward compatibility
                     Ok(Expression::ArrayAccess {
                         array: name.clone(),
-                        index: Box::new(Expression::Variable("i".to_string())),
+                        index: Box::new(Expression::Variable(index_var)),
                     })
                 }
             }
