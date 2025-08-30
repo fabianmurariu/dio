@@ -69,11 +69,10 @@ pub enum Expr {
     /// Count reduction: (count a) - counts non-null values
     Count(Box<Expr>),
 
-    /// Variable binding: (let [var_name binding_expr] body_expr)
+    /// Variable bindings: (let [Type1 var1 expr1 Type2 var2 expr2 ...] body_expr)
     /// Binding expressions must be reductive functions like (sum a) or (count a)
     Let {
-        var_name: String,
-        binding: Box<Expr>,
+        bindings: Vec<(Type, String, Expr)>, // (type, name, expression)
         body: Box<Expr>,
     },
 
@@ -178,8 +177,15 @@ impl fmt::Display for Expr {
             Expr::Div(lhs, rhs) => write!(f, "(/ {lhs} {rhs})"),
             Expr::Sum(expr) => write!(f, "(sum {expr})"),
             Expr::Count(expr) => write!(f, "(count {expr})"),
-            Expr::Let { var_name, binding, body } => {
-                write!(f, "(let [{var_name} {binding}] {body})")
+            Expr::Let { bindings, body } => {
+                write!(f, "(let [")?;
+                for (i, (type_, var_name, binding_expr)) in bindings.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, " ")?;
+                    }
+                    write!(f, "{type_} {var_name} {binding_expr}")?;
+                }
+                write!(f, "] {body})")
             }
             Expr::Lambda {
                 params,
@@ -251,8 +257,10 @@ impl Expr {
             Expr::Sum(expr) | Expr::Count(expr) => {
                 expr.collect_columns(columns);
             }
-            Expr::Let { binding, body, .. } => {
-                binding.collect_columns(columns);
+            Expr::Let { bindings, body, .. } => {
+                for (_, _, binding_expr) in bindings {
+                    binding_expr.collect_columns(columns);
+                }
                 body.collect_columns(columns);
             }
             Expr::Lambda { body, .. } => {
@@ -272,7 +280,7 @@ impl Expr {
             Expr::Sum(expr) | Expr::Count(expr) => {
                 2 + expr.complexity() // Reductions are more expensive
             }
-            Expr::Let { binding, body, .. } => 1 + binding.complexity() + body.complexity(),
+            Expr::Let { bindings, body, .. } => 1 + bindings.iter().map(|(_, _, expr)| expr.complexity()).sum::<usize>() + body.complexity(),
             Expr::Lambda { body, .. } => 1 + body.complexity(),
         }
     }

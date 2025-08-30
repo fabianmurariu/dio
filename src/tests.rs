@@ -1,4 +1,4 @@
-use crate::ast::OrderedFloat64;
+use crate::ast::{OrderedFloat64, Type};
 use crate::{parse_expr, Expr, Value};
 use proptest::prelude::*;
 
@@ -143,15 +143,14 @@ fn test_reductions() {
     );
 }
 
-/// Test let bindings (now only support reductive functions)
+/// Test let bindings (now support multiple typed bindings with reductive functions)
 #[test]
 fn test_let_bindings() {
-    // Let bindings now only work with reductive functions
+    // Single typed let binding
     assert_eq!(
-        parse_expr("(let [s (sum a)] (+ s b))").unwrap(),
+        parse_expr("(let [U64 s (sum a)] (+ s b))").unwrap(),
         Expr::Let {
-            var_name: "s".to_string(),
-            binding: Box::new(Expr::Sum(Box::new(Expr::Column("a".to_string())))),
+            bindings: vec![(Type::U64, "s".to_string(), Expr::Sum(Box::new(Expr::Column("a".to_string()))))],
             body: Box::new(Expr::Add(vec![
                 Expr::Column("s".to_string()),
                 Expr::Column("b".to_string()),
@@ -159,8 +158,23 @@ fn test_let_bindings() {
         }
     );
     
+    // Multiple typed let bindings
+    assert_eq!(
+        parse_expr("(let [U64 s (sum a) U64 c (count b)] (+ s c))").unwrap(),
+        Expr::Let {
+            bindings: vec![
+                (Type::U64, "s".to_string(), Expr::Sum(Box::new(Expr::Column("a".to_string())))),
+                (Type::U64, "c".to_string(), Expr::Count(Box::new(Expr::Column("b".to_string())))),
+            ],
+            body: Box::new(Expr::Add(vec![
+                Expr::Column("s".to_string()),
+                Expr::Column("c".to_string()),
+            ]))
+        }
+    );
+    
     // Test that elementwise operations are rejected in let bindings
-    assert!(parse_expr("(let [tmp (+ a b)] (sum tmp))").is_err());
+    assert!(parse_expr("(let [U64 tmp (+ a b)] (sum tmp))").is_err());
 }
 
 /// Test nested expressions
@@ -473,8 +487,10 @@ fn expr_values_equivalent(a: &Expr, b: &Expr) -> bool {
         (Expr::Sum(e1), Expr::Sum(e2)) | (Expr::Count(e1), Expr::Count(e2)) => {
             expr_values_equivalent(e1, e2)
         }
-        (Expr::Let { var_name: n1, binding: b1, body: e1 }, Expr::Let { var_name: n2, binding: b2, body: e2 }) => {
-            n1 == n2 && expr_values_equivalent(b1, b2) && expr_values_equivalent(e1, e2)
+        (Expr::Let { bindings: b1, body: e1 }, Expr::Let { bindings: b2, body: e2 }) => {
+            b1.len() == b2.len() 
+                && b1.iter().zip(b2.iter()).all(|((t1, n1, be1), (t2, n2, be2))| t1 == t2 && n1 == n2 && expr_values_equivalent(be1, be2))
+                && expr_values_equivalent(e1, e2)
         }
         _ => false,
     }

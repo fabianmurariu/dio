@@ -238,9 +238,9 @@ impl ByteCodeCompiler {
                 // Reduction operation: sum over the inner expression
                 self.compile_reduction_operation(inner, &ret_type)?;
             }
-            Expr::Let { var_name, binding, body } => {
-                // Let binding: compile the binding and then the body with the variable in scope
-                self.compile_let_binding(var_name, binding, body, &ret_type)?;
+            Expr::Let { bindings, body } => {
+                // Let bindings: compile each binding and then the body with all variables in scope
+                self.compile_let_bindings(bindings, body, &ret_type)?;
             }
             _ => {
                 return Err(DioError::Compilation(
@@ -369,135 +369,183 @@ impl ByteCodeCompiler {
         Ok(())
     }
 
-    /// Compile let bindings with reductive binding expressions
-    fn compile_let_binding(
+    /// Compile let bindings as sequential variable declarations
+    fn compile_let_bindings(
         &mut self,
-        var_name: &str,
-        binding: &Expr,
+        bindings: &[(Type, String, Expr)],
         body: &Expr,
         ret_type: &DataType,
     ) -> Result<(), DioError> {
-        // Since we only support reductive functions in let bindings,
-        // we know the binding always produces a scalar value
-        
-        // Create a local variable to store the scalar result
-        let temp_var_name = format!("{}_temp", var_name);
-        self.locals.push(LocalVar {
-            name: temp_var_name.clone(),
-            data_type: DataType::U64, // Reductions produce scalars
-        });
-        
-        // Compile the reductive binding expression
-        match binding {
-            Expr::Sum(inner) => {
-                // Add accumulator and index variables for the sum
-                let acc_var = format!("{}_acc", var_name);
-                let index_var = format!("{}_i", var_name);
-                
-                self.locals.push(LocalVar {
-                    name: acc_var.clone(),
-                    data_type: DataType::U64,
-                });
-                self.locals.push(LocalVar {
-                    name: index_var.clone(),
-                    data_type: DataType::U64,
-                });
-                
-                // Initialize accumulator: acc = 0
-                self.statements.push(Statement::Assign {
-                    target: acc_var.clone(),
-                    expr: Expression::Literal(0),
-                });
-                
-                // Create the for loop: for(i = 0; i < length; i++)
-                let mut loop_body = Vec::new();
-                let inner_expr = self.compile_expression(inner)?;
-                
-                // acc = acc + inner_expr
-                loop_body.push(Statement::Assign {
-                    target: acc_var.clone(),
-                    expr: Expression::BinaryOp {
-                        op: BinaryOperator::Add,
-                        left: Box::new(Expression::Variable(acc_var.clone())),
-                        right: Box::new(inner_expr),
-                    },
-                });
-                
-                // Add the for loop
-                self.statements.push(Statement::ForLoop {
-                    index_var: index_var.clone(),
-                    start: Expression::Literal(0),
-                    end: Expression::Variable("length".to_string()),
-                    step: Expression::Literal(1),
-                    body: loop_body,
-                });
-                
-                // Store the result in the temp variable: temp_var = acc
-                self.statements.push(Statement::Assign {
-                    target: temp_var_name.clone(),
-                    expr: Expression::Variable(acc_var),
-                });
+        // For each binding, compile it and store the result in a local variable
+        for (type_, var_name, binding_expr) in bindings {
+            // Convert AST type to bytecode data type
+            let data_type = match type_ {
+                Type::U64 => DataType::U64,
+                Type::I64 => DataType::I64,
+                Type::U64Array => DataType::ArrayU64,
+                Type::I64Array => DataType::ArrayI64,
+                Type::F64 => DataType::I64, // Treat F64 as I64 for now
+                Type::F64Array => DataType::ArrayI64, // Treat F64Array as ArrayI64 for now
+            };
+            
+            // Validate that the binding expression makes sense with the declared type
+            match binding_expr {
+                Expr::Sum(_) | Expr::Count(_) => {
+                    if !data_type.is_scalar() {
+                        return Err(DioError::Compilation(
+                            format!("Reductive function {} produces a scalar but variable {} is declared as array type {}", 
+                                   if matches!(binding_expr, Expr::Sum(_)) { "sum" } else { "count" },
+                                   var_name, type_)
+                        ));
+                    }
+                }
+                _ => {
+                    return Err(DioError::Compilation(
+                        "Only reductive functions (sum, count) are allowed in let bindings".to_string(),
+                    ));
+                }
             }
-            Expr::Count(inner) => {
-                // Similar to sum but counting non-null values
-                let acc_var = format!("{}_acc", var_name);
-                let index_var = format!("{}_i", var_name);
-                
-                self.locals.push(LocalVar {
-                    name: acc_var.clone(),
-                    data_type: DataType::U64,
-                });
-                self.locals.push(LocalVar {
-                    name: index_var.clone(),
-                    data_type: DataType::U64,
-                });
-                
-                // Initialize counter: acc = 0
-                self.statements.push(Statement::Assign {
-                    target: acc_var.clone(),
-                    expr: Expression::Literal(0),
-                });
-                
-                // Create the for loop: for(i = 0; i < length; i++)
-                let mut loop_body = Vec::new();
-                let _inner_expr = self.compile_expression(inner)?;
-                
-                // For count, just increment the counter (assuming all values are non-null for now)
-                loop_body.push(Statement::Assign {
-                    target: acc_var.clone(),
-                    expr: Expression::BinaryOp {
-                        op: BinaryOperator::Add,
-                        left: Box::new(Expression::Variable(acc_var.clone())),
-                        right: Box::new(Expression::Literal(1)),
-                    },
-                });
-                
-                // Add the for loop
-                self.statements.push(Statement::ForLoop {
-                    index_var: index_var.clone(),
-                    start: Expression::Literal(0),
-                    end: Expression::Variable("length".to_string()),
-                    step: Expression::Literal(1),
-                    body: loop_body,
-                });
-                
-                // Store the result in the temp variable: temp_var = acc
-                self.statements.push(Statement::Assign {
-                    target: temp_var_name.clone(),
-                    expr: Expression::Variable(acc_var),
-                });
-            }
-            _ => {
-                return Err(DioError::Compilation(
-                    "Only reductive functions (sum, count) are allowed in let bindings".to_string(),
-                ));
+            
+            // Create a local variable for this binding
+            self.locals.push(LocalVar {
+                name: var_name.clone(),
+                data_type: data_type.clone(),
+            });
+            
+            // Compile the binding expression and assign to the variable
+            match binding_expr {
+                Expr::Sum(inner) => {
+                    self.compile_reduction_to_variable(inner, var_name, &data_type)?;
+                }
+                Expr::Count(inner) => {
+                    self.compile_count_to_variable(inner, var_name)?;
+                }
+                _ => unreachable!(), // Already checked above
             }
         }
         
-        // Now compile the body with the scalar variable in scope
-        let substituted_body = substitute_variable_in_expr(body, var_name, &temp_var_name);
-        self.compile_lambda_body_recursive(&substituted_body, ret_type)?;
+        // Now compile the body with all bindings in scope
+        self.compile_lambda_body_recursive(body, ret_type)?;
         
+        Ok(())
+    }
+    
+    /// Compile a sum reduction and store the result in a named variable
+    fn compile_reduction_to_variable(
+        &mut self,
+        inner: &Expr,
+        result_var: &str,
+        ret_type: &DataType,
+    ) -> Result<(), DioError> {
+        // Add accumulator variable (use a unique name to avoid conflicts)
+        let acc_var = format!("{}_acc", result_var);
+        self.locals.push(LocalVar {
+            name: acc_var.clone(),
+            data_type: ret_type.clone(),
+        });
+
+        // Add loop index variable (use a unique name to avoid conflicts)
+        let index_var = format!("{}_i", result_var);
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+
+        // Initialize accumulator: acc = 0
+        self.statements.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::Literal(0),
+        });
+
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+
+        // Compile the inner expression (e.g., a[i] + b[i] for sum(+ a b))
+        let inner_expr = self.compile_expression(inner)?;
+
+        // acc = acc + inner_expr
+        loop_body.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::BinaryOp {
+                op: BinaryOperator::Add,
+                left: Box::new(Expression::Variable(acc_var.clone())),
+                right: Box::new(inner_expr),
+            },
+        });
+
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var: index_var.clone(),
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+
+        // Store the final result in the result variable
+        self.statements.push(Statement::Assign {
+            target: result_var.to_string(),
+            expr: Expression::Variable(acc_var),
+        });
+
+        Ok(())
+    }
+    
+    /// Compile a count reduction and store the result in a named variable
+    fn compile_count_to_variable(
+        &mut self,
+        inner: &Expr,
+        result_var: &str,
+    ) -> Result<(), DioError> {
+        // Add accumulator variable (use a unique name to avoid conflicts)
+        let acc_var = format!("{}_acc", result_var);
+        self.locals.push(LocalVar {
+            name: acc_var.clone(),
+            data_type: DataType::U64,
+        });
+
+        // Add loop index variable (use a unique name to avoid conflicts)
+        let index_var = format!("{}_i", result_var);
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+
+        // Initialize counter: acc = 0
+        self.statements.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::Literal(0),
+        });
+
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+        let _inner_expr = self.compile_expression(inner)?;
+
+        // For count, just increment the counter (assuming all values are non-null for now)
+        loop_body.push(Statement::Assign {
+            target: acc_var.clone(),
+            expr: Expression::BinaryOp {
+                op: BinaryOperator::Add,
+                left: Box::new(Expression::Variable(acc_var.clone())),
+                right: Box::new(Expression::Literal(1)),
+            },
+        });
+
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var: index_var.clone(),
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+
+        // Store the final result in the result variable
+        self.statements.push(Statement::Assign {
+            target: result_var.to_string(),
+            expr: Expression::Variable(acc_var),
+        });
+
         Ok(())
     }
     
@@ -508,16 +556,31 @@ impl ByteCodeCompiler {
                 if ret_type.is_array() {
                     self.compile_elementwise_operation(operands, BinaryOperator::Add)?;
                 } else {
-                    return Err(DioError::Compilation(
-                        "Add with scalar return type not supported".to_string(),
-                    ));
+                    // Scalar addition: compile as a simple scalar expression
+                    let result_expr = self.compile_expression(body)?;
+                    self.statements.push(Statement::ArrayAssign {
+                        array: "output".to_string(),
+                        index: Expression::Literal(0), // Store scalar at index 0
+                        value: result_expr,
+                    });
+                    self.statements.push(Statement::Return { value: None });
                 }
             }
             Expr::Sum(inner) => {
                 self.compile_reduction_operation(inner, ret_type)?;
             }
-            Expr::Let { var_name, binding, body } => {
-                self.compile_let_binding(var_name, binding, body, ret_type)?;
+            Expr::Let { bindings, body } => {
+                self.compile_let_bindings(bindings, body, ret_type)?;
+            }
+            Expr::Column(name) => {
+                // Direct variable reference (e.g., just returning a let-bound variable)
+                let var_expr = self.compile_expression(body)?;
+                self.statements.push(Statement::ArrayAssign {
+                    array: "output".to_string(),
+                    index: Expression::Literal(0), // Store scalar at index 0
+                    value: var_expr,
+                });
+                self.statements.push(Statement::Return { value: None });
             }
             _ => {
                 return Err(DioError::Compilation(
@@ -533,12 +596,10 @@ impl ByteCodeCompiler {
     fn compile_expression(&mut self, expr: &Expr) -> Result<Expression, DioError> {
         match expr {
             Expr::Column(name) => {
-                // Check if this is a reference to a let-bound scalar variable
-                // (let-bound variables will have "_temp" suffix in their actual names)
-                let temp_name = format!("{}_temp", name);
-                if self.locals.iter().any(|local| local.name == temp_name && local.data_type.is_scalar()) {
-                    // This is a scalar variable reference
-                    Ok(Expression::Variable(temp_name))
+                // Check if this is a reference to a let-bound variable (locals have precedence)
+                if self.locals.iter().any(|local| local.name == *name && local.data_type.is_scalar()) {
+                    // This is a scalar variable reference (from let binding)
+                    Ok(Expression::Variable(name.clone()))
                 } else {
                     // For array access, return array[i] where i is the current loop index
                     Ok(Expression::ArrayAccess {
@@ -1075,67 +1136,6 @@ fn convert_bytecode_to_ssa_datatype(data_type: &DataType) -> SsaDataType {
     }
 }
 
-/// Helper function to substitute variable references in expressions (for let bindings)
-fn substitute_variable_in_expr(expr: &Expr, old_name: &str, new_name: &str) -> Expr {
-    match expr {
-        Expr::Column(name) => {
-            if name == old_name {
-                Expr::Column(new_name.to_string())
-            } else {
-                expr.clone()
-            }
-        }
-        Expr::Literal(value) => Expr::Literal(value.clone()),
-        Expr::Add(operands) => {
-            Expr::Add(operands.iter().map(|op| substitute_variable_in_expr(op, old_name, new_name)).collect())
-        }
-        Expr::Sub(lhs, rhs) => {
-            Expr::Sub(
-                Box::new(substitute_variable_in_expr(lhs, old_name, new_name)),
-                Box::new(substitute_variable_in_expr(rhs, old_name, new_name)),
-            )
-        }
-        Expr::Mul(operands) => {
-            Expr::Mul(operands.iter().map(|op| substitute_variable_in_expr(op, old_name, new_name)).collect())
-        }
-        Expr::Div(lhs, rhs) => {
-            Expr::Div(
-                Box::new(substitute_variable_in_expr(lhs, old_name, new_name)),
-                Box::new(substitute_variable_in_expr(rhs, old_name, new_name)),
-            )
-        }
-        Expr::Sum(inner) => {
-            Expr::Sum(Box::new(substitute_variable_in_expr(inner, old_name, new_name)))
-        }
-        Expr::Count(inner) => {
-            Expr::Count(Box::new(substitute_variable_in_expr(inner, old_name, new_name)))
-        }
-        Expr::Let { var_name, binding, body } => {
-            // Don't substitute inside the binding if it shadows the variable
-            if var_name == old_name {
-                expr.clone() // Variable is shadowed, don't substitute
-            } else {
-                Expr::Let {
-                    var_name: var_name.clone(),
-                    binding: Box::new(substitute_variable_in_expr(binding, old_name, new_name)),
-                    body: Box::new(substitute_variable_in_expr(body, old_name, new_name)),
-                }
-            }
-        }
-        Expr::Lambda { params, return_type, body } => {
-            // Check if any parameter shadows the variable
-            if params.iter().any(|p| p.name == old_name) {
-                expr.clone() // Variable is shadowed by a parameter
-            } else {
-                Expr::Lambda {
-                    params: params.clone(),
-                    return_type: return_type.clone(),
-                    body: Box::new(substitute_variable_in_expr(body, old_name, new_name)),
-                }
-            }
-        }
-    }
-}
 
 /// Display implementations for C-like syntax debugging
 impl fmt::Display for DataType {
@@ -1342,28 +1342,40 @@ mod tests {
     }
 
     #[test]
-    fn test_let_binding_bytecode_compilation() {
-        // Test let binding with reductive function: (lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (+ s (sum c))))
-        let expr = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (sum c)))").unwrap();
+    fn test_let_binding_single_bytecode() {
+        // Test let binding with single typed reductive function
+        let expr = parse_expr("(lambda ([U64Array b] U64) (let [U64 s (sum b)] s))").unwrap();
         let bytecode = ast_to_bytecode(&expr).unwrap();
 
         // Should successfully compile let bindings with reductive functions
         assert_eq!(bytecode.return_type, DataType::U64);
-        assert!(!bytecode.locals.is_empty()); // Should have temp variables for let binding
+        assert!(!bytecode.locals.is_empty()); // Should have local variable for let binding
+    }
+
+    #[test]
+    fn test_let_binding_multiple_bytecode() {
+        // Test let binding with multiple typed reductive functions
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
+        let bytecode = ast_to_bytecode(&expr).unwrap();
+
+        // Should successfully compile multiple let bindings
+        assert_eq!(bytecode.return_type, DataType::U64);
+        // Should have local variables for both bindings plus internal temporaries
+        assert!(bytecode.locals.len() >= 2);
     }
 
     #[test]
     fn test_let_binding_rejects_elementwise() {
         // Test that let bindings reject elementwise operations
-        let expr_result = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [a (+ b c)] (sum a)))");
+        let expr_result = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [U64 a (+ b c)] (sum a)))");
         // This should fail at the parser level now
         assert!(expr_result.is_err(), "Expected parser to reject elementwise let binding");
     }
 
     #[test]
     fn test_let_binding_full_pipeline() {
-        // Test the full pipeline with let bindings using reductive functions
-        let expr = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [s (sum b)] (sum c)))").unwrap();
+        // Test the full pipeline with let bindings using typed reductive functions
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
         let ssa = ast_to_ssa_v2_via_bytecode(&expr).unwrap();
 
         // Should create SSA program with blocks
