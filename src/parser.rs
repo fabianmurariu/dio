@@ -204,8 +204,8 @@ fn parse_let(input: &str) -> IResult<&str, Expr> {
         // Parse binding expression
         let (input, binding_expr) = cut(expression)(input)?;
         
-        // Validate that binding expression is reductive
-        if !binding_expr.is_reduction() {
+        // Validate that binding expression is reductive or a literal constant
+        if !binding_expr.is_reduction() && !matches!(binding_expr, Expr::Literal(_)) {
             return Err(nom::Err::Failure(nom::error::Error::new(
                 input,
                 nom::error::ErrorKind::Verify,
@@ -740,5 +740,32 @@ mod tests {
     fn test_parse_error_invalid_number() {
         let result = parse_expr("std::f64::consts::PI.15");
         assert!(result.is_err());
+    }
+
+    #[test]
+    fn test_let_with_constants() {
+        // Test constants in let bindings
+        let result = parse_expr("(let [I64 x -1234 U64 y 567] (+ x y))").unwrap();
+        if let Expr::Let { bindings, body } = result {
+            assert_eq!(bindings.len(), 2);
+            assert_eq!(bindings[0].0, Type::I64);
+            assert_eq!(bindings[0].1, "x");
+            assert_eq!(bindings[0].2, Expr::Literal(Value::Int64(-1234)));
+            assert_eq!(bindings[1].0, Type::U64);
+            assert_eq!(bindings[1].1, "y");
+            assert_eq!(bindings[1].2, Expr::Literal(Value::Int64(567)));
+        } else {
+            panic!("Expected Let expression");
+        }
+    }
+
+    #[test]
+    fn test_scalar_array_addition_parsing() {
+        // Test parsing scalar-array operations (should parse, execution is separate concern)
+        let result = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a)] (+ s b)))");
+        assert!(result.is_ok(), "Should parse scalar-array addition");
+        
+        let result = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a) I64 i -1] (+ (* s i) b)))");
+        assert!(result.is_ok(), "Should parse complex mixed operations");
     }
 }

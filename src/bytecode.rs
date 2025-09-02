@@ -140,6 +140,56 @@ impl ByteCodeCompiler {
         }
     }
 
+    /// Analyze the type of an expression given the current variable context
+    fn analyze_expression_type(&self, expr: &Expr) -> Result<DataType, DioError> {
+        match expr {
+            Expr::Literal(_) => Ok(DataType::I64), // Constants are scalars
+            Expr::Column(name) => {
+                // Check if it's an input parameter
+                for input in &self.inputs {
+                    if input.name == *name {
+                        return Ok(input.data_type.clone());
+                    }
+                }
+                // Check if it's a local variable (from let bindings)
+                for local in &self.locals {
+                    if local.name == *name {
+                        return Ok(local.data_type.clone());
+                    }
+                }
+                Err(DioError::Compilation(format!("Unknown variable: {}", name)))
+            }
+            Expr::Sum(_) | Expr::Count(_) => Ok(DataType::I64), // Reductions produce scalars
+            Expr::Add(operands) | Expr::Mul(operands) => {
+                // For n-ary operations, if any operand is an array, result is an array
+                let mut has_array = false;
+                for operand in operands {
+                    let operand_type = self.analyze_expression_type(operand)?;
+                    if operand_type.is_array() {
+                        has_array = true;
+                        break;
+                    }
+                }
+                if has_array {
+                    Ok(DataType::ArrayI64) // Broadcast to array
+                } else {
+                    Ok(DataType::I64) // All scalars
+                }
+            }
+            Expr::Sub(lhs, rhs) | Expr::Div(lhs, rhs) => {
+                // For binary operations, if either operand is an array, result is an array
+                let lhs_type = self.analyze_expression_type(lhs)?;
+                let rhs_type = self.analyze_expression_type(rhs)?;
+                if lhs_type.is_array() || rhs_type.is_array() {
+                    Ok(DataType::ArrayI64) // Broadcast to array
+                } else {
+                    Ok(DataType::I64) // Both scalars
+                }
+            }
+            _ => Err(DioError::Compilation(format!("Cannot analyze type for expression: {:?}", expr)))
+        }
+    }
+
     fn compile_lambda(
         &mut self,
         params: &[TypedParam],
@@ -315,6 +365,96 @@ impl ByteCodeCompiler {
         Ok(())
     }
 
+    /// Compile elementwise operations with support for scalar broadcasting
+    fn compile_elementwise_operation_with_broadcast(
+        &mut self,
+        operands: &[Expr],
+        op: BinaryOperator,
+    ) -> Result<(), DioError> {
+        // Add loop index variable
+        let index_var = "i".to_string();
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+
+        // Set the current loop index context before compiling expressions
+        let old_loop_index = self.current_loop_index.clone();
+        self.current_loop_index = Some(index_var.clone());
+
+        // Build the expression for the operation with broadcasting support
+        let mut expr = self.compile_expression_with_broadcast(&operands[0])?;
+        for operand in &operands[1..] {
+            let right_expr = self.compile_expression_with_broadcast(operand)?;
+            expr = Expression::BinaryOp {
+                op: op.clone(),
+                left: Box::new(expr),
+                right: Box::new(right_expr),
+            };
+        }
+        
+        // Restore the previous loop index context
+        self.current_loop_index = old_loop_index;
+
+        // output[i] = expr
+        loop_body.push(Statement::ArrayAssign {
+            array: "output".to_string(),
+            index: Expression::Variable(index_var.clone()),
+            value: expr,
+        });
+
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var,
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+
+        // Return void for elementwise operations
+        self.statements.push(Statement::Return { value: None });
+
+        Ok(())
+    }
+
+    /// Compile expression with support for scalar broadcasting
+    fn compile_expression_with_broadcast(&mut self, expr: &Expr) -> Result<Expression, DioError> {
+        let expr_type = self.analyze_expression_type(expr)?;
+        
+        match expr {
+            Expr::Column(name) => {
+                if expr_type.is_array() {
+                    // Array access: array[i]
+                    Ok(Expression::ArrayAccess {
+                        array: name.clone(),
+                        index: Box::new(Expression::Variable(
+                            self.current_loop_index.clone().unwrap_or("i".to_string())
+                        )),
+                    })
+                } else {
+                    // Scalar variable: just use the value directly (broadcasting)
+                    Ok(Expression::Variable(name.clone()))
+                }
+            }
+            Expr::Literal(value) => {
+                // Literals are always scalars (broadcasting)
+                let literal_val = match value {
+                    crate::ast::Value::Int64(i) => *i,
+                    crate::ast::Value::Float64(f) => f.0 as i64,
+                };
+                Ok(Expression::Literal(literal_val))
+            }
+            _ => {
+                // For now, delegate to the original compile_expression for complex cases
+                self.compile_expression(expr)
+            }
+        }
+    }
+
     /// Compile reduction operations like (sum expr)
     fn compile_reduction_operation(
         &mut self,
@@ -408,9 +548,16 @@ impl ByteCodeCompiler {
                         ));
                     }
                 }
+                Expr::Literal(_) => {
+                    if !data_type.is_scalar() {
+                        return Err(DioError::Compilation(
+                            format!("Literal constant produces a scalar but variable {} is declared as array type", var_name)
+                        ));
+                    }
+                }
                 _ => {
                     return Err(DioError::Compilation(
-                        "Only reductive functions (sum, count) are allowed in let bindings".to_string(),
+                        "Only reductive functions (sum, count) and literal constants are allowed in let bindings".to_string(),
                     ));
                 }
             }
@@ -428,6 +575,17 @@ impl ByteCodeCompiler {
                 }
                 Expr::Count(inner) => {
                     self.compile_count_to_variable(inner, var_name)?;
+                }
+                Expr::Literal(value) => {
+                    // Assign the literal value to the variable
+                    let literal_val = match value {
+                        crate::ast::Value::Int64(i) => *i,
+                        crate::ast::Value::Float64(f) => f.0 as i64, // Convert to i64 for now
+                    };
+                    self.statements.push(Statement::Assign {
+                        target: var_name.clone(),
+                        expr: Expression::Literal(literal_val),
+                    });
                 }
                 _ => unreachable!(), // Already checked above
             }
@@ -577,10 +735,13 @@ impl ByteCodeCompiler {
     fn compile_lambda_body_recursive(&mut self, body: &Expr, ret_type: &DataType) -> Result<(), DioError> {
         match body {
             Expr::Add(operands) => {
-                if ret_type.is_array() {
-                    self.compile_elementwise_operation(operands, BinaryOperator::Add)?;
+                // Analyze the actual type of this expression based on operands
+                let expr_type = self.analyze_expression_type(body)?;
+                if expr_type.is_array() {
+                    // Mixed or array-array operations -> elementwise with broadcasting
+                    self.compile_elementwise_operation_with_broadcast(operands, BinaryOperator::Add)?;
                 } else {
-                    // Scalar addition: compile as a simple scalar expression
+                    // Pure scalar operation
                     let result_expr = self.compile_expression(body)?;
                     self.statements.push(Statement::ArrayAssign {
                         array: "output".to_string(),
@@ -1397,6 +1558,70 @@ mod tests {
         let expr_result = parse_expr("(lambda ([U64Array b] [U64Array c] U64) (let [U64 a (+ b c)] (sum a)))");
         // This should fail at the parser level now
         assert!(expr_result.is_err(), "Expected parser to reject elementwise let binding");
+    }
+
+    #[test]
+    fn test_let_binding_with_constants() {
+        // Test constants in let bindings
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [I64 x -1234 U64 y 567] (+ x y)))").unwrap();
+        let bytecode = ast_to_bytecode(&expr).unwrap();
+        
+        // Should have a, b, length as inputs
+        assert_eq!(bytecode.inputs.len(), 3);
+        
+        // Should have local variables for the constants plus loop index
+        // x: I64, y: U64, i: U64 for the loop (if it's pure scalar it may not have a loop)
+        assert!(bytecode.locals.len() >= 2);
+        
+        // Check that constants are properly assigned
+        let x_local = bytecode.locals.iter().find(|l| l.name == "x");
+        let y_local = bytecode.locals.iter().find(|l| l.name == "y");
+        assert!(x_local.is_some());
+        assert!(y_local.is_some());
+        assert_eq!(x_local.unwrap().data_type, DataType::I64);
+        assert_eq!(y_local.unwrap().data_type, DataType::U64);
+    }
+
+    #[test]
+    fn test_scalar_array_broadcasting() {
+        // Test scalar-array broadcasting: (+ s b) where s is scalar, b is array
+        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a)] (+ s b)))").unwrap();
+        let bytecode = ast_to_bytecode(&expr).unwrap();
+        
+        // Should have a, b, length as inputs
+        assert_eq!(bytecode.inputs.len(), 3);
+        
+        // Should have local variables: s (from sum), loop variables for reduction and main loop
+        assert!(bytecode.locals.len() >= 2);
+        
+        // Should have a scalar variable s
+        let s_local = bytecode.locals.iter().find(|l| l.name == "s");
+        assert!(s_local.is_some());
+        assert_eq!(s_local.unwrap().data_type, DataType::U64);
+    }
+
+    #[test] 
+    fn test_all_requested_functionality() {
+        // Test all requested functionality in one comprehensive test
+        
+        // Example 1: (lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a)] (+ s b)))
+        let expr1 = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a)] (+ s b)))").unwrap();
+        let bytecode1 = ast_to_bytecode(&expr1).unwrap();
+        assert!(bytecode1.inputs.len() == 3); // a, b, length
+        assert!(bytecode1.locals.iter().any(|l| l.name == "s" && l.data_type == DataType::U64));
+        
+        // Example 2: (let [I64 x -1234 U64 y 567] (+ x y))
+        let expr2 = parse_expr("(lambda ([U64Array a] U64) (let [I64 x -1234 U64 y 567] (+ x y)))").unwrap();
+        let bytecode2 = ast_to_bytecode(&expr2).unwrap();
+        assert!(bytecode2.locals.iter().any(|l| l.name == "x" && l.data_type == DataType::I64));
+        assert!(bytecode2.locals.iter().any(|l| l.name == "y" && l.data_type == DataType::U64));
+        
+        // Example 3: (lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a) I64 i -1] (+ (* s i) b)))
+        let expr3 = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a) I64 i -1] (+ (* s i) b)))").unwrap();
+        let bytecode3 = ast_to_bytecode(&expr3).unwrap();
+        assert!(bytecode3.inputs.len() == 3); // a, b, length
+        assert!(bytecode3.locals.iter().any(|l| l.name == "s" && l.data_type == DataType::U64));
+        assert!(bytecode3.locals.iter().any(|l| l.name == "i" && l.data_type == DataType::I64));
     }
 
     #[test]
