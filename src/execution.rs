@@ -190,9 +190,10 @@ pub fn execute_generic_bytecode(
             return_type, body, ..
         } => {
             // Simplification 2: Treat reductions as length-1 vectors instead of scalars
-            let is_reduction = matches!(**body, Expr::Sum(_) | Expr::Count(_));
-            if is_reduction && return_type.is_scalar() {
-                // For reductions with scalar return type, create a length-1 array internally
+            // Check if this produces a scalar result (either direct reduction or let with scalar return)
+            let produces_scalar_result = return_type.is_scalar();
+            if produces_scalar_result {
+                // For scalar return types, create a length-1 array internally
                 let array_type = match return_type {
                     Type::U64 => Type::U64Array,
                     Type::I64 => Type::I64Array,
@@ -252,9 +253,10 @@ pub fn execute_generic_cached(
             return_type, body, ..
         } => {
             // Simplification 2: Treat reductions as length-1 vectors instead of scalars
-            let is_reduction = matches!(**body, Expr::Sum(_) | Expr::Count(_));
-            if is_reduction && return_type.is_scalar() {
-                // For reductions with scalar return type, create a length-1 array internally
+            // Check if this produces a scalar result (either direct reduction or let with scalar return)
+            let produces_scalar_result = return_type.is_scalar();
+            if produces_scalar_result {
+                // For scalar return types, create a length-1 array internally
                 let array_type = match return_type {
                     Type::U64 => Type::U64Array,
                     Type::I64 => Type::I64Array,

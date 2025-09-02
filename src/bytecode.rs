@@ -316,7 +316,7 @@ impl ByteCodeCompiler {
         op: BinaryOperator,
     ) -> Result<(), DioError> {
         // Add loop index variable
-        let index_var = "i".to_string();
+        let index_var = "loop_idx".to_string();
         self.locals.push(LocalVar {
             name: index_var.clone(),
             data_type: DataType::U64,
@@ -365,6 +365,43 @@ impl ByteCodeCompiler {
         Ok(())
     }
 
+    /// Compile a scalar operation that needs to be broadcast to all array elements
+    fn compile_scalar_broadcast_operation(&mut self, expr: &Expr) -> Result<(), DioError> {
+        // Add loop index variable
+        let index_var = "loop_idx".to_string();
+        self.locals.push(LocalVar {
+            name: index_var.clone(),
+            data_type: DataType::U64,
+        });
+
+        // Create the for loop: for(i = 0; i < length; i++)
+        let mut loop_body = Vec::new();
+
+        // Compile the scalar expression once
+        let scalar_expr = self.compile_expression(expr)?;
+        
+        // output[i] = scalar_expr (broadcast to all elements)
+        loop_body.push(Statement::ArrayAssign {
+            array: "output".to_string(),
+            index: Expression::Variable(index_var.clone()),
+            value: scalar_expr,
+        });
+
+        // Add the for loop
+        self.statements.push(Statement::ForLoop {
+            index_var,
+            start: Expression::Literal(0),
+            end: Expression::Variable("length".to_string()),
+            step: Expression::Literal(1),
+            body: loop_body,
+        });
+
+        // Return void for elementwise operations
+        self.statements.push(Statement::Return { value: None });
+
+        Ok(())
+    }
+
     /// Compile elementwise operations with support for scalar broadcasting
     fn compile_elementwise_operation_with_broadcast(
         &mut self,
@@ -372,7 +409,7 @@ impl ByteCodeCompiler {
         op: BinaryOperator,
     ) -> Result<(), DioError> {
         // Add loop index variable
-        let index_var = "i".to_string();
+        let index_var = "loop_idx".to_string();
         self.locals.push(LocalVar {
             name: index_var.clone(),
             data_type: DataType::U64,
@@ -432,7 +469,7 @@ impl ByteCodeCompiler {
                     Ok(Expression::ArrayAccess {
                         array: name.clone(),
                         index: Box::new(Expression::Variable(
-                            self.current_loop_index.clone().unwrap_or("i".to_string())
+                            self.current_loop_index.clone().unwrap_or("loop_idx".to_string())
                         )),
                     })
                 } else {
@@ -447,6 +484,25 @@ impl ByteCodeCompiler {
                     crate::ast::Value::Float64(f) => f.0 as i64,
                 };
                 Ok(Expression::Literal(literal_val))
+            }
+            Expr::Mul(operands) => {
+                // Handle multiplication of scalars within broadcasting context
+                if expr_type.is_scalar() {
+                    // Pure scalar multiplication - compile all operands as scalars
+                    let mut result = self.compile_expression_with_broadcast(&operands[0])?;
+                    for operand in &operands[1..] {
+                        let right = self.compile_expression_with_broadcast(operand)?;
+                        result = Expression::BinaryOp {
+                            op: BinaryOperator::Mul,
+                            left: Box::new(result),
+                            right: Box::new(right),
+                        };
+                    }
+                    Ok(result)
+                } else {
+                    // Mixed scalar-array multiplication - shouldn't reach here in current design
+                    self.compile_expression(expr)
+                }
             }
             _ => {
                 // For now, delegate to the original compile_expression for complex cases
@@ -469,7 +525,7 @@ impl ByteCodeCompiler {
         });
 
         // Add loop index variable
-        let index_var = "i".to_string();
+        let index_var = "loop_idx".to_string();
         self.locals.push(LocalVar {
             name: index_var.clone(),
             data_type: DataType::U64,
@@ -737,11 +793,41 @@ impl ByteCodeCompiler {
             Expr::Add(operands) => {
                 // Analyze the actual type of this expression based on operands
                 let expr_type = self.analyze_expression_type(body)?;
-                if expr_type.is_array() {
-                    // Mixed or array-array operations -> elementwise with broadcasting
-                    self.compile_elementwise_operation_with_broadcast(operands, BinaryOperator::Add)?;
+                
+                // If the return type is an array, we need to broadcast even scalar operations
+                if ret_type.is_array() {
+                    if expr_type.is_array() {
+                        // Mixed or array-array operations -> elementwise with broadcasting
+                        self.compile_elementwise_operation_with_broadcast(operands, BinaryOperator::Add)?;
+                    } else {
+                        // Pure scalar operation that needs to be broadcast to array
+                        self.compile_scalar_broadcast_operation(body)?;
+                    }
                 } else {
-                    // Pure scalar operation
+                    // Pure scalar operation for scalar return type
+                    let result_expr = self.compile_expression(body)?;
+                    self.statements.push(Statement::ArrayAssign {
+                        array: "output".to_string(),
+                        index: Expression::Literal(0), // Store scalar at index 0
+                        value: result_expr,
+                    });
+                    self.statements.push(Statement::Return { value: None });
+                }
+            }
+            Expr::Mul(operands) => {
+                // Handle multiplication similar to addition
+                let expr_type = self.analyze_expression_type(body)?;
+                
+                if ret_type.is_array() {
+                    if expr_type.is_array() {
+                        // Mixed or array-array operations -> elementwise with broadcasting
+                        self.compile_elementwise_operation_with_broadcast(operands, BinaryOperator::Mul)?;
+                    } else {
+                        // Pure scalar operation that needs to be broadcast to array
+                        self.compile_scalar_broadcast_operation(body)?;
+                    }
+                } else {
+                    // Pure scalar operation for scalar return type
                     let result_expr = self.compile_expression(body)?;
                     self.statements.push(Statement::ArrayAssign {
                         array: "output".to_string(),
@@ -789,7 +875,7 @@ impl ByteCodeCompiler {
                     // For array access, return array[i] where i is the current loop index
                     let index_var = self.current_loop_index.as_ref()
                         .cloned()
-                        .unwrap_or_else(|| "i".to_string()); // Fallback to "i" for backward compatibility
+                        .unwrap_or_else(|| "loop_idx".to_string()); // Fallback to "loop_idx" for backward compatibility
                     Ok(Expression::ArrayAccess {
                         array: name.clone(),
                         index: Box::new(Expression::Variable(index_var)),

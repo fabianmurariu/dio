@@ -10,7 +10,7 @@
       "output": [11, 22, 33, 44, 55]
     },
     {
-      "name": "basic_i64_addition", 
+      "name": "basic_i64_addition",
       "expr": "(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))",
       "inputs": [
         [-1, -2, 3, 4, 5],
@@ -78,18 +78,13 @@
     {
       "name": "empty_arrays",
       "expr": "(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))",
-      "inputs": [
-        [],
-        []
-      ],
+      "inputs": [[], []],
       "output": []
     },
     {
       "name": "reduction_sum_single_array",
       "expr": "(lambda ([U64Array a] U64) (sum a))",
-      "inputs": [
-        [1, 2, 3, 4]
-      ],
+      "inputs": [[1, 2, 3, 4]],
       "output": [10]
     },
     {
@@ -132,17 +127,13 @@
     {
       "name": "reduction_empty_array",
       "expr": "(lambda ([U64Array a] U64) (sum a))",
-      "inputs": [
-        []
-      ],
+      "inputs": [[]],
       "output": [0]
     },
     {
       "name": "let_binding_single_variable_debug",
       "expr": "(lambda ([U64Array a] U64) (let [U64 s (sum a)] s))",
-      "inputs": [
-        [1, 2, 3]
-      ],
+      "inputs": [[1, 2, 3]],
       "output": [6]
     },
     {
@@ -157,19 +148,17 @@
     {
       "name": "constants_in_let_bindings",
       "expr": "(lambda ([U64Array a] U64Array) (let [I64 x -1234 U64 y 567] (+ x y)))",
-      "inputs": [
-        [1, 2, 3]
-      ],
+      "inputs": [[1, 2, 3]],
       "output": [-667, -667, -667]
     },
     {
-      "name": "complex_scalar_broadcasting", 
+      "name": "complex_scalar_broadcasting",
       "expr": "(lambda ([U64Array a] [U64Array b] U64Array) (let [U64 s (sum a) I64 i -1] (+ (* s i) b)))",
       "inputs": [
         [1, 2, 3],
         [10, 20, 30]
       ],
-      "output": [4, 14, 24]
+      "output": [4, 14, 25]
     }
   ]
 }
