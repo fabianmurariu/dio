@@ -562,6 +562,8 @@ dependencies = [
  "nom",
  "petgraph",
  "proptest",
+ "serde",
+ "serde_json",
  "thiserror",
 ]
 

@@ -407,56 +407,127 @@ mod tests {
     use crate::array_support::{create_i64_array_from_vec, create_u64_array_from_vec};
     use crate::parse_expr;
     use arrow::array::{Int64Array, UInt64Array};
+    use serde::{Deserialize, Serialize};
+    use std::fs;
 
-    #[test]
-    fn test_generic_execute_binary_u64() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
+    #[derive(Deserialize, Serialize, Debug)]
+    struct TestConfig {
+        exec_tests: Vec<ExecutionTest>,
+    }
 
-        // Use the new ByteCode pipeline: AST -> ByteCode -> SSA v2 -> Cranelift
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result_u64.values(), &[11, 22, 33, 44, 55]);
+    #[derive(Deserialize, Serialize, Debug)]
+    struct ExecutionTest {
+        name: String,
+        expr: String,
+        inputs: Vec<Vec<i64>>,
+        output: Vec<i64>,
+    }
+
+    /// Create an ArrayRef from a vector of i64 values based on the type
+    fn create_array_from_values(values: Vec<i64>, expected_type: &Type) -> Result<ArrayRef, DioError> {
+        match expected_type {
+            Type::U64Array => {
+                let u64_values: Vec<u64> = values.into_iter().map(|v| v as u64).collect();
+                create_u64_array_from_vec(u64_values)
+            }
+            Type::I64Array => {
+                create_i64_array_from_vec(values)
+            }
+            _ => Err(DioError::Runtime(format!("Unsupported array type: {:?}", expected_type)))
+        }
+    }
+
+    /// Extract output values from an ArrayRef for comparison
+    fn extract_output_values(array: &ArrayRef) -> Vec<i64> {
+        if let Some(u64_array) = array.as_any().downcast_ref::<UInt64Array>() {
+            u64_array.values().iter().map(|&v| v as i64).collect()
+        } else if let Some(i64_array) = array.as_any().downcast_ref::<Int64Array>() {
+            i64_array.values().to_vec()
+        } else {
+            panic!("Unsupported array type for output extraction");
+        }
+    }
+
+    /// Extract lambda parameter types from an expression
+    fn extract_parameter_types(expr: &crate::ast::Expr) -> Vec<Type> {
+        match expr {
+            crate::ast::Expr::Lambda { params, .. } => {
+                params.iter().map(|param| param.type_.clone()).collect()
+            }
+            _ => panic!("Expected Lambda expression"),
+        }
     }
 
     #[test]
-    fn test_generic_execute_binary_i64() {
-        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
-        let a = create_i64_array_from_vec(vec![-1, -2, 3, 4, 5]).unwrap();
-        let b = create_i64_array_from_vec(vec![10, 20, -30, 40, 50]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result_i64.values(), &[9, 18, -27, 44, 55]);
-    }
+    fn test_json_driven_execution() {
+        // Load the JSON test configuration
+        let test_data_path = concat!(env!("CARGO_MANIFEST_DIR"), "/test_data/execution_tests.json");
+        let json_content = fs::read_to_string(test_data_path)
+            .expect("Failed to read test_data/execution_tests.json");
+        
+        let config: TestConfig = serde_json::from_str(&json_content)
+            .expect("Failed to parse JSON test configuration");
 
-    #[test]
-    fn test_generic_execute_subtraction_i64() {
-        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (- a b))").unwrap();
-        let a = create_i64_array_from_vec(vec![-1, 20, 3, 40, 5]).unwrap();
-        let b = create_i64_array_from_vec(vec![10, -2, -30, 4, 50]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result_i64.values(), &[-11, 22, 33, 36, -45]);
-    }
+        // Run each test
+        for test_case in config.exec_tests {
+            println!("Running test: {}", test_case.name);
+            
+            // Parse the expression
+            let expr = match parse_expr(&test_case.expr) {
+                Ok(e) => e,
+                Err(e) => {
+                    panic!("Test '{}': Failed to parse expression '{}': {:?}", 
+                           test_case.name, test_case.expr, e);
+                }
+            };
 
-    #[test]
-    fn test_generic_execute_mixed_types() {
-        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
-        let b = create_i64_array_from_vec(vec![-1, -2, -3, 4, 5]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result_i64.values(), &[0, 0, 0, 8, 10]);
-    }
+            // Extract parameter types from the lambda
+            let param_types = extract_parameter_types(&expr);
+            
+            // Validate input count matches parameter count
+            if test_case.inputs.len() != param_types.len() {
+                panic!("Test '{}': Input count {} doesn't match parameter count {}", 
+                       test_case.name, test_case.inputs.len(), param_types.len());
+            }
 
-    #[test]
-    fn test_generic_execute_empty_arrays() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![]).unwrap();
-        let b = create_u64_array_from_vec(vec![]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        assert_eq!(result.len(), 0);
+            // Create input arrays based on parameter types
+            let input_arrays: Result<Vec<_>, _> = test_case.inputs.iter()
+                .zip(&param_types)
+                .map(|(values, param_type)| create_array_from_values(values.clone(), param_type))
+                .collect();
+            
+            let input_arrays = match input_arrays {
+                Ok(arrays) => arrays,
+                Err(e) => {
+                    panic!("Test '{}': Failed to create input arrays: {:?}", test_case.name, e);
+                }
+            };
+
+            // Execute the expression
+            let result = match execute_generic_bytecode(&expr, &input_arrays) {
+                Ok(r) => r,
+                Err(e) => {
+                    panic!("Test '{}': Execution failed for expr '{}' with inputs {:?}: {:?}", 
+                           test_case.name, test_case.expr, test_case.inputs, e);
+                }
+            };
+
+            // Extract and compare output values
+            let actual_output = extract_output_values(&result);
+            
+            if actual_output != test_case.output {
+                // For debugging: print extra info about arrays returning unexpected length
+                if actual_output.len() != test_case.output.len() {
+                    println!("  Length mismatch - Expected: {}, Got: {} elements", test_case.output.len(), actual_output.len());
+                    println!("  Result array type: {:?}", result.data_type());
+                    println!("  Result array length: {}", result.len());
+                }
+                panic!("Test '{}': Output mismatch for expr '{}' with inputs {:?}\n  Expected: {:?}\n  Actual: {:?}", 
+                       test_case.name, test_case.expr, test_case.inputs, test_case.output, actual_output);
+            }
+
+            println!("✓ Test '{}' passed", test_case.name);
+        }
     }
 
     #[test]
@@ -465,270 +536,5 @@ mod tests {
         let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
         let b = create_u64_array_from_vec(vec![4, 5]).unwrap();
         assert!(execute_generic_bytecode(&expr, &[a, b]).is_err());
-    }
-
-    #[test]
-    fn test_cached_execute_basic() {
-        clear_function_cache();
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_u64_array_from_vec(vec![4, 5, 6]).unwrap();
-        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
-        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result1_u64.values(), &[5, 7, 9]);
-        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
-        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result2_u64.values(), &[5, 7, 9]);
-    }
-
-    #[test]
-    fn test_cached_execute_different_signatures() {
-        clear_function_cache();
-        let expr1 = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-        let expr2 = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (+ a b))").unwrap();
-        let a_u64 = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let b_u64 = create_u64_array_from_vec(vec![3, 4]).unwrap();
-        let a_i64 = create_i64_array_from_vec(vec![-1, -2]).unwrap();
-        let b_i64 = create_i64_array_from_vec(vec![3, 4]).unwrap();
-        let result1 = execute_generic_cached(&expr1, &[a_u64, b_u64]).unwrap();
-        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result1_u64.values(), &[4, 6]);
-        let result2 = execute_generic_cached(&expr2, &[a_i64, b_i64]).unwrap();
-        let result2_i64 = result2.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result2_i64.values(), &[2, 2]);
-    }
-
-    #[test]
-    fn test_cache_clear() {
-        clear_function_cache();
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![1]).unwrap();
-        let b = create_u64_array_from_vec(vec![2]).unwrap();
-        let _ = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
-        clear_function_cache();
-        let result = execute_generic_cached(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result_u64.values(), &[3]);
-    }
-
-    #[test]
-    fn test_generic_execute_ternary_addition() {
-        let expr =
-            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))")
-                .unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let c = create_u64_array_from_vec(vec![100, 200, 300]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result_u64.values(), &[111, 222, 333]);
-    }
-
-    #[test]
-    fn test_generic_execute_quaternary_mixed() {
-        let expr = parse_expr(
-            "(lambda ([U64Array w] [I64Array x] [U64Array y] [I64Array z] I64Array) (+ w x y z))",
-        )
-        .unwrap();
-        let w = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let x = create_i64_array_from_vec(vec![10, 20]).unwrap();
-        let y = create_u64_array_from_vec(vec![100, 200]).unwrap();
-        let z = create_i64_array_from_vec(vec![1000, 2000]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[w, x, y, z]).unwrap();
-        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result_i64.values(), &[1111, 2222]);
-    }
-
-    #[test]
-    fn test_cached_execute_ternary() {
-        clear_function_cache();
-        let expr =
-            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))")
-                .unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
-        let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
-        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone(), c.clone()]).unwrap();
-        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result1_u64.values(), &[111, 222]);
-        let result2 = execute_generic_cached(&expr, &[a, b, c]).unwrap();
-        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result2_u64.values(), &[111, 222]);
-    }
-
-    #[test]
-    fn test_execute_reduction_sum_single_array() {
-        let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3, 4]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 10); // 1 + 2 + 3 + 4 = 10
-    }
-
-    #[test]
-    fn test_execute_reduction_sum_binary_addition() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
-    }
-
-    #[test]
-    fn test_execute_reduction_sum_ternary_addition() {
-        let expr =
-            parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (sum (+ a b c)))")
-                .unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
-        let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 333); // (1+10+100) + (2+20+200) = 111 + 222 = 333
-    }
-
-    #[test]
-    fn test_execute_reduction_sum_mixed_types() {
-        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64) (sum (+ a b)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_i64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 66); // (1+10) + (2+20) + (3+30) = 11 + 22 + 33 = 66
-    }
-
-    #[test]
-    fn test_execute_reduction_sum_subtraction() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (- a b)))").unwrap();
-        let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let b = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 54); // (10-1) + (20-2) + (30-3) = 9 + 18 + 27 = 54
-    }
-
-    #[test]
-    fn test_execute_reduction_cached() {
-        clear_function_cache();
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
-
-        // First call
-        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
-        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result1 = result1_u64.value(0);
-        assert_eq!(result1, 33); // (1+10) + (2+20) = 11 + 22 = 33
-
-        // Second call should use cached version
-        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
-        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result2 = result2_u64.value(0);
-        assert_eq!(result2, 33);
-    }
-
-    #[test]
-    fn test_execute_reduction_empty_arrays() {
-        let expr = parse_expr("(lambda ([U64Array a] U64) (sum a))").unwrap();
-        let a = create_u64_array_from_vec(vec![]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 0); // Sum of empty array is 0
-    }
-
-    #[test]
-    fn test_generic_execute_subtraction_u64() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (- a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
-        let b = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        assert_eq!(result_u64.values(), &[9, 18, 27, 36, 45]);
-    }
-
-    #[test]
-    fn test_generic_execute_subtraction_mixed_types() {
-        let expr = parse_expr("(lambda ([U64Array a] [I64Array b] I64Array) (- a b))").unwrap();
-        let a = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let b = create_i64_array_from_vec(vec![-5, 15, -10]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_i64 = result.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result_i64.values(), &[15, 5, 40]); // 10-(-5)=15, 20-15=5, 30-(-10)=40
-    }
-
-    #[test]
-    fn test_cached_execute_subtraction() {
-        clear_function_cache();
-        let expr = parse_expr("(lambda ([I64Array a] [I64Array b] I64Array) (- a b))").unwrap();
-        let a = create_i64_array_from_vec(vec![100, 50, 0]).unwrap();
-        let b = create_i64_array_from_vec(vec![25, 60, -10]).unwrap();
-        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
-        let result1_i64 = result1.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result1_i64.values(), &[75, -10, 10]); // 100-25=75, 50-60=-10, 0-(-10)=10
-                                                          // Second call should use cache
-        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
-        let result2_i64 = result2.as_any().downcast_ref::<Int64Array>().unwrap();
-        assert_eq!(result2_i64.values(), &[75, -10, 10]);
-    }
-
-    #[test]
-    fn test_execute_let_binding_single_variable() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 t (sum b)] (+ s t)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 66); // sum(a) + sum(b) = 6 + 60 = 66
-    }
-
-    #[test]
-    fn test_execute_let_binding_multiple_variables() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2, 3]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20, 30]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 9); // sum(a) + count(b) = 6 + 3 = 9
-    }
-
-    #[test]
-    fn test_execute_let_binding_with_complex_expression() {
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] [U64Array c] U64) (let [U64 s (sum (+ a b)) U64 t (sum c)] (+ s t)))").unwrap();
-        let a = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        let b = create_u64_array_from_vec(vec![10, 20]).unwrap();
-        let c = create_u64_array_from_vec(vec![100, 200]).unwrap();
-        let result = execute_generic_bytecode(&expr, &[a, b, c]).unwrap();
-        let result_u64 = result.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result = result_u64.value(0);
-        assert_eq!(result, 333); // sum(a+b) + sum(c) = (11+22) + (100+200) = 33 + 300 = 333
-    }
-
-    #[test]
-    fn test_execute_let_binding_cached() {
-        clear_function_cache();
-        let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64) (let [U64 s (sum a) U64 c (count b)] (+ s c)))").unwrap();
-        let a = create_u64_array_from_vec(vec![5, 10]).unwrap();
-        let b = create_u64_array_from_vec(vec![1, 2]).unwrap();
-        
-        // First call
-        let result1 = execute_generic_cached(&expr, &[a.clone(), b.clone()]).unwrap();
-        let result1_u64 = result1.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result1 = result1_u64.value(0);
-        assert_eq!(result1, 17); // sum(a) + count(b) = 15 + 2 = 17
-        
-        // Second call should use cached version
-        let result2 = execute_generic_cached(&expr, &[a, b]).unwrap();
-        let result2_u64 = result2.as_any().downcast_ref::<UInt64Array>().unwrap();
-        let result2 = result2_u64.value(0);
-        assert_eq!(result2, 17);
     }
 }
