@@ -1,0 +1,26 @@
+[package]
+name = "dio4"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# JIT compilation - core dependencies for staging
+cranelift = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-native = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+# Arrow integration
+arrow = { workspace = true }
+
+# Performance utilities
+ahash = { workspace = true }
+
+[dev-dependencies]
+# Testing
+proptest = { workspace = true }

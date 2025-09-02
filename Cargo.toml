@@ -1,9 +1,8 @@
-[package]
-name = "dio"
-version = "0.1.0"
-edition = "2021"
+[workspace]
+members = ["dio3", "dio4"]
+resolver = "2"
 
-[dependencies]
+[workspace.dependencies]
 # Parsing
 nom = "7.1"
 
@@ -27,7 +26,6 @@ petgraph = "0.6"
 # Performance utilities
 ahash = "0.8"
 
-[dev-dependencies]
 # Testing
 proptest = "1.4"
 serde = { version = "1.0", features = ["derive"] }

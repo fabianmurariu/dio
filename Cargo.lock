@@ -547,7 +547,7 @@ dependencies = [
 ]
 
 [[package]]
-name = "dio"
+name = "dio3"
 version = "0.1.0"
 dependencies = [
  "ahash",
@@ -564,6 +564,22 @@ dependencies = [
  "proptest",
  "serde",
  "serde_json",
+ "thiserror",
+]
+
+[[package]]
+name = "dio4"
+version = "0.1.0"
+dependencies = [
+ "ahash",
+ "arrow",
+ "cranelift",
+ "cranelift-codegen",
+ "cranelift-frontend",
+ "cranelift-jit",
+ "cranelift-module",
+ "cranelift-native",
+ "proptest",
  "thiserror",
 ]
 
