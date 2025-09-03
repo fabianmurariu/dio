@@ -4,5 +4,7 @@
 //! and callback-based operator fusion as described in `docs/dio4.md`.
 
 pub mod staging;
-pub mod filter;
+pub mod operators;
+pub mod pipeline;
+pub mod execution;
 pub mod compiler;

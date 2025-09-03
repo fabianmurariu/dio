@@ -182,65 +182,6 @@ impl ExecutionContext {
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::filter::{StagedFilter, StagedPredicate};
 
-    #[test]
-    fn test_end_to_end_filter_compilation() {
-        // Create a filter for elements > 5
-        let predicate = StagedPredicate::GreaterThan(5);
-        let filter = StagedFilter::new(predicate);
-
-        // Generate the function
-        let func = filter.generate_filter_function().unwrap();
-
-        // Compile it
-        let mut context = ExecutionContext::new().unwrap();
-        context.compile_function("filter_gt_5".to_string(), func).unwrap();
-
-        // Test it with data
-        let input = vec![1, 3, 6, 8, 2, 10, 4];
-        let mut output = Vec::new();
-
-        let count = context
-            .execute_filter("filter_gt_5", &input, &mut output)
-            .unwrap();
-
-        println!("Input: {:?}", input);
-        println!("Output: {:?}", output);
-        println!("Count: {}", count);
-
-        // Verify the results
-        let expected = vec![6, 8, 10];
-        assert_eq!(output, expected);
-        assert_eq!(count, 3);
-    }
-
-    #[test]
-    fn test_end_to_end_equality_filter() {
-        // Create a filter for elements == 42
-        let predicate = StagedPredicate::EqualTo(42);
-        let filter = StagedFilter::new(predicate);
-
-        // Generate and compile
-        let func = filter.generate_filter_function().unwrap();
-        let mut context = ExecutionContext::new().unwrap();
-        context.compile_function("filter_eq_42".to_string(), func).unwrap();
-
-        // Test with data containing 42
-        let input = vec![1, 42, 3, 42, 5, 42];
-        let mut output = Vec::new();
-
-        let count = context
-            .execute_filter("filter_eq_42", &input, &mut output)
-            .unwrap();
-
-        println!("Input: {:?}", input);
-        println!("Output: {:?}", output);
-        println!("Count: {}", count);
-
-        // Verify results
-        let expected = vec![42, 42, 42];
-        assert_eq!(output, expected);
-        assert_eq!(count, 3);
-    }
+    // Note: Tests moved to execution.rs for the new API
 }

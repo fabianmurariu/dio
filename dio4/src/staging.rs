@@ -73,6 +73,7 @@ pub enum StagedU64 {
     Variable(StagedVariable),
     Add(Box<StagedU64>, Box<StagedU64>),
     Mul(Box<StagedU64>, Box<StagedU64>),
+    DirectValue(Value), // Hold a Cranelift Value directly
 }
 
 impl StagedU64 {
@@ -125,6 +126,7 @@ impl Staged for StagedU64 {
                 let right_val = right.codegen(builder);
                 builder.ins().imul(left_val, right_val)
             }
+            StagedU64::DirectValue(value) => *value,
         }
     }
 
@@ -606,11 +608,8 @@ pub mod control_flow {
             
             // Generate loop body
             builder.switch_to_block(loop_body);
-            // Create a variable to hold the loop index
-            let loop_index_var = Variable::from_u32(1000); // Use a high ID to avoid conflicts
-            builder.declare_var(loop_index_var, types::I64);
-            builder.def_var(loop_index_var, loop_var);
-            let staged_index = StagedU64::Variable(StagedVariable::new(1000, types::I64));
+            // Use the loop variable directly as a StagedU64::DirectValue
+            let staged_index = StagedU64::DirectValue(loop_var);
             body(builder, staged_index)?;
             
             // Increment and continue loop
