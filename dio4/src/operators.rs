@@ -106,18 +106,42 @@ impl Operator for ScanOperator {
             println!("[DEBUG] ScanOperator::produce - schema: {:?}", self.schema);
         }
         
-        // Get function parameters (array pointers and length)
+        // Get function parameters using NaryOpFn signature
         let entry_block = builder.current_block().unwrap();
         let params = builder.block_params(entry_block);
         
         if std::env::var("DIO_DEBUG_JIT").is_ok() {
             println!("[DEBUG] Function parameters count: {}", params.len());
-            println!("[DEBUG] Expected: {} input columns + length + output", self.schema.columns.len());
+            println!("[DEBUG] Expected NaryOpFn signature: (arrays_ptr, count, output_ptr, length)");
         }
         
-        // Function signature: (array0_ptr, array1_ptr, ..., length, output_ptr) -> count
-        let length_param = params[params.len() - 2]; // Second to last param is length
-        let array_ptrs: Vec<Value> = params[..params.len() - 2].to_vec();
+        // NaryOpFn signature: (array_of_arrays_ptr, input_count, output_ptr, length) -> count
+        let arrays_ptr = params[0];     // *const *const u8 - array of input arrays
+        let input_count = params[1];    // u32 - number of input arrays  
+        let output_ptr = params[2];     // *mut u8 - output array pointer
+        let length_param = params[3];   // u64 - input array length
+        
+        // Extract individual array pointers from the array-of-arrays
+        let mut array_ptrs = Vec::new();
+        for i in 0..self.schema.columns.len() {
+            if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                println!("[DEBUG] Extracting array pointer {}", i);
+            }
+            
+            // Calculate offset into array-of-arrays: arrays_ptr + (i * 8) since each pointer is 8 bytes
+            let offset_const = builder.ins().iconst(types::I64, (i * 8) as i64);
+            let array_ptr_addr = builder.ins().iadd(arrays_ptr, offset_const);
+            
+            // Load the individual array pointer
+            let array_ptr = builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::new(),
+                array_ptr_addr,
+                0
+            );
+            
+            array_ptrs.push(array_ptr);
+        }
 
         // Create length variable for the loop
         let length_var = ctx.fresh_variable(builder);
@@ -314,12 +338,11 @@ impl OutputConsumer {
 
 impl Consumer for OutputConsumer {
     fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
-        // Get output array pointer from function parameters
-        // We need to get the entry block, not the current block
+        // Get output array pointer from function parameters using NaryOpFn signature
         let func = &builder.func;
         let entry_block = func.layout.entry_block().expect("Function should have entry block");
         let params = func.dfg.block_params(entry_block);
-        let output_ptr = params[params.len() - 1]; // Last param is output ptr
+        let output_ptr = params[2]; // Third param is output ptr in NaryOpFn signature
 
         // Get the column value to write
         let column_val = record.get_column(self.column_index)

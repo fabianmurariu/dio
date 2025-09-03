@@ -149,7 +149,7 @@ impl CompiledPipeline {
         let output_col = &self.input_schema.columns[self.output_column];
         
         format!(
-            "fn({}, length: u64, output_ptr: *mut u64) -> count: u64\nOutputs: {} values",
+            "fn(arrays_ptr: *const *const u8, input_count: u32, output_ptr: *mut u8, length: u64) -> count: u64\nInput arrays: [{}]\nOutputs: {} values",
             input_cols.join(", "),
             output_col.name
         )
@@ -171,8 +171,8 @@ impl PipelineCompiler {
         operators: Vec<PipelineOperator>, 
         output_column: usize
     ) -> Result<CompiledPipeline, StagingError> {
-        // Create function signature based on the scan schema (not the final pipeline schema)
-        // fn(col0_ptr, col1_ptr, ..., length, output_ptr) -> count
+        // Create function signature using NaryOpFn format
+        // fn(array_of_arrays_ptr, input_count, output_ptr, length) -> count
         let scan_schema = match operators.first() {
             Some(PipelineOperator::Scan { schema }) => schema,
             _ => return Err(StagingError::CodeGenerationFailed {
@@ -182,13 +182,12 @@ impl PipelineCompiler {
         
         let mut sig = Signature::new(CallConv::SystemV);
         
-        // Add input column parameters based on scan schema
-        for _ in &scan_schema.columns {
-            sig.params.push(AbiParam::new(types::I64)); // column pointer
-        }
-        sig.params.push(AbiParam::new(types::I64)); // length
-        sig.params.push(AbiParam::new(types::I64)); // output pointer
-        sig.returns.push(AbiParam::new(types::I64)); // count
+        // NaryOpFn signature: (*const *const u8, u32, *mut u8, u64) -> i64
+        sig.params.push(AbiParam::new(types::I64)); // array of input arrays pointer
+        sig.params.push(AbiParam::new(types::I32)); // number of input arrays 
+        sig.params.push(AbiParam::new(types::I64)); // output array pointer
+        sig.params.push(AbiParam::new(types::I64)); // input array length
+        sig.returns.push(AbiParam::new(types::I64)); // result count
 
         // Create Cranelift function
         let mut func = Function::new();
@@ -378,9 +377,9 @@ mod tests {
 
         println!("Pipeline signature: {}", pipeline.signature_description());
         
-        // Verify function signature
+        // Verify function signature - NaryOpFn format
         let sig = &pipeline.function.signature;
-        assert_eq!(sig.params.len(), 5); // 3 columns + length + output_ptr
+        assert_eq!(sig.params.len(), 4); // arrays_ptr + input_count + output_ptr + length
         assert_eq!(sig.returns.len(), 1); // count
 
         // Verify IR contains the filter constant
@@ -432,9 +431,9 @@ mod tests {
 
         println!("Scan->Project pipeline signature: {}", pipeline.signature_description());
         
-        // Verify function signature - should take 3 scan columns + length + output_ptr
+        // Verify function signature - NaryOpFn format
         let sig = &pipeline.function.signature;
-        assert_eq!(sig.params.len(), 5); // 3 original columns + length + output_ptr  
+        assert_eq!(sig.params.len(), 4); // arrays_ptr + input_count + output_ptr + length
         assert_eq!(sig.returns.len(), 1); // count
 
         let ir = pipeline.function.display().to_string();

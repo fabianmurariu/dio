@@ -159,7 +159,7 @@ impl ExecutableQuery {
         for array in input_arrays {
             // For now, assume all arrays are UInt64Array - we'll make this more generic later
             if let Some(u64_array) = array.as_any().downcast_ref::<arrow::array::UInt64Array>() {
-                raw_ptrs.push(u64_array.values().as_ptr() as i64);
+                raw_ptrs.push(u64_array.values().as_ptr() as *const u8);
             } else {
                 return Err(ExecutionError::ExecutionFailed {
                     reason: "Currently only UInt64Array is supported".to_string(),
@@ -169,33 +169,18 @@ impl ExecutableQuery {
 
         // Prepare output buffer
         let mut output_buffer = vec![0u64; length];
-        raw_ptrs.push(length as i64);
-        raw_ptrs.push(output_buffer.as_mut_ptr() as i64);
 
-        // Call the compiled function based on the number of input arrays
-        let result_count = match input_arrays.len() {
-            1 => {
-                let func: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2])
-            }
-            2 => {
-                let func: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3])
-            }
-            3 => {
-                let func: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3], raw_ptrs[4])
-            }
-            4 => {
-                let func: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3], raw_ptrs[4], raw_ptrs[5])
-            }
-            _ => {
-                return Err(ExecutionError::ExecutionFailed {
-                    reason: format!("Unsupported number of input arrays: {}", input_arrays.len()),
-                });
-            }
-        };
+        // Call the compiled function using the NaryOpFn signature
+        // fn(array_of_arrays_ptr, input_count, output_ptr, length) -> result_count
+        type NaryOpFn = extern "C" fn(*const *const u8, u32, *mut u8, u64) -> i64;
+        let func: NaryOpFn = std::mem::transmute(self.func_ptr);
+        
+        let result_count = func(
+            raw_ptrs.as_ptr(),                    // array of input arrays
+            input_arrays.len() as u32,            // number of input arrays
+            output_buffer.as_mut_ptr() as *mut u8, // output array pointer
+            length as u64,                        // input array length
+        );
 
         // Truncate output buffer to actual result count
         output_buffer.truncate(result_count as usize);
