@@ -91,6 +91,21 @@ impl StagedU64 {
     pub fn mul(left: StagedU64, right: StagedU64) -> Self {
         StagedU64::Mul(Box::new(left), Box::new(right))
     }
+
+    /// Generate equality comparison
+    pub fn eq(self, other: StagedU64) -> StagedBool {
+        StagedBool::U64Equal(Box::new(self), Box::new(other))
+    }
+
+    /// Generate greater-than comparison  
+    pub fn gt(self, other: StagedU64) -> StagedBool {
+        StagedBool::U64GreaterThan(Box::new(self), Box::new(other))
+    }
+
+    /// Generate less-than comparison
+    pub fn lt(self, other: StagedU64) -> StagedBool {
+        StagedBool::U64LessThan(Box::new(self), Box::new(other))
+    }
 }
 
 impl Staged for StagedU64 {
@@ -238,6 +253,10 @@ pub enum StagedBool {
     And(Box<StagedBool>, Box<StagedBool>),
     Or(Box<StagedBool>, Box<StagedBool>),
     Not(Box<StagedBool>),
+    // U64 comparisons
+    U64Equal(Box<StagedU64>, Box<StagedU64>),
+    U64GreaterThan(Box<StagedU64>, Box<StagedU64>),
+    U64LessThan(Box<StagedU64>, Box<StagedU64>),
 }
 
 impl StagedBool {
@@ -306,6 +325,21 @@ impl Staged for StagedBool {
             StagedBool::Not(operand) => {
                 let operand_val = operand.codegen(builder);
                 builder.ins().bnot(operand_val)
+            }
+            StagedBool::U64Equal(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::Equal, left_val, right_val)
+            }
+            StagedBool::U64GreaterThan(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedGreaterThan, left_val, right_val)
+            }
+            StagedBool::U64LessThan(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedLessThan, left_val, right_val)
             }
         }
     }
@@ -525,10 +559,122 @@ pub mod ops {
     }
 }
 
+/// Staged control flow operations for loops and conditionals
+pub mod control_flow {
+    use super::*;
+    use cranelift_codegen::ir::{Block, InstBuilder};
+    
+    /// Represents a staged for-loop that generates Cranelift IR
+    pub struct StagedForLoop {
+        start: StagedU64,
+        end: StagedU64,
+    }
+    
+    impl StagedForLoop {
+        /// Create a new staged for loop from start to end (exclusive)
+        pub fn new(start: StagedU64, end: StagedU64) -> Self {
+            Self { start, end }
+        }
+        
+        /// Generate a for loop with a body function that receives the loop index
+        pub fn generate_loop<F>(
+            &self,
+            builder: &mut FunctionBuilder,
+            mut body: F,
+        ) -> Result<(), StagingError>
+        where
+            F: FnMut(&mut FunctionBuilder, StagedU64) -> Result<(), StagingError>,
+        {
+            // Create blocks for loop structure
+            let loop_header = builder.create_block();
+            let loop_body = builder.create_block();
+            let loop_exit = builder.create_block();
+            
+            // Add loop variable parameter to header block
+            builder.append_block_param(loop_header, types::I64);
+            
+            // Generate start value and jump to loop header
+            let start_val = self.start.codegen(builder);
+            builder.ins().jump(loop_header, &[start_val]);
+            
+            // Generate loop header (condition check)
+            builder.switch_to_block(loop_header);
+            let loop_var = builder.block_params(loop_header)[0];
+            let end_val = self.end.codegen(builder);
+            let condition = builder.ins().icmp(cranelift_codegen::ir::condcodes::IntCC::UnsignedLessThan, loop_var, end_val);
+            builder.ins().brif(condition, loop_body, &[], loop_exit, &[]);
+            
+            // Generate loop body
+            builder.switch_to_block(loop_body);
+            // Create a variable to hold the loop index
+            let loop_index_var = Variable::from_u32(1000); // Use a high ID to avoid conflicts
+            builder.declare_var(loop_index_var, types::I64);
+            builder.def_var(loop_index_var, loop_var);
+            let staged_index = StagedU64::Variable(StagedVariable::new(1000, types::I64));
+            body(builder, staged_index)?;
+            
+            // Increment and continue loop
+            let one = builder.ins().iconst(types::I64, 1);
+            let next_val = builder.ins().iadd(loop_var, one);
+            builder.ins().jump(loop_header, &[next_val]);
+            
+            // Continue after loop
+            builder.switch_to_block(loop_exit);
+            Ok(())
+        }
+    }
+    
+    /// Staged conditional (if-then-else) operation
+    pub struct StagedConditional {
+        condition: StagedBool,
+    }
+    
+    impl StagedConditional {
+        pub fn new(condition: StagedBool) -> Self {
+            Self { condition }
+        }
+        
+        /// Generate if-then-else with optional else branch
+        pub fn generate_if_else<ThenF, ElseF>(
+            &self,
+            builder: &mut FunctionBuilder,
+            mut then_branch: ThenF,
+            mut else_branch: Option<ElseF>,
+        ) -> Result<(), StagingError>
+        where
+            ThenF: FnMut(&mut FunctionBuilder) -> Result<(), StagingError>,
+            ElseF: FnMut(&mut FunctionBuilder) -> Result<(), StagingError>,
+        {
+            let then_block = builder.create_block();
+            let else_block = builder.create_block();
+            let merge_block = builder.create_block();
+            
+            let condition_val = self.condition.codegen(builder);
+            builder.ins().brif(condition_val, then_block, &[], else_block, &[]);
+            
+            // Generate then branch
+            builder.switch_to_block(then_block);
+            then_branch(builder)?;
+            builder.ins().jump(merge_block, &[]);
+            
+            // Generate else branch  
+            builder.switch_to_block(else_block);
+            if let Some(ref mut else_fn) = else_branch {
+                else_fn(builder)?;
+            }
+            builder.ins().jump(merge_block, &[]);
+            
+            // Continue after conditional
+            builder.switch_to_block(merge_block);
+            Ok(())
+        }
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;
-    use cranelift_codegen::ir::Function;
+    use cranelift_codegen::ir::{Function, Signature, AbiParam};
     use cranelift_codegen::isa::CallConv;
     use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 
@@ -598,5 +744,56 @@ mod tests {
             ir.contains("iconst.i64 20"),
             "Generated IR should contain the constant 20"
         );
+    }
+
+    #[test]
+    fn test_staged_loop_generation() {
+        use super::control_flow::*;
+        
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.returns.push(AbiParam::new(types::I64));
+        
+        let mut func = Function::new();
+        func.signature = sig;
+        
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+        
+        let entry = builder.create_block();
+        builder.switch_to_block(entry);
+        
+        // Create a simple loop from 0 to 3
+        let start = StagedU64::Constant(0);
+        let end = StagedU64::Constant(3);
+        let loop_gen = StagedForLoop::new(start, end);
+        
+        let mut sum_var = Variable::from_u32(0);
+        builder.declare_var(sum_var, types::I64);
+        let zero = builder.ins().iconst(types::I64, 0);
+        builder.def_var(sum_var, zero);
+        
+        // Generate loop that accumulates index values
+        loop_gen.generate_loop(&mut builder, |builder, index| {
+            let current_sum = builder.use_var(sum_var);
+            let index_val = index.codegen(builder);
+            let new_sum = builder.ins().iadd(current_sum, index_val);
+            builder.def_var(sum_var, new_sum);
+            Ok(())
+        }).unwrap();
+        
+        let final_sum = builder.use_var(sum_var);
+        builder.ins().return_(&[final_sum]);
+        
+        // Seal all blocks
+        builder.seal_all_blocks();
+        builder.finalize();
+        
+        let ir = func.display().to_string();
+        println!("Loop IR:\n{}", ir);
+        
+        // Check for loop constructs
+        assert!(ir.contains("brif"), "Generated IR should contain conditional branches");
+        assert!(ir.contains("jump"), "Generated IR should contain jumps");
+        assert!(ir.contains("iadd"), "Generated IR should contain addition");
     }
 }
