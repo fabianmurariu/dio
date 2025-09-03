@@ -6,11 +6,13 @@
 use crate::pipeline::{CompiledPipeline, PipelineBuilder};
 use crate::operators::ComparisonOp;
 use crate::staging::StagingError;
+use arrow::array::ArrayRef;
 use cranelift_codegen::ir::Function;
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use std::env;
 use thiserror::Error;
 
 /// Errors that can occur during execution
@@ -55,6 +57,12 @@ impl QueryEngine {
 
     /// Compile a pipeline into executable machine code
     pub fn compile_pipeline(&mut self, pipeline: CompiledPipeline) -> Result<ExecutableQuery, ExecutionError> {
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Starting JIT compilation");
+            println!("[DEBUG] Input schema: {:?}", pipeline.input_schema);
+            println!("[DEBUG] Output column: {}", pipeline.output_column);
+        }
+        
         // Set up the Cranelift function
         self.context.func = pipeline.function;
 
@@ -66,11 +74,19 @@ impl QueryEngine {
                 reason: format!("Function declaration failed: {}", e),
             })?;
 
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Function declared with ID: {:?}", func_id);
+        }
+
         self.jit_module
             .define_function(func_id, &mut self.context)
             .map_err(|e| ExecutionError::JitCompilationFailed {
                 reason: format!("Function definition failed: {}", e),
             })?;
+
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Function defined successfully");
+        }
 
         // Clear for reuse
         self.context.func.clear();
@@ -82,8 +98,16 @@ impl QueryEngine {
                 reason: format!("JIT finalization failed: {}", e),
             })?;
 
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] JIT compilation finalized");
+        }
+
         // Get the compiled function pointer
         let func_ptr = self.jit_module.get_finalized_function(func_id);
+
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Got function pointer: {:p}", func_ptr);
+        }
 
         Ok(ExecutableQuery {
             func_ptr,
@@ -101,66 +125,91 @@ pub struct ExecutableQuery {
 }
 
 impl ExecutableQuery {
-    /// Execute the query on input columns, returning filtered results
+    /// Execute the query on input columns, returning filtered results as ArrayRef
     ///
     /// # Safety
     /// This function is unsafe because it calls compiled machine code.
-    pub unsafe fn execute(&self, input_columns: &[&[u64]], output_buffer: &mut Vec<u64>) -> Result<usize, ExecutionError> {
-        if input_columns.is_empty() {
-            return Ok(0);
+    pub unsafe fn execute(&self, input_arrays: &[ArrayRef]) -> Result<ArrayRef, ExecutionError> {
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Starting query execution");
+            println!("[DEBUG] Input arrays count: {}", input_arrays.len());
+            for (i, array) in input_arrays.iter().enumerate() {
+                println!("[DEBUG] Array {}: length={}, type={:?}", i, array.len(), array.data_type());
+            }
+        }
+        
+        if input_arrays.is_empty() {
+            return Err(ExecutionError::ExecutionFailed {
+                reason: "Must provide at least one input array".to_string(),
+            });
         }
 
-        // Verify all columns have the same length
-        let length = input_columns[0].len();
-        for (i, col) in input_columns.iter().enumerate() {
-            if col.len() != length {
+        // Verify all arrays have the same length
+        let length = input_arrays[0].len();
+        for (i, array) in input_arrays.iter().enumerate() {
+            if array.len() != length {
                 return Err(ExecutionError::ExecutionFailed {
-                    reason: format!("Column {} length {} doesn't match expected length {}", i, col.len(), length),
+                    reason: format!("Array {} length {} doesn't match expected length {}", i, array.len(), length),
+                });
+            }
+        }
+
+        // Extract raw data pointers from Arrow arrays
+        let mut raw_ptrs = Vec::new();
+        for array in input_arrays {
+            // For now, assume all arrays are UInt64Array - we'll make this more generic later
+            if let Some(u64_array) = array.as_any().downcast_ref::<arrow::array::UInt64Array>() {
+                raw_ptrs.push(u64_array.values().as_ptr() as i64);
+            } else {
+                return Err(ExecutionError::ExecutionFailed {
+                    reason: "Currently only UInt64Array is supported".to_string(),
                 });
             }
         }
 
         // Prepare output buffer
-        output_buffer.clear();
-        output_buffer.reserve(length);
+        let mut output_buffer = vec![0u64; length];
+        raw_ptrs.push(length as i64);
+        raw_ptrs.push(output_buffer.as_mut_ptr() as i64);
 
-        // Build function arguments: (col0_ptr, col1_ptr, ..., length, output_ptr)
-        let mut args = Vec::new();
-        for col in input_columns {
-            args.push(col.as_ptr() as i64);
-        }
-        args.push(length as i64);
-        args.push(output_buffer.as_mut_ptr() as i64);
-
-        // Call the compiled function based on the number of input columns
-        let result_count = match input_columns.len() {
+        // Call the compiled function based on the number of input arrays
+        let result_count = match input_arrays.len() {
             1 => {
                 let func: extern "C" fn(i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(args[0], args[1], args[2])
+                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2])
             }
             2 => {
                 let func: extern "C" fn(i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(args[0], args[1], args[2], args[3])
+                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3])
             }
             3 => {
                 let func: extern "C" fn(i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(args[0], args[1], args[2], args[3], args[4])
+                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3], raw_ptrs[4])
             }
             4 => {
                 let func: extern "C" fn(i64, i64, i64, i64, i64, i64) -> i64 = std::mem::transmute(self.func_ptr);
-                func(args[0], args[1], args[2], args[3], args[4], args[5])
+                func(raw_ptrs[0], raw_ptrs[1], raw_ptrs[2], raw_ptrs[3], raw_ptrs[4], raw_ptrs[5])
             }
             _ => {
                 return Err(ExecutionError::ExecutionFailed {
-                    reason: format!("Unsupported number of input columns: {}", input_columns.len()),
+                    reason: format!("Unsupported number of input arrays: {}", input_arrays.len()),
                 });
             }
         };
 
-        // Set the actual length of the output buffer
-        output_buffer.set_len(result_count as usize);
+        // Truncate output buffer to actual result count
+        output_buffer.truncate(result_count as usize);
 
-        Ok(result_count as usize)
+        if env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Execution completed");
+            println!("[DEBUG] Result count: {}", result_count);
+            println!("[DEBUG] Result values: {:?}", output_buffer);
+        }
+
+        // Convert back to ArrayRef
+        use arrow::array::UInt64Array;
+        let result_array = UInt64Array::from(output_buffer);
+        Ok(std::sync::Arc::new(result_array))
     }
 
     /// Get a description of what this query does
@@ -194,8 +243,8 @@ impl QueryProcessor {
         comparison: ComparisonOp,
         threshold: u64,
         output_column: usize,
-        input_data: &[&[u64]],
-    ) -> Result<Vec<u64>, ExecutionError> {
+        input_arrays: &[ArrayRef],
+    ) -> Result<ArrayRef, ExecutionError> {
         // Step 1: Build the pipeline description
         let pipeline = PipelineBuilder::scan(column_names)
             .filter(filter_column, comparison, threshold)
@@ -209,18 +258,52 @@ impl QueryProcessor {
         println!("Compiled executable: {}", executable.description());
 
         // Step 3: Execute on actual data
-        let mut results = Vec::new();
-        let count = unsafe { executable.execute(input_data, &mut results)? };
+        let result_array = unsafe { executable.execute(input_arrays)? };
         
-        println!("Execution completed: {} results", count);
+        println!("Execution completed: {} results", result_array.len());
         
-        Ok(results)
+        Ok(result_array)
+    }
+
+    /// Execute a complete scan + project + filter pipeline
+    /// 
+    /// Example: Scan(Project(col1, col2), Filter(col1 > 12)) -> compiled function -> execution
+    pub fn scan_project_filter(
+        &mut self,
+        column_names: Vec<String>,
+        project_columns: Vec<usize>,
+        filter_column: usize,
+        comparison: ComparisonOp,
+        threshold: u64,
+        output_column: usize,
+        input_arrays: &[ArrayRef],
+    ) -> Result<ArrayRef, ExecutionError> {
+        // Step 1: Build the pipeline description
+        let pipeline = PipelineBuilder::scan(column_names)
+            .project(project_columns)
+            .filter(filter_column, comparison, threshold)
+            .compile(output_column)?;
+
+        println!("Generated pipeline: {}", pipeline.signature_description());
+        
+        // Step 2: Compile to executable machine code
+        let executable = self.engine.compile_pipeline(pipeline)?;
+        
+        println!("Compiled executable: {}", executable.description());
+
+        // Step 3: Execute on actual data
+        let result_array = unsafe { executable.execute(input_arrays)? };
+        
+        println!("Execution completed: {} results", result_array.len());
+        
+        Ok(result_array)
     }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::UInt64Array;
 
     #[test]
     fn test_complete_vertical_slice() {
@@ -231,7 +314,12 @@ mod tests {
         let col1_data = vec![10, 15, 8, 25, 30, 12, 18, 22, 5, 35];
         let col2_data = vec![5, 10, 15, 20, 25, 30, 8, 12, 18, 40];
 
-        let input_columns = vec![&col0_data[..], &col1_data[..], &col2_data[..] ];
+        // Convert to Arrow arrays
+        use arrow::array::UInt64Array;
+        let col0_array = std::sync::Arc::new(UInt64Array::from(col0_data.clone()));
+        let col1_array = std::sync::Arc::new(UInt64Array::from(col1_data.clone()));
+        let col2_array = std::sync::Arc::new(UInt64Array::from(col2_data.clone()));
+        let input_arrays = vec![col0_array as ArrayRef, col1_array as ArrayRef, col2_array as ArrayRef];
 
         // Execute: Scan(Filter(col2 > 12)) -> output col2 values
         let results = processor.scan_filter(
@@ -240,7 +328,7 @@ mod tests {
             ComparisonOp::GreaterThan,           // >
             12,                                  // threshold
             2,                                   // output col2 (score)
-            &input_columns,
+            &input_arrays,
         ).unwrap();
 
         println!("Input data:");
@@ -248,13 +336,17 @@ mod tests {
         println!("  col1 (age): {:?}", col1_data);
         println!("  col2 (score): {:?}", col2_data);
         println!("Filter: score > 12");
-        println!("Results: {:?}", results);
+        
+        // Convert result array back to Vec<u64> for comparison
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        println!("Results: {:?}", result_values);
 
         // Expected: values from col2 where col2 > 12
         // col2: [5, 10, 15, 20, 25, 30, 8, 12, 18, 40]
         //         -   -  ✓   ✓   ✓   ✓  -   -   ✓   ✓
         let expected = vec![15, 20, 25, 30, 18, 40];
-        assert_eq!(results, expected);
+        assert_eq!(result_values, expected);
     }
 
     #[test]
@@ -262,7 +354,8 @@ mod tests {
         let mut processor = QueryProcessor::new().unwrap();
 
         let data = vec![1, 5, 3, 5, 2, 5, 4];
-        let input_columns = vec![&data[..]];
+        let data_array = std::sync::Arc::new(UInt64Array::from(data.clone()));
+        let input_arrays = vec![data_array as ArrayRef];
 
         // Filter for values equal to 5
         let results = processor.scan_filter(
@@ -271,15 +364,17 @@ mod tests {
             ComparisonOp::Equal,                 // ==
             5,                                   // threshold
             0,                                   // output col0
-            &input_columns,
+            &input_arrays,
         ).unwrap();
 
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
         println!("Input: {:?}", data);
         println!("Filter: value == 5");  
-        println!("Results: {:?}", results);
+        println!("Results: {:?}", result_values);
 
         let expected = vec![5, 5, 5]; // Three 5's in the input
-        assert_eq!(results, expected);
+        assert_eq!(result_values, expected);
     }
 
     #[test]
@@ -287,7 +382,8 @@ mod tests {
         let mut processor = QueryProcessor::new().unwrap();
 
         let data = vec![1, 2, 3, 4, 5];
-        let input_columns = vec![&data[..]];
+        let data_array = std::sync::Arc::new(UInt64Array::from(data.clone()));
+        let input_arrays = vec![data_array as ArrayRef];
 
         // Filter for values greater than 10 (no matches)
         let results = processor.scan_filter(
@@ -296,14 +392,16 @@ mod tests {
             ComparisonOp::GreaterThan,
             10,
             0,
-            &input_columns,
+            &input_arrays,
         ).unwrap();
 
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
         println!("Input: {:?}", data);
         println!("Filter: value > 10");
-        println!("Results: {:?}", results);
+        println!("Results: {:?}", result_values);
 
-        assert_eq!(results, Vec::<u64>::new()); // No matches
+        assert_eq!(result_values, Vec::<u64>::new()); // No matches
     }
 
     #[test]
@@ -311,7 +409,8 @@ mod tests {
         let mut processor = QueryProcessor::new().unwrap();
 
         let data = vec![10, 20, 30, 40, 50];
-        let input_columns = vec![&data[..]];
+        let data_array = std::sync::Arc::new(UInt64Array::from(data.clone()));
+        let input_arrays = vec![data_array as ArrayRef];
 
         // Filter for values greater than 5 (all match)
         let results = processor.scan_filter(
@@ -320,13 +419,67 @@ mod tests {
             ComparisonOp::GreaterThan,
             5,
             0,
-            &input_columns,
+            &input_arrays,
         ).unwrap();
 
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
         println!("Input: {:?}", data);
         println!("Filter: value > 5");
-        println!("Results: {:?}", results);
+        println!("Results: {:?}", result_values);
 
-        assert_eq!(results, data); // All values match
+        assert_eq!(result_values, data); // All values match
+    }
+
+    #[test]
+    fn test_scan_project_filter_workflow() {
+        let mut processor = QueryProcessor::new().unwrap();
+
+        // Test data: 4 columns
+        let col0_data = vec![1, 2, 3, 4, 5, 6];         // id
+        let col1_data = vec![100, 200, 150, 300, 250, 180]; // score
+        let col2_data = vec![10, 20, 15, 30, 25, 18];   // age  
+        let col3_data = vec![5, 10, 7, 15, 12, 9];      // bonus
+
+        // Convert to Arrow arrays
+        let col0_array = std::sync::Arc::new(UInt64Array::from(col0_data.clone()));
+        let col1_array = std::sync::Arc::new(UInt64Array::from(col1_data.clone()));
+        let col2_array = std::sync::Arc::new(UInt64Array::from(col2_data.clone()));
+        let col3_array = std::sync::Arc::new(UInt64Array::from(col3_data.clone()));
+        let input_arrays = vec![col0_array as ArrayRef, col1_array as ArrayRef, 
+                               col2_array as ArrayRef, col3_array as ArrayRef];
+
+        // Execute: Scan(Project(col1, col2), Filter(col0 > 200)) -> output col1 values
+        // Note: After projection, col1 becomes index 0, col2 becomes index 1
+        // So we filter on index 0 (original col1/score) > 200
+        // And output index 0 (original col1/score values that pass filter)
+        let results = processor.scan_project_filter(
+            vec!["id".to_string(), "score".to_string(), "age".to_string(), "bonus".to_string()],
+            vec![1, 2],                              // Project: select col1 (score), col2 (age)
+            0,                                       // Filter on projected col0 (original score) > 200
+            ComparisonOp::GreaterThan,
+            200,
+            0,                                       // Output projected col0 (original score values)
+            &input_arrays,
+        ).unwrap();
+
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+
+        println!("Input data:");
+        println!("  col0 (id): {:?}", col0_data);
+        println!("  col1 (score): {:?}", col1_data);
+        println!("  col2 (age): {:?}", col2_data);
+        println!("  col3 (bonus): {:?}", col3_data);
+        println!("Project: select score, age");
+        println!("Filter: score > 200");
+        println!("Output: score values");
+        println!("Results: {:?}", result_values);
+
+        // Expected: score values where score > 200
+        // col1 (score): [100, 200, 150, 300, 250, 180]
+        //                 -    -    -   ✓    ✓    -
+        let expected = vec![300, 250];
+        assert_eq!(result_values, expected);
     }
 }

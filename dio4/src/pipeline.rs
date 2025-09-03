@@ -6,7 +6,8 @@
 
 use crate::operators::{
     ComparisonOp, Consumer, DataType, Operator, OutputConsumer, 
-    ScanOperator, Schema, SelectionOperator, StagedPredicate, ColumnInfo
+    ProjectionExpr, ProjectionOperator, ScanOperator, Schema, 
+    SelectionOperator, StagedPredicate, ColumnInfo
 };
 use crate::staging::{StagedVariable, StagingError};
 use cranelift_codegen::ir::{types, AbiParam, Function, Signature, InstBuilder};
@@ -25,10 +26,23 @@ pub enum PipelineOperator {
     Scan {
         schema: Schema,
     },
+    Project {
+        expressions: Vec<ProjectionExpr>,
+    },
     Filter {
         predicate: StagedPredicate,
     },
     // Future operators: Join, Aggregate, Sort, etc.
+}
+
+impl PipelineOperator {
+    /// Get the input schema for this operator (only applies to Scan)
+    fn schema(&self) -> &Schema {
+        match self {
+            PipelineOperator::Scan { schema } => schema,
+            _ => panic!("schema() only applies to Scan operator"),
+        }
+    }
 }
 
 impl PipelineBuilder {
@@ -47,6 +61,27 @@ impl PipelineBuilder {
             }],
             schema,
         }
+    }
+
+    /// Add a projection operation to the pipeline
+    pub fn project(mut self, column_indices: Vec<usize>) -> Self {
+        // Convert column indices to projection expressions
+        let expressions: Vec<ProjectionExpr> = column_indices.into_iter()
+            .map(ProjectionExpr::Column)
+            .collect();
+        
+        // Update pipeline schema to reflect the projection
+        let projected_columns: Vec<ColumnInfo> = expressions.iter()
+            .map(|expr| {
+                match expr {
+                    ProjectionExpr::Column(idx) => self.schema.columns[*idx].clone(),
+                }
+            })
+            .collect();
+        
+        self.schema = Schema { columns: projected_columns };
+        self.operators.push(PipelineOperator::Project { expressions });
+        self
     }
 
     /// Add a filter operation to the pipeline
@@ -69,8 +104,30 @@ impl PipelineBuilder {
 
     /// Compile the entire pipeline into a specialized Cranelift function
     pub fn compile(self, output_column: usize) -> Result<CompiledPipeline, StagingError> {
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Starting pipeline compilation");
+            println!("[DEBUG] Pipeline schema: {:?}", self.schema);
+            println!("[DEBUG] Pipeline operators: {:?}", self.operators);
+            println!("[DEBUG] Output column: {}", output_column);
+        }
+        
         let mut pipeline_compiler = PipelineCompiler::new(self.schema.clone());
-        pipeline_compiler.compile_pipeline(self.operators, output_column)
+        let result = pipeline_compiler.compile_pipeline(self.operators, output_column);
+        
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            match &result {
+                Ok(pipeline) => {
+                    println!("[DEBUG] Pipeline compilation successful");
+                    println!("[DEBUG] Generated function signature: {}", pipeline.signature_description());
+                    println!("[DEBUG] Cranelift IR:\n{}", pipeline.function.display());
+                }
+                Err(e) => {
+                    println!("[DEBUG] Pipeline compilation failed: {:?}", e);
+                }
+            }
+        }
+        
+        result
     }
 }
 
@@ -114,12 +171,19 @@ impl PipelineCompiler {
         operators: Vec<PipelineOperator>, 
         output_column: usize
     ) -> Result<CompiledPipeline, StagingError> {
-        // Create function signature
+        // Create function signature based on the scan schema (not the final pipeline schema)
         // fn(col0_ptr, col1_ptr, ..., length, output_ptr) -> count
+        let scan_schema = match operators.first() {
+            Some(PipelineOperator::Scan { schema }) => schema,
+            _ => return Err(StagingError::CodeGenerationFailed {
+                reason: "Pipeline must start with a Scan operator".to_string(),
+            }),
+        };
+        
         let mut sig = Signature::new(CallConv::SystemV);
         
-        // Add input column parameters
-        for _ in &self.schema.columns {
+        // Add input column parameters based on scan schema
+        for _ in &scan_schema.columns {
             sig.params.push(AbiParam::new(types::I64)); // column pointer
         }
         sig.params.push(AbiParam::new(types::I64)); // length
@@ -148,7 +212,7 @@ impl PipelineCompiler {
         let consumer_chain = self.build_consumer_chain(&operators, output_column, count_var)?;
 
         // Create the scan operator (always the first/root operator)
-        let scan_op = ScanOperator::new(self.schema.clone());
+        let scan_op = ScanOperator::new(scan_schema.clone());
 
         // Execute the pipeline - scan produces to the consumer chain
         let mut ctx = crate::operators::ExecutionContext::new();
@@ -164,7 +228,7 @@ impl PipelineCompiler {
 
         Ok(CompiledPipeline {
             function: func,
-            input_schema: self.schema.clone(),
+            input_schema: scan_schema.clone(),
             output_column,
         })
     }
@@ -176,6 +240,10 @@ impl PipelineCompiler {
         output_column: usize,
         count_var: Variable,
     ) -> Result<Box<dyn Consumer>, StagingError> {
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Building consumer chain from {} operators", operators.len());
+        }
+        
         // Start with the output consumer (rightmost in chain)
         let mut consumer: Box<dyn Consumer> = Box::new(OutputConsumer::new(
             0, // output param index (simplified)
@@ -184,21 +252,82 @@ impl PipelineCompiler {
             count_var,
         ));
 
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Created OutputConsumer for column {} with schema: {:?}", output_column, self.schema);
+        }
+
         // Build chain backwards (right to left), excluding the scan
-        for op in operators.iter().skip(1) { // Skip the scan (first operator)
+        // First, compute all schema transformations in forward order
+        let mut schemas = vec![];
+        let mut current_schema = operators.first().unwrap().schema().clone(); // Start with scan schema
+        schemas.push(current_schema.clone());
+        
+        for op in operators.iter().skip(1) { // Skip scan, process in forward order
+            current_schema = match op {
+                PipelineOperator::Scan { schema } => schema.clone(),
+                PipelineOperator::Project { expressions } => {
+                    // Compute projected schema
+                    let projected_columns: Vec<ColumnInfo> = expressions.iter()
+                        .map(|expr| match expr {
+                            ProjectionExpr::Column(idx) => current_schema.columns[*idx].clone(),
+                        })
+                        .collect();
+                    Schema { columns: projected_columns }
+                }
+                PipelineOperator::Filter { .. } => current_schema.clone(), // Filter doesn't change schema
+            };
+            schemas.push(current_schema.clone());
+        }
+        
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Computed schemas: {:?}", schemas);
+        }
+        
+        // Now build consumers in reverse order using the computed schemas
+        for (idx, op) in operators.iter().skip(1).rev().enumerate() { // Skip scan and reverse
+            let schema_idx = operators.len() - 1 - idx; // Map reverse index to forward schema index
+            let input_schema = schemas[schema_idx - 1].clone(); // Input schema is from previous stage
+            
+            if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                println!("[DEBUG] Processing operator: {:?}", op);
+                println!("[DEBUG] Using input schema[{}]: {:?}", schema_idx - 1, input_schema);
+            }
+            
             consumer = match op {
                 PipelineOperator::Scan { .. } => {
                     // This should never happen since we skip(1)
                     consumer
                 }
+                PipelineOperator::Project { expressions } => {
+                    if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                        println!("[DEBUG] Creating ProjectionOperator with expressions: {:?}", expressions);
+                        println!("[DEBUG] Input schema: {:?}", input_schema);
+                    }
+                    
+                    let proj_op = ProjectionOperator::new(
+                        expressions.clone(),
+                        consumer,
+                        input_schema,
+                    )?;
+                    Box::new(proj_op)
+                }
                 PipelineOperator::Filter { predicate } => {
+                    if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                        println!("[DEBUG] Creating SelectionOperator with predicate: {:?}", predicate);
+                        println!("[DEBUG] Input schema: {:?}", input_schema);
+                    }
+                    
                     Box::new(SelectionOperator::new(
                         predicate.clone(),
                         consumer,
-                        self.schema.clone(),
+                        input_schema,
                     ))
                 }
             };
+        }
+
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Consumer chain built successfully");
         }
 
         Ok(consumer)
@@ -289,6 +418,30 @@ mod tests {
         // Should still generate a loop structure
         assert!(ir.contains("jump"), "Should contain loop structure");
         // Should contain loop bounds checking (icmp ult) but no filter comparisons (icmp ugt)
+        assert!(ir.contains("icmp ult"), "Should contain loop bounds checking");
+        assert!(!ir.contains("icmp ugt"), "Should not contain filter comparison instructions");
+    }
+
+    #[test]
+    fn test_scan_project_pipeline() {
+        // Test a pipeline: Scan -> Project(select col1, col0) -> Output col0 from projected schema
+        let pipeline = PipelineBuilder::scan(vec!["col0".to_string(), "col1".to_string(), "col2".to_string()])
+            .project(vec![1, 0]) // Select col1, col0 (reorder and subset)
+            .compile(1) // Output col0 from the projected schema (which is now at index 1)
+            .unwrap();
+
+        println!("Scan->Project pipeline signature: {}", pipeline.signature_description());
+        
+        // Verify function signature - should take 3 scan columns + length + output_ptr
+        let sig = &pipeline.function.signature;
+        assert_eq!(sig.params.len(), 5); // 3 original columns + length + output_ptr  
+        assert_eq!(sig.returns.len(), 1); // count
+
+        let ir = pipeline.function.display().to_string();
+        println!("Scan->Project pipeline IR:\n{}", ir);
+        
+        // Should contain loop structure but no filter comparisons
+        assert!(ir.contains("jump"), "Should contain loop structure");
         assert!(ir.contains("icmp ult"), "Should contain loop bounds checking");
         assert!(!ir.contains("icmp ugt"), "Should not contain filter comparison instructions");
     }

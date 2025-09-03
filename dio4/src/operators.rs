@@ -102,9 +102,18 @@ impl ScanOperator {
 
 impl Operator for ScanOperator {
     fn produce(&self, consumer: &dyn Consumer, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] ScanOperator::produce - schema: {:?}", self.schema);
+        }
+        
         // Get function parameters (array pointers and length)
         let entry_block = builder.current_block().unwrap();
         let params = builder.block_params(entry_block);
+        
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            println!("[DEBUG] Function parameters count: {}", params.len());
+            println!("[DEBUG] Expected: {} input columns + length + output", self.schema.columns.len());
+        }
         
         // Function signature: (array0_ptr, array1_ptr, ..., length, output_ptr) -> count
         let length_param = params[params.len() - 2]; // Second to last param is length
@@ -122,7 +131,10 @@ impl Operator for ScanOperator {
         scan_loop.generate_loop(builder, |loop_builder, row_index| {
             // Load all columns for this row
             let mut record_columns = Vec::new();
-            for (_col_idx, &array_ptr) in array_ptrs.iter().enumerate() {
+            for (col_idx, &array_ptr) in array_ptrs.iter().enumerate() {
+                if std::env::var("DIO_DEBUG_JIT").is_ok() {
+                    println!("[DEBUG] Loading column {} from array_ptr", col_idx);
+                }
                 // Calculate element address: array_ptr + (row_index * 8)
                 let row_idx_val = row_index.codegen(loop_builder);
                 let element_size = loop_builder.ins().iconst(types::I64, 8); // 8 bytes for u64
@@ -194,6 +206,14 @@ impl Consumer for SelectionOperator {
     fn input_schema(&self) -> &Schema {
         &self.schema
     }
+}
+
+/// Simple expression for column selection in projections
+#[derive(Debug, Clone)]
+pub enum ProjectionExpr {
+    /// Select a column by index
+    Column(usize),
+    // Future: computed expressions, literals, etc.
 }
 
 /// Predicate for filtering - can be extended for more complex expressions
@@ -334,5 +354,77 @@ impl Consumer for OutputConsumer {
 
     fn input_schema(&self) -> &Schema {
         &self.schema
+    }
+}
+
+/// Projection operator - selects and reorders columns based on expressions
+pub struct ProjectionOperator {
+    pub expressions: Vec<ProjectionExpr>,
+    pub downstream: Box<dyn Consumer>,
+    pub input_schema: Schema,
+    pub output_schema: Schema,
+}
+
+impl ProjectionOperator {
+    pub fn new(
+        expressions: Vec<ProjectionExpr>, 
+        downstream: Box<dyn Consumer>, 
+        input_schema: Schema
+    ) -> Result<Self, StagingError> {
+        // Build output schema from projection expressions
+        let mut output_columns = Vec::new();
+        for expr in &expressions {
+            match expr {
+                ProjectionExpr::Column(col_idx) => {
+                    if *col_idx >= input_schema.columns.len() {
+                        return Err(StagingError::CodeGenerationFailed {
+                            reason: format!("Column index {} out of bounds", col_idx),
+                        });
+                    }
+                    output_columns.push(input_schema.columns[*col_idx].clone());
+                }
+            }
+        }
+        
+        let output_schema = Schema { columns: output_columns };
+        
+        Ok(Self { 
+            expressions, 
+            downstream, 
+            input_schema,
+            output_schema,
+        })
+    }
+}
+
+impl Consumer for ProjectionOperator {
+    fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+        // Project the record to create a new record with selected columns
+        let mut projected_columns = Vec::new();
+        
+        for expr in &self.expressions {
+            match expr {
+                ProjectionExpr::Column(col_idx) => {
+                    let column_val = record.get_column(*col_idx)
+                        .ok_or_else(|| StagingError::CodeGenerationFailed {
+                            reason: format!("Column index {} out of bounds", col_idx),
+                        })?;
+                    projected_columns.push(column_val.clone());
+                }
+            }
+        }
+        
+        // Create new record with projected columns and updated schema
+        let projected_record = Record {
+            columns: projected_columns,
+            schema: self.output_schema.clone(),
+        };
+        
+        // Pass projected record to downstream consumer
+        self.downstream.consume(&projected_record, builder, ctx)
+    }
+
+    fn input_schema(&self) -> &Schema {
+        &self.input_schema
     }
 }
