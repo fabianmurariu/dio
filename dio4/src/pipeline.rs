@@ -5,7 +5,7 @@
 //! pipelines and generates specialized Cranelift functions via Futamura projection.
 
 use crate::operators::{
-    ComparisonOp, Consumer, DataType, Operator, OutputConsumer, 
+    BooleanOp, ComparisonOp, Consumer, DataType, Operator, OutputConsumer, 
     ProjectionExpr, ProjectionOperator, ScanOperator, Schema, 
     SelectionOperator, StagedPredicate, ColumnInfo
 };
@@ -46,12 +46,29 @@ impl PipelineOperator {
 }
 
 impl PipelineBuilder {
-    /// Create a new pipeline starting with a scan
+    /// Create a new pipeline starting with a scan (defaults all columns to U64)
     pub fn scan(column_names: Vec<String>) -> Self {
         let schema = Schema {
             columns: column_names.into_iter().map(|name| ColumnInfo {
                 name,
                 data_type: DataType::U64, // Simplified for now
+            }).collect(),
+        };
+
+        Self {
+            operators: vec![PipelineOperator::Scan {
+                schema: schema.clone(),
+            }],
+            schema,
+        }
+    }
+    
+    /// Create a new pipeline starting with a scan with specified column types
+    pub fn scan_with_types(columns: Vec<(String, DataType)>) -> Self {
+        let schema = Schema {
+            columns: columns.into_iter().map(|(name, data_type)| ColumnInfo {
+                name,
+                data_type,
             }).collect(),
         };
 
@@ -359,6 +376,41 @@ impl StagedPredicate {
             column_index,
             op: ComparisonOp::LessThan,
             value,
+        }
+    }
+    
+    /// Create a boolean column == boolean value predicate
+    pub fn bool_equal(column_index: usize, value: bool) -> Self {
+        StagedPredicate::BooleanComparison {
+            column_index,
+            value,
+        }
+    }
+    
+    /// Create a boolean operation between two columns (column_a AND column_b)
+    pub fn bool_and(left_column: usize, right_column: usize) -> Self {
+        StagedPredicate::BooleanOperation {
+            left_column,
+            op: BooleanOp::And,
+            right_column,
+        }
+    }
+    
+    /// Create a boolean operation between two columns (column_a OR column_b)
+    pub fn bool_or(left_column: usize, right_column: usize) -> Self {
+        StagedPredicate::BooleanOperation {
+            left_column,
+            op: BooleanOp::Or,
+            right_column,
+        }
+    }
+    
+    /// Create a boolean equality between two columns (column_a == column_b)
+    pub fn bool_equal_columns(left_column: usize, right_column: usize) -> Self {
+        StagedPredicate::BooleanOperation {
+            left_column,
+            op: BooleanOp::Equal,
+            right_column,
         }
     }
 }

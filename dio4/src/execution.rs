@@ -156,13 +156,19 @@ impl ExecutableQuery {
 
         // Extract raw data pointers from Arrow arrays
         let mut raw_ptrs = Vec::new();
-        for array in input_arrays {
-            // For now, assume all arrays are UInt64Array - we'll make this more generic later
+        for (i, array) in input_arrays.iter().enumerate() {
             if let Some(u64_array) = array.as_any().downcast_ref::<arrow::array::UInt64Array>() {
                 raw_ptrs.push(u64_array.values().as_ptr() as *const u8);
+            } else if let Some(bool_array) = array.as_any().downcast_ref::<arrow::array::BooleanArray>() {
+                // For boolean arrays, we need the bitmap data
+                // Arrow stores boolean data as bitmaps (Vec<u8>)
+                let bitmap_buffer = bool_array.values();
+                // Convert BooleanBuffer to Buffer to get raw pointer
+                let buffer: &arrow::buffer::Buffer = bitmap_buffer.inner();
+                raw_ptrs.push(buffer.as_ptr());
             } else {
                 return Err(ExecutionError::ExecutionFailed {
-                    reason: "Currently only UInt64Array is supported".to_string(),
+                    reason: format!("Unsupported array type for column {}: {:?}", i, array.data_type()),
                 });
             }
         }
@@ -283,12 +289,19 @@ impl QueryProcessor {
         
         Ok(result_array)
     }
+    
+    /// Prepare a pipeline for execution (for testing with custom pipelines)
+    pub fn prepare_query(&mut self, pipeline: CompiledPipeline) -> Result<ExecutableQuery, ExecutionError> {
+        self.engine.compile_pipeline(pipeline)
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
     use arrow::array::UInt64Array;
+    use crate::operators::{ComparisonOp, DataType, StagedPredicate};
+    use crate::pipeline::PipelineBuilder;
 
     #[test]
     fn test_complete_vertical_slice() {
@@ -465,6 +478,211 @@ mod tests {
         // col1 (score): [100, 200, 150, 300, 250, 180]
         //                 -    -    -   ✓    ✓    -
         let expected = vec![300, 250];
+        assert_eq!(result_values, expected);
+    }
+    
+    #[test]
+    fn test_boolean_array_filtering() {
+        use arrow::array::BooleanArray;
+        
+        let mut processor = QueryProcessor::new().unwrap();
+        
+        // Test data: boolean column with values [true, false, true, false, true, false]
+        let bool_data = vec![true, false, true, false, true, false];
+        let bool_array = std::sync::Arc::new(BooleanArray::from(bool_data.clone()));
+        let input_arrays = vec![bool_array as ArrayRef];
+        
+        // Build pipeline: Scan(Bool) -> Filter(bool_col == true) -> Output(bool_col)
+        let pipeline = PipelineBuilder::scan_with_types(vec![("is_active".to_string(), DataType::Bool)])
+            .filter_with_predicate(StagedPredicate::bool_equal(0, true))
+            .compile(0)
+            .unwrap();
+            
+        // Execute the query
+        let query = processor.prepare_query(pipeline).unwrap();
+        let results = unsafe { query.execute(&input_arrays) }.unwrap();
+        
+        // Convert results back to u64 (booleans are extended to u64)
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        
+        println!("Boolean input: {:?}", bool_data);
+        println!("Filter: bool_col == true");
+        println!("Results (as u64): {:?}", result_values);
+        
+        // Expected: true values converted to 1 (u64)
+        // bool_data: [true, false, true, false, true, false]
+        //              ✓     -     ✓     -     ✓     -
+        let expected = vec![1, 1, 1];  // three true values, each extended to u64(1)
+        assert_eq!(result_values, expected);
+    }
+    
+    #[test] 
+    fn test_boolean_array_filter_false() {
+        use arrow::array::BooleanArray;
+        
+        let mut processor = QueryProcessor::new().unwrap();
+        
+        // Test filtering for false values
+        let bool_data = vec![true, false, true, false, true, false];
+        let bool_array = std::sync::Arc::new(BooleanArray::from(bool_data.clone()));
+        let input_arrays = vec![bool_array as ArrayRef];
+        
+        // Build pipeline: Filter(bool_col == false)
+        let pipeline = PipelineBuilder::scan_with_types(vec![("is_disabled".to_string(), DataType::Bool)])
+            .filter_with_predicate(StagedPredicate::bool_equal(0, false))
+            .compile(0)
+            .unwrap();
+            
+        let query = processor.prepare_query(pipeline).unwrap();
+        let results = unsafe { query.execute(&input_arrays) }.unwrap();
+        
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        
+        println!("Boolean input: {:?}", bool_data);
+        println!("Filter: bool_col == false");
+        println!("Results (as u64): {:?}", result_values);
+        
+        // Expected: false values converted to 0 (u64)
+        // bool_data: [true, false, true, false, true, false]
+        //              -     ✓     -     ✓     -     ✓
+        let expected = vec![0, 0, 0];  // three false values, each extended to u64(0)
+        assert_eq!(result_values, expected);
+    }
+    
+    #[test]
+    fn test_boolean_operation_and() {
+        use arrow::array::BooleanArray;
+        
+        let mut processor = QueryProcessor::new().unwrap();
+        
+        // Test boolean AND operation between two columns
+        let col0_data = vec![true, true, false, false];
+        let col1_data = vec![true, false, true, false];
+        
+        let col0_array = std::sync::Arc::new(BooleanArray::from(col0_data.clone()));
+        let col1_array = std::sync::Arc::new(BooleanArray::from(col1_data.clone()));
+        let input_arrays = vec![col0_array as ArrayRef, col1_array as ArrayRef];
+        
+        // Build pipeline: Filter(col0 AND col1) -> Output(col0)
+        let pipeline = PipelineBuilder::scan_with_types(vec![
+            ("flag_a".to_string(), DataType::Bool),
+            ("flag_b".to_string(), DataType::Bool)
+        ])
+            .filter_with_predicate(StagedPredicate::bool_and(0, 1))
+            .compile(0)  // Output col0 values where (col0 AND col1) is true
+            .unwrap();
+            
+        let query = processor.prepare_query(pipeline).unwrap();
+        let results = unsafe { query.execute(&input_arrays) }.unwrap();
+        
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        
+        println!("col0: {:?}", col0_data);
+        println!("col1: {:?}", col1_data);
+        println!("Filter: col0 AND col1");
+        println!("Results: {:?}", result_values);
+        
+        // Expected: col0 values where (col0 AND col1) is true
+        // col0: [true, true, false, false]
+        // col1: [true, false, true, false]
+        // AND:  [true, false, false, false]
+        //         ✓     -      -      -
+        let expected = vec![1]; // Only first row passes: true AND true = true -> output true (1)
+        assert_eq!(result_values, expected);
+    }
+    
+    #[test]
+    fn test_boolean_operation_or() {
+        use arrow::array::BooleanArray;
+        
+        let mut processor = QueryProcessor::new().unwrap();
+        
+        // Test boolean OR operation
+        let col0_data = vec![true, true, false, false];
+        let col1_data = vec![true, false, true, false];
+        
+        let col0_array = std::sync::Arc::new(BooleanArray::from(col0_data.clone()));
+        let col1_array = std::sync::Arc::new(BooleanArray::from(col1_data.clone()));
+        let input_arrays = vec![col0_array as ArrayRef, col1_array as ArrayRef];
+        
+        // Build pipeline: Filter(col0 OR col1) -> Output(col1)
+        let pipeline = PipelineBuilder::scan_with_types(vec![
+            ("flag_a".to_string(), DataType::Bool),
+            ("flag_b".to_string(), DataType::Bool)
+        ])
+            .filter_with_predicate(StagedPredicate::bool_or(0, 1))
+            .compile(1)  // Output col1 values where (col0 OR col1) is true
+            .unwrap();
+            
+        let query = processor.prepare_query(pipeline).unwrap();
+        let results = unsafe { query.execute(&input_arrays) }.unwrap();
+        
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        
+        println!("col0: {:?}", col0_data);
+        println!("col1: {:?}", col1_data);
+        println!("Filter: col0 OR col1");
+        println!("Results: {:?}", result_values);
+        
+        // Expected: col1 values where (col0 OR col1) is true
+        // col0: [true, true, false, false]
+        // col1: [true, false, true, false]
+        // OR:   [true, true, true, false]
+        //         ✓     ✓     ✓     -
+        let expected = vec![1, 0, 1]; // col1 values: true, false, true -> 1, 0, 1
+        assert_eq!(result_values, expected);
+    }
+    
+    #[test]
+    fn test_mixed_types_u64_and_boolean() {
+        use arrow::array::BooleanArray;
+        
+        let mut processor = QueryProcessor::new().unwrap();
+        
+        // Test with mixed types: u64 and boolean columns
+        let id_data = vec![1, 2, 3, 4, 5, 6];
+        let active_data = vec![true, false, true, true, false, true];
+        
+        let id_array = std::sync::Arc::new(UInt64Array::from(id_data.clone()));
+        let active_array = std::sync::Arc::new(BooleanArray::from(active_data.clone()));
+        let input_arrays = vec![id_array as ArrayRef, active_array as ArrayRef];
+        
+        // Complex filter: (id > 3) AND (is_active == true)
+        // This combines numeric and boolean predicates
+        let numeric_filter = StagedPredicate::greater_than(0, 3);  // id > 3
+        let boolean_filter = StagedPredicate::bool_equal(1, true); // is_active == true
+        let combined_filter = StagedPredicate::And(Box::new(numeric_filter), Box::new(boolean_filter));
+        
+        let pipeline = PipelineBuilder::scan_with_types(vec![
+            ("id".to_string(), DataType::U64),
+            ("is_active".to_string(), DataType::Bool)
+        ])
+            .filter_with_predicate(combined_filter)
+            .compile(0)  // Output id values
+            .unwrap();
+            
+        let query = processor.prepare_query(pipeline).unwrap();
+        let results = unsafe { query.execute(&input_arrays) }.unwrap();
+        
+        let result_u64_array = results.as_any().downcast_ref::<UInt64Array>().unwrap();
+        let result_values: Vec<u64> = result_u64_array.values().to_vec();
+        
+        println!("id: {:?}", id_data);
+        println!("is_active: {:?}", active_data);
+        println!("Filter: (id > 3) AND (is_active == true)");
+        println!("Results: {:?}", result_values);
+        
+        // Expected: id values where (id > 3) AND (is_active == true)
+        // id:        [1, 2, 3, 4, 5, 6]
+        // is_active: [T, F, T, T, F, T]
+        // id > 3:    [F, F, F, T, T, T]
+        // AND:       [F, F, F, T, F, T]
+        //             -  -  -  ✓  -  ✓
+        let expected = vec![4, 6]; // Only rows 4 and 6 satisfy both conditions
         assert_eq!(result_values, expected);
     }
 }

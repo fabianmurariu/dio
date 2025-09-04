@@ -259,6 +259,11 @@ pub enum StagedBool {
     U64Equal(Box<StagedU64>, Box<StagedU64>),
     U64GreaterThan(Box<StagedU64>, Box<StagedU64>),
     U64LessThan(Box<StagedU64>, Box<StagedU64>),
+    // Boolean array bitmap loading
+    BitmapLoad {
+        bitmap_ptr: Value,    // Pointer to the bitmap array (Vec<u8>)
+        row_index: Box<StagedU64>, // Row index to load from
+    },
 }
 
 impl StagedBool {
@@ -288,6 +293,15 @@ impl StagedBool {
 
     pub fn not(operand: StagedBool) -> Self {
         StagedBool::Not(Box::new(operand))
+    }
+    
+    /// Create a bitmap load operation for boolean arrays
+    /// Arrow boolean arrays are stored as bitmaps where is_valid[j] -> bitmap[j / 8] & (1 << (j % 8))
+    pub fn bitmap_load(bitmap_ptr: Value, row_index: StagedU64) -> Self {
+        StagedBool::BitmapLoad {
+            bitmap_ptr,
+            row_index: Box::new(row_index),
+        }
     }
 }
 
@@ -342,6 +356,37 @@ impl Staged for StagedBool {
                 let left_val = left.codegen(builder);
                 let right_val = right.codegen(builder);
                 builder.ins().icmp(IntCC::UnsignedLessThan, left_val, right_val)
+            }
+            StagedBool::BitmapLoad { bitmap_ptr, row_index } => {
+                // Generate bitmap loading code: bitmap[row_index / 8] & (1 << (row_index % 8))
+                let row_idx_val = row_index.codegen(builder);
+                
+                // Calculate byte index: row_index / 8
+                let eight = builder.ins().iconst(types::I64, 8);
+                let byte_index = builder.ins().udiv(row_idx_val, eight);
+                
+                // Calculate bit position within byte: row_index % 8
+                let bit_position = builder.ins().urem(row_idx_val, eight);
+                
+                // Load the byte: bitmap_ptr + byte_index
+                let byte_ptr = builder.ins().iadd(*bitmap_ptr, byte_index);
+                let bitmap_byte = builder.ins().load(
+                    types::I8,
+                    cranelift_codegen::ir::MemFlags::new(),
+                    byte_ptr,
+                    0
+                );
+                
+                // Create bit mask: 1 << bit_position
+                let one = builder.ins().iconst(types::I8, 1);
+                let bit_mask = builder.ins().ishl(one, bit_position);
+                
+                // Extract the bit: bitmap_byte & bit_mask
+                let masked = builder.ins().band(bitmap_byte, bit_mask);
+                
+                // Convert to boolean (0 or 1): masked != 0
+                let zero = builder.ins().iconst(types::I8, 0);
+                builder.ins().icmp(IntCC::NotEqual, masked, zero)
             }
         }
     }

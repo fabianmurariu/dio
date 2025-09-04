@@ -73,15 +73,65 @@ pub enum DataType {
     Bool,
 }
 
+/// A staged column value that can represent different data types
+#[derive(Debug, Clone)]
+pub enum StagedColumnValue {
+    U64(StagedU64),
+    Bool(StagedBool),
+    // Future: I64, F64, String, etc.
+}
+
+impl StagedColumnValue {
+    pub fn as_u64(&self) -> Option<&StagedU64> {
+        match self {
+            StagedColumnValue::U64(val) => Some(val),
+            _ => None,
+        }
+    }
+    
+    pub fn as_bool(&self) -> Option<&StagedBool> {
+        match self {
+            StagedColumnValue::Bool(val) => Some(val),
+            _ => None,
+        }
+    }
+    
+    pub fn data_type(&self) -> DataType {
+        match self {
+            StagedColumnValue::U64(_) => DataType::U64,
+            StagedColumnValue::Bool(_) => DataType::Bool,
+        }
+    }
+    
+    pub fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            StagedColumnValue::U64(val) => val.codegen(builder),
+            StagedColumnValue::Bool(val) => {
+                // Convert boolean (i8) to i64 for consistent output
+                let bool_val = val.codegen(builder);
+                builder.ins().uextend(types::I64, bool_val)
+            }
+        }
+    }
+}
+
 /// A record represents a single row with staged column values
 pub struct Record {
-    pub columns: Vec<StagedU64>, // Simplified to U64 for now
+    pub columns: Vec<StagedColumnValue>,
     pub schema: Schema,
 }
 
 impl Record {
-    pub fn get_column(&self, index: usize) -> Option<&StagedU64> {
+    pub fn get_column(&self, index: usize) -> Option<&StagedColumnValue> {
         self.columns.get(index)
+    }
+    
+    pub fn get_u64_column(&self, index: usize) -> Option<&StagedU64> {
+        self.get_column(index)?.as_u64()
+    }
+    
+    pub fn get_bool_column(&self, index: usize) -> Option<&StagedBool> {
+        self.get_column(index)?.as_bool()
     }
 }
 
@@ -159,26 +209,44 @@ impl Operator for ScanOperator {
                 if std::env::var("DIO_DEBUG_JIT").is_ok() {
                     println!("[DEBUG] Loading column {} from array_ptr", col_idx);
                 }
-                // Calculate element address: array_ptr + (row_index * 8)
-                let row_idx_val = row_index.codegen(loop_builder);
-                let element_size = loop_builder.ins().iconst(types::I64, 8); // 8 bytes for u64
-                let offset = loop_builder.ins().imul(row_idx_val, element_size);
-                let element_ptr = loop_builder.ins().iadd(array_ptr, offset);
                 
-                // Load the element value
-                let element_val = loop_builder.ins().load(
-                    types::I64, 
-                    cranelift_codegen::ir::MemFlags::new(), 
-                    element_ptr, 
-                    0
-                );
+                let column_info = &self.schema.columns[col_idx];
+                let staged_value = match column_info.data_type {
+                    DataType::U64 => {
+                        // Calculate element address: array_ptr + (row_index * 8)
+                        let row_idx_val = row_index.codegen(loop_builder);
+                        let element_size = loop_builder.ins().iconst(types::I64, 8); // 8 bytes for u64
+                        let offset = loop_builder.ins().imul(row_idx_val, element_size);
+                        let element_ptr = loop_builder.ins().iadd(array_ptr, offset);
+                        
+                        // Load the element value
+                        let element_val = loop_builder.ins().load(
+                            types::I64, 
+                            cranelift_codegen::ir::MemFlags::new(), 
+                            element_ptr, 
+                            0
+                        );
 
-                // Create a variable to hold this column value
-                let col_var = ctx.fresh_variable(loop_builder);
-                loop_builder.def_var(col_var, element_val);
-                let staged_column = StagedU64::Variable(StagedVariable::new(col_var.as_u32(), types::I64));
-                record_columns.push(staged_column);
-                ctx.current_record_vars.push(col_var);
+                        // Create a variable to hold this column value
+                        let col_var = ctx.fresh_variable(loop_builder);
+                        loop_builder.def_var(col_var, element_val);
+                        let staged_column = StagedU64::Variable(StagedVariable::new(col_var.as_u32(), types::I64));
+                        ctx.current_record_vars.push(col_var);
+                        StagedColumnValue::U64(staged_column)
+                    }
+                    DataType::Bool => {
+                        // For boolean arrays, array_ptr points to the bitmap (Vec<u8>)
+                        let staged_bool = StagedBool::bitmap_load(array_ptr, row_index.clone());
+                        StagedColumnValue::Bool(staged_bool)
+                    }
+                    _ => {
+                        return Err(StagingError::CodeGenerationFailed {
+                            reason: format!("Unsupported data type: {:?}", column_info.data_type),
+                        });
+                    }
+                };
+                
+                record_columns.push(staged_value);
             }
 
             // Create record and pass to consumer
@@ -249,6 +317,17 @@ pub enum StagedPredicate {
         op: ComparisonOp,
         value: u64,
     },
+    /// Boolean column comparison with boolean constant
+    BooleanComparison {
+        column_index: usize,
+        value: bool,
+    },
+    /// Boolean operation between two boolean columns
+    BooleanOperation {
+        left_column: usize,
+        op: BooleanOp,
+        right_column: usize,
+    },
     /// Logical AND of two predicates
     And(Box<StagedPredicate>, Box<StagedPredicate>),
     /// Logical OR of two predicates
@@ -267,13 +346,20 @@ pub enum ComparisonOp {
     GreaterThanOrEqual,
 }
 
+#[derive(Debug, Clone)]
+pub enum BooleanOp {
+    And,
+    Or,
+    Equal,
+}
+
 impl StagedPredicate {
     pub fn evaluate(&self, record: &Record) -> Result<StagedBool, StagingError> {
         match self {
             StagedPredicate::ColumnComparison { column_index, op, value } => {
-                let column_val = record.get_column(*column_index)
+                let column_val = record.get_u64_column(*column_index)
                     .ok_or_else(|| StagingError::CodeGenerationFailed {
-                        reason: format!("Column index {} out of bounds", column_index),
+                        reason: format!("Column index {} out of bounds or not U64 type", column_index),
                     })?;
                 
                 let constant = StagedU64::Constant(*value);
@@ -281,17 +367,67 @@ impl StagedPredicate {
                     ComparisonOp::Equal => column_val.clone().eq(constant),
                     ComparisonOp::NotEqual => {
                         // NOT(column == constant)
-                        todo!("Implement NOT operation")
+                        StagedBool::not(column_val.clone().eq(constant))
                     }
                     ComparisonOp::LessThan => column_val.clone().lt(constant),
                     ComparisonOp::LessThanOrEqual => {
                         // column < constant OR column == constant
-                        todo!("Implement OR operation")
+                        let lt = column_val.clone().lt(constant.clone());
+                        let eq = column_val.clone().eq(constant);
+                        StagedBool::or(lt, eq)
                     }
                     ComparisonOp::GreaterThan => column_val.clone().gt(constant),
                     ComparisonOp::GreaterThanOrEqual => {
                         // column > constant OR column == constant
-                        todo!("Implement OR operation")
+                        let gt = column_val.clone().gt(constant.clone());
+                        let eq = column_val.clone().eq(constant);
+                        StagedBool::or(gt, eq)
+                    }
+                };
+                Ok(result)
+            }
+            StagedPredicate::BooleanComparison { column_index, value } => {
+                let column_val = record.get_bool_column(*column_index)
+                    .ok_or_else(|| StagingError::CodeGenerationFailed {
+                        reason: format!("Column index {} out of bounds or not Bool type", column_index),
+                    })?;
+                
+                let constant = StagedBool::constant(*value);
+                // Boolean equality: (column == constant)
+                // We can implement as: (column AND constant) OR (!column AND !constant)
+                let result = if *value {
+                    // column == true: just return the column value
+                    column_val.clone()
+                } else {
+                    // column == false: return !column
+                    // If column is false, !column = true (passes filter)
+                    // If column is true, !column = false (doesn't pass filter)
+                    StagedBool::not(column_val.clone())
+                };
+                Ok(result)
+            }
+            StagedPredicate::BooleanOperation { left_column, op, right_column } => {
+                let left_val = record.get_bool_column(*left_column)
+                    .ok_or_else(|| StagingError::CodeGenerationFailed {
+                        reason: format!("Left column index {} out of bounds or not Bool type", left_column),
+                    })?;
+                let right_val = record.get_bool_column(*right_column)
+                    .ok_or_else(|| StagingError::CodeGenerationFailed {
+                        reason: format!("Right column index {} out of bounds or not Bool type", right_column),
+                    })?;
+                
+                let result = match op {
+                    BooleanOp::And => StagedBool::and(left_val.clone(), right_val.clone()),
+                    BooleanOp::Or => StagedBool::or(left_val.clone(), right_val.clone()),
+                    BooleanOp::Equal => {
+                        // Boolean equality: !(a XOR b)
+                        // We can implement as: (a AND b) OR (!a AND !b)
+                        let both_true = StagedBool::and(left_val.clone(), right_val.clone());
+                        let both_false = StagedBool::and(
+                            StagedBool::not(left_val.clone()), 
+                            StagedBool::not(right_val.clone())
+                        );
+                        StagedBool::or(both_true, both_false)
                     }
                 };
                 Ok(result)
@@ -299,19 +435,16 @@ impl StagedPredicate {
             StagedPredicate::And(left, right) => {
                 let left_val = left.evaluate(record)?;
                 let right_val = right.evaluate(record)?;
-                // TODO: Implement staged AND
-                todo!("Implement staged AND")
+                Ok(StagedBool::and(left_val, right_val))
             }
             StagedPredicate::Or(left, right) => {
                 let left_val = left.evaluate(record)?;
                 let right_val = right.evaluate(record)?;
-                // TODO: Implement staged OR
-                todo!("Implement staged OR")
+                Ok(StagedBool::or(left_val, right_val))
             }
             StagedPredicate::Not(inner) => {
                 let inner_val = inner.evaluate(record)?;
-                // TODO: Implement staged NOT
-                todo!("Implement staged NOT")
+                Ok(StagedBool::not(inner_val))
             }
         }
     }
