@@ -1,5 +1,5 @@
 [workspace]
-members = ["dio3", "dio4"]
+members = ["dio3", "dio4", "tutorial"]
 resolver = "2"
 
 [workspace.dependencies]

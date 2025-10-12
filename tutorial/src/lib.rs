@@ -1,0 +1,599 @@
+//! # Tutorial: Building a Partial Evaluation Compiler with Futamura Projections
+//!
+//! This tutorial teaches you how to build a JIT compiler using staging and partial evaluation.
+//! You'll learn by implementing a progressively more sophisticated calculator that generates
+//! optimized machine code using Cranelift.
+//!
+//! ## Learning Path
+//!
+//! 1. **Lesson 1**: Simple Addition (Example - COMPLETE)
+//! 2. **Lesson 2**: Constants (Exercise - YOU COMPLETE)
+//! 3. **Lesson 3**: Variables (Exercise - YOU COMPLETE)
+//! 4. **Lesson 4**: Mixed Type Operations (Exercise - YOU COMPLETE)
+//! 5. **Lesson 5**: Boolean Operations (Exercise - YOU COMPLETE)
+//!
+//! Future lessons will cover arrays, loops, conditionals, and SIMD.
+//!
+//! ## How to Use This Tutorial
+//!
+//! Each lesson has:
+//! - Explanation of the concept
+//! - Working example (if it's an example lesson)
+//! - Test functions that are currently failing (if it's an exercise lesson)
+//!
+//! Run `cargo test -p tutorial` to see which tests are failing.
+//! Your job: make them pass by implementing the missing functionality!
+
+use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, Signature, UserFuncName, Value};
+use cranelift_codegen::isa::CallConv;
+use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::Context;
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_jit::{JITBuilder, JITModule};
+use cranelift_module::{default_libcall_names, Linkage, Module};
+use std::marker::PhantomData;
+use thiserror::Error;
+
+// =============================================================================
+// CORE INFRASTRUCTURE - The foundation for all lessons
+// =============================================================================
+
+/// Errors that can occur during staging and compilation
+#[derive(Error, Debug)]
+pub enum StagingError {
+    #[error("Type mismatch: expected {expected}, got {actual}")]
+    TypeMismatch { expected: String, actual: String },
+
+    #[error("Compilation failed: {reason}")]
+    CompilationFailed { reason: String },
+
+    #[error("Execution failed: {reason}")]
+    ExecutionFailed { reason: String },
+}
+
+/// Core trait for staged values - values that generate code at compile time
+///
+/// This is the heart of our partial evaluation system. Instead of computing
+/// values immediately, we build up a description of the computation that will
+/// be compiled to machine code later.
+pub trait Staged {
+    /// The runtime type this staged value will produce when executed
+    type RuntimeType;
+
+    /// Generate Cranelift IR code for this value
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value;
+
+    /// Get the Cranelift type representation
+    fn cranelift_type() -> cranelift_codegen::ir::Type;
+}
+
+// =============================================================================
+// LESSON 1: SIMPLE ADDITION (EXAMPLE - COMPLETE)
+// =============================================================================
+//
+// This lesson demonstrates the complete flow:
+// 1. Define a staged type (StagedI64)
+// 2. Implement operations (add)
+// 3. Compile to machine code
+// 4. Execute the compiled function
+//
+// Study this example carefully - it's the template for all exercises!
+
+/// A staged 64-bit signed integer
+///
+/// This represents an i64 value that will exist at runtime. At compile time,
+/// we're just building a description of how to compute it.
+#[derive(Debug, Clone)]
+pub enum StagedI64 {
+    /// A constant value known at compile time
+    Constant(i64),
+
+    /// A variable (function parameter) known only at runtime
+    Variable(Variable),
+
+    /// Addition of two staged values
+    Add(Box<StagedI64>, Box<StagedI64>),
+}
+
+impl StagedI64 {
+    /// Create a constant staged value
+    pub fn constant(value: i64) -> Self {
+        StagedI64::Constant(value)
+    }
+
+    /// Create a variable staged value (represents a function parameter)
+    pub fn variable(var: Variable) -> Self {
+        StagedI64::Variable(var)
+    }
+
+    /// Add two staged values
+    ///
+    /// Note: This doesn't perform the addition! It creates a description
+    /// that says "when this code runs, add these two values"
+    pub fn add(left: StagedI64, right: StagedI64) -> Self {
+        StagedI64::Add(Box::new(left), Box::new(right))
+    }
+}
+
+impl Staged for StagedI64 {
+    type RuntimeType = i64;
+
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            StagedI64::Constant(val) => {
+                // Generate: iconst.i64 <val>
+                builder.ins().iconst(types::I64, *val)
+            }
+            StagedI64::Variable(var) => {
+                // Generate: use_var <var>
+                builder.use_var(*var)
+            }
+            StagedI64::Add(left, right) => {
+                // Generate code for left and right, then add them
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                // Generate: iadd <left>, <right>
+                builder.ins().iadd(left_val, right_val)
+            }
+        }
+    }
+
+    fn cranelift_type() -> cranelift_codegen::ir::Type {
+        types::I64
+    }
+}
+
+/// A JIT compiler that can compile staged functions to machine code
+pub struct Compiler {
+    module: JITModule,
+}
+
+impl Compiler {
+    /// Create a new compiler instance
+    pub fn new() -> Result<Self, StagingError> {
+        let isa = cranelift_native::builder()
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to create ISA: {}", e),
+            })?
+            .finish(settings::Flags::new(settings::builder()))
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to finish ISA: {}", e),
+            })?;
+
+        let builder = JITBuilder::with_isa(isa, default_libcall_names());
+        let module = JITModule::new(builder);
+
+        Ok(Self { module })
+    }
+
+    /// Compile a staged function that takes one i64 parameter and returns i64
+    ///
+    /// This is the first Futamura projection in action! We're specializing
+    /// a general computation framework (our staged language) with a specific
+    /// program (the StagedI64 expression), producing a compiled function.
+    pub fn compile_unary_i64(
+        &mut self,
+        body: impl FnOnce(&mut FunctionBuilder, Variable) -> StagedI64,
+    ) -> Result<CompiledUnaryI64, StagingError> {
+        // Create function signature: i64 -> i64
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(AbiParam::new(types::I64));
+        sig.returns.push(AbiParam::new(types::I64));
+
+        // Create the function
+        let mut func = Function::new();
+        func.signature = sig;
+
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        // Create entry block with parameter
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+
+        // Declare variable for the parameter
+        let param_var = Variable::from_u32(0);
+        builder.declare_var(param_var, types::I64);
+        let param = builder.block_params(entry_block)[0];
+        builder.def_var(param_var, param);
+
+        // Generate the function body
+        let result_expr = body(&mut builder, param_var);
+        let result_val = result_expr.codegen(&mut builder);
+
+        // Return the result
+        builder.ins().return_(&[result_val]);
+
+        // Finalize
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        // Compile to machine code
+        let mut ctx = Context::new();
+        ctx.func = func;
+
+        let func_id = self
+            .module
+            .declare_function("staged_func", Linkage::Export, &ctx.func.signature)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to declare function: {}", e),
+            })?;
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to define function: {}", e),
+            })?;
+
+        self.module.clear_context(&mut ctx);
+        self.module.finalize_definitions().map_err(|e| {
+            StagingError::CompilationFailed {
+                reason: format!("Failed to finalize: {}", e),
+            }
+        })?;
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+
+        Ok(CompiledUnaryI64 { code_ptr })
+    }
+}
+
+/// A compiled function that takes one i64 and returns i64
+pub struct CompiledUnaryI64 {
+    code_ptr: *const u8,
+}
+
+impl CompiledUnaryI64 {
+    /// Execute the compiled function
+    pub fn call(&self, arg: i64) -> i64 {
+        unsafe {
+            let func: extern "C" fn(i64) -> i64 = std::mem::transmute(self.code_ptr);
+            func(arg)
+        }
+    }
+}
+
+// =============================================================================
+// LESSON 2: CONSTANTS (EXERCISE - YOU COMPLETE)
+// =============================================================================
+//
+// Constants are values we know at compile time. By using constants instead of
+// variables, we enable more optimizations. This is the essence of partial
+// evaluation!
+//
+// Example: Instead of compiling `add(x, y)` which needs two inputs,
+//          we can compile `add(42, y)` which only needs one input.
+//          The constant 42 is "baked into" the machine code!
+//
+// YOUR TASK: Implement the subtract operation for StagedI64
+
+impl StagedI64 {
+    /// Subtract two staged values
+    ///
+    /// TODO: Implement this! Follow the pattern from `add` above.
+    /// Hint: The Cranelift instruction is `isub` instead of `iadd`
+    pub fn sub(left: StagedI64, right: StagedI64) -> Self {
+        // TODO: YOUR CODE HERE
+        // Remember: Don't compute the result, just describe the computation!
+        todo!("Implement subtraction for StagedI64")
+    }
+}
+
+// =============================================================================
+// LESSON 3: VARIABLES (EXERCISE - YOU COMPLETE)
+// =============================================================================
+//
+// Variables represent values we don't know until runtime (function parameters).
+// The key insight: we can mix constants and variables! This is partial evaluation.
+//
+// Example: `add(constant(10), variable(x))` compiles to code that adds 10 to
+//          whatever value x has at runtime.
+//
+// YOUR TASK: Implement the multiply operation
+
+impl StagedI64 {
+    /// Multiply two staged values
+    ///
+    /// TODO: Implement this!
+    /// Hint: The Cranelift instruction is `imul`
+    /// Hint: You'll need to add a `Mul` variant to the StagedI64 enum
+    pub fn mul(left: StagedI64, right: StagedI64) -> Self {
+        // TODO: YOUR CODE HERE
+        todo!("Implement multiplication for StagedI64")
+    }
+}
+
+// TODO: Add the Mul variant to StagedI64 enum above and handle it in codegen!
+
+// =============================================================================
+// LESSON 4: MIXED TYPE OPERATIONS (EXERCISE - YOU COMPLETE)
+// =============================================================================
+//
+// Real programs use multiple types: signed integers, unsigned integers, floats, etc.
+// Each type needs its own staged representation and operations.
+//
+// YOUR TASK: Implement StagedU64 for unsigned 64-bit integers
+
+/// A staged 64-bit unsigned integer
+///
+/// TODO: Implement this following the pattern from StagedI64
+/// Remember to handle:
+/// 1. Constants and Variables
+/// 2. Add operation
+/// 3. The Staged trait implementation
+/// 4. Use unsigned instructions (iconst with type I64, but interpret as unsigned)
+#[derive(Debug, Clone)]
+pub enum StagedU64 {
+    // TODO: Add variants here (Constant, Variable, Add)
+}
+
+// TODO: Implement methods for StagedU64 (constant, variable, add)
+
+// TODO: Implement Staged trait for StagedU64
+
+// =============================================================================
+// LESSON 5: BOOLEAN OPERATIONS (EXERCISE - YOU COMPLETE)
+// =============================================================================
+//
+// Booleans are essential for control flow (if/then/else) and comparisons.
+// In Cranelift, booleans are represented as i8 (0 = false, 1 = true).
+//
+// YOUR TASK: Implement StagedBool with comparison and logical operations
+
+/// A staged boolean value
+///
+/// TODO: Implement this with support for:
+/// 1. Constants (true/false)
+/// 2. Comparisons (less than, greater than, equal)
+/// 3. Logical operations (and, or, not)
+#[derive(Debug, Clone)]
+pub enum StagedBool {
+    // TODO: Add variants here
+    // Hint: You'll need LessThan(Box<StagedI64>, Box<StagedI64>), etc.
+}
+
+// TODO: Implement StagedBool methods and Staged trait
+
+// =============================================================================
+// TESTS - Your guide through the tutorial
+// =============================================================================
+//
+// These tests are ordered by difficulty. Make them pass one at a time!
+
+#[cfg(test)]
+mod tests {
+    use super::*;
+
+    // -------------------------------------------------------------------------
+    // LESSON 1 TESTS: Simple Addition (Example - Should PASS)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lesson1_constant_addition() {
+        // This compiles: f(x) = x + 5
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x = StagedI64::variable(param);
+                let five = StagedI64::constant(5);
+                StagedI64::add(x, five)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(10), 15);
+        assert_eq!(compiled.call(0), 5);
+        assert_eq!(compiled.call(-3), 2);
+    }
+
+    #[test]
+    fn test_lesson1_double_addition() {
+        // This compiles: f(x) = x + x (which is x * 2)
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x = StagedI64::variable(param);
+                let x2 = StagedI64::variable(param);
+                StagedI64::add(x, x2)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(10), 20);
+        assert_eq!(compiled.call(7), 14);
+    }
+
+    #[test]
+    fn test_lesson1_nested_addition() {
+        // This compiles: f(x) = (x + 1) + 2
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x = StagedI64::variable(param);
+                let one = StagedI64::constant(1);
+                let two = StagedI64::constant(2);
+                let x_plus_1 = StagedI64::add(x, one);
+                StagedI64::add(x_plus_1, two)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(10), 13);
+        assert_eq!(compiled.call(0), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 2 TESTS: Constants (Exercise - Currently FAIL)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson2_simple_subtraction() {
+        // TODO: Make this test pass by implementing StagedI64::sub
+        // This should compile: f(x) = x - 3
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x = StagedI64::variable(param);
+                let three = StagedI64::constant(3);
+                StagedI64::sub(x, three)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(10), 7);
+        assert_eq!(compiled.call(5), 2);
+        assert_eq!(compiled.call(0), -3);
+    }
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson2_constant_only_subtraction() {
+        // TODO: This is partial evaluation in action!
+        // We're compiling a function with NO parameters - everything is constant!
+        // This should compile: f() = 100 - 42
+
+        // Note: We still use compile_unary_i64 but ignore the parameter
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let hundred = StagedI64::constant(100);
+                let fortytwo = StagedI64::constant(42);
+                StagedI64::sub(hundred, fortytwo)
+            })
+            .unwrap();
+
+        // No matter what we pass, the result is always 58!
+        assert_eq!(compiled.call(0), 58);
+        assert_eq!(compiled.call(999), 58);
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 3 TESTS: Variables (Exercise - Currently FAIL)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson3_simple_multiplication() {
+        // TODO: Make this test pass by implementing StagedI64::mul
+        // This should compile: f(x) = x * 2
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x = StagedI64::variable(param);
+                let two = StagedI64::constant(2);
+                StagedI64::mul(x, two)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(10), 20);
+        assert_eq!(compiled.call(7), 14);
+        assert_eq!(compiled.call(-3), -6);
+    }
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson3_complex_expression() {
+        // TODO: This combines add, sub, and mul!
+        // This should compile: f(x) = (x + 5) * (x - 2)
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_unary_i64(|builder, param| {
+                let x1 = StagedI64::variable(param);
+                let x2 = StagedI64::variable(param);
+                let five = StagedI64::constant(5);
+                let two = StagedI64::constant(2);
+
+                let left = StagedI64::add(x1, five);
+                let right = StagedI64::sub(x2, two);
+                StagedI64::mul(left, right)
+            })
+            .unwrap();
+
+        // When x = 3: (3 + 5) * (3 - 2) = 8 * 1 = 8
+        assert_eq!(compiled.call(3), 8);
+        // When x = 4: (4 + 5) * (4 - 2) = 9 * 2 = 18
+        assert_eq!(compiled.call(4), 18);
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 4 TESTS: Mixed Types (Exercise - Currently FAIL)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson4_unsigned_addition() {
+        // TODO: Implement StagedU64 to make this test pass
+        // Note: This test won't compile until you implement StagedU64!
+
+        // Uncomment this code once you've defined StagedU64:
+        /*
+        let mut compiler = Compiler::new().unwrap();
+        // You'll need to create compile_unary_u64 similar to compile_unary_i64
+        let compiled = compiler
+            .compile_unary_u64(|builder, param| {
+                let x = StagedU64::variable(param);
+                let ten = StagedU64::constant(10);
+                StagedU64::add(x, ten)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(5), 15);
+        assert_eq!(compiled.call(0), 10);
+        */
+
+        // For now, just panic so the test shows as "needs implementation"
+        todo!("Implement StagedU64 and compile_unary_u64");
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 5 TESTS: Booleans (Exercise - Currently FAIL)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    #[should_panic(expected = "not yet implemented")]
+    fn test_lesson5_less_than_comparison() {
+        // TODO: Implement StagedBool to make this test pass
+        // This should compile: f(x) = (x < 10) ? 1 : 0
+
+        // Uncomment this code once you've implemented StagedBool:
+        /*
+        let mut compiler = Compiler::new().unwrap();
+        // You'll need to create compile_unary_i64_to_bool
+        let compiled = compiler
+            .compile_unary_i64_to_bool(|builder, param| {
+                let x = StagedI64::variable(param);
+                let ten = StagedI64::constant(10);
+                StagedBool::less_than(x, ten)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(5), true);
+        assert_eq!(compiled.call(10), false);
+        assert_eq!(compiled.call(15), false);
+        */
+
+        todo!("Implement StagedBool and comparison operations");
+    }
+}
+
+// =============================================================================
+// WHAT'S NEXT?
+// =============================================================================
+//
+// Once you complete these lessons, you'll understand:
+// ✅ Staging - Building code generators instead of computing directly
+// ✅ Partial evaluation - Fixing some inputs to specialize code
+// ✅ Futamura projections - How specialization creates compilers
+// ✅ JIT compilation - Generating machine code at runtime
+//
+// In future prompts, we'll add:
+// - Lesson 6-8: Arrays and loops
+// - Lesson 9-11: Conditionals and control flow
+// - Lesson 12-14: Functions and inlining
+// - Lesson 15+: SIMD and advanced optimizations
+//
+// The root function will take:
+// - input_arrays: Array of pointers to input arrays
+// - input_scalars: Array of scalar inputs
+// - output_array: Pointer to output array
+// - length: Number of elements to process
+//
+// This matches the NaryOpFn signature from dio4!

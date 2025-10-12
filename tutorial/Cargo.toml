@@ -1,0 +1,19 @@
+[package]
+name = "tutorial"
+version = "0.1.0"
+edition = "2021"
+
+[dependencies]
+# JIT compilation
+cranelift = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
+cranelift-frontend = { workspace = true }
+cranelift-codegen = { workspace = true }
+cranelift-native = { workspace = true }
+
+# Error handling
+thiserror = { workspace = true }
+
+[dev-dependencies]
+# None needed yet

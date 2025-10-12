@@ -6,7 +6,7 @@
 
 use crate::staging::{
     control_flow::{StagedConditional, StagedForLoop},
-    StagedBool, StagedU64, StagedVariable, Staged, StagingError,
+    Staged, StagedBool, StagedU64, StagedVariable, StagingError,
 };
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
@@ -15,8 +15,13 @@ use std::marker::PhantomData;
 /// Core operator trait implementing the callback-based push model
 pub trait Operator {
     /// Start data production, calling consume() on the consumer for each record
-    fn produce(&self, consumer: &dyn Consumer, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError>;
-    
+    fn produce(
+        &self,
+        consumer: &dyn Consumer,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError>;
+
     /// Get the output schema produced by this operator
     fn output_schema(&self) -> &Schema;
 }
@@ -24,8 +29,13 @@ pub trait Operator {
 /// Consumer trait for processing records in the callback chain
 pub trait Consumer {
     /// Process a single record and potentially pass to downstream consumers
-    fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError>;
-    
+    fn consume(
+        &self,
+        record: &Record,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError>;
+
     /// Get the schema this consumer expects
     fn input_schema(&self) -> &Schema;
 }
@@ -88,21 +98,21 @@ impl StagedColumnValue {
             _ => None,
         }
     }
-    
+
     pub fn as_bool(&self) -> Option<&StagedBool> {
         match self {
             StagedColumnValue::Bool(val) => Some(val),
             _ => None,
         }
     }
-    
+
     pub fn data_type(&self) -> DataType {
         match self {
             StagedColumnValue::U64(_) => DataType::U64,
             StagedColumnValue::Bool(_) => DataType::Bool,
         }
     }
-    
+
     pub fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
         match self {
             StagedColumnValue::U64(val) => val.codegen(builder),
@@ -125,11 +135,11 @@ impl Record {
     pub fn get_column(&self, index: usize) -> Option<&StagedColumnValue> {
         self.columns.get(index)
     }
-    
+
     pub fn get_u64_column(&self, index: usize) -> Option<&StagedU64> {
         self.get_column(index)?.as_u64()
     }
-    
+
     pub fn get_bool_column(&self, index: usize) -> Option<&StagedBool> {
         self.get_column(index)?.as_bool()
     }
@@ -151,52 +161,60 @@ impl ScanOperator {
 }
 
 impl Operator for ScanOperator {
-    fn produce(&self, consumer: &dyn Consumer, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+    fn produce(
+        &self,
+        consumer: &dyn Consumer,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError> {
         if std::env::var("DIO_DEBUG_JIT").is_ok() {
             println!("[DEBUG] ScanOperator::produce - schema: {:?}", self.schema);
         }
-        
+
         // Get function parameters using NaryOpFn signature
         let entry_block = builder.current_block().unwrap();
         let params = builder.block_params(entry_block);
-        
+
         if std::env::var("DIO_DEBUG_JIT").is_ok() {
             println!("[DEBUG] Function parameters count: {}", params.len());
-            println!("[DEBUG] Expected NaryOpFn signature: (arrays_ptr, count, output_ptr, length)");
+            println!(
+                "[DEBUG] Expected NaryOpFn signature: (arrays_ptr, count, output_ptr, length)"
+            );
         }
-        
+
         // NaryOpFn signature: (array_of_arrays_ptr, input_count, output_ptr, length) -> count
-        let arrays_ptr = params[0];     // *const *const u8 - array of input arrays
-        let input_count = params[1];    // u32 - number of input arrays  
-        let output_ptr = params[2];     // *mut u8 - output array pointer
-        let length_param = params[3];   // u64 - input array length
-        
+        let arrays_ptr = params[0]; // *const *const u8 - array of input arrays
+        let input_count = params[1]; // u32 - number of input arrays
+        let output_ptr = params[2]; // *mut u8 - output array pointer
+        let length_param = params[3]; // u64 - input array length
+
         // Extract individual array pointers from the array-of-arrays
         let mut array_ptrs = Vec::new();
         for i in 0..self.schema.columns.len() {
             if std::env::var("DIO_DEBUG_JIT").is_ok() {
                 println!("[DEBUG] Extracting array pointer {}", i);
             }
-            
+
             // Calculate offset into array-of-arrays: arrays_ptr + (i * 8) since each pointer is 8 bytes
             let offset_const = builder.ins().iconst(types::I64, (i * 8) as i64);
             let array_ptr_addr = builder.ins().iadd(arrays_ptr, offset_const);
-            
+
             // Load the individual array pointer
             let array_ptr = builder.ins().load(
                 types::I64,
                 cranelift_codegen::ir::MemFlags::new(),
                 array_ptr_addr,
-                0
+                0,
             );
-            
+
             array_ptrs.push(array_ptr);
         }
 
         // Create length variable for the loop
         let length_var = ctx.fresh_variable(builder);
         builder.def_var(length_var, length_param);
-        let staged_length = StagedU64::Variable(StagedVariable::new(length_var.as_u32(), types::I64));
+        let staged_length =
+            StagedU64::Variable(StagedVariable::new(length_var.as_u32(), types::I64));
 
         // Generate loop from 0 to length
         let start = StagedU64::Constant(0);
@@ -209,7 +227,7 @@ impl Operator for ScanOperator {
                 if std::env::var("DIO_DEBUG_JIT").is_ok() {
                     println!("[DEBUG] Loading column {} from array_ptr", col_idx);
                 }
-                
+
                 let column_info = &self.schema.columns[col_idx];
                 let staged_value = match column_info.data_type {
                     DataType::U64 => {
@@ -218,19 +236,20 @@ impl Operator for ScanOperator {
                         let element_size = loop_builder.ins().iconst(types::I64, 8); // 8 bytes for u64
                         let offset = loop_builder.ins().imul(row_idx_val, element_size);
                         let element_ptr = loop_builder.ins().iadd(array_ptr, offset);
-                        
+
                         // Load the element value
                         let element_val = loop_builder.ins().load(
-                            types::I64, 
-                            cranelift_codegen::ir::MemFlags::new(), 
-                            element_ptr, 
-                            0
+                            types::I64,
+                            cranelift_codegen::ir::MemFlags::new(),
+                            element_ptr,
+                            0,
                         );
 
                         // Create a variable to hold this column value
                         let col_var = ctx.fresh_variable(loop_builder);
                         loop_builder.def_var(col_var, element_val);
-                        let staged_column = StagedU64::Variable(StagedVariable::new(col_var.as_u32(), types::I64));
+                        let staged_column =
+                            StagedU64::Variable(StagedVariable::new(col_var.as_u32(), types::I64));
                         ctx.current_record_vars.push(col_var);
                         StagedColumnValue::U64(staged_column)
                     }
@@ -245,7 +264,7 @@ impl Operator for ScanOperator {
                         });
                     }
                 };
-                
+
                 record_columns.push(staged_value);
             }
 
@@ -256,7 +275,7 @@ impl Operator for ScanOperator {
             };
 
             consumer.consume(&record, loop_builder, ctx)?;
-            
+
             Ok(())
         })
     }
@@ -275,12 +294,21 @@ pub struct SelectionOperator {
 
 impl SelectionOperator {
     pub fn new(predicate: StagedPredicate, downstream: Box<dyn Consumer>, schema: Schema) -> Self {
-        Self { predicate, downstream, schema }
+        Self {
+            predicate,
+            downstream,
+            schema,
+        }
     }
 }
 
 impl Consumer for SelectionOperator {
-    fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+    fn consume(
+        &self,
+        record: &Record,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError> {
         // Evaluate predicate on the record
         let condition = self.predicate.evaluate(record)?;
         let staged_cond = StagedConditional::new(condition);
@@ -288,9 +316,7 @@ impl Consumer for SelectionOperator {
         // Generate conditional: if (predicate) then pass to downstream
         staged_cond.generate_if_else(
             builder,
-            |inner_builder| {
-                self.downstream.consume(record, inner_builder, ctx)
-            },
+            |inner_builder| self.downstream.consume(record, inner_builder, ctx),
             None::<fn(&mut FunctionBuilder) -> Result<(), StagingError>>,
         )
     }
@@ -318,10 +344,7 @@ pub enum StagedPredicate {
         value: u64,
     },
     /// Boolean column comparison with boolean constant
-    BooleanComparison {
-        column_index: usize,
-        value: bool,
-    },
+    BooleanComparison { column_index: usize, value: bool },
     /// Boolean operation between two boolean columns
     BooleanOperation {
         left_column: usize,
@@ -356,12 +379,20 @@ pub enum BooleanOp {
 impl StagedPredicate {
     pub fn evaluate(&self, record: &Record) -> Result<StagedBool, StagingError> {
         match self {
-            StagedPredicate::ColumnComparison { column_index, op, value } => {
-                let column_val = record.get_u64_column(*column_index)
-                    .ok_or_else(|| StagingError::CodeGenerationFailed {
-                        reason: format!("Column index {} out of bounds or not U64 type", column_index),
-                    })?;
-                
+            StagedPredicate::ColumnComparison {
+                column_index,
+                op,
+                value,
+            } => {
+                let column_val = record.get_u64_column(*column_index).ok_or_else(|| {
+                    StagingError::CodeGenerationFailed {
+                        reason: format!(
+                            "Column index {} out of bounds or not U64 type",
+                            column_index
+                        ),
+                    }
+                })?;
+
                 let constant = StagedU64::Constant(*value);
                 let result = match op {
                     ComparisonOp::Equal => column_val.clone().eq(constant),
@@ -386,12 +417,19 @@ impl StagedPredicate {
                 };
                 Ok(result)
             }
-            StagedPredicate::BooleanComparison { column_index, value } => {
-                let column_val = record.get_bool_column(*column_index)
-                    .ok_or_else(|| StagingError::CodeGenerationFailed {
-                        reason: format!("Column index {} out of bounds or not Bool type", column_index),
-                    })?;
-                
+            StagedPredicate::BooleanComparison {
+                column_index,
+                value,
+            } => {
+                let column_val = record.get_bool_column(*column_index).ok_or_else(|| {
+                    StagingError::CodeGenerationFailed {
+                        reason: format!(
+                            "Column index {} out of bounds or not Bool type",
+                            column_index
+                        ),
+                    }
+                })?;
+
                 let constant = StagedBool::constant(*value);
                 // Boolean equality: (column == constant)
                 // We can implement as: (column AND constant) OR (!column AND !constant)
@@ -406,16 +444,28 @@ impl StagedPredicate {
                 };
                 Ok(result)
             }
-            StagedPredicate::BooleanOperation { left_column, op, right_column } => {
-                let left_val = record.get_bool_column(*left_column)
-                    .ok_or_else(|| StagingError::CodeGenerationFailed {
-                        reason: format!("Left column index {} out of bounds or not Bool type", left_column),
-                    })?;
-                let right_val = record.get_bool_column(*right_column)
-                    .ok_or_else(|| StagingError::CodeGenerationFailed {
-                        reason: format!("Right column index {} out of bounds or not Bool type", right_column),
-                    })?;
-                
+            StagedPredicate::BooleanOperation {
+                left_column,
+                op,
+                right_column,
+            } => {
+                let left_val = record.get_bool_column(*left_column).ok_or_else(|| {
+                    StagingError::CodeGenerationFailed {
+                        reason: format!(
+                            "Left column index {} out of bounds or not Bool type",
+                            left_column
+                        ),
+                    }
+                })?;
+                let right_val = record.get_bool_column(*right_column).ok_or_else(|| {
+                    StagingError::CodeGenerationFailed {
+                        reason: format!(
+                            "Right column index {} out of bounds or not Bool type",
+                            right_column
+                        ),
+                    }
+                })?;
+
                 let result = match op {
                     BooleanOp::And => StagedBool::and(left_val.clone(), right_val.clone()),
                     BooleanOp::Or => StagedBool::or(left_val.clone(), right_val.clone()),
@@ -424,8 +474,8 @@ impl StagedPredicate {
                         // We can implement as: (a AND b) OR (!a AND !b)
                         let both_true = StagedBool::and(left_val.clone(), right_val.clone());
                         let both_false = StagedBool::and(
-                            StagedBool::not(left_val.clone()), 
-                            StagedBool::not(right_val.clone())
+                            StagedBool::not(left_val.clone()),
+                            StagedBool::not(right_val.clone()),
                         );
                         StagedBool::or(both_true, both_false)
                     }
@@ -455,11 +505,16 @@ pub struct OutputConsumer {
     pub output_param_index: usize, // Parameter index for output array
     pub column_index: usize,       // Which column to output
     pub schema: Schema,
-    pub count_var: Variable,       // Variable tracking output count
+    pub count_var: Variable, // Variable tracking output count
 }
 
 impl OutputConsumer {
-    pub fn new(output_param_index: usize, column_index: usize, schema: Schema, count_var: Variable) -> Self {
+    pub fn new(
+        output_param_index: usize,
+        column_index: usize,
+        schema: Schema,
+        count_var: Variable,
+    ) -> Self {
         Self {
             output_param_index,
             column_index,
@@ -470,22 +525,31 @@ impl OutputConsumer {
 }
 
 impl Consumer for OutputConsumer {
-    fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+    fn consume(
+        &self,
+        record: &Record,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError> {
         // Get output array pointer from function parameters using NaryOpFn signature
         let func = &builder.func;
-        let entry_block = func.layout.entry_block().expect("Function should have entry block");
+        let entry_block = func
+            .layout
+            .entry_block()
+            .expect("Function should have entry block");
         let params = func.dfg.block_params(entry_block);
         let output_ptr = params[2]; // Third param is output ptr in NaryOpFn signature
 
         // Get the column value to write
-        let column_val = record.get_column(self.column_index)
-            .ok_or_else(|| StagingError::CodeGenerationFailed {
+        let column_val = record.get_column(self.column_index).ok_or_else(|| {
+            StagingError::CodeGenerationFailed {
                 reason: format!("Column index {} out of bounds", self.column_index),
-            })?;
+            }
+        })?;
 
         // Get current output count
         let current_count = builder.use_var(self.count_var);
-        
+
         // Calculate output address: output_ptr + (count * 8)
         let element_size = builder.ins().iconst(types::I64, 8);
         let output_offset = builder.ins().imul(current_count, element_size);
@@ -497,7 +561,7 @@ impl Consumer for OutputConsumer {
             cranelift_codegen::ir::MemFlags::new(),
             value_to_store,
             output_element_ptr,
-            0
+            0,
         );
 
         // Increment count
@@ -523,9 +587,9 @@ pub struct ProjectionOperator {
 
 impl ProjectionOperator {
     pub fn new(
-        expressions: Vec<ProjectionExpr>, 
-        downstream: Box<dyn Consumer>, 
-        input_schema: Schema
+        expressions: Vec<ProjectionExpr>,
+        downstream: Box<dyn Consumer>,
+        input_schema: Schema,
     ) -> Result<Self, StagingError> {
         // Build output schema from projection expressions
         let mut output_columns = Vec::new();
@@ -541,12 +605,14 @@ impl ProjectionOperator {
                 }
             }
         }
-        
-        let output_schema = Schema { columns: output_columns };
-        
-        Ok(Self { 
-            expressions, 
-            downstream, 
+
+        let output_schema = Schema {
+            columns: output_columns,
+        };
+
+        Ok(Self {
+            expressions,
+            downstream,
             input_schema,
             output_schema,
         })
@@ -554,28 +620,34 @@ impl ProjectionOperator {
 }
 
 impl Consumer for ProjectionOperator {
-    fn consume(&self, record: &Record, builder: &mut FunctionBuilder, ctx: &mut ExecutionContext) -> Result<(), StagingError> {
+    fn consume(
+        &self,
+        record: &Record,
+        builder: &mut FunctionBuilder,
+        ctx: &mut ExecutionContext,
+    ) -> Result<(), StagingError> {
         // Project the record to create a new record with selected columns
         let mut projected_columns = Vec::new();
-        
+
         for expr in &self.expressions {
             match expr {
                 ProjectionExpr::Column(col_idx) => {
-                    let column_val = record.get_column(*col_idx)
-                        .ok_or_else(|| StagingError::CodeGenerationFailed {
+                    let column_val = record.get_column(*col_idx).ok_or_else(|| {
+                        StagingError::CodeGenerationFailed {
                             reason: format!("Column index {} out of bounds", col_idx),
-                        })?;
+                        }
+                    })?;
                     projected_columns.push(column_val.clone());
                 }
             }
         }
-        
+
         // Create new record with projected columns and updated schema
         let projected_record = Record {
             columns: projected_columns,
             schema: self.output_schema.clone(),
         };
-        
+
         // Pass projected record to downstream consumer
         self.downstream.consume(&projected_record, builder, ctx)
     }
