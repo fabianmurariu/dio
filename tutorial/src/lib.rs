@@ -93,6 +93,12 @@ pub enum StagedI64 {
 
     /// Addition of two staged values
     Add(Box<StagedI64>, Box<StagedI64>),
+
+    /// Subtraction of two staged values
+    Sub(Box<StagedI64>, Box<StagedI64>),
+
+    /// Multiplication of two staged values
+    Mul(Box<StagedI64>, Box<StagedI64>),
 }
 
 impl StagedI64 {
@@ -134,6 +140,16 @@ impl Staged for StagedI64 {
                 let right_val = right.codegen(builder);
                 // Generate: iadd <left>, <right>
                 builder.ins().iadd(left_val, right_val)
+            }
+            StagedI64::Sub(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().isub(left_val, right_val)
+            }
+            StagedI64::Mul(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().imul(left_val, right_val)
             }
         }
     }
@@ -274,9 +290,7 @@ impl StagedI64 {
     /// TODO: Implement this! Follow the pattern from `add` above.
     /// Hint: The Cranelift instruction is `isub` instead of `iadd`
     pub fn sub(left: StagedI64, right: StagedI64) -> Self {
-        // TODO: YOUR CODE HERE
-        // Remember: Don't compute the result, just describe the computation!
-        todo!("Implement subtraction for StagedI64")
+        StagedI64::Sub(left.into(), right.into())
     }
 }
 
@@ -299,8 +313,7 @@ impl StagedI64 {
     /// Hint: The Cranelift instruction is `imul`
     /// Hint: You'll need to add a `Mul` variant to the StagedI64 enum
     pub fn mul(left: StagedI64, right: StagedI64) -> Self {
-        // TODO: YOUR CODE HERE
-        todo!("Implement multiplication for StagedI64")
+        StagedI64::Mul(left.into(), right.into())
     }
 }
 
@@ -425,9 +438,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson2_simple_subtraction() {
-        // TODO: Make this test pass by implementing StagedI64::sub
         // This should compile: f(x) = x - 3
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
@@ -444,9 +455,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson2_constant_only_subtraction() {
-        // TODO: This is partial evaluation in action!
         // We're compiling a function with NO parameters - everything is constant!
         // This should compile: f() = 100 - 42
 
@@ -470,9 +479,7 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson3_simple_multiplication() {
-        // TODO: Make this test pass by implementing StagedI64::mul
         // This should compile: f(x) = x * 2
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
@@ -489,9 +496,7 @@ mod tests {
     }
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson3_complex_expression() {
-        // TODO: This combines add, sub, and mul!
         // This should compile: f(x) = (x + 5) * (x - 2)
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
