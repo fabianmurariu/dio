@@ -7,10 +7,11 @@
 //! ## Learning Path
 //!
 //! 1. **Lesson 1**: Simple Addition (Example - COMPLETE)
-//! 2. **Lesson 2**: Constants (Exercise - YOU COMPLETE)
-//! 3. **Lesson 3**: Variables (Exercise - YOU COMPLETE)
-//! 4. **Lesson 4**: Mixed Type Operations (Exercise - YOU COMPLETE)
-//! 5. **Lesson 5**: Boolean Operations (Exercise - YOU COMPLETE)
+//! 2. **Lesson 1b**: Multi-Parameter Functions (Example - COMPLETE)
+//! 3. **Lesson 2**: Constants (Exercise - YOU COMPLETE)
+//! 4. **Lesson 3**: Variables (Exercise - YOU COMPLETE)
+//! 5. **Lesson 4**: Mixed Type Operations (Exercise - YOU COMPLETE)
+//! 6. **Lesson 5**: Boolean Operations (Exercise - YOU COMPLETE)
 //!
 //! Future lessons will cover arrays, loops, conditionals, and SIMD.
 //!
@@ -24,14 +25,13 @@
 //! Run `cargo test -p tutorial` to see which tests are failing.
 //! Your job: make them pass by implementing the missing functionality!
 
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, Signature, UserFuncName, Value};
+use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, MemFlags, Signature, Value};
 use cranelift_codegen::isa::CallConv;
-use cranelift_codegen::settings::{self, Configurable};
+use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
-use std::marker::PhantomData;
 use thiserror::Error;
 
 // =============================================================================
@@ -253,6 +253,110 @@ impl Compiler {
 
         Ok(CompiledUnaryI64 { code_ptr })
     }
+
+    /// Compile a staged function that takes multiple i64 parameters (as a slice) and returns i64
+    ///
+    /// This is a more general version of compile_unary_i64 that supports N parameters!
+    /// The key differences:
+    /// 1. Instead of individual parameters, we pass a pointer to an array
+    /// 2. Variables are looked up by index from this array
+    /// 3. The body function receives a vector of Variable handles (one per parameter)
+    ///
+    /// Example: To compile `f(x, y, z) = (x + y) * z`:
+    /// ```
+    /// compiler.compile_nary_i64(3, |builder, vars| {
+    ///     let x = StagedI64::variable(vars[0]);
+    ///     let y = StagedI64::variable(vars[1]);
+    ///     let z = StagedI64::variable(vars[2]);
+    ///     let sum = StagedI64::add(x, y);
+    ///     StagedI64::mul(sum, z)
+    /// })
+    /// ```
+    pub fn compile_nary_i64(
+        &mut self,
+        num_params: usize,
+        body: impl FnOnce(&mut FunctionBuilder, &[Variable]) -> StagedI64,
+    ) -> Result<CompiledNaryI64, StagingError> {
+        // Create function signature: *const i64 -> i64
+        // The function takes a pointer to an array of i64 parameters
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(AbiParam::new(types::I64)); // pointer to params array
+        sig.returns.push(AbiParam::new(types::I64)); // return value
+
+        // Create the function
+        let mut func = Function::new();
+        func.signature = sig;
+
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        // Create entry block with parameter (pointer to array)
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+
+        let params_ptr = builder.block_params(entry_block)[0];
+
+        // Load each parameter from the array and assign to variables
+        // This is the key insight: we load from params[0], params[1], etc.
+        let mut param_vars = Vec::new();
+        for i in 0..num_params {
+            let var = Variable::from_u32(i as u32);
+            builder.declare_var(var, types::I64);
+
+            // Load params[i]: compute address = params_ptr + (i * 8)
+            let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
+            let param_addr = builder.ins().iadd(params_ptr, offset);
+            let param_val = builder.ins().load(types::I64, MemFlags::trusted(), param_addr, 0);
+
+            // Assign to variable
+            builder.def_var(var, param_val);
+            param_vars.push(var);
+        }
+
+        // Generate the function body
+        // The user's closure receives the list of variables
+        let result_expr = body(&mut builder, &param_vars);
+        let result_val = result_expr.codegen(&mut builder);
+
+        // Return the result
+        builder.ins().return_(&[result_val]);
+
+        // Finalize
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        // Compile to machine code
+        let mut ctx = Context::new();
+        ctx.func = func;
+
+        let func_id = self
+            .module
+            .declare_function("staged_func_nary", Linkage::Export, &ctx.func.signature)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to declare function: {}", e),
+            })?;
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to define function: {}", e),
+            })?;
+
+        self.module.clear_context(&mut ctx);
+        self.module.finalize_definitions().map_err(|e| {
+            StagingError::CompilationFailed {
+                reason: format!("Failed to finalize: {}", e),
+            }
+        })?;
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+
+        Ok(CompiledNaryI64 {
+            code_ptr,
+            num_params,
+        })
+    }
 }
 
 /// A compiled function that takes one i64 and returns i64
@@ -269,6 +373,62 @@ impl CompiledUnaryI64 {
         }
     }
 }
+
+/// A compiled function that takes a slice of i64 parameters and returns i64
+///
+/// This is the more general form that supports N-ary functions!
+/// Instead of individual parameters, we pass all inputs as a slice.
+pub struct CompiledNaryI64 {
+    code_ptr: *const u8,
+    num_params: usize,
+}
+
+impl CompiledNaryI64 {
+    /// Execute the compiled function with a slice of arguments
+    ///
+    /// # Safety
+    /// The caller must ensure that `args.len() >= num_params`
+    pub fn call(&self, args: &[i64]) -> i64 {
+        assert!(
+            args.len() >= self.num_params,
+            "Expected at least {} arguments, got {}",
+            self.num_params,
+            args.len()
+        );
+
+        unsafe {
+            // The compiled function takes a pointer to the array of parameters
+            let func: extern "C" fn(*const i64) -> i64 = std::mem::transmute(self.code_ptr);
+            func(args.as_ptr())
+        }
+    }
+
+    /// Get the number of parameters this function expects
+    pub fn num_params(&self) -> usize {
+        self.num_params
+    }
+}
+
+// =============================================================================
+// LESSON 1b: MULTI-PARAMETER FUNCTIONS (EXAMPLE - COMPLETE)
+// =============================================================================
+//
+// Real functions often need multiple parameters! The compile_unary_i64 method
+// only supports single-parameter functions, which is limiting.
+//
+// We've added compile_nary_i64 which supports N parameters:
+// - Instead of passing individual parameters, we pass a pointer to an array
+// - Each parameter is loaded from the array at the start of the function
+// - This matches how dio3's cranelift_backend works!
+//
+// Key insight: f(x, y, z) becomes f(*params) where:
+//   x = params[0]
+//   y = params[1]
+//   z = params[2]
+//
+// This is more flexible and scales to any number of parameters!
+//
+// See the tests below for examples of using compile_nary_i64.
 
 // =============================================================================
 // LESSON 2: CONSTANTS (EXERCISE - YOU COMPLETE)
@@ -431,6 +591,114 @@ mod tests {
 
         assert_eq!(compiled.call(10), 13);
         assert_eq!(compiled.call(0), 3);
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 1b TESTS: Multi-Parameter Functions (Example - Should PASS)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lesson1b_binary_addition() {
+        // This compiles: f(x, y) = x + y
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary_i64(2, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let y = StagedI64::variable(vars[1]);
+                StagedI64::add(x, y)
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call(&[10, 5]), 15);
+        assert_eq!(compiled.call(&[100, 200]), 300);
+        assert_eq!(compiled.call(&[-3, 8]), 5);
+    }
+
+    #[test]
+    fn test_lesson1b_ternary_expression() {
+        // This compiles: f(x, y, z) = (x + y) * z
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary_i64(3, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let y = StagedI64::variable(vars[1]);
+                let z = StagedI64::variable(vars[2]);
+                let sum = StagedI64::add(x, y);
+                StagedI64::mul(sum, z)
+            })
+            .unwrap();
+
+        // (2 + 3) * 4 = 20
+        assert_eq!(compiled.call(&[2, 3, 4]), 20);
+        // (10 + 5) * 2 = 30
+        assert_eq!(compiled.call(&[10, 5, 2]), 30);
+        // (1 + 1) * 100 = 200
+        assert_eq!(compiled.call(&[1, 1, 100]), 200);
+    }
+
+    #[test]
+    fn test_lesson1b_mixed_constants_and_variables() {
+        // This compiles: f(x, y) = (x + 10) * y
+        // Shows partial evaluation: the constant 10 is baked into the code!
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary_i64(2, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let y = StagedI64::variable(vars[1]);
+                let ten = StagedI64::constant(10);
+                let x_plus_10 = StagedI64::add(x, ten);
+                StagedI64::mul(x_plus_10, y)
+            })
+            .unwrap();
+
+        // (5 + 10) * 2 = 30
+        assert_eq!(compiled.call(&[5, 2]), 30);
+        // (0 + 10) * 3 = 30
+        assert_eq!(compiled.call(&[0, 3]), 30);
+        // (90 + 10) * 1 = 100
+        assert_eq!(compiled.call(&[90, 1]), 100);
+    }
+
+    #[test]
+    fn test_lesson1b_complex_multi_param() {
+        // This compiles: f(a, b, c, d) = (a + b) * (c - d)
+        // Demonstrates multiple variables and nested operations
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary_i64(4, |_builder, vars| {
+                let a = StagedI64::variable(vars[0]);
+                let b = StagedI64::variable(vars[1]);
+                let c = StagedI64::variable(vars[2]);
+                let d = StagedI64::variable(vars[3]);
+                let left = StagedI64::add(a, b);
+                let right = StagedI64::sub(c, d);
+                StagedI64::mul(left, right)
+            })
+            .unwrap();
+
+        // (1 + 2) * (10 - 5) = 3 * 5 = 15
+        assert_eq!(compiled.call(&[1, 2, 10, 5]), 15);
+        // (10 + 20) * (100 - 50) = 30 * 50 = 1500
+        assert_eq!(compiled.call(&[10, 20, 100, 50]), 1500);
+    }
+
+    #[test]
+    fn test_lesson1b_zero_params_all_constants() {
+        // This compiles: f() = 42 + 58
+        // Even though we have "zero runtime params", we still need to pass
+        // an empty slice. The result is always constant!
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary_i64(0, |_builder, _vars| {
+                let forty_two = StagedI64::constant(42);
+                let fifty_eight = StagedI64::constant(58);
+                StagedI64::add(forty_two, fifty_eight)
+            })
+            .unwrap();
+
+        // No matter what we pass (even empty), result is always 100
+        assert_eq!(compiled.call(&[]), 100);
+        assert_eq!(compiled.call(&[999, 888]), 100); // extra args ignored
     }
 
     // -------------------------------------------------------------------------
