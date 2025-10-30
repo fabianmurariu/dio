@@ -182,95 +182,32 @@ impl Compiler {
         Ok(Self { module })
     }
 
-    /// Compile a staged function that takes one i64 parameter and returns i64
-    ///
-    /// This is the first Futamura projection in action! We're specializing
-    /// a general computation framework (our staged language) with a specific
-    /// program (the StagedI64 expression), producing a compiled function.
-    pub fn compile_unary_i64(
-        &mut self,
-        body: impl FnOnce(&mut FunctionBuilder, Variable) -> StagedI64,
-    ) -> Result<CompiledUnaryI64, StagingError> {
-        // Create function signature: i64 -> i64
-        let mut sig = Signature::new(CallConv::SystemV);
-        sig.params.push(AbiParam::new(types::I64));
-        sig.returns.push(AbiParam::new(types::I64));
-
-        // Create the function
-        let mut func = Function::new();
-        func.signature = sig;
-
-        let mut func_ctx = FunctionBuilderContext::new();
-        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
-
-        // Create entry block with parameter
-        let entry_block = builder.create_block();
-        builder.append_block_params_for_function_params(entry_block);
-        builder.switch_to_block(entry_block);
-
-        // Declare variable for the parameter
-        let param_var = Variable::from_u32(0);
-        builder.declare_var(param_var, types::I64);
-        let param = builder.block_params(entry_block)[0];
-        builder.def_var(param_var, param);
-
-        // Generate the function body
-        let result_expr = body(&mut builder, param_var);
-        let result_val = result_expr.codegen(&mut builder);
-
-        // Return the result
-        builder.ins().return_(&[result_val]);
-
-        // Finalize
-        builder.seal_all_blocks();
-        builder.finalize();
-
-        // Compile to machine code
-        let mut ctx = Context::new();
-        ctx.func = func;
-
-        let func_id = self
-            .module
-            .declare_function("staged_func", Linkage::Export, &ctx.func.signature)
-            .map_err(|e| StagingError::CompilationFailed {
-                reason: format!("Failed to declare function: {}", e),
-            })?;
-
-        self.module
-            .define_function(func_id, &mut ctx)
-            .map_err(|e| StagingError::CompilationFailed {
-                reason: format!("Failed to define function: {}", e),
-            })?;
-
-        self.module.clear_context(&mut ctx);
-        self.module.finalize_definitions().map_err(|e| {
-            StagingError::CompilationFailed {
-                reason: format!("Failed to finalize: {}", e),
-            }
-        })?;
-
-        let code_ptr = self.module.get_finalized_function(func_id);
-
-        Ok(CompiledUnaryI64 { code_ptr })
-    }
 
     /// Compile a staged function that takes multiple i64 parameters (as a slice) and returns i64
     ///
-    /// This is a more general version of compile_unary_i64 that supports N parameters!
+    /// This is a more general version that supports N parameters!
     /// The key differences:
     /// 1. Instead of individual parameters, we pass a pointer to an array
     /// 2. Variables are looked up by index from this array
     /// 3. The body function receives a vector of Variable handles (one per parameter)
     ///
-    /// Example: To compile `f(x, y, z) = (x + y) * z`:
+    /// # Example
+    ///
+    /// To compile `f(x, y, z) = (x + y) * z`:
+    ///
     /// ```
-    /// compiler.compile_nary_i64(3, |builder, vars| {
+    /// use tutorial::{Compiler, StagedI64};
+    ///
+    /// let mut compiler = Compiler::new().unwrap();
+    /// let compiled = compiler.compile_nary_i64(3, |_builder, vars| {
     ///     let x = StagedI64::variable(vars[0]);
     ///     let y = StagedI64::variable(vars[1]);
     ///     let z = StagedI64::variable(vars[2]);
     ///     let sum = StagedI64::add(x, y);
     ///     StagedI64::mul(sum, z)
-    /// })
+    /// }).unwrap();
+    ///
+    /// assert_eq!(compiled.call(&[2, 3, 4]), 20); // (2 + 3) * 4 = 20
     /// ```
     pub fn compile_nary_i64(
         &mut self,
@@ -359,20 +296,6 @@ impl Compiler {
     }
 }
 
-/// A compiled function that takes one i64 and returns i64
-pub struct CompiledUnaryI64 {
-    code_ptr: *const u8,
-}
-
-impl CompiledUnaryI64 {
-    /// Execute the compiled function
-    pub fn call(&self, arg: i64) -> i64 {
-        unsafe {
-            let func: extern "C" fn(i64) -> i64 = std::mem::transmute(self.code_ptr);
-            func(arg)
-        }
-    }
-}
 
 /// A compiled function that takes a slice of i64 parameters and returns i64
 ///
@@ -447,8 +370,6 @@ impl CompiledNaryI64 {
 impl StagedI64 {
     /// Subtract two staged values
     ///
-    /// TODO: Implement this! Follow the pattern from `add` above.
-    /// Hint: The Cranelift instruction is `isub` instead of `iadd`
     pub fn sub(left: StagedI64, right: StagedI64) -> Self {
         StagedI64::Sub(left.into(), right.into())
     }
@@ -469,15 +390,10 @@ impl StagedI64 {
 impl StagedI64 {
     /// Multiply two staged values
     ///
-    /// TODO: Implement this!
-    /// Hint: The Cranelift instruction is `imul`
-    /// Hint: You'll need to add a `Mul` variant to the StagedI64 enum
     pub fn mul(left: StagedI64, right: StagedI64) -> Self {
         StagedI64::Mul(left.into(), right.into())
     }
 }
-
-// TODO: Add the Mul variant to StagedI64 enum above and handle it in codegen!
 
 // =============================================================================
 // LESSON 4: MIXED TYPE OPERATIONS (EXERCISE - YOU COMPLETE)
@@ -547,16 +463,16 @@ mod tests {
         // This compiles: f(x) = x + 5
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
                 let five = StagedI64::constant(5);
                 StagedI64::add(x, five)
             })
             .unwrap();
 
-        assert_eq!(compiled.call(10), 15);
-        assert_eq!(compiled.call(0), 5);
-        assert_eq!(compiled.call(-3), 2);
+        assert_eq!(compiled.call(&[10]), 15);
+        assert_eq!(compiled.call(&[0]), 5);
+        assert_eq!(compiled.call(&[-3]), 2);
     }
 
     #[test]
@@ -564,15 +480,15 @@ mod tests {
         // This compiles: f(x) = x + x (which is x * 2)
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x = StagedI64::variable(param);
-                let x2 = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let x2 = StagedI64::variable(vars[0]);
                 StagedI64::add(x, x2)
             })
             .unwrap();
 
-        assert_eq!(compiled.call(10), 20);
-        assert_eq!(compiled.call(7), 14);
+        assert_eq!(compiled.call(&[10]), 20);
+        assert_eq!(compiled.call(&[7]), 14);
     }
 
     #[test]
@@ -580,8 +496,8 @@ mod tests {
         // This compiles: f(x) = (x + 1) + 2
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
                 let one = StagedI64::constant(1);
                 let two = StagedI64::constant(2);
                 let x_plus_1 = StagedI64::add(x, one);
@@ -589,8 +505,8 @@ mod tests {
             })
             .unwrap();
 
-        assert_eq!(compiled.call(10), 13);
-        assert_eq!(compiled.call(0), 3);
+        assert_eq!(compiled.call(&[10]), 13);
+        assert_eq!(compiled.call(&[0]), 3);
     }
 
     // -------------------------------------------------------------------------
@@ -710,16 +626,16 @@ mod tests {
         // This should compile: f(x) = x - 3
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
                 let three = StagedI64::constant(3);
                 StagedI64::sub(x, three)
             })
             .unwrap();
 
-        assert_eq!(compiled.call(10), 7);
-        assert_eq!(compiled.call(5), 2);
-        assert_eq!(compiled.call(0), -3);
+        assert_eq!(compiled.call(&[10]), 7);
+        assert_eq!(compiled.call(&[5]), 2);
+        assert_eq!(compiled.call(&[0]), -3);
     }
 
     #[test]
@@ -727,10 +643,10 @@ mod tests {
         // We're compiling a function with NO parameters - everything is constant!
         // This should compile: f() = 100 - 42
 
-        // Note: We still use compile_unary_i64 but ignore the parameter
+        // Note: We use compile_nary_i64 with 0 parameters
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
+            .compile_nary_i64(0, |_builder, _vars| {
                 let hundred = StagedI64::constant(100);
                 let fortytwo = StagedI64::constant(42);
                 StagedI64::sub(hundred, fortytwo)
@@ -738,8 +654,8 @@ mod tests {
             .unwrap();
 
         // No matter what we pass, the result is always 58!
-        assert_eq!(compiled.call(0), 58);
-        assert_eq!(compiled.call(999), 58);
+        assert_eq!(compiled.call(&[]), 58);
+        assert_eq!(compiled.call(&[999]), 58);
     }
 
     // -------------------------------------------------------------------------
@@ -751,16 +667,16 @@ mod tests {
         // This should compile: f(x) = x * 2
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
                 let two = StagedI64::constant(2);
                 StagedI64::mul(x, two)
             })
             .unwrap();
 
-        assert_eq!(compiled.call(10), 20);
-        assert_eq!(compiled.call(7), 14);
-        assert_eq!(compiled.call(-3), -6);
+        assert_eq!(compiled.call(&[10]), 20);
+        assert_eq!(compiled.call(&[7]), 14);
+        assert_eq!(compiled.call(&[-3]), -6);
     }
 
     #[test]
@@ -768,9 +684,9 @@ mod tests {
         // This should compile: f(x) = (x + 5) * (x - 2)
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_unary_i64(|builder, param| {
-                let x1 = StagedI64::variable(param);
-                let x2 = StagedI64::variable(param);
+            .compile_nary_i64(1, |_builder, vars| {
+                let x1 = StagedI64::variable(vars[0]);
+                let x2 = StagedI64::variable(vars[0]);
                 let five = StagedI64::constant(5);
                 let two = StagedI64::constant(2);
 
@@ -781,9 +697,9 @@ mod tests {
             .unwrap();
 
         // When x = 3: (3 + 5) * (3 - 2) = 8 * 1 = 8
-        assert_eq!(compiled.call(3), 8);
+        assert_eq!(compiled.call(&[3]), 8);
         // When x = 4: (4 + 5) * (4 - 2) = 9 * 2 = 18
-        assert_eq!(compiled.call(4), 18);
+        assert_eq!(compiled.call(&[4]), 18);
     }
 
     // -------------------------------------------------------------------------
