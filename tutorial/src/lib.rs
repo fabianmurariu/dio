@@ -25,13 +25,16 @@
 //! Run `cargo test -p tutorial` to see which tests are failing.
 //! Your job: make them pass by implementing the missing functionality!
 
-use cranelift_codegen::ir::{types, AbiParam, Function, InstBuilder, MemFlags, Signature, Value};
+use cranelift_codegen::ir::{
+    types, AbiParam, Function, InstBuilder, MemFlags, Signature, Type, Value,
+};
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings;
 use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use std::ops::{Add, Mul, Sub};
 use thiserror::Error;
 
 // =============================================================================
@@ -182,7 +185,6 @@ impl Compiler {
         Ok(Self { module })
     }
 
-
     /// Compile a staged function that takes multiple i64 parameters (as a slice) and returns i64
     ///
     /// This is a more general version that supports N parameters!
@@ -244,7 +246,9 @@ impl Compiler {
             // Load params[i]: compute address = params_ptr + (i * 8)
             let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
             let param_addr = builder.ins().iadd(params_ptr, offset);
-            let param_val = builder.ins().load(types::I64, MemFlags::trusted(), param_addr, 0);
+            let param_val = builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), param_addr, 0);
 
             // Assign to variable
             builder.def_var(var, param_val);
@@ -281,11 +285,11 @@ impl Compiler {
             })?;
 
         self.module.clear_context(&mut ctx);
-        self.module.finalize_definitions().map_err(|e| {
-            StagingError::CompilationFailed {
+        self.module
+            .finalize_definitions()
+            .map_err(|e| StagingError::CompilationFailed {
                 reason: format!("Failed to finalize: {}", e),
-            }
-        })?;
+            })?;
 
         let code_ptr = self.module.get_finalized_function(func_id);
 
@@ -295,7 +299,6 @@ impl Compiler {
         })
     }
 }
-
 
 /// A compiled function that takes a slice of i64 parameters and returns i64
 ///
@@ -414,12 +417,96 @@ impl StagedI64 {
 /// 4. Use unsigned instructions (iconst with type I64, but interpret as unsigned)
 #[derive(Debug, Clone)]
 pub enum StagedU64 {
-    // TODO: Add variants here (Constant, Variable, Add)
+    /// A constant value known at compile time
+    Constant(u64),
+
+    /// A variable (function parameter) known only at runtime
+    Variable(Variable),
+
+    /// Addition of two staged values
+    Add(Box<StagedU64>, Box<StagedU64>),
+
+    /// Subtraction of two staged values
+    Sub(Box<StagedU64>, Box<StagedU64>),
+
+    /// Multiplication of two staged values
+    Mul(Box<StagedU64>, Box<StagedU64>),
 }
 
 // TODO: Implement methods for StagedU64 (constant, variable, add)
+impl StagedU64 {
+    /// Create a constant staged value
+    pub fn constant(value: u64) -> Self {
+        StagedU64::Constant(value)
+    }
 
-// TODO: Implement Staged trait for StagedU64
+    /// Create a variable staged value (represents a function parameter)
+    pub fn variable(var: Variable) -> Self {
+        StagedU64::Variable(var)
+    }
+}
+
+impl Add<StagedU64> for StagedU64 {
+    type Output = StagedU64;
+
+    fn add(self, rhs: StagedU64) -> StagedU64 {
+        StagedU64::Add(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Mul<StagedU64> for StagedU64 {
+    type Output = StagedU64;
+
+    fn mul(self, rhs: StagedU64) -> StagedU64 {
+        StagedU64::Mul(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Sub<StagedU64> for StagedU64 {
+    type Output = StagedU64;
+
+    fn sub(self, rhs: StagedU64) -> StagedU64 {
+        StagedU64::Sub(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Staged for StagedU64 {
+    type RuntimeType = u64;
+
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            StagedU64::Constant(val) => {
+                // Generate: iconst.i64 <val>
+                builder.ins().iconst(types::I64, *val as i64)
+            }
+            StagedU64::Variable(var) => {
+                // Generate: use_var <var>
+                builder.use_var(*var)
+            }
+            StagedU64::Add(left, right) => {
+                // Generate code for left and right, then add them
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                // Generate: iadd <left>, <right>
+                builder.ins().iadd(left_val, right_val)
+            }
+            StagedU64::Sub(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().isub(left_val, right_val)
+            }
+            StagedU64::Mul(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().imul(left_val, right_val)
+            }
+        }
+    }
+
+    fn cranelift_type() -> Type {
+        types::I64
+    }
+}
 
 // =============================================================================
 // LESSON 5: BOOLEAN OPERATIONS (EXERCISE - YOU COMPLETE)
