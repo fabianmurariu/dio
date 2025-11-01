@@ -201,7 +201,7 @@ impl Compiler {
     /// use tutorial::{Compiler, StagedI64};
     ///
     /// let mut compiler = Compiler::new().unwrap();
-    /// let compiled = compiler.compile_nary_i64(3, |_builder, vars| {
+    /// let compiled = compiler.compile_nary_i64(3, |_, vars| {
     ///     let x = StagedI64::variable(vars[0]);
     ///     let y = StagedI64::variable(vars[1]);
     ///     let z = StagedI64::variable(vars[2]);
@@ -539,7 +539,7 @@ pub enum DataType {
 /// let compiled = compiler.compile_nary(
 ///     vec![DataType::U64, DataType::I64],
 ///     DataType::U64,
-///     |_builder, vars| {
+///     |_, vars| {
 ///         let x = StagedU64::variable(vars[0]);
 ///         let y_as_u64 = StagedU64::variable(vars[1]);
 ///         StagedValue::U64(x + y_as_u64)
@@ -685,7 +685,7 @@ impl Compiler {
     /// let compiled = compiler.compile_nary(
     ///     vec![DataType::U64, DataType::I64],
     ///     DataType::U64,
-    ///     |_builder, vars| {
+    ///     |_, vars| {
     ///         let x = StagedU64::variable(vars[0]);
     ///         let y = StagedI64::variable(vars[1]);
     ///         let y_unsigned = StagedU64::variable(vars[1]); // reinterpret as U64
@@ -820,7 +820,7 @@ impl CompiledNary {
     /// let compiled = compiler.compile_nary(
     ///     vec![DataType::U64, DataType::U64],
     ///     DataType::U64,
-    ///     |_builder, vars| {
+    ///     |_, vars| {
     ///         let x = StagedU64::variable(vars[0]);
     ///         let y = StagedU64::variable(vars[1]);
     ///         StagedValue::U64(x + y)
@@ -1052,7 +1052,7 @@ mod tests {
         // This compiles: f(x) = x + 5
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let five = StagedI64::constant(5);
                 StagedI64::add(x, five)
@@ -1069,7 +1069,7 @@ mod tests {
         // This compiles: f(x) = x + x (which is x * 2)
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let x2 = StagedI64::variable(vars[0]);
                 StagedI64::add(x, x2)
@@ -1085,7 +1085,7 @@ mod tests {
         // This compiles: f(x) = (x + 1) + 2
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let one = StagedI64::constant(1);
                 let two = StagedI64::constant(2);
@@ -1107,7 +1107,7 @@ mod tests {
         // This compiles: f(x, y) = x + y
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(2, |_builder, vars| {
+            .compile_nary_i64(2, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
                 StagedI64::add(x, y)
@@ -1124,7 +1124,7 @@ mod tests {
         // This compiles: f(x, y, z) = (x + y) * z
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(3, |_builder, vars| {
+            .compile_nary_i64(3, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
                 let z = StagedI64::variable(vars[2]);
@@ -1147,7 +1147,7 @@ mod tests {
         // Shows partial evaluation: the constant 10 is baked into the code!
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(2, |_builder, vars| {
+            .compile_nary_i64(2, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
                 let ten = StagedI64::constant(10);
@@ -1170,7 +1170,7 @@ mod tests {
         // Demonstrates multiple variables and nested operations
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(4, |_builder, vars| {
+            .compile_nary_i64(4, |_, vars| {
                 let a = StagedI64::variable(vars[0]);
                 let b = StagedI64::variable(vars[1]);
                 let c = StagedI64::variable(vars[2]);
@@ -1194,7 +1194,7 @@ mod tests {
         // an empty slice. The result is always constant!
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(0, |_builder, _vars| {
+            .compile_nary_i64(0, |_, _vars| {
                 let forty_two = StagedI64::constant(42);
                 let fifty_eight = StagedI64::constant(58);
                 StagedI64::add(forty_two, fifty_eight)
@@ -1215,7 +1215,7 @@ mod tests {
         // This should compile: f(x) = x - 3
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let three = StagedI64::constant(3);
                 StagedI64::sub(x, three)
@@ -1235,7 +1235,7 @@ mod tests {
         // Note: We use compile_nary_i64 with 0 parameters
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(0, |_builder, _vars| {
+            .compile_nary_i64(0, |_, _vars| {
                 let hundred = StagedI64::constant(100);
                 let fortytwo = StagedI64::constant(42);
                 StagedI64::sub(hundred, fortytwo)
@@ -1256,7 +1256,7 @@ mod tests {
         // This should compile: f(x) = x * 2
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let two = StagedI64::constant(2);
                 StagedI64::mul(x, two)
@@ -1273,7 +1273,7 @@ mod tests {
         // This should compile: f(x) = (x + 5) * (x - 2)
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary_i64(1, |_builder, vars| {
+            .compile_nary_i64(1, |_, vars| {
                 let x1 = StagedI64::variable(vars[0]);
                 let x2 = StagedI64::variable(vars[0]);
                 let five = StagedI64::constant(5);
@@ -1292,33 +1292,24 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
-    // LESSON 4 TESTS: Mixed Types (Exercise - Currently FAIL)
+    // LESSON 4 TESTS: Mixed Types
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson4_unsigned_addition() {
-        // TODO: Implement StagedU64 to make this test pass
-        // Note: This test won't compile until you implement StagedU64!
-
-        // Uncomment this code once you've defined StagedU64:
-        /*
         let mut compiler = Compiler::new().unwrap();
-        // You'll need to create compile_unary_u64 similar to compile_unary_i64
         let compiled = compiler
-            .compile_unary_u64(|builder, param| {
-                let x = StagedU64::variable(param);
+            .compile_nary(vec![DataType::U64],DataType::U64, |_, param| {
+                let x = StagedU64::variable(param[0]);
                 let ten = StagedU64::constant(10);
-                StagedU64::add(x, ten)
+                (x + ten).into()
             })
             .unwrap();
 
-        assert_eq!(compiled.call(5), 15);
-        assert_eq!(compiled.call(0), 10);
-        */
+        assert_eq!(compiled.call_u64(&[5]), 15);
+        assert_eq!(compiled.call_u64(&[0]), 10);
+        assert_eq!(compiled.call_u64(&[100]), 110);
 
-        // For now, just panic so the test shows as "needs implementation"
-        todo!("Implement StagedU64 and compile_unary_u64");
     }
 
     // -------------------------------------------------------------------------
@@ -1363,7 +1354,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let ten = StagedU64::constant(10);
                     StagedValue::U64(x + ten)
@@ -1385,7 +1376,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::I64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     // Reinterpret vars[1] as U64 (they're both 64-bit values)
                     let y_as_u64 = StagedU64::variable(vars[1]);
@@ -1407,7 +1398,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::I64, DataType::I64, DataType::I64],
                 DataType::I64,
-                |_builder, vars| {
+                |_, vars| {
                     let a = StagedI64::variable(vars[0]);
                     let b = StagedI64::variable(vars[1]);
                     let c = StagedI64::variable(vars[2]);
@@ -1429,7 +1420,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
                     StagedValue::U64(x * y)
@@ -1449,7 +1440,7 @@ mod tests {
         let result = compiler.compile_nary(
             vec![DataType::I64],
             DataType::U64, // Expecting U64 return
-            |_builder, vars| {
+            |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 StagedValue::I64(x) // But returning I64!
             },
@@ -1469,7 +1460,7 @@ mod tests {
         // Compile: f() -> u64 = 42
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary(vec![], DataType::U64, |_builder, _vars| {
+            .compile_nary(vec![], DataType::U64, |_, _vars| {
                 StagedValue::U64(StagedU64::constant(42))
             })
             .unwrap();
@@ -1486,7 +1477,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b = StagedU64::variable(vars[1]);
                     let c = StagedU64::variable(vars[2]);
@@ -1516,7 +1507,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
                     StagedValue::U64(x + y)
@@ -1539,7 +1530,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::I64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b_as_u64 = StagedU64::variable(vars[1]); // Reinterpret i64 as u64
                     let c = StagedU64::variable(vars[2]);
@@ -1569,7 +1560,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
                     StagedValue::U64(x + y)
@@ -1597,7 +1588,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
                     StagedValue::U64(x + y)
@@ -1624,7 +1615,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::I64, DataType::I64],
                 DataType::I64,
-                |_builder, vars| {
+                |_, vars| {
                     let x = StagedI64::variable(vars[0]);
                     let y = StagedI64::variable(vars[1]);
                     StagedValue::I64(StagedI64::sub(x, y))
@@ -1647,7 +1638,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
-                |_builder, vars| {
+                |_, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b = StagedU64::variable(vars[1]);
                     let c = StagedU64::variable(vars[2]);
