@@ -521,6 +521,99 @@ impl Staged for StagedU64 {
 pub enum DataType {
     I64,
     U64,
+    Bool,
+}
+
+/// A runtime scalar value that can be passed to compiled functions
+///
+/// Similar to how dio4 uses ArrayRef for type erasure, ScalarValue provides
+/// a type-erased wrapper for scalar parameters. This allows calling compiled
+/// functions with heterogeneous parameter types in a type-safe way.
+///
+/// # Example
+///
+/// ```
+/// use tutorial::{Compiler, DataType, StagedI64, StagedU64, StagedValue, ScalarValue};
+///
+/// let mut compiler = Compiler::new().unwrap();
+/// let compiled = compiler.compile_nary(
+///     vec![DataType::U64, DataType::I64],
+///     DataType::U64,
+///     |_builder, vars| {
+///         let x = StagedU64::variable(vars[0]);
+///         let y_as_u64 = StagedU64::variable(vars[1]);
+///         StagedValue::U64(x + y_as_u64)
+///     }
+/// ).unwrap();
+///
+/// // Call with ScalarValues instead of raw slices
+/// let result = compiled.call(&[
+///     ScalarValue::U64(10),
+///     ScalarValue::I64(5)
+/// ]).unwrap();
+///
+/// assert_eq!(result, ScalarValue::U64(15));
+/// ```
+#[derive(Debug, Clone, PartialEq, Eq)]
+pub enum ScalarValue {
+    I64(i64),
+    U64(u64),
+    Bool(bool),
+}
+
+impl ScalarValue {
+    /// Get the data type of this scalar value
+    pub fn data_type(&self) -> DataType {
+        match self {
+            ScalarValue::I64(_) => DataType::I64,
+            ScalarValue::U64(_) => DataType::U64,
+            ScalarValue::Bool(_) => DataType::Bool,
+        }
+    }
+
+    /// Convert this scalar value to i64 representation
+    /// This is used internally for the calling convention where all
+    /// 64-bit values are passed as i64
+    fn as_i64(&self) -> i64 {
+        match self {
+            ScalarValue::I64(v) => *v,
+            ScalarValue::U64(v) => *v as i64,
+            ScalarValue::Bool(v) => *v as i64,
+        }
+    }
+
+    /// Convert from i64 representation back to the typed value
+    fn from_i64(value: i64, data_type: DataType) -> Self {
+        match data_type {
+            DataType::I64 => ScalarValue::I64(value),
+            DataType::U64 => ScalarValue::U64(value as u64),
+            DataType::Bool => ScalarValue::Bool(value != 0),
+        }
+    }
+
+    /// Unwrap as i64, panics if not I64
+    pub fn as_i64_unchecked(&self) -> i64 {
+        match self {
+            ScalarValue::I64(v) => *v,
+            _ => panic!("Expected I64, got {:?}", self.data_type()),
+        }
+    }
+
+    /// Unwrap as u64, panics if not U64
+    pub fn as_u64_unchecked(&self) -> u64 {
+        match self {
+            ScalarValue::U64(v) => *v,
+            _ => panic!("Expected U64, got {:?}", self.data_type()),
+        }
+    }
+
+    /// Unwrap as bool, panics if not Bool
+    pub fn as_bool_unchecked(&self) -> bool {
+        match self {
+            ScalarValue::Bool(v) => *v,
+            _ => panic!("Expected Bool, got {:?}", self.data_type()),
+        }
+    }
 }
 
 impl DataType {
@@ -529,6 +622,7 @@ impl DataType {
         match self {
             DataType::I64 => types::I64,
             DataType::U64 => types::I64, // U64 also uses I64 in Cranelift
+            DataType::Bool => types::I8,  // Booleans are i8 (0 or 1)
         }
     }
 }
@@ -550,14 +644,6 @@ impl StagedValue {
         match self {
             StagedValue::I64(v) => v.codegen(builder),
             StagedValue::U64(v) => v.codegen(builder),
-        }
-    }
-
-    /// Get the Cranelift type for this value
-    fn cranelift_type(&self) -> Type {
-        match self {
-            StagedValue::I64(_) => types::I64,
-            StagedValue::U64(_) => types::I64,
         }
     }
 
@@ -719,7 +805,69 @@ pub struct CompiledNary {
 }
 
 impl CompiledNary {
-    /// Execute the compiled function with i64 arguments
+    /// Execute the compiled function with type-safe ScalarValue arguments
+    ///
+    /// This is the primary calling interface, similar to how dio4's execute()
+    /// takes ArrayRef and extracts raw pointers. Here we take ScalarValues,
+    /// perform type checking, extract raw values, and call the compiled function.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tutorial::{Compiler, DataType, StagedU64, StagedValue, ScalarValue};
+    ///
+    /// let mut compiler = Compiler::new().unwrap();
+    /// let compiled = compiler.compile_nary(
+    ///     vec![DataType::U64, DataType::U64],
+    ///     DataType::U64,
+    ///     |_builder, vars| {
+    ///         let x = StagedU64::variable(vars[0]);
+    ///         let y = StagedU64::variable(vars[1]);
+    ///         StagedValue::U64(x + y)
+    ///     }
+    /// ).unwrap();
+    ///
+    /// let result = compiled.call(&[
+    ///     ScalarValue::U64(10),
+    ///     ScalarValue::U64(20)
+    /// ]).unwrap();
+    ///
+    /// assert_eq!(result, ScalarValue::U64(30));
+    /// ```
+    pub fn call(&self, args: &[ScalarValue]) -> Result<ScalarValue, StagingError> {
+        // Verify argument count
+        if args.len() != self.param_types.len() {
+            return Err(StagingError::ExecutionFailed {
+                reason: format!(
+                    "Expected {} arguments, got {}",
+                    self.param_types.len(),
+                    args.len()
+                ),
+            });
+        }
+
+        // Verify argument types match expected parameter types
+        for (i, (arg, expected_type)) in args.iter().zip(&self.param_types).enumerate() {
+            if arg.data_type() != *expected_type {
+                return Err(StagingError::TypeMismatch {
+                    expected: format!("argument {} type {:?}", i, expected_type),
+                    actual: format!("got {:?}", arg.data_type()),
+                });
+            }
+        }
+
+        // Convert all args to i64 representation for calling
+        // (all 64-bit values use the same calling convention)
+        let i64_args: Vec<i64> = args.iter().map(|a| a.as_i64()).collect();
+
+        // Call the function using the raw i64 calling convention
+        let result_i64 = self.call_i64(&i64_args);
+
+        // Convert result back to the typed ScalarValue based on return type
+        Ok(ScalarValue::from_i64(result_i64, self.return_type))
+    }
+
+    /// Execute the compiled function with i64 arguments (low-level interface)
     ///
     /// Similar to how dio3/dio4's call_nary_op works, we pass a pointer to
     /// an array of parameters. The types are reinterpreted based on param_types.
@@ -740,7 +888,7 @@ impl CompiledNary {
         }
     }
 
-    /// Execute the compiled function with u64 arguments
+    /// Execute the compiled function with u64 arguments (low-level interface)
     ///
     /// # Safety
     /// The caller must ensure that `args.len() >= param_types.len()`
@@ -758,7 +906,7 @@ impl CompiledNary {
         }
     }
 
-    /// Execute with mixed i64/u64 arguments based on parameter types
+    /// Execute with mixed i64/u64 arguments based on parameter types (low-level interface)
     ///
     /// This is the most flexible calling convention - values are passed
     /// as i64 but interpreted according to their declared types.
@@ -1269,6 +1417,194 @@ mod tests {
         assert_eq!(compiled.call_u64(&[3, 4, 5]), 22);
         // (10 * 2) + (7 * 2) = 20 + 14 = 34
         assert_eq!(compiled.call_u64(&[10, 2, 7]), 34);
+    }
+
+    // -------------------------------------------------------------------------
+    // SCALARVALUE TESTS: Type-safe heterogeneous calling (like dio4's ArrayRef)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_scalarvalue_homogeneous_u64() {
+        // Test calling with ScalarValue instead of raw slices
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let y = StagedU64::variable(vars[1]);
+                    StagedValue::U64(x + y)
+                },
+            )
+            .unwrap();
+
+        let result = compiled
+            .call(&[ScalarValue::U64(10), ScalarValue::U64(20)])
+            .unwrap();
+
+        assert_eq!(result, ScalarValue::U64(30));
+    }
+
+    #[test]
+    fn test_scalarvalue_heterogeneous_types() {
+        // Test mixing U64 and I64 parameters (like dio4 mixing ArrayRef types)
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::I64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let a = StagedU64::variable(vars[0]);
+                    let b_as_u64 = StagedU64::variable(vars[1]); // Reinterpret i64 as u64
+                    let c = StagedU64::variable(vars[2]);
+                    // (a + b) * c
+                    let sum = a + b_as_u64;
+                    StagedValue::U64(sum * c)
+                },
+            )
+            .unwrap();
+
+        let result = compiled
+            .call(&[
+                ScalarValue::U64(10),
+                ScalarValue::I64(5),
+                ScalarValue::U64(2),
+            ])
+            .unwrap();
+
+        assert_eq!(result, ScalarValue::U64(30)); // (10 + 5) * 2 = 30
+    }
+
+    #[test]
+    fn test_scalarvalue_type_checking() {
+        // Should fail: passing wrong type
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let y = StagedU64::variable(vars[1]);
+                    StagedValue::U64(x + y)
+                },
+            )
+            .unwrap();
+
+        // Try to pass I64 where U64 is expected
+        let result = compiled.call(&[ScalarValue::U64(10), ScalarValue::I64(20)]);
+
+        assert!(result.is_err());
+        if let Err(StagingError::TypeMismatch { expected, actual }) = result {
+            assert!(expected.contains("U64"));
+            assert!(actual.contains("I64"));
+        } else {
+            panic!("Expected TypeMismatch error");
+        }
+    }
+
+    #[test]
+    fn test_scalarvalue_wrong_arg_count() {
+        // Should fail: wrong number of arguments
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let y = StagedU64::variable(vars[1]);
+                    StagedValue::U64(x + y)
+                },
+            )
+            .unwrap();
+
+        // Try to pass only 1 argument when 2 are expected
+        let result = compiled.call(&[ScalarValue::U64(10)]);
+
+        assert!(result.is_err());
+        if let Err(StagingError::ExecutionFailed { reason }) = result {
+            assert!(reason.contains("Expected 2 arguments"));
+        } else {
+            panic!("Expected ExecutionFailed error");
+        }
+    }
+
+    #[test]
+    fn test_scalarvalue_i64_return_type() {
+        // Test I64 return type
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::I64,
+                |_builder, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    StagedValue::I64(StagedI64::sub(x, y))
+                },
+            )
+            .unwrap();
+
+        let result = compiled
+            .call(&[ScalarValue::I64(10), ScalarValue::I64(3)])
+            .unwrap();
+
+        assert_eq!(result, ScalarValue::I64(7));
+    }
+
+    #[test]
+    fn test_scalarvalue_complex_expression() {
+        // Complex expression with mixed operations
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let a = StagedU64::variable(vars[0]);
+                    let b = StagedU64::variable(vars[1]);
+                    let c = StagedU64::variable(vars[2]);
+                    let ten = StagedU64::constant(10);
+                    // ((a + b) * c) + 10
+                    let sum = a + b;
+                    let product = sum * c;
+                    StagedValue::U64(product + ten)
+                },
+            )
+            .unwrap();
+
+        let result = compiled
+            .call(&[
+                ScalarValue::U64(2),
+                ScalarValue::U64(3),
+                ScalarValue::U64(4),
+            ])
+            .unwrap();
+
+        // ((2 + 3) * 4) + 10 = 20 + 10 = 30
+        assert_eq!(result, ScalarValue::U64(30));
+    }
+
+    #[test]
+    fn test_scalarvalue_unwrap_methods() {
+        // Test the unwrap helper methods
+        let i64_val = ScalarValue::I64(42);
+        let u64_val = ScalarValue::U64(100);
+        let bool_val = ScalarValue::Bool(true);
+
+        assert_eq!(i64_val.as_i64_unchecked(), 42);
+        assert_eq!(u64_val.as_u64_unchecked(), 100);
+        assert_eq!(bool_val.as_bool_unchecked(), true);
+    }
+
+    #[test]
+    #[should_panic(expected = "Expected U64")]
+    fn test_scalarvalue_unwrap_wrong_type() {
+        // Should panic when unwrapping as wrong type
+        let i64_val = ScalarValue::I64(42);
+        i64_val.as_u64_unchecked(); // This should panic
     }
 }
 
