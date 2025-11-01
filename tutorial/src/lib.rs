@@ -34,7 +34,7 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
-use std::ops::{Add, Mul, Sub};
+use std::ops::{Add, BitAnd, BitOr, Mul, Not, Sub};
 use thiserror::Error;
 
 // =============================================================================
@@ -942,11 +942,96 @@ impl CompiledNary {
 /// 3. Logical operations (and, or, not)
 #[derive(Debug, Clone)]
 pub enum StagedBool {
-    // TODO: Add variants here
-    // Hint: You'll need LessThan(Box<StagedI64>, Box<StagedI64>), etc.
+    /// A constant boolean value
+    Constant(bool),
+
+    /// A variable (function parameter) known only at runtime
+    Variable(Variable),
+
+    /// Logical AND of two staged booleans
+    And(Box<StagedBool>, Box<StagedBool>),
+
+    /// Logical OR of two staged booleans
+    Or(Box<StagedBool>, Box<StagedBool>),
+
+    /// Logical NOT of a staged boolean
+    Not(Box<StagedBool>),
 }
 
-// TODO: Implement StagedBool methods and Staged trait
+impl StagedBool {
+    /// Create a constant staged boolean
+    pub fn constant(value: bool) -> Self {
+        StagedBool::Constant(value)
+    }
+
+    /// Create a variable staged boolean (represents a function parameter)
+    pub fn variable(var: Variable) -> Self {
+        StagedBool::Variable(var)
+    }
+}
+
+impl Staged for StagedBool {
+    type RuntimeType = bool;
+
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            StagedBool::Constant(val) => {
+                let int_val = if *val { 1 } else { 0 };
+                builder.ins().iconst(types::I8, int_val)
+            }
+            StagedBool::Variable(var) => {
+                // Generate: use_var <var>
+                builder.use_var(*var)
+            }
+            StagedBool::And(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                // Generate: and <left>, <right>
+                builder.ins().band(left_val, right_val)
+            }
+            StagedBool::Or(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                // Generate: or <left>, <right>
+                builder.ins().bor(left_val, right_val)
+            }
+            StagedBool::Not(expr) => {
+                let expr_val = expr.codegen(builder);
+                // Generate: xor <expr>, 1 (to flip the boolean)
+                let one = builder.ins().iconst(types::I8, 1);
+                builder.ins().bxor(expr_val, one)
+            }
+        }
+    }
+
+    fn cranelift_type() -> Type {
+        types::I8
+    }
+}
+
+impl BitAnd for StagedBool {
+    type Output = StagedBool;
+
+    fn bitand(self, rhs: Self) -> Self::Output {
+        StagedBool::And(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl BitOr for StagedBool {
+    type Output = StagedBool;
+
+    fn bitor(self, rhs: Self) -> Self::Output {
+        StagedBool::Or(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Not for StagedBool {
+    type Output = StagedBool;
+
+    fn not(self) -> Self::Output {
+        StagedBool::Not(Box::new(self))
+    }
+}
 
 // =============================================================================
 // TESTS - Your guide through the tutorial
