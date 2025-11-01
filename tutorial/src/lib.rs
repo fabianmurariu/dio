@@ -509,6 +509,275 @@ impl Staged for StagedU64 {
 }
 
 // =============================================================================
+// GENERIC COMPILATION - Supporting multiple types
+// =============================================================================
+//
+// This section provides a generic compilation mechanism that can handle
+// different staged types (I64, U64, etc.) similar to how dio3 and dio4
+// use ArrayRef with type erasure.
+
+/// Runtime data type for parameters and return values
+#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+pub enum DataType {
+    I64,
+    U64,
+}
+
+impl DataType {
+    /// Get the Cranelift type for this data type
+    fn to_cranelift_type(&self) -> Type {
+        match self {
+            DataType::I64 => types::I64,
+            DataType::U64 => types::I64, // U64 also uses I64 in Cranelift
+        }
+    }
+}
+
+/// A type-erased staged value that can hold any staged type
+///
+/// This is similar to how dio3/dio4 use ArrayRef to abstract over different
+/// concrete array types. It allows generic compilation while preserving
+/// type information for code generation.
+#[derive(Debug, Clone)]
+pub enum StagedValue {
+    I64(StagedI64),
+    U64(StagedU64),
+}
+
+impl StagedValue {
+    /// Generate Cranelift IR code for this value
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            StagedValue::I64(v) => v.codegen(builder),
+            StagedValue::U64(v) => v.codegen(builder),
+        }
+    }
+
+    /// Get the Cranelift type for this value
+    fn cranelift_type(&self) -> Type {
+        match self {
+            StagedValue::I64(_) => types::I64,
+            StagedValue::U64(_) => types::I64,
+        }
+    }
+
+    /// Get the runtime data type
+    pub fn data_type(&self) -> DataType {
+        match self {
+            StagedValue::I64(_) => DataType::I64,
+            StagedValue::U64(_) => DataType::U64,
+        }
+    }
+}
+
+// Conversion traits for ergonomic usage
+impl From<StagedI64> for StagedValue {
+    fn from(v: StagedI64) -> Self {
+        StagedValue::I64(v)
+    }
+}
+
+impl From<StagedU64> for StagedValue {
+    fn from(v: StagedU64) -> Self {
+        StagedValue::U64(v)
+    }
+}
+
+impl Compiler {
+    /// Compile a generic n-ary function with typed parameters
+    ///
+    /// This is the generic version of compile_nary_i64 that supports multiple types.
+    /// Similar to how dio3/dio4 handle ArrayRef, we use DataType to specify parameter
+    /// types and StagedValue for type-erased staged values.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tutorial::{Compiler, StagedI64, StagedU64, StagedValue, DataType};
+    ///
+    /// let mut compiler = Compiler::new().unwrap();
+    /// let compiled = compiler.compile_nary(
+    ///     vec![DataType::U64, DataType::I64],
+    ///     DataType::U64,
+    ///     |_builder, vars| {
+    ///         let x = StagedU64::variable(vars[0]);
+    ///         let y = StagedI64::variable(vars[1]);
+    ///         let y_unsigned = StagedU64::variable(vars[1]); // reinterpret as U64
+    ///         StagedValue::U64(x + y_unsigned)
+    ///     }
+    /// ).unwrap();
+    /// ```
+    pub fn compile_nary(
+        &mut self,
+        param_types: Vec<DataType>,
+        return_type: DataType,
+        body: impl FnOnce(&mut FunctionBuilder, &[Variable]) -> StagedValue,
+    ) -> Result<CompiledNary, StagingError> {
+        let num_params = param_types.len();
+
+        // Create function signature: *const i64 -> i64
+        // The function takes a pointer to an array of parameters (all 64-bit values)
+        let mut sig = Signature::new(CallConv::SystemV);
+        sig.params.push(AbiParam::new(types::I64)); // pointer to params array
+        sig.returns.push(AbiParam::new(return_type.to_cranelift_type())); // return value
+
+        // Create the function
+        let mut func = Function::new();
+        func.signature = sig;
+
+        let mut func_ctx = FunctionBuilderContext::new();
+        let mut builder = FunctionBuilder::new(&mut func, &mut func_ctx);
+
+        // Create entry block with parameter (pointer to array)
+        let entry_block = builder.create_block();
+        builder.append_block_params_for_function_params(entry_block);
+        builder.switch_to_block(entry_block);
+
+        let params_ptr = builder.block_params(entry_block)[0];
+
+        // Load each parameter from the array and assign to variables
+        let mut param_vars = Vec::new();
+        for i in 0..num_params {
+            let var = Variable::from_u32(i as u32);
+            let cranelift_type = param_types[i].to_cranelift_type();
+            builder.declare_var(var, cranelift_type);
+
+            // Load params[i]: compute address = params_ptr + (i * 8)
+            let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
+            let param_addr = builder.ins().iadd(params_ptr, offset);
+            let param_val = builder
+                .ins()
+                .load(cranelift_type, MemFlags::trusted(), param_addr, 0);
+
+            // Assign to variable
+            builder.def_var(var, param_val);
+            param_vars.push(var);
+        }
+
+        // Generate the function body
+        let result_expr = body(&mut builder, &param_vars);
+
+        // Verify return type matches
+        if result_expr.data_type() != return_type {
+            return Err(StagingError::TypeMismatch {
+                expected: format!("{:?}", return_type),
+                actual: format!("{:?}", result_expr.data_type()),
+            });
+        }
+
+        let result_val = result_expr.codegen(&mut builder);
+
+        // Return the result
+        builder.ins().return_(&[result_val]);
+
+        // Finalize
+        builder.seal_all_blocks();
+        builder.finalize();
+
+        // Compile to machine code
+        let mut ctx = Context::new();
+        ctx.func = func;
+
+        let func_id = self
+            .module
+            .declare_function("staged_func_nary", Linkage::Export, &ctx.func.signature)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to declare function: {}", e),
+            })?;
+
+        self.module
+            .define_function(func_id, &mut ctx)
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to define function: {}", e),
+            })?;
+
+        self.module.clear_context(&mut ctx);
+        self.module
+            .finalize_definitions()
+            .map_err(|e| StagingError::CompilationFailed {
+                reason: format!("Failed to finalize: {}", e),
+            })?;
+
+        let code_ptr = self.module.get_finalized_function(func_id);
+
+        Ok(CompiledNary {
+            code_ptr,
+            param_types,
+            return_type,
+        })
+    }
+}
+
+/// A compiled generic n-ary function
+///
+/// This is similar to how dio3/dio4 handle compiled functions with type information
+/// preserved for proper execution.
+pub struct CompiledNary {
+    code_ptr: *const u8,
+    param_types: Vec<DataType>,
+    return_type: DataType,
+}
+
+impl CompiledNary {
+    /// Execute the compiled function with i64 arguments
+    ///
+    /// Similar to how dio3/dio4's call_nary_op works, we pass a pointer to
+    /// an array of parameters. The types are reinterpreted based on param_types.
+    ///
+    /// # Safety
+    /// The caller must ensure that `args.len() >= param_types.len()`
+    pub fn call_i64(&self, args: &[i64]) -> i64 {
+        assert!(
+            args.len() >= self.param_types.len(),
+            "Expected at least {} arguments, got {}",
+            self.param_types.len(),
+            args.len()
+        );
+
+        unsafe {
+            let func: extern "C" fn(*const i64) -> i64 = std::mem::transmute(self.code_ptr);
+            func(args.as_ptr())
+        }
+    }
+
+    /// Execute the compiled function with u64 arguments
+    ///
+    /// # Safety
+    /// The caller must ensure that `args.len() >= param_types.len()`
+    pub fn call_u64(&self, args: &[u64]) -> u64 {
+        assert!(
+            args.len() >= self.param_types.len(),
+            "Expected at least {} arguments, got {}",
+            self.param_types.len(),
+            args.len()
+        );
+
+        unsafe {
+            let func: extern "C" fn(*const u64) -> u64 = std::mem::transmute(self.code_ptr);
+            func(args.as_ptr())
+        }
+    }
+
+    /// Execute with mixed i64/u64 arguments based on parameter types
+    ///
+    /// This is the most flexible calling convention - values are passed
+    /// as i64 but interpreted according to their declared types.
+    pub fn call_mixed(&self, args: &[i64]) -> i64 {
+        self.call_i64(args)
+    }
+
+    /// Get the parameter types
+    pub fn param_types(&self) -> &[DataType] {
+        &self.param_types
+    }
+
+    /// Get the return type
+    pub fn return_type(&self) -> DataType {
+        self.return_type
+    }
+}
+
+// =============================================================================
 // LESSON 5: BOOLEAN OPERATIONS (EXERCISE - YOU COMPLETE)
 // =============================================================================
 //
@@ -847,6 +1116,159 @@ mod tests {
         */
 
         todo!("Implement StagedBool and comparison operations");
+    }
+
+    // -------------------------------------------------------------------------
+    // GENERIC COMPILATION TESTS: Testing compile_nary with mixed types
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_generic_u64_addition() {
+        // Compile: f(x: u64) = x + 10
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let ten = StagedU64::constant(10);
+                    StagedValue::U64(x + ten)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(compiled.call_u64(&[5]), 15);
+        assert_eq!(compiled.call_u64(&[0]), 10);
+        assert_eq!(compiled.call_u64(&[100]), 110);
+    }
+
+    #[test]
+    fn test_generic_mixed_types_u64_i64() {
+        // Compile: f(x: u64, y: i64) -> u64
+        // Note: We reinterpret y as u64 for the addition
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::I64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    // Reinterpret vars[1] as U64 (they're both 64-bit values)
+                    let y_as_u64 = StagedU64::variable(vars[1]);
+                    StagedValue::U64(x + y_as_u64)
+                },
+            )
+            .unwrap();
+
+        // Pass as mixed i64 slice (both u64 and i64 fit in i64)
+        assert_eq!(compiled.call_mixed(&[10, 5]), 15);
+        assert_eq!(compiled.call_mixed(&[100, 200]), 300);
+    }
+
+    #[test]
+    fn test_generic_i64_operations() {
+        // Compile: f(a: i64, b: i64, c: i64) -> i64 = (a + b) * c
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::I64, DataType::I64, DataType::I64],
+                DataType::I64,
+                |_builder, vars| {
+                    let a = StagedI64::variable(vars[0]);
+                    let b = StagedI64::variable(vars[1]);
+                    let c = StagedI64::variable(vars[2]);
+                    let sum = StagedI64::add(a, b);
+                    StagedValue::I64(StagedI64::mul(sum, c))
+                },
+            )
+            .unwrap();
+
+        assert_eq!(compiled.call_i64(&[2, 3, 4]), 20); // (2 + 3) * 4 = 20
+        assert_eq!(compiled.call_i64(&[10, 5, 2]), 30); // (10 + 5) * 2 = 30
+    }
+
+    #[test]
+    fn test_generic_u64_multiplication() {
+        // Compile: f(x: u64, y: u64) -> u64 = x * y
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let y = StagedU64::variable(vars[1]);
+                    StagedValue::U64(x * y)
+                },
+            )
+            .unwrap();
+
+        assert_eq!(compiled.call_u64(&[3, 4]), 12);
+        assert_eq!(compiled.call_u64(&[7, 8]), 56);
+        assert_eq!(compiled.call_u64(&[0, 100]), 0);
+    }
+
+    #[test]
+    fn test_generic_type_mismatch_error() {
+        // This should fail: declaring return type as U64 but returning I64
+        let mut compiler = Compiler::new().unwrap();
+        let result = compiler.compile_nary(
+            vec![DataType::I64],
+            DataType::U64, // Expecting U64 return
+            |_builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                StagedValue::I64(x) // But returning I64!
+            },
+        );
+
+        assert!(result.is_err());
+        if let Err(StagingError::TypeMismatch { expected, actual }) = result {
+            assert!(expected.contains("U64"));
+            assert!(actual.contains("I64"));
+        } else {
+            panic!("Expected TypeMismatch error");
+        }
+    }
+
+    #[test]
+    fn test_generic_zero_params_constant() {
+        // Compile: f() -> u64 = 42
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(vec![], DataType::U64, |_builder, _vars| {
+                StagedValue::U64(StagedU64::constant(42))
+            })
+            .unwrap();
+
+        assert_eq!(compiled.call_u64(&[]), 42);
+        assert_eq!(compiled.call_u64(&[999, 888]), 42); // Extra args ignored
+    }
+
+    #[test]
+    fn test_generic_complex_expression() {
+        // Compile: f(a: u64, b: u64, c: u64) -> u64 = (a * b) + (c * 2)
+        let mut compiler = Compiler::new().unwrap();
+        let compiled = compiler
+            .compile_nary(
+                vec![DataType::U64, DataType::U64, DataType::U64],
+                DataType::U64,
+                |_builder, vars| {
+                    let a = StagedU64::variable(vars[0]);
+                    let b = StagedU64::variable(vars[1]);
+                    let c = StagedU64::variable(vars[2]);
+                    let two = StagedU64::constant(2);
+                    let ab = a * b;
+                    let c2 = c * two;
+                    StagedValue::U64(ab + c2)
+                },
+            )
+            .unwrap();
+
+        // (3 * 4) + (5 * 2) = 12 + 10 = 22
+        assert_eq!(compiled.call_u64(&[3, 4, 5]), 22);
+        // (10 * 2) + (7 * 2) = 20 + 14 = 34
+        assert_eq!(compiled.call_u64(&[10, 2, 7]), 34);
     }
 }
 
