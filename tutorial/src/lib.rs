@@ -25,6 +25,7 @@
 //! Run `cargo test -p tutorial` to see which tests are failing.
 //! Your job: make them pass by implementing the missing functionality!
 
+use cranelift_codegen::ir::condcodes::IntCC;
 use cranelift_codegen::ir::{
     types, AbiParam, Function, InstBuilder, MemFlags, Signature, Type, Value,
 };
@@ -102,6 +103,20 @@ pub enum StagedI64 {
 
     /// Multiplication of two staged values
     Mul(Box<StagedI64>, Box<StagedI64>),
+
+    Cmp(Condition, Box<StagedI64>, Box<StagedI64>),
+}
+
+impl From<i32> for StagedI64 {
+    fn from(value: i32) -> Self {
+        StagedI64::Constant(value as i64)
+    }
+}
+
+impl From<i64> for StagedI64 {
+    fn from(value: i64) -> Self {
+        StagedI64::Constant(value)
+    }
 }
 
 impl StagedI64 {
@@ -115,12 +130,53 @@ impl StagedI64 {
         StagedI64::Variable(var)
     }
 
-    /// Add two staged values
-    ///
-    /// Note: This doesn't perform the addition! It creates a description
-    /// that says "when this code runs, add these two values"
-    pub fn add(left: StagedI64, right: StagedI64) -> Self {
-        StagedI64::Add(Box::new(left), Box::new(right))
+    pub fn lt(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::LessThan, self.into(), right.into())
+    }
+
+    pub fn gt(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::GreaterThan, self.into(), right.into())
+    }
+
+    pub fn eq(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::Equal, self.into(), right.into())
+    }
+
+    pub fn ne(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::NotEqual, self.into(), right.into())
+    }
+
+    pub fn lte(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::LessThanOrEqual, self.into(), right.into())
+    }
+
+    pub fn gte(self, right: StagedI64) -> Self {
+        StagedI64::Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
+    }
+
+}
+
+impl Add<StagedI64> for StagedI64 {
+    type Output = StagedI64;
+
+    fn add(self, rhs: StagedI64) -> StagedI64 {
+        StagedI64::Add(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Mul<StagedI64> for StagedI64 {
+    type Output = StagedI64;
+
+    fn mul(self, rhs: StagedI64) -> StagedI64 {
+        StagedI64::Mul(Box::new(self), Box::new(rhs))
+    }
+}
+
+impl Sub<StagedI64> for StagedI64 {
+    type Output = StagedI64;
+
+    fn sub(self, rhs: StagedI64) -> StagedI64 {
+        StagedI64::Sub(Box::new(self), Box::new(rhs))
     }
 }
 
@@ -153,6 +209,11 @@ impl Staged for StagedI64 {
                 let left_val = left.codegen(builder);
                 let right_val = right.codegen(builder);
                 builder.ins().imul(left_val, right_val)
+            }
+            StagedI64::Cmp(cond, left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(*cond, left_val, right_val)
             }
         }
     }
@@ -205,8 +266,8 @@ impl Compiler {
     ///     let x = StagedI64::variable(vars[0]);
     ///     let y = StagedI64::variable(vars[1]);
     ///     let z = StagedI64::variable(vars[2]);
-    ///     let sum = StagedI64::add(x, y);
-    ///     StagedI64::mul(sum, z)
+    ///     let sum = x + y;
+    ///     sum * z
     /// }).unwrap();
     ///
     /// assert_eq!(compiled.call(&[2, 3, 4]), 20); // (2 + 3) * 4 = 20
@@ -408,13 +469,6 @@ impl StagedI64 {
 // YOUR TASK: Implement StagedU64 for unsigned 64-bit integers
 
 /// A staged 64-bit unsigned integer
-///
-/// TODO: Implement this following the pattern from StagedI64
-/// Remember to handle:
-/// 1. Constants and Variables
-/// 2. Add operation
-/// 3. The Staged trait implementation
-/// 4. Use unsigned instructions (iconst with type I64, but interpret as unsigned)
 #[derive(Debug, Clone)]
 pub enum StagedU64 {
     /// A constant value known at compile time
@@ -433,7 +487,6 @@ pub enum StagedU64 {
     Mul(Box<StagedU64>, Box<StagedU64>),
 }
 
-// TODO: Implement methods for StagedU64 (constant, variable, add)
 impl StagedU64 {
     /// Create a constant staged value
     pub fn constant(value: u64) -> Self {
@@ -622,7 +675,7 @@ impl DataType {
         match self {
             DataType::I64 => types::I64,
             DataType::U64 => types::I64, // U64 also uses I64 in Cranelift
-            DataType::Bool => types::I8,  // Booleans are i8 (0 or 1)
+            DataType::Bool => types::I8, // Booleans are i8 (0 or 1)
         }
     }
 }
@@ -705,7 +758,8 @@ impl Compiler {
         // The function takes a pointer to an array of parameters (all 64-bit values)
         let mut sig = Signature::new(CallConv::SystemV);
         sig.params.push(AbiParam::new(types::I64)); // pointer to params array
-        sig.returns.push(AbiParam::new(return_type.to_cranelift_type())); // return value
+        sig.returns
+            .push(AbiParam::new(return_type.to_cranelift_type())); // return value
 
         // Create the function
         let mut func = Function::new();
@@ -956,6 +1010,32 @@ pub enum StagedBool {
 
     /// Logical NOT of a staged boolean
     Not(Box<StagedBool>),
+
+    /// Comparison between two staged booleans
+    Cmp(Condition, Box<StagedBool>, Box<StagedBool>),
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum Condition {
+    LessThan,
+    LessThanOrEqual,
+    GreaterThan,
+    GreaterThanOrEqual,
+    NotEqual,
+    Equal,
+}
+
+impl Into<IntCC> for Condition {
+    fn into(self) -> IntCC {
+        match self {
+            Condition::LessThan => IntCC::SignedLessThan,
+            Condition::LessThanOrEqual => IntCC::SignedLessThanOrEqual,
+            Condition::GreaterThan => IntCC::SignedGreaterThan,
+            Condition::GreaterThanOrEqual => IntCC::SignedGreaterThanOrEqual,
+            Condition::NotEqual => IntCC::NotEqual,
+            Condition::Equal => IntCC::Equal,
+        }
+    }
 }
 
 impl StagedBool {
@@ -1000,6 +1080,11 @@ impl Staged for StagedBool {
                 // Generate: xor <expr>, 1 (to flip the boolean)
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(expr_val, one)
+            }
+            StagedBool::Cmp(cond, left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(*cond, left_val, right_val)
             }
         }
     }
@@ -1299,7 +1384,7 @@ mod tests {
     fn test_lesson4_unsigned_addition() {
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary(vec![DataType::U64],DataType::U64, |_, param| {
+            .compile_nary(vec![DataType::U64], DataType::U64, |_, param| {
                 let x = StagedU64::variable(param[0]);
                 let ten = StagedU64::constant(10);
                 (x + ten).into()
@@ -1309,7 +1394,6 @@ mod tests {
         assert_eq!(compiled.call_u64(&[5]), 15);
         assert_eq!(compiled.call_u64(&[0]), 10);
         assert_eq!(compiled.call_u64(&[100]), 110);
-
     }
 
     // -------------------------------------------------------------------------
@@ -1317,29 +1401,23 @@ mod tests {
     // -------------------------------------------------------------------------
 
     #[test]
-    #[should_panic(expected = "not yet implemented")]
     fn test_lesson5_less_than_comparison() {
-        // TODO: Implement StagedBool to make this test pass
         // This should compile: f(x) = (x < 10) ? 1 : 0
 
-        // Uncomment this code once you've implemented StagedBool:
-        /*
         let mut compiler = Compiler::new().unwrap();
         // You'll need to create compile_unary_i64_to_bool
         let compiled = compiler
-            .compile_unary_i64_to_bool(|builder, param| {
-                let x = StagedI64::variable(param);
+            .compile_nary(vec![DataType::I64], DataType::Bool, |_, param| {
+                let x = StagedI64::variable(param[0]);
                 let ten = StagedI64::constant(10);
-                StagedBool::less_than(x, ten)
+                (x.lte(ten)).into()
             })
             .unwrap();
 
-        assert_eq!(compiled.call(5), true);
-        assert_eq!(compiled.call(10), false);
-        assert_eq!(compiled.call(15), false);
-        */
-
-        todo!("Implement StagedBool and comparison operations");
+        assert_eq!(compiled.call(&[ScalarValue::I64(2)]).unwrap().as_bool_unchecked(), true);
+        assert_eq!(compiled.call(&[ScalarValue::I64(5)]).unwrap().as_bool_unchecked(), true);
+        assert_eq!(compiled.call(&[ScalarValue::I64(10)]).unwrap().as_bool_unchecked(), false);
+        assert_eq!(compiled.call(&[ScalarValue::I64(15)]).unwrap().as_bool_unchecked(), false);
     }
 
     // -------------------------------------------------------------------------
@@ -1351,15 +1429,11 @@ mod tests {
         // Compile: f(x: u64) = x + 10
         let mut compiler = Compiler::new().unwrap();
         let compiled = compiler
-            .compile_nary(
-                vec![DataType::U64],
-                DataType::U64,
-                |_, vars| {
-                    let x = StagedU64::variable(vars[0]);
-                    let ten = StagedU64::constant(10);
-                    StagedValue::U64(x + ten)
-                },
-            )
+            .compile_nary(vec![DataType::U64], DataType::U64, |_, vars| {
+                let x = StagedU64::variable(vars[0]);
+                let ten = StagedU64::constant(10);
+                StagedValue::U64(x + ten)
+            })
             .unwrap();
 
         assert_eq!(compiled.call_u64(&[5]), 15);
