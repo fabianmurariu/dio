@@ -103,8 +103,6 @@ pub enum StagedI64 {
 
     /// Multiplication of two staged values
     Mul(Box<StagedI64>, Box<StagedI64>),
-
-    Cmp(Condition, Box<StagedI64>, Box<StagedI64>),
 }
 
 impl From<i32> for StagedI64 {
@@ -130,28 +128,28 @@ impl StagedI64 {
         StagedI64::Variable(var)
     }
 
-    pub fn lt(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::LessThan, self.into(), right.into())
+    pub fn lt(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::LessThan, self.into(), right.into())
     }
 
-    pub fn gt(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::GreaterThan, self.into(), right.into())
+    pub fn gt(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::GreaterThan, self.into(), right.into())
     }
 
-    pub fn eq(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::Equal, self.into(), right.into())
+    pub fn eq(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::Equal, self.into(), right.into())
     }
 
-    pub fn ne(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::NotEqual, self.into(), right.into())
+    pub fn ne(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::NotEqual, self.into(), right.into())
     }
 
-    pub fn lte(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::LessThanOrEqual, self.into(), right.into())
+    pub fn lte(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::LessThanOrEqual, self.into(), right.into())
     }
 
-    pub fn gte(self, right: StagedI64) -> Self {
-        StagedI64::Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
+    pub fn gte(self, right: StagedI64) -> StagedBool {
+        StagedBool::I64Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
     }
 
 }
@@ -209,11 +207,6 @@ impl Staged for StagedI64 {
                 let left_val = left.codegen(builder);
                 let right_val = right.codegen(builder);
                 builder.ins().imul(left_val, right_val)
-            }
-            StagedI64::Cmp(cond, left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(*cond, left_val, right_val)
             }
         }
     }
@@ -624,23 +617,40 @@ impl ScalarValue {
         }
     }
 
-    /// Convert this scalar value to i64 representation
-    /// This is used internally for the calling convention where all
-    /// 64-bit values are passed as i64
-    fn as_i64(&self) -> i64 {
+    /// Convert this scalar value to a byte representation
+    /// Returns (pointer to bytes, size in bytes)
+    /// This matches dio3/dio4's approach of using raw byte pointers
+    fn as_bytes(&self) -> ([u8; 8], usize) {
         match self {
-            ScalarValue::I64(v) => *v,
-            ScalarValue::U64(v) => *v as i64,
-            ScalarValue::Bool(v) => *v as i64,
+            ScalarValue::I64(v) => (v.to_ne_bytes().into(), 8),
+            ScalarValue::U64(v) => {
+                // Reinterpret u64 as i64 bytes for storage
+                let bytes = (*v as i64).to_ne_bytes();
+                (bytes.into(), 8)
+            }
+            ScalarValue::Bool(v) => {
+                let mut bytes = [0u8; 8];
+                bytes[0] = if *v { 1 } else { 0 };
+                (bytes, 1) // Bool is 1 byte but we store in 8-byte slot for alignment
+            }
         }
     }
 
-    /// Convert from i64 representation back to the typed value
-    fn from_i64(value: i64, data_type: DataType) -> Self {
+    /// Convert from raw bytes back to the typed value
+    fn from_bytes(bytes: &[u8], data_type: DataType) -> Self {
         match data_type {
-            DataType::I64 => ScalarValue::I64(value),
-            DataType::U64 => ScalarValue::U64(value as u64),
-            DataType::Bool => ScalarValue::Bool(value != 0),
+            DataType::I64 => {
+                let value = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+                ScalarValue::I64(value)
+            }
+            DataType::U64 => {
+                let value = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
+                ScalarValue::U64(value as u64)
+            }
+            DataType::Bool => {
+                let value = bytes[0] != 0;
+                ScalarValue::Bool(value)
+            }
         }
     }
 
@@ -689,6 +699,7 @@ impl DataType {
 pub enum StagedValue {
     I64(StagedI64),
     U64(StagedU64),
+    Bool(StagedBool),
 }
 
 impl StagedValue {
@@ -697,6 +708,7 @@ impl StagedValue {
         match self {
             StagedValue::I64(v) => v.codegen(builder),
             StagedValue::U64(v) => v.codegen(builder),
+            StagedValue::Bool(v) => v.codegen(builder),
         }
     }
 
@@ -705,6 +717,7 @@ impl StagedValue {
         match self {
             StagedValue::I64(_) => DataType::I64,
             StagedValue::U64(_) => DataType::U64,
+            StagedValue::Bool(_) => DataType::Bool,
         }
     }
 }
@@ -719,6 +732,12 @@ impl From<StagedI64> for StagedValue {
 impl From<StagedU64> for StagedValue {
     fn from(v: StagedU64) -> Self {
         StagedValue::U64(v)
+    }
+}
+
+impl From<StagedBool> for StagedValue {
+    fn from(v: StagedBool) -> Self {
+        StagedValue::Bool(v)
     }
 }
 
@@ -754,10 +773,11 @@ impl Compiler {
     ) -> Result<CompiledNary, StagingError> {
         let num_params = param_types.len();
 
-        // Create function signature: *const i64 -> i64
-        // The function takes a pointer to an array of parameters (all 64-bit values)
+        // Create function signature: *const u8 -> <return_type>
+        // Like dio3/dio4, we use *const u8 (pointer to bytes) as the universal pointer type
+        // This allows us to handle different parameter sizes and will work for arrays later
         let mut sig = Signature::new(CallConv::SystemV);
-        sig.params.push(AbiParam::new(types::I64)); // pointer to params array
+        sig.params.push(AbiParam::new(types::I64)); // pointer (as i64) to params array
         sig.returns
             .push(AbiParam::new(return_type.to_cranelift_type())); // return value
 
@@ -775,16 +795,22 @@ impl Compiler {
 
         let params_ptr = builder.block_params(entry_block)[0];
 
-        // Load each parameter from the array and assign to variables
+        // Load each parameter from the byte array and assign to variables
+        // Similar to dio3/dio4, we cast the pointer and load based on type size
         let mut param_vars = Vec::new();
         for i in 0..num_params {
             let var = Variable::from_u32(i as u32);
             let cranelift_type = param_types[i].to_cranelift_type();
             builder.declare_var(var, cranelift_type);
 
-            // Load params[i]: compute address = params_ptr + (i * 8)
-            let offset = builder.ins().iconst(types::I64, (i * 8) as i64);
+            // Compute byte offset based on parameter size
+            // For now, all types are 8 bytes (i64, u64) or 1 byte (bool as i8)
+            // But we store everything at 8-byte boundaries for alignment
+            let byte_offset = i * 8;
+            let offset = builder.ins().iconst(types::I64, byte_offset as i64);
             let param_addr = builder.ins().iadd(params_ptr, offset);
+
+            // Load the appropriate size based on type
             let param_val = builder
                 .ins()
                 .load(cranelift_type, MemFlags::trusted(), param_addr, 0);
@@ -910,21 +936,45 @@ impl CompiledNary {
             }
         }
 
-        // Convert all args to i64 representation for calling
-        // (all 64-bit values use the same calling convention)
-        let i64_args: Vec<i64> = args.iter().map(|a| a.as_i64()).collect();
+        // Pack all arguments into a byte buffer
+        // Like dio3/dio4, we use a contiguous byte array with 8-byte alignment
+        let mut arg_buffer = vec![0u8; args.len() * 8];
+        for (i, arg) in args.iter().enumerate() {
+            let (bytes, _size) = arg.as_bytes();
+            let offset = i * 8;
+            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
+        }
 
-        // Call the function using the raw i64 calling convention
-        let result_i64 = self.call_i64(&i64_args);
-
-        // Convert result back to the typed ScalarValue based on return type
-        Ok(ScalarValue::from_i64(result_i64, self.return_type))
+        // Call the compiled function with different signatures based on return type
+        // This matches how Cranelift generates different return types
+        unsafe {
+            match self.return_type {
+                DataType::I64 => {
+                    type Fn = extern "C" fn(*const u8) -> i64;
+                    let func: Fn = std::mem::transmute(self.code_ptr);
+                    let result = func(arg_buffer.as_ptr());
+                    Ok(ScalarValue::I64(result))
+                }
+                DataType::U64 => {
+                    type Fn = extern "C" fn(*const u8) -> i64;
+                    let func: Fn = std::mem::transmute(self.code_ptr);
+                    let result = func(arg_buffer.as_ptr());
+                    Ok(ScalarValue::U64(result as u64))
+                }
+                DataType::Bool => {
+                    type Fn = extern "C" fn(*const u8) -> i8;
+                    let func: Fn = std::mem::transmute(self.code_ptr);
+                    let result = func(arg_buffer.as_ptr());
+                    Ok(ScalarValue::Bool(result != 0))
+                }
+            }
+        }
     }
 
     /// Execute the compiled function with i64 arguments (low-level interface)
     ///
     /// Similar to how dio3/dio4's call_nary_op works, we pass a pointer to
-    /// an array of parameters. The types are reinterpreted based on param_types.
+    /// a byte array. The types are interpreted based on param_types.
     ///
     /// # Safety
     /// The caller must ensure that `args.len() >= param_types.len()`
@@ -936,9 +986,17 @@ impl CompiledNary {
             args.len()
         );
 
+        // Pack i64 arguments into byte buffer
+        let mut arg_buffer = vec![0u8; args.len() * 8];
+        for (i, &arg) in args.iter().enumerate() {
+            let bytes = arg.to_ne_bytes();
+            let offset = i * 8;
+            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
+        }
+
         unsafe {
-            let func: extern "C" fn(*const i64) -> i64 = std::mem::transmute(self.code_ptr);
-            func(args.as_ptr())
+            let func: extern "C" fn(*const u8) -> i64 = std::mem::transmute(self.code_ptr);
+            func(arg_buffer.as_ptr())
         }
     }
 
@@ -954,16 +1012,26 @@ impl CompiledNary {
             args.len()
         );
 
+        // Pack u64 arguments into byte buffer (reinterpret as i64 for storage)
+        let mut arg_buffer = vec![0u8; args.len() * 8];
+        for (i, &arg) in args.iter().enumerate() {
+            let bytes = (arg as i64).to_ne_bytes();
+            let offset = i * 8;
+            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
+        }
+
         unsafe {
-            let func: extern "C" fn(*const u64) -> u64 = std::mem::transmute(self.code_ptr);
-            func(args.as_ptr())
+            // Note: return type is still i64 in Cranelift, we reinterpret as u64
+            let func: extern "C" fn(*const u8) -> i64 = std::mem::transmute(self.code_ptr);
+            let result = func(arg_buffer.as_ptr());
+            result as u64
         }
     }
 
     /// Execute with mixed i64/u64 arguments based on parameter types (low-level interface)
     ///
     /// This is the most flexible calling convention - values are passed
-    /// as i64 but interpreted according to their declared types.
+    /// as bytes but interpreted according to their declared types.
     pub fn call_mixed(&self, args: &[i64]) -> i64 {
         self.call_i64(args)
     }
@@ -1013,6 +1081,9 @@ pub enum StagedBool {
 
     /// Comparison between two staged booleans
     Cmp(Condition, Box<StagedBool>, Box<StagedBool>),
+
+    /// Comparison between two staged i64 values
+    I64Cmp(Condition, Box<StagedI64>, Box<StagedI64>),
 }
 
 #[derive(Debug, Clone, Copy)]
@@ -1082,6 +1153,11 @@ impl Staged for StagedBool {
                 builder.ins().bxor(expr_val, one)
             }
             StagedBool::Cmp(cond, left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(*cond, left_val, right_val)
+            }
+            StagedBool::I64Cmp(cond, left, right) => {
                 let left_val = left.codegen(builder);
                 let right_val = right.codegen(builder);
                 builder.ins().icmp(*cond, left_val, right_val)
@@ -1410,7 +1486,7 @@ mod tests {
             .compile_nary(vec![DataType::I64], DataType::Bool, |_, param| {
                 let x = StagedI64::variable(param[0]);
                 let ten = StagedI64::constant(10);
-                (x.lte(ten)).into()
+                (x.lt(ten)).into()
             })
             .unwrap();
 
