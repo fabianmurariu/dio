@@ -582,7 +582,7 @@ pub enum DataType {
 /// use tutorial::{Compiler, DataType, StagedI64, StagedU64, StagedValue, ScalarValue};
 ///
 /// let mut compiler = Compiler::new().unwrap();
-/// let compiled = compiler.compile_nary(
+/// let mut compiled = compiler.compile_nary(
 ///     vec![DataType::U64, DataType::I64],
 ///     DataType::U64,
 ///     |_, vars| {
@@ -617,40 +617,24 @@ impl ScalarValue {
         }
     }
 
-    /// Convert this scalar value to a byte representation
-    /// Returns (pointer to bytes, size in bytes)
-    /// This matches dio3/dio4's approach of using raw byte pointers
-    fn as_bytes(&self) -> ([u8; 8], usize) {
+    /// Convert this scalar value to u64 bit representation for passing to compiled functions
+    ///
+    /// This is more efficient than byte-level operations and maintains proper alignment.
+    /// Similar to how dio3/dio4 work with raw pointers, but using u64 slots.
+    pub fn to_u64_bits(&self) -> u64 {
         match self {
-            ScalarValue::I64(v) => (v.to_ne_bytes().into(), 8),
-            ScalarValue::U64(v) => {
-                // Reinterpret u64 as i64 bytes for storage
-                let bytes = (*v as i64).to_ne_bytes();
-                (bytes.into(), 8)
-            }
-            ScalarValue::Bool(v) => {
-                let mut bytes = [0u8; 8];
-                bytes[0] = if *v { 1 } else { 0 };
-                (bytes, 1) // Bool is 1 byte but we store in 8-byte slot for alignment
-            }
+            ScalarValue::I64(v) => *v as u64,      // Reinterpret i64 as u64
+            ScalarValue::U64(v) => *v,              // Already u64
+            ScalarValue::Bool(v) => if *v { 1 } else { 0 }, // 0 or 1
         }
     }
 
-    /// Convert from raw bytes back to the typed value
-    fn from_bytes(bytes: &[u8], data_type: DataType) -> Self {
+    /// Convert from u64 bit representation back to typed ScalarValue
+    pub fn from_u64_bits(bits: u64, data_type: DataType) -> Self {
         match data_type {
-            DataType::I64 => {
-                let value = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
-                ScalarValue::I64(value)
-            }
-            DataType::U64 => {
-                let value = i64::from_ne_bytes(bytes[0..8].try_into().unwrap());
-                ScalarValue::U64(value as u64)
-            }
-            DataType::Bool => {
-                let value = bytes[0] != 0;
-                ScalarValue::Bool(value)
-            }
+            DataType::I64 => ScalarValue::I64(bits as i64),
+            DataType::U64 => ScalarValue::U64(bits),
+            DataType::Bool => ScalarValue::Bool(bits != 0),
         }
     }
 
@@ -773,11 +757,11 @@ impl Compiler {
     ) -> Result<CompiledNary, StagingError> {
         let num_params = param_types.len();
 
-        // Create function signature: *const u8 -> <return_type>
-        // Like dio3/dio4, we use *const u8 (pointer to bytes) as the universal pointer type
-        // This allows us to handle different parameter sizes and will work for arrays later
+        // Create function signature: *const u64 -> <return_type>
+        // We pass a pointer to an array of u64 values. Each parameter occupies one u64 slot.
+        // This is more efficient than byte-level operations and maintains proper alignment.
         let mut sig = Signature::new(CallConv::SystemV);
-        sig.params.push(AbiParam::new(types::I64)); // pointer (as i64) to params array
+        sig.params.push(AbiParam::new(types::I64)); // pointer (as i64) to u64 array
         sig.returns
             .push(AbiParam::new(return_type.to_cranelift_type())); // return value
 
@@ -795,22 +779,23 @@ impl Compiler {
 
         let params_ptr = builder.block_params(entry_block)[0];
 
-        // Load each parameter from the byte array and assign to variables
-        // Similar to dio3/dio4, we cast the pointer and load based on type size
+        // Load each parameter from the u64 array and assign to variables
+        // Each parameter is stored in a u64 slot at offset i*8 bytes
         let mut param_vars = Vec::new();
         for i in 0..num_params {
             let var = Variable::from_u32(i as u32);
             let cranelift_type = param_types[i].to_cranelift_type();
             builder.declare_var(var, cranelift_type);
 
-            // Compute byte offset based on parameter size
-            // For now, all types are 8 bytes (i64, u64) or 1 byte (bool as i8)
-            // But we store everything at 8-byte boundaries for alignment
+            // Compute byte offset: parameter i is at byte offset i*8
+            // (since each u64 slot is 8 bytes)
             let byte_offset = i * 8;
             let offset = builder.ins().iconst(types::I64, byte_offset as i64);
             let param_addr = builder.ins().iadd(params_ptr, offset);
 
-            // Load the appropriate size based on type
+            // Load the value from the u64 slot
+            // For I64/U64, we load the full 8 bytes
+            // For Bool (i8), we load 1 byte but it's stored in an 8-byte slot
             let param_val = builder
                 .ins()
                 .load(cranelift_type, MemFlags::trusted(), param_addr, 0);
@@ -870,6 +855,7 @@ impl Compiler {
             code_ptr,
             param_types,
             return_type,
+            arg_buffer: Vec::new(), // Will be resized on first call
         })
     }
 }
@@ -882,6 +868,8 @@ pub struct CompiledNary {
     code_ptr: *const u8,
     param_types: Vec<DataType>,
     return_type: DataType,
+    /// Reusable buffer for argument passing to avoid allocation on every call
+    arg_buffer: Vec<u64>,
 }
 
 impl CompiledNary {
@@ -897,7 +885,7 @@ impl CompiledNary {
     /// use tutorial::{Compiler, DataType, StagedU64, StagedValue, ScalarValue};
     ///
     /// let mut compiler = Compiler::new().unwrap();
-    /// let compiled = compiler.compile_nary(
+    /// let mut compiled = compiler.compile_nary(
     ///     vec![DataType::U64, DataType::U64],
     ///     DataType::U64,
     ///     |_, vars| {
@@ -914,7 +902,7 @@ impl CompiledNary {
     ///
     /// assert_eq!(result, ScalarValue::U64(30));
     /// ```
-    pub fn call(&self, args: &[ScalarValue]) -> Result<ScalarValue, StagingError> {
+    pub fn call(&mut self, args: &[ScalarValue]) -> Result<ScalarValue, StagingError> {
         // Verify argument count
         if args.len() != self.param_types.len() {
             return Err(StagingError::ExecutionFailed {
@@ -936,35 +924,34 @@ impl CompiledNary {
             }
         }
 
-        // Pack all arguments into a byte buffer
-        // Like dio3/dio4, we use a contiguous byte array with 8-byte alignment
-        let mut arg_buffer = vec![0u8; args.len() * 8];
-        for (i, arg) in args.iter().enumerate() {
-            let (bytes, _size) = arg.as_bytes();
-            let offset = i * 8;
-            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
+        // Reuse the buffer, clear and fill with new args
+        // Using Vec<u64> is more efficient than Vec<u8> with byte-level copies
+        self.arg_buffer.clear();
+        self.arg_buffer.reserve(args.len());
+        for arg in args {
+            self.arg_buffer.push(arg.to_u64_bits());
         }
 
         // Call the compiled function with different signatures based on return type
-        // This matches how Cranelift generates different return types
+        // The Cranelift function receives *const u64 and loads values at u64 offsets
         unsafe {
             match self.return_type {
                 DataType::I64 => {
-                    type Fn = extern "C" fn(*const u8) -> i64;
+                    type Fn = extern "C" fn(*const u64) -> i64;
                     let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(arg_buffer.as_ptr());
+                    let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::I64(result))
                 }
                 DataType::U64 => {
-                    type Fn = extern "C" fn(*const u8) -> i64;
+                    type Fn = extern "C" fn(*const u64) -> i64;
                     let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(arg_buffer.as_ptr());
+                    let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::U64(result as u64))
                 }
                 DataType::Bool => {
-                    type Fn = extern "C" fn(*const u8) -> i8;
+                    type Fn = extern "C" fn(*const u64) -> i8;
                     let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(arg_buffer.as_ptr());
+                    let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::Bool(result != 0))
                 }
             }
@@ -1212,7 +1199,7 @@ mod tests {
     fn test_lesson1_constant_addition() {
         // This compiles: f(x) = x + 5
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let five = StagedI64::constant(5);
@@ -1229,7 +1216,7 @@ mod tests {
     fn test_lesson1_double_addition() {
         // This compiles: f(x) = x + x (which is x * 2)
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let x2 = StagedI64::variable(vars[0]);
@@ -1245,7 +1232,7 @@ mod tests {
     fn test_lesson1_nested_addition() {
         // This compiles: f(x) = (x + 1) + 2
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let one = StagedI64::constant(1);
@@ -1267,7 +1254,7 @@ mod tests {
     fn test_lesson1b_binary_addition() {
         // This compiles: f(x, y) = x + y
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(2, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
@@ -1284,7 +1271,7 @@ mod tests {
     fn test_lesson1b_ternary_expression() {
         // This compiles: f(x, y, z) = (x + y) * z
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(3, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
@@ -1307,7 +1294,7 @@ mod tests {
         // This compiles: f(x, y) = (x + 10) * y
         // Shows partial evaluation: the constant 10 is baked into the code!
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(2, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let y = StagedI64::variable(vars[1]);
@@ -1330,7 +1317,7 @@ mod tests {
         // This compiles: f(a, b, c, d) = (a + b) * (c - d)
         // Demonstrates multiple variables and nested operations
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(4, |_, vars| {
                 let a = StagedI64::variable(vars[0]);
                 let b = StagedI64::variable(vars[1]);
@@ -1354,7 +1341,7 @@ mod tests {
         // Even though we have "zero runtime params", we still need to pass
         // an empty slice. The result is always constant!
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(0, |_, _vars| {
                 let forty_two = StagedI64::constant(42);
                 let fifty_eight = StagedI64::constant(58);
@@ -1375,7 +1362,7 @@ mod tests {
     fn test_lesson2_simple_subtraction() {
         // This should compile: f(x) = x - 3
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let three = StagedI64::constant(3);
@@ -1395,7 +1382,7 @@ mod tests {
 
         // Note: We use compile_nary_i64 with 0 parameters
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(0, |_, _vars| {
                 let hundred = StagedI64::constant(100);
                 let fortytwo = StagedI64::constant(42);
@@ -1416,7 +1403,7 @@ mod tests {
     fn test_lesson3_simple_multiplication() {
         // This should compile: f(x) = x * 2
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let two = StagedI64::constant(2);
@@ -1433,7 +1420,7 @@ mod tests {
     fn test_lesson3_complex_expression() {
         // This should compile: f(x) = (x + 5) * (x - 2)
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary_i64(1, |_, vars| {
                 let x1 = StagedI64::variable(vars[0]);
                 let x2 = StagedI64::variable(vars[0]);
@@ -1459,7 +1446,7 @@ mod tests {
     #[test]
     fn test_lesson4_unsigned_addition() {
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(vec![DataType::U64], DataType::U64, |_, param| {
                 let x = StagedU64::variable(param[0]);
                 let ten = StagedU64::constant(10);
@@ -1482,7 +1469,7 @@ mod tests {
 
         let mut compiler = Compiler::new().unwrap();
         // You'll need to create compile_unary_i64_to_bool
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(vec![DataType::I64], DataType::Bool, |_, param| {
                 let x = StagedI64::variable(param[0]);
                 let ten = StagedI64::constant(10);
@@ -1504,7 +1491,7 @@ mod tests {
     fn test_generic_u64_addition() {
         // Compile: f(x: u64) = x + 10
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(vec![DataType::U64], DataType::U64, |_, vars| {
                 let x = StagedU64::variable(vars[0]);
                 let ten = StagedU64::constant(10);
@@ -1522,7 +1509,7 @@ mod tests {
         // Compile: f(x: u64, y: i64) -> u64
         // Note: We reinterpret y as u64 for the addition
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::I64],
                 DataType::U64,
@@ -1544,7 +1531,7 @@ mod tests {
     fn test_generic_i64_operations() {
         // Compile: f(a: i64, b: i64, c: i64) -> i64 = (a + b) * c
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::I64, DataType::I64, DataType::I64],
                 DataType::I64,
@@ -1566,7 +1553,7 @@ mod tests {
     fn test_generic_u64_multiplication() {
         // Compile: f(x: u64, y: u64) -> u64 = x * y
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
@@ -1609,7 +1596,7 @@ mod tests {
     fn test_generic_zero_params_constant() {
         // Compile: f() -> u64 = 42
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(vec![], DataType::U64, |_, _vars| {
                 StagedValue::U64(StagedU64::constant(42))
             })
@@ -1623,7 +1610,7 @@ mod tests {
     fn test_generic_complex_expression() {
         // Compile: f(a: u64, b: u64, c: u64) -> u64 = (a * b) + (c * 2)
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
@@ -1653,7 +1640,7 @@ mod tests {
     fn test_scalarvalue_homogeneous_u64() {
         // Test calling with ScalarValue instead of raw slices
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
@@ -1676,7 +1663,7 @@ mod tests {
     fn test_scalarvalue_heterogeneous_types() {
         // Test mixing U64 and I64 parameters (like dio4 mixing ArrayRef types)
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::I64, DataType::U64],
                 DataType::U64,
@@ -1706,7 +1693,7 @@ mod tests {
     fn test_scalarvalue_type_checking() {
         // Should fail: passing wrong type
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
@@ -1734,7 +1721,7 @@ mod tests {
     fn test_scalarvalue_wrong_arg_count() {
         // Should fail: wrong number of arguments
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
@@ -1761,7 +1748,7 @@ mod tests {
     fn test_scalarvalue_i64_return_type() {
         // Test I64 return type
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::I64, DataType::I64],
                 DataType::I64,
@@ -1784,7 +1771,7 @@ mod tests {
     fn test_scalarvalue_complex_expression() {
         // Complex expression with mixed operations
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
