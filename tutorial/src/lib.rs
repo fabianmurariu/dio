@@ -57,6 +57,311 @@ pub enum StagingError {
 
 /// Core trait for staged values - values that generate code at compile time
 ///
+// =============================================================================
+// CORE EXPRESSION TYPE WITH TYPE INFERENCE
+// =============================================================================
+
+/// Generic expression that can be any type
+///
+/// This wraps type-specific expressions (StagedI64, StagedU64, StagedBool)
+/// and adds generic control flow (Let, If) that works with any type.
+#[derive(Debug, Clone)]
+pub enum Expr {
+    /// A 64-bit signed integer expression
+    I64(StagedI64),
+
+    /// A 64-bit unsigned integer expression
+    U64(StagedU64),
+
+    /// A boolean expression
+    Bool(StagedBool),
+
+    /// Variable reference (can be any type)
+    Variable {
+        var: Variable,
+        var_type: DataType,
+    },
+
+    /// Let binding: bind a value to a variable, use it in body
+    /// Type is inferred from the value expression
+    Let {
+        var_id: u32,
+        var_type: DataType,  // Inferred from value
+        value: Box<Expr>,     // The expression being bound
+        body: Box<Expr>,      // The expression that can use the variable
+    },
+
+    /// If-then-else conditional
+    /// Both branches must have the same type
+    If {
+        condition: Box<Expr>,     // Must be Bool
+        then_branch: Box<Expr>,   // Any type T
+        else_branch: Box<Expr>,   // Must be same type T
+        result_type: DataType,    // Inferred from branches
+    },
+}
+
+impl Expr {
+    /// Get the type of this expression (type inference!)
+    pub fn data_type(&self) -> DataType {
+        match self {
+            Expr::I64(_) => DataType::I64,
+            Expr::U64(_) => DataType::U64,
+            Expr::Bool(_) => DataType::Bool,
+            Expr::Variable { var_type, .. } => *var_type,
+            Expr::Let { body, .. } => body.data_type(),
+            Expr::If { result_type, .. } => *result_type,
+        }
+    }
+
+    /// Extract as I64 (consuming)
+    pub fn into_i64(self) -> Option<StagedI64> {
+        match self {
+            Expr::I64(v) => Some(v),
+            Expr::Variable { var, var_type: DataType::I64 } => Some(StagedI64::Variable(var)),
+            _ => None,
+        }
+    }
+
+    /// Extract as U64 (consuming)
+    pub fn into_u64(self) -> Option<StagedU64> {
+        match self {
+            Expr::U64(v) => Some(v),
+            Expr::Variable { var, var_type: DataType::U64 } => Some(StagedU64::Variable(var)),
+            _ => None,
+        }
+    }
+
+    /// Extract as Bool (consuming)
+    pub fn into_bool(self) -> Option<StagedBool> {
+        match self {
+            Expr::Bool(v) => Some(v),
+            Expr::Variable { var, var_type: DataType::Bool } => Some(StagedBool::Variable(var)),
+            _ => None,
+        }
+    }
+
+    /// Borrow as I64
+    pub fn as_i64(&self) -> Option<&StagedI64> {
+        match self {
+            Expr::I64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrow as U64
+    pub fn as_u64(&self) -> Option<&StagedU64> {
+        match self {
+            Expr::U64(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Borrow as Bool
+    pub fn as_bool(&self) -> Option<&StagedBool> {
+        match self {
+            Expr::Bool(v) => Some(v),
+            _ => None,
+        }
+    }
+
+    /// Create a variable reference
+    pub fn variable(var: Variable, var_type: DataType) -> Self {
+        Expr::Variable { var, var_type }
+    }
+
+    /// Generate Cranelift IR code for this expression
+    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        match self {
+            Expr::I64(v) => v.codegen(builder),
+            Expr::U64(v) => v.codegen(builder),
+            Expr::Bool(v) => v.codegen(builder),
+            Expr::Variable { var, .. } => builder.use_var(*var),
+            Expr::Let { var_id, var_type, value, body } => {
+                // Create a new local variable
+                let var = Variable::from_u32(*var_id);
+                builder.declare_var(var, var_type.to_cranelift_type());
+
+                // Evaluate the value expression
+                let val = value.codegen(builder);
+
+                // Store it in the variable
+                builder.def_var(var, val);
+
+                // Evaluate the body (which can reference this variable)
+                body.codegen(builder)
+            }
+            Expr::If { condition, then_branch, else_branch, result_type } => {
+                // Evaluate the condition
+                let cond_val = condition.codegen(builder);
+
+                // Create blocks for control flow
+                let then_block = builder.create_block();
+                let else_block = builder.create_block();
+                let merge_block = builder.create_block();
+
+                // Add a block parameter to merge block to receive the result
+                builder.append_block_param(merge_block, result_type.to_cranelift_type());
+
+                // Branch based on condition
+                builder.ins().brif(cond_val, then_block, &[], else_block, &[]);
+
+                // Generate then branch
+                builder.switch_to_block(then_block);
+                builder.seal_block(then_block);
+                let then_val = then_branch.codegen(builder);
+                builder.ins().jump(merge_block, &[then_val]);
+
+                // Generate else branch
+                builder.switch_to_block(else_block);
+                builder.seal_block(else_block);
+                let else_val = else_branch.codegen(builder);
+                builder.ins().jump(merge_block, &[else_val]);
+
+                // Continue at merge block
+                builder.switch_to_block(merge_block);
+                builder.seal_block(merge_block);
+
+                // The result is the block parameter (phi node)
+                builder.block_params(merge_block)[0]
+            }
+        }
+    }
+}
+
+// Conversion helpers for ergonomics
+impl From<StagedI64> for Expr {
+    fn from(v: StagedI64) -> Self {
+        Expr::I64(v)
+    }
+}
+
+impl From<StagedU64> for Expr {
+    fn from(v: StagedU64) -> Self {
+        Expr::U64(v)
+    }
+}
+
+impl From<StagedBool> for Expr {
+    fn from(v: StagedBool) -> Self {
+        Expr::Bool(v)
+    }
+}
+
+// =============================================================================
+// STAGED BUILDER: Ergonomic AST Construction with Auto Variable Management
+// =============================================================================
+
+/// Builder for constructing staged expressions with automatic variable ID management
+///
+/// This provides ergonomic helpers for building expression trees, especially for
+/// let bindings where we need to track variable IDs.
+pub struct StagedBuilder {
+    next_var_id: u32,
+}
+
+impl StagedBuilder {
+    /// Create a new builder
+    /// Variable IDs start at 1000 to avoid conflicts with function parameters (0-999)
+    pub fn new() -> Self {
+        StagedBuilder { next_var_id: 1000 }
+    }
+
+    /// Create a let binding with automatic variable ID management
+    ///
+    /// # Example
+    /// ```
+    /// # use tutorial::*;
+    /// let mut builder = StagedBuilder::new();
+    /// let x = Expr::I64(StagedI64::constant(5));
+    ///
+    /// let expr = builder.let_binding(x, |builder, var| {
+    ///     // var is only visible in this closure
+    ///     let y = var.into_i64().unwrap();
+    ///     Expr::I64(y.clone() * y)
+    /// });
+    /// ```
+    pub fn let_binding<F>(&mut self, value: Expr, body: F) -> Expr
+    where
+        F: FnOnce(&mut Self, Expr) -> Expr,
+    {
+        let var_id = self.next_var_id;
+        self.next_var_id += 1;
+
+        // Infer type from the value expression
+        let var_type = value.data_type();
+
+        // Create a variable reference for the closure
+        let var = Expr::variable(Variable::from_u32(var_id), var_type);
+
+        // Build the body
+        let body_expr = body(self, var);
+
+        Expr::Let {
+            var_id,
+            var_type,
+            value: Box::new(value),
+            body: Box::new(body_expr),
+        }
+    }
+
+    /// Create an if-then-else expression with type checking
+    ///
+    /// # Example
+    /// ```
+    /// # use tutorial::*;
+    /// let mut builder = StagedBuilder::new();
+    /// let cond = Expr::Bool(StagedBool::constant(true));
+    ///
+    /// let expr = builder.if_then_else(
+    ///     cond,
+    ///     |_| Expr::I64(StagedI64::constant(10)),
+    ///     |_| Expr::I64(StagedI64::constant(20)),
+    /// );
+    /// ```
+    pub fn if_then_else<T, E>(&mut self, condition: Expr, then_fn: T, else_fn: E) -> Expr
+    where
+        T: FnOnce(&mut Self) -> Expr,
+        E: FnOnce(&mut Self) -> Expr,
+    {
+        // Verify condition is Bool
+        assert_eq!(
+            condition.data_type(),
+            DataType::Bool,
+            "If condition must be boolean, got {:?}",
+            condition.data_type()
+        );
+
+        let then_branch = then_fn(self);
+        let else_branch = else_fn(self);
+
+        // Infer result type from then branch
+        let result_type = then_branch.data_type();
+
+        // Type check: branches must match
+        assert_eq!(
+            result_type,
+            else_branch.data_type(),
+            "If branches must have same type: then={:?}, else={:?}",
+            result_type,
+            else_branch.data_type()
+        );
+
+        Expr::If {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+            result_type,
+        }
+    }
+}
+
+impl Default for StagedBuilder {
+    fn default() -> Self {
+        Self::new()
+    }
+}
+
 /// This is the heart of our partial evaluation system. Instead of computing
 /// values immediately, we build up a description of the computation that will
 /// be compiled to machine code later.
@@ -151,7 +456,6 @@ impl StagedI64 {
     pub fn gte(self, right: StagedI64) -> StagedBool {
         StagedBool::I64Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
     }
-
 }
 
 impl Add<StagedI64> for StagedI64 {
@@ -735,7 +1039,7 @@ impl Compiler {
     /// # Example
     ///
     /// ```
-    /// use tutorial::{Compiler, StagedI64, StagedU64, StagedValue, DataType};
+    /// use tutorial::{Compiler, StagedI64, StagedU64, Expr, DataType};
     ///
     /// let mut compiler = Compiler::new().unwrap();
     /// let compiled = compiler.compile_nary(
@@ -745,7 +1049,7 @@ impl Compiler {
     ///         let x = StagedU64::variable(vars[0]);
     ///         let y = StagedI64::variable(vars[1]);
     ///         let y_unsigned = StagedU64::variable(vars[1]); // reinterpret as U64
-    ///         StagedValue::U64(x + y_unsigned)
+    ///         Expr::U64(x + y_unsigned)
     ///     }
     /// ).unwrap();
     /// ```
@@ -753,7 +1057,7 @@ impl Compiler {
         &mut self,
         param_types: Vec<DataType>,
         return_type: DataType,
-        body: impl FnOnce(&mut FunctionBuilder, &[Variable]) -> StagedValue,
+        body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> Expr,
     ) -> Result<CompiledNary, StagingError> {
         let num_params = param_types.len();
 
@@ -805,8 +1109,9 @@ impl Compiler {
             param_vars.push(var);
         }
 
-        // Generate the function body
-        let result_expr = body(&mut builder, &param_vars);
+        // Generate the function body using StagedBuilder
+        let mut staged_builder = StagedBuilder::new();
+        let result_expr = body(&mut staged_builder, &param_vars);
 
         // Verify return type matches
         if result_expr.data_type() != return_type {
@@ -1484,6 +1789,384 @@ mod tests {
     }
 
     // -------------------------------------------------------------------------
+    // LESSON 6 TESTS: LET BINDINGS AND CONDITIONALS (COMPLETE EXAMPLES)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lesson6_simple_if_else() {
+        // f(x) = if x < 10 then 1 else 0
+        // This demonstrates basic if-then-else control flow
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let ten = StagedI64::constant(10);
+                let cond = x.lt(ten);
+                let one = StagedI64::constant(1);
+                let zero = StagedI64::constant(0);
+                builder.if_then_else(
+                    Expr::Bool(cond),
+                    |_| Expr::I64(one),
+                    |_| Expr::I64(zero),
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            1
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(15)])
+                .unwrap()
+                .as_i64_unchecked(),
+            0
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(10)])
+                .unwrap()
+                .as_i64_unchecked(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_lesson6_if_else_with_computation() {
+        // f(x) = if x < 0 then -x else x (absolute value)
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let zero = StagedI64::constant(0);
+                let cond = x.clone().lt(zero.clone());
+                let neg_x = zero - x.clone();
+                builder.if_then_else(
+                    Expr::Bool(cond),
+                    |_| Expr::I64(neg_x.clone()),
+                    |_| Expr::I64(x),
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(-5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            5
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(10)])
+                .unwrap()
+                .as_i64_unchecked(),
+            10
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(0)])
+                .unwrap()
+                .as_i64_unchecked(),
+            0
+        );
+    }
+
+    #[test]
+    fn test_lesson6_simple_let_binding() {
+        // f(x) = let y = x + 1 in y * y
+        // Demonstrates naming an intermediate computation
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let one = StagedI64::constant(1);
+                let y_binding = x + one;
+
+                builder.let_binding(Expr::I64(y_binding), |_builder, var| {
+                    // var is the bound variable (automatically managed)
+                    let y = var.into_i64().unwrap();
+                    Expr::I64(y.clone() * y)
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            36
+        ); // (5+1)^2 = 36
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(0)])
+                .unwrap()
+                .as_i64_unchecked(),
+            1
+        ); // (0+1)^2 = 1
+    }
+
+    #[test]
+    fn test_lesson6_let_binding_avoids_recomputation() {
+        // f(x) = let y = x * x in y + y
+        // Without let binding: (x*x) + (x*x) - computes x*x twice
+        // With let binding: let y = x*x in y + y - computes x*x once
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let y_binding = x.clone() * x;
+
+                builder.let_binding(Expr::I64(y_binding), |_builder, var| {
+                    let y = var.into_i64().unwrap();
+                    Expr::I64(y.clone() + y)
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(3)])
+                .unwrap()
+                .as_i64_unchecked(),
+            18
+        ); // 3*3 + 3*3 = 18
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(10)])
+                .unwrap()
+                .as_i64_unchecked(),
+            200
+        ); // 10*10 + 10*10 = 200
+    }
+
+    #[test]
+    fn test_lesson6_nested_let_bindings() {
+        // f(x) = let y = x + 1 in let z = y * 2 in z + y
+        // Demonstrates nested let bindings
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let one = StagedI64::constant(1);
+                let two = StagedI64::constant(2);
+
+                // let y = x + 1 in ...
+                builder.let_binding(Expr::I64(x + one), |builder, y_var| {
+                    let y = y_var.into_i64().unwrap();
+
+                    // let z = y * 2 in ...
+                    builder.let_binding(Expr::I64(y.clone() * two), |_builder, z_var| {
+                        let z = z_var.into_i64().unwrap();
+
+                        // z + y
+                        Expr::I64(z + y)
+                    })
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            18
+        ); // y=6, z=12, result=18
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(10)])
+                .unwrap()
+                .as_i64_unchecked(),
+            33
+        ); // y=11, z=22, result=33
+    }
+
+    #[test]
+    fn test_lesson6_if_inside_let() {
+        // f(x) = let y = (if x < 0 then -x else x) in y * 2
+        // Demonstrates if-then-else as a let binding
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let zero = StagedI64::constant(0);
+                let two = StagedI64::constant(2);
+
+                // Absolute value using if-then-else
+                let cond = x.clone().lt(zero.clone());
+                let neg_x = zero - x.clone();
+
+                // Compute the if-then-else expression first
+                let abs_value = builder.if_then_else(
+                    Expr::Bool(cond),
+                    |_| Expr::I64(neg_x.clone()),
+                    |_| Expr::I64(x.clone()),
+                );
+
+                // Bind the if-then-else result and use it
+                builder.let_binding(abs_value, |_builder, y_var| {
+                    let y = y_var.into_i64().unwrap();
+                    Expr::I64(y * two)
+                })
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(-5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            10
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(7)])
+                .unwrap()
+                .as_i64_unchecked(),
+            14
+        );
+    }
+
+    #[test]
+    fn test_lesson6_let_inside_if() {
+        // f(x) = if x < 0 then (let y = -x in y * 2) else x
+        // Demonstrates let binding inside a branch
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
+                let x = StagedI64::variable(vars[0]);
+                let zero = StagedI64::constant(0);
+                let two = StagedI64::constant(2);
+
+                let cond = x.clone().lt(zero.clone());
+                let neg_x = zero - x.clone();
+
+                builder.if_then_else(
+                    Expr::Bool(cond),
+                    |builder| {
+                        // Then branch: let y = -x in y * 2
+                        builder.let_binding(Expr::I64(neg_x.clone()), |_builder, y_var| {
+                            let y = y_var.into_i64().unwrap();
+                            Expr::I64(y * two)
+                        })
+                    },
+                    |_| Expr::I64(x), // Else branch: just x
+                )
+            })
+            .unwrap();
+
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(-5)])
+                .unwrap()
+                .as_i64_unchecked(),
+            10
+        );
+        assert_eq!(
+            compiled
+                .call(&[ScalarValue::I64(7)])
+                .unwrap()
+                .as_i64_unchecked(),
+            7
+        );
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 6 EXERCISES: Implement these patterns yourself!
+    // -------------------------------------------------------------------------
+    // TODO: Uncomment these tests and implement them after understanding the examples above
+
+    // #[test]
+    // fn test_lesson6_exercise_max() {
+    //     // TODO: Implement max(x, y) using if-then-else
+    //     // f(x, y) = if x > y then x else y
+    //     let mut compiler = Compiler::new().unwrap();
+    //     let mut compiled = compiler.compile_nary(
+    //         vec![DataType::I64, DataType::I64],
+    //         DataType::I64,
+    //         |_, vars| {
+    //             // YOUR CODE HERE
+    //             todo!("Implement max using if_then_else")
+    //         }
+    //     ).unwrap();
+    //
+    //     assert_eq!(compiled.call(&[ScalarValue::I64(10), ScalarValue::I64(20)]).unwrap().as_i64_unchecked(), 20);
+    //     assert_eq!(compiled.call(&[ScalarValue::I64(30), ScalarValue::I64(15)]).unwrap().as_i64_unchecked(), 30);
+    // }
+
+    // #[test]
+    // fn test_lesson6_exercise_clamp() {
+    //     // TODO: Implement clamp(x, min, max) using nested if-then-else
+    //     // Returns min if x < min, max if x > max, otherwise x
+    //     let mut compiler = Compiler::new().unwrap();
+    //     let mut compiled = compiler.compile_nary(
+    //         vec![DataType::I64, DataType::I64, DataType::I64],
+    //         DataType::I64,
+    //         |_, vars| {
+    //             // YOUR CODE HERE
+    //             todo!("Implement clamp using nested if_then_else")
+    //         }
+    //     ).unwrap();
+    //
+    //     assert_eq!(compiled.call(&[
+    //         ScalarValue::I64(5), ScalarValue::I64(10), ScalarValue::I64(20)
+    //     ]).unwrap().as_i64_unchecked(), 10); // Below min
+    //     assert_eq!(compiled.call(&[
+    //         ScalarValue::I64(25), ScalarValue::I64(10), ScalarValue::I64(20)
+    //     ]).unwrap().as_i64_unchecked(), 20); // Above max
+    //     assert_eq!(compiled.call(&[
+    //         ScalarValue::I64(15), ScalarValue::I64(10), ScalarValue::I64(20)
+    //     ]).unwrap().as_i64_unchecked(), 15); // Within range
+    // }
+
+    // #[test]
+    // fn test_lesson6_exercise_pythagorean() {
+    //     // TODO: Compute x^2 + y^2 using let bindings to avoid recomputation
+    //     // f(x, y) = let x2 = x*x in let y2 = y*y in x2 + y2
+    //     let mut compiler = Compiler::new().unwrap();
+    //     let mut compiled = compiler.compile_nary(
+    //         vec![DataType::I64, DataType::I64],
+    //         DataType::I64,
+    //         |_, vars| {
+    //             // YOUR CODE HERE
+    //             todo!("Implement using nested let_binding")
+    //         }
+    //     ).unwrap();
+    //
+    //     assert_eq!(compiled.call(&[
+    //         ScalarValue::I64(3), ScalarValue::I64(4)
+    //     ]).unwrap().as_i64_unchecked(), 25); // 3^2 + 4^2 = 25
+    //     assert_eq!(compiled.call(&[
+    //         ScalarValue::I64(5), ScalarValue::I64(12)
+    //     ]).unwrap().as_i64_unchecked(), 169); // 5^2 + 12^2 = 169
+    // }
+
+    // #[test]
+    // fn test_lesson6_exercise_sign() {
+    //     // TODO: Implement sign(x) that returns -1, 0, or 1 using nested if-then-else
+    //     // f(x) = if x < 0 then -1 else (if x > 0 then 1 else 0)
+    //     let mut compiler = Compiler::new().unwrap();
+    //     let mut compiled = compiler.compile_nary(
+    //         vec![DataType::I64],
+    //         DataType::I64,
+    //         |_, vars| {
+    //             // YOUR CODE HERE
+    //             todo!("Implement sign using nested if_then_else")
+    //         }
+    //     ).unwrap();
+    //
+    //     assert_eq!(compiled.call(&[ScalarValue::I64(-10)]).unwrap().as_i64_unchecked(), -1);
+    //     assert_eq!(compiled.call(&[ScalarValue::I64(0)]).unwrap().as_i64_unchecked(), 0);
+    //     assert_eq!(compiled.call(&[ScalarValue::I64(10)]).unwrap().as_i64_unchecked(), 1);
+    // }
+
+    // -------------------------------------------------------------------------
     // GENERIC COMPILATION TESTS: Testing compile_nary with mixed types
     // -------------------------------------------------------------------------
 
@@ -1495,7 +2178,7 @@ mod tests {
             .compile_nary(vec![DataType::U64], DataType::U64, |_, vars| {
                 let x = StagedU64::variable(vars[0]);
                 let ten = StagedU64::constant(10);
-                StagedValue::U64(x + ten)
+                Expr::U64(x + ten)
             })
             .unwrap();
 
@@ -1513,11 +2196,11 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::I64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedU64::variable(vars[0]);
                     // Reinterpret vars[1] as U64 (they're both 64-bit values)
                     let y_as_u64 = StagedU64::variable(vars[1]);
-                    StagedValue::U64(x + y_as_u64)
+                    Expr::U64(x + y_as_u64)
                 },
             )
             .unwrap();
@@ -1535,12 +2218,12 @@ mod tests {
             .compile_nary(
                 vec![DataType::I64, DataType::I64, DataType::I64],
                 DataType::I64,
-                |_, vars| {
+                |builder, vars| {
                     let a = StagedI64::variable(vars[0]);
                     let b = StagedI64::variable(vars[1]);
                     let c = StagedI64::variable(vars[2]);
                     let sum = StagedI64::add(a, b);
-                    StagedValue::I64(StagedI64::mul(sum, c))
+                    Expr::I64(StagedI64::mul(sum, c))
                 },
             )
             .unwrap();
@@ -1557,10 +2240,10 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
-                    StagedValue::U64(x * y)
+                    Expr::U64(x * y)
                 },
             )
             .unwrap();
@@ -1577,9 +2260,9 @@ mod tests {
         let result = compiler.compile_nary(
             vec![DataType::I64],
             DataType::U64, // Expecting U64 return
-            |_, vars| {
+            |builder, vars| {
                 let x = StagedI64::variable(vars[0]);
-                StagedValue::I64(x) // But returning I64!
+                Expr::I64(x) // But returning I64!
             },
         );
 
@@ -1597,8 +2280,8 @@ mod tests {
         // Compile: f() -> u64 = 42
         let mut compiler = Compiler::new().unwrap();
         let mut compiled = compiler
-            .compile_nary(vec![], DataType::U64, |_, _vars| {
-                StagedValue::U64(StagedU64::constant(42))
+            .compile_nary(vec![], DataType::U64, |builder, _vars| {
+                Expr::U64(StagedU64::constant(42))
             })
             .unwrap();
 
@@ -1614,14 +2297,14 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b = StagedU64::variable(vars[1]);
                     let c = StagedU64::variable(vars[2]);
                     let two = StagedU64::constant(2);
                     let ab = a * b;
                     let c2 = c * two;
-                    StagedValue::U64(ab + c2)
+                    Expr::U64(ab + c2)
                 },
             )
             .unwrap();
@@ -1644,10 +2327,10 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
-                    StagedValue::U64(x + y)
+                    Expr::U64(x + y)
                 },
             )
             .unwrap();
@@ -1667,13 +2350,13 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::I64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b_as_u64 = StagedU64::variable(vars[1]); // Reinterpret i64 as u64
                     let c = StagedU64::variable(vars[2]);
                     // (a + b) * c
                     let sum = a + b_as_u64;
-                    StagedValue::U64(sum * c)
+                    Expr::U64(sum * c)
                 },
             )
             .unwrap();
@@ -1697,10 +2380,10 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
-                    StagedValue::U64(x + y)
+                    Expr::U64(x + y)
                 },
             )
             .unwrap();
@@ -1725,10 +2408,10 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedU64::variable(vars[0]);
                     let y = StagedU64::variable(vars[1]);
-                    StagedValue::U64(x + y)
+                    Expr::U64(x + y)
                 },
             )
             .unwrap();
@@ -1752,10 +2435,10 @@ mod tests {
             .compile_nary(
                 vec![DataType::I64, DataType::I64],
                 DataType::I64,
-                |_, vars| {
+                |builder, vars| {
                     let x = StagedI64::variable(vars[0]);
                     let y = StagedI64::variable(vars[1]);
-                    StagedValue::I64(StagedI64::sub(x, y))
+                    Expr::I64(StagedI64::sub(x, y))
                 },
             )
             .unwrap();
@@ -1775,7 +2458,7 @@ mod tests {
             .compile_nary(
                 vec![DataType::U64, DataType::U64, DataType::U64],
                 DataType::U64,
-                |_, vars| {
+                |builder, vars| {
                     let a = StagedU64::variable(vars[0]);
                     let b = StagedU64::variable(vars[1]);
                     let c = StagedU64::variable(vars[2]);
@@ -1783,7 +2466,7 @@ mod tests {
                     // ((a + b) * c) + 10
                     let sum = a + b;
                     let product = sum * c;
-                    StagedValue::U64(product + ten)
+                    Expr::U64(product + ten)
                 },
             )
             .unwrap();
