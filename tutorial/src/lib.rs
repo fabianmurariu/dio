@@ -61,11 +61,61 @@ pub enum StagingError {
 // CORE EXPRESSION TYPE WITH TYPE INFERENCE
 // =============================================================================
 
+/// Lightweight reference to a computed value (variable)
+///
+/// This represents a reference to a value that has been computed and stored.
+/// Unlike `Expr`, which represents a computation tree, `Var` is just a handle
+/// to an already-computed value. This makes it cheap to clone and pass around.
+#[derive(Debug, Clone, Copy)]
+pub struct Var {
+    var: Variable,
+    var_type: DataType,
+}
+
+impl Var {
+    /// Create a new variable reference
+    pub fn new(var: Variable, var_type: DataType) -> Self {
+        Var { var, var_type }
+    }
+
+    /// Get the data type of this variable
+    pub fn data_type(&self) -> DataType {
+        self.var_type
+    }
+
+    /// Convert to an expression
+    pub fn to_expr(self) -> Expr {
+        Expr::Variable(self)
+    }
+
+    /// Convert to StagedI64 (panics if not I64 type)
+    pub fn to_i64(self) -> StagedI64 {
+        assert_eq!(self.var_type, DataType::I64, "Expected I64, got {:?}", self.var_type);
+        StagedI64::Variable(self.var)
+    }
+
+    /// Convert to StagedU64 (panics if not U64 type)
+    pub fn to_u64(self) -> StagedU64 {
+        assert_eq!(self.var_type, DataType::U64, "Expected U64, got {:?}", self.var_type);
+        StagedU64::Variable(self.var)
+    }
+
+    /// Convert to StagedBool (panics if not Bool type)
+    pub fn to_bool(self) -> StagedBool {
+        assert_eq!(self.var_type, DataType::Bool, "Expected Bool, got {:?}", self.var_type);
+        StagedBool::Variable(self.var)
+    }
+}
+
 /// Generic expression that can be any type
 ///
 /// This wraps type-specific expressions (StagedI64, StagedU64, StagedBool)
 /// and adds generic control flow (Let, If) that works with any type.
-#[derive(Debug, Clone)]
+///
+/// Note: Expr is NOT Clone because it represents a computation tree.
+/// Cloning would duplicate the entire tree, which is expensive and usually unintended.
+/// If you need to reference a computed value multiple times, use Let to bind it to a Var.
+#[derive(Debug)]
 pub enum Expr {
     /// A 64-bit signed integer expression
     I64(StagedI64),
@@ -77,18 +127,13 @@ pub enum Expr {
     Bool(StagedBool),
 
     /// Variable reference (can be any type)
-    Variable {
-        var: Variable,
-        var_type: DataType,
-    },
+    Variable(Var),
 
-    /// Let binding: bind a value to a variable, use it in body
-    /// Type is inferred from the value expression
+    /// Let binding: bind values to variables, use them in body
+    /// Type is inferred from the value expressions
     Let {
-        var_id: u32,
-        var_type: DataType,  // Inferred from value
-        value: Box<Expr>,     // The expression being bound
-        body: Box<Expr>,      // The expression that can use the variable
+        bindings: Vec<(u32, DataType, Box<Expr>)>,  // (var_id, type, value)
+        body: Box<Expr>,
     },
 
     /// If-then-else conditional
@@ -108,7 +153,7 @@ impl Expr {
             Expr::I64(_) => DataType::I64,
             Expr::U64(_) => DataType::U64,
             Expr::Bool(_) => DataType::Bool,
-            Expr::Variable { var_type, .. } => *var_type,
+            Expr::Variable(var) => var.data_type(),
             Expr::Let { body, .. } => body.data_type(),
             Expr::If { result_type, .. } => *result_type,
         }
@@ -118,7 +163,7 @@ impl Expr {
     pub fn into_i64(self) -> Option<StagedI64> {
         match self {
             Expr::I64(v) => Some(v),
-            Expr::Variable { var, var_type: DataType::I64 } => Some(StagedI64::Variable(var)),
+            Expr::Variable(var) if var.var_type == DataType::I64 => Some(StagedI64::Variable(var.var)),
             _ => None,
         }
     }
@@ -127,7 +172,7 @@ impl Expr {
     pub fn into_u64(self) -> Option<StagedU64> {
         match self {
             Expr::U64(v) => Some(v),
-            Expr::Variable { var, var_type: DataType::U64 } => Some(StagedU64::Variable(var)),
+            Expr::Variable(var) if var.var_type == DataType::U64 => Some(StagedU64::Variable(var.var)),
             _ => None,
         }
     }
@@ -136,7 +181,7 @@ impl Expr {
     pub fn into_bool(self) -> Option<StagedBool> {
         match self {
             Expr::Bool(v) => Some(v),
-            Expr::Variable { var, var_type: DataType::Bool } => Some(StagedBool::Variable(var)),
+            Expr::Variable(var) if var.var_type == DataType::Bool => Some(StagedBool::Variable(var.var)),
             _ => None,
         }
     }
@@ -167,7 +212,7 @@ impl Expr {
 
     /// Create a variable reference
     pub fn variable(var: Variable, var_type: DataType) -> Self {
-        Expr::Variable { var, var_type }
+        Expr::Variable(Var::new(var, var_type))
     }
 
     /// Generate Cranelift IR code for this expression
@@ -176,19 +221,21 @@ impl Expr {
             Expr::I64(v) => v.codegen(builder),
             Expr::U64(v) => v.codegen(builder),
             Expr::Bool(v) => v.codegen(builder),
-            Expr::Variable { var, .. } => builder.use_var(*var),
-            Expr::Let { var_id, var_type, value, body } => {
-                // Create a new local variable
-                let var = Variable::from_u32(*var_id);
-                builder.declare_var(var, var_type.to_cranelift_type());
+            Expr::Variable(var) => builder.use_var(var.var),
+            Expr::Let { bindings, body } => {
+                // Declare and define all bindings
+                for (var_id, var_type, value) in bindings {
+                    let var = Variable::from_u32(*var_id);
+                    builder.declare_var(var, var_type.to_cranelift_type());
 
-                // Evaluate the value expression
-                let val = value.codegen(builder);
+                    // Evaluate the value expression
+                    let val = value.codegen(builder);
 
-                // Store it in the variable
-                builder.def_var(var, val);
+                    // Store it in the variable
+                    builder.def_var(var, val);
+                }
 
-                // Evaluate the body (which can reference this variable)
+                // Evaluate the body (which can reference these variables)
                 body.codegen(builder)
             }
             Expr::If { condition, then_branch, else_branch, result_type } => {
@@ -267,7 +314,7 @@ impl StagedBuilder {
         StagedBuilder { next_var_id: 1000 }
     }
 
-    /// Create a let binding with automatic variable ID management
+    /// Create a single let binding with automatic variable ID management
     ///
     /// # Example
     /// ```
@@ -275,15 +322,15 @@ impl StagedBuilder {
     /// let mut builder = StagedBuilder::new();
     /// let x = Expr::I64(StagedI64::constant(5));
     ///
-    /// let expr = builder.let_binding(x, |builder, var| {
-    ///     // var is only visible in this closure
-    ///     let y = var.into_i64().unwrap();
+    /// let expr = builder.let1(x, |builder, var| {
+    ///     // var is a lightweight reference to the bound value
+    ///     let y = var.to_i64();
     ///     Expr::I64(y.clone() * y)
     /// });
     /// ```
-    pub fn let_binding<F>(&mut self, value: Expr, body: F) -> Expr
+    pub fn let1<F>(&mut self, value: Expr, body: F) -> Expr
     where
-        F: FnOnce(&mut Self, Expr) -> Expr,
+        F: FnOnce(&mut Self, Var) -> Expr,
     {
         let var_id = self.next_var_id;
         self.next_var_id += 1;
@@ -292,15 +339,60 @@ impl StagedBuilder {
         let var_type = value.data_type();
 
         // Create a variable reference for the closure
-        let var = Expr::variable(Variable::from_u32(var_id), var_type);
+        let var = Var::new(Variable::from_u32(var_id), var_type);
 
         // Build the body
         let body_expr = body(self, var);
 
         Expr::Let {
-            var_id,
-            var_type,
-            value: Box::new(value),
+            bindings: vec![(var_id, var_type, Box::new(value))],
+            body: Box::new(body_expr),
+        }
+    }
+
+    /// Create multiple let bindings with automatic variable ID management
+    ///
+    /// This allows binding multiple values at once, making the code cleaner
+    /// when you have several intermediate computations to name.
+    ///
+    /// # Example
+    /// ```
+    /// # use tutorial::*;
+    /// let mut builder = StagedBuilder::new();
+    /// let x = Expr::I64(StagedI64::constant(3));
+    /// let y = Expr::I64(StagedI64::constant(4));
+    ///
+    /// let expr = builder.let_n(vec![x, y], |builder, vars| {
+    ///     let x = vars[0].to_i64();
+    ///     let y = vars[1].to_i64();
+    ///     // x^2 + y^2
+    ///     Expr::I64((x.clone() * x) + (y.clone() * y))
+    /// });
+    /// ```
+    pub fn let_n<F>(&mut self, values: Vec<Expr>, body: F) -> Expr
+    where
+        F: FnOnce(&mut Self, &[Var]) -> Expr,
+    {
+        // Allocate variable IDs and collect bindings
+        let mut bindings = Vec::new();
+        let mut vars = Vec::new();
+
+        for value in values {
+            let var_id = self.next_var_id;
+            self.next_var_id += 1;
+
+            let var_type = value.data_type();
+            let var = Var::new(Variable::from_u32(var_id), var_type);
+
+            bindings.push((var_id, var_type, Box::new(value)));
+            vars.push(var);
+        }
+
+        // Build the body
+        let body_expr = body(self, &vars);
+
+        Expr::Let {
+            bindings,
             body: Box::new(body_expr),
         }
     }
@@ -883,7 +975,7 @@ pub enum DataType {
 /// # Example
 ///
 /// ```
-/// use tutorial::{Compiler, DataType, StagedI64, StagedU64, StagedValue, ScalarValue};
+/// use tutorial::{Compiler, DataType, StagedU64, Expr, ScalarValue};
 ///
 /// let mut compiler = Compiler::new().unwrap();
 /// let mut compiled = compiler.compile_nary(
@@ -892,7 +984,7 @@ pub enum DataType {
 ///     |_, vars| {
 ///         let x = StagedU64::variable(vars[0]);
 ///         let y_as_u64 = StagedU64::variable(vars[1]);
-///         StagedValue::U64(x + y_as_u64)
+///         Expr::U64(x + y_as_u64)
 ///     }
 /// ).unwrap();
 ///
@@ -1187,7 +1279,7 @@ impl CompiledNary {
     /// # Example
     ///
     /// ```
-    /// use tutorial::{Compiler, DataType, StagedU64, StagedValue, ScalarValue};
+    /// use tutorial::{Compiler, DataType, StagedU64, Expr, ScalarValue};
     ///
     /// let mut compiler = Compiler::new().unwrap();
     /// let mut compiled = compiler.compile_nary(
@@ -1196,7 +1288,7 @@ impl CompiledNary {
     ///     |_, vars| {
     ///         let x = StagedU64::variable(vars[0]);
     ///         let y = StagedU64::variable(vars[1]);
-    ///         StagedValue::U64(x + y)
+    ///         Expr::U64(x + y)
     ///     }
     /// ).unwrap();
     ///
@@ -1887,9 +1979,9 @@ mod tests {
                 let one = StagedI64::constant(1);
                 let y_binding = x + one;
 
-                builder.let_binding(Expr::I64(y_binding), |_builder, var| {
+                builder.let1(Expr::I64(y_binding), |_builder, var| {
                     // var is the bound variable (automatically managed)
-                    let y = var.into_i64().unwrap();
+                    let y = var.to_i64();
                     Expr::I64(y.clone() * y)
                 })
             })
@@ -1922,8 +2014,8 @@ mod tests {
                 let x = StagedI64::variable(vars[0]);
                 let y_binding = x.clone() * x;
 
-                builder.let_binding(Expr::I64(y_binding), |_builder, var| {
-                    let y = var.into_i64().unwrap();
+                builder.let1(Expr::I64(y_binding), |_builder, var| {
+                    let y = var.to_i64();
                     Expr::I64(y.clone() + y)
                 })
             })
@@ -1957,12 +2049,12 @@ mod tests {
                 let two = StagedI64::constant(2);
 
                 // let y = x + 1 in ...
-                builder.let_binding(Expr::I64(x + one), |builder, y_var| {
-                    let y = y_var.into_i64().unwrap();
+                builder.let1(Expr::I64(x + one), |builder, y_var| {
+                    let y = y_var.to_i64();
 
                     // let z = y * 2 in ...
-                    builder.let_binding(Expr::I64(y.clone() * two), |_builder, z_var| {
-                        let z = z_var.into_i64().unwrap();
+                    builder.let1(Expr::I64(y.clone() * two), |_builder, z_var| {
+                        let z = z_var.to_i64();
 
                         // z + y
                         Expr::I64(z + y)
@@ -2010,8 +2102,8 @@ mod tests {
                 );
 
                 // Bind the if-then-else result and use it
-                builder.let_binding(abs_value, |_builder, y_var| {
-                    let y = y_var.into_i64().unwrap();
+                builder.let1(abs_value, |_builder, y_var| {
+                    let y = y_var.to_i64();
                     Expr::I64(y * two)
                 })
             })
@@ -2051,8 +2143,8 @@ mod tests {
                     Expr::Bool(cond),
                     |builder| {
                         // Then branch: let y = -x in y * 2
-                        builder.let_binding(Expr::I64(neg_x.clone()), |_builder, y_var| {
-                            let y = y_var.into_i64().unwrap();
+                        builder.let1(Expr::I64(neg_x.clone()), |_builder, y_var| {
+                            let y = y_var.to_i64();
                             Expr::I64(y * two)
                         })
                     },
@@ -2135,7 +2227,7 @@ mod tests {
     //         DataType::I64,
     //         |_, vars| {
     //             // YOUR CODE HERE
-    //             todo!("Implement using nested let_binding")
+    //             todo!("Implement using nested let1 or let_n")
     //         }
     //     ).unwrap();
     //
