@@ -66,7 +66,7 @@ pub enum StagingError {
 /// This represents a reference to a value that has been computed and stored.
 /// Unlike `Expr`, which represents a computation tree, `Var` is just a handle
 /// to an already-computed value. This makes it cheap to clone and pass around.
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug, Clone)]
 pub struct Var {
     var: Variable,
     var_type: DataType,
@@ -80,7 +80,7 @@ impl Var {
 
     /// Get the data type of this variable
     pub fn data_type(&self) -> DataType {
-        self.var_type
+        self.var_type.clone()
     }
 
     /// Convert to an expression
@@ -144,6 +144,31 @@ pub enum Expr {
         else_branch: Box<Expr>,   // Must be same type T
         result_type: DataType,    // Inferred from branches
     },
+
+    /// Get element from array at index
+    /// Returns the element type (U64, I64, Bool)
+    ArrayGet {
+        array: StagedArray,       // The array to index into
+        index: Box<Expr>,         // Index expression (must be U64)
+        element_type: DataType,   // Type of elements in the array
+    },
+
+    /// Set element in array at index
+    /// This is a statement that returns unit/void
+    ArraySet {
+        array: StagedArray,       // The array to write to (must be mutable)
+        index: Box<Expr>,         // Index expression (must be U64)
+        value: Box<Expr>,         // Value to write (type must match element_type)
+    },
+
+    /// For loop: for i in start..end { body }
+    /// Returns unit/void (for loops are statements)
+    ForLoop {
+        loop_var_id: u32,         // Variable ID for loop counter
+        start: Box<Expr>,         // Start value (must be U64)
+        end: Box<Expr>,           // End value exclusive (must be U64)
+        body: Box<Expr>,          // Body expression (can be any type, result ignored)
+    },
 }
 
 impl Expr {
@@ -155,7 +180,10 @@ impl Expr {
             Expr::Bool(_) => DataType::Bool,
             Expr::Variable(var) => var.data_type(),
             Expr::Let { body, .. } => body.data_type(),
-            Expr::If { result_type, .. } => *result_type,
+            Expr::If { result_type, .. } => result_type.clone(),
+            Expr::ArrayGet { element_type, .. } => element_type.clone(),
+            Expr::ArraySet { .. } => DataType::Unit,
+            Expr::ForLoop { .. } => DataType::Unit,
         }
     }
 
@@ -272,6 +300,109 @@ impl Expr {
                 // The result is the block parameter (phi node)
                 builder.block_params(merge_block)[0]
             }
+            Expr::ArrayGet { array, index, element_type } => {
+                // Get the array pointer and index
+                let arr_ptr = builder.use_var(array.ptr_var);
+                let index_val = index.codegen(builder);
+
+                // Calculate element size in bytes
+                let element_size = match element_type {
+                    DataType::I64 | DataType::U64 => 8,
+                    DataType::Bool => 1,
+                    _ => panic!("Unsupported array element type: {:?}", element_type),
+                };
+
+                // Calculate byte offset: index * element_size
+                let elem_size_const = builder.ins().iconst(types::I64, element_size);
+                let byte_offset = builder.ins().imul(index_val, elem_size_const);
+
+                // Calculate element address: arr_ptr + byte_offset
+                let elem_addr = builder.ins().iadd(arr_ptr, byte_offset);
+
+                // Load the element
+                let cranelift_type = element_type.to_cranelift_type();
+                builder.ins().load(cranelift_type, MemFlags::trusted(), elem_addr, 0)
+            }
+            Expr::ArraySet { array, index, value } => {
+                // Get the array pointer, index, and value
+                let arr_ptr = builder.use_var(array.ptr_var);
+                let index_val = index.codegen(builder);
+                let value_val = value.codegen(builder);
+
+                // Calculate element size in bytes
+                let element_size = match array.element_type {
+                    DataType::I64 | DataType::U64 => 8,
+                    DataType::Bool => 1,
+                    _ => panic!("Unsupported array element type: {:?}", array.element_type),
+                };
+
+                // Calculate byte offset: index * element_size
+                let elem_size_const = builder.ins().iconst(types::I64, element_size);
+                let byte_offset = builder.ins().imul(index_val, elem_size_const);
+
+                // Calculate element address: arr_ptr + byte_offset
+                let elem_addr = builder.ins().iadd(arr_ptr, byte_offset);
+
+                // Store the value
+                builder.ins().store(MemFlags::trusted(), value_val, elem_addr, 0);
+
+                // ArraySet returns unit, represented as 0
+                builder.ins().iconst(types::I64, 0)
+            }
+            Expr::ForLoop { loop_var_id, start, end, body } => {
+                // Declare the loop variable
+                let loop_var = Variable::from_u32(*loop_var_id);
+                builder.declare_var(loop_var, types::I64);
+
+                // Evaluate start and end values
+                let start_val = start.codegen(builder);
+                let end_val = end.codegen(builder);
+
+                // Initialize loop counter
+                builder.def_var(loop_var, start_val);
+
+                // Create blocks for the loop
+                let header_block = builder.create_block();
+                let body_block = builder.create_block();
+                let exit_block = builder.create_block();
+
+                // Jump to header
+                builder.ins().jump(header_block, &[]);
+
+                // Header: check loop condition (i < end)
+                // Note: Don't seal yet - we have a back-edge from the loop body!
+                builder.switch_to_block(header_block);
+
+                let current_i = builder.use_var(loop_var);
+                let cond = builder.ins().icmp(IntCC::UnsignedLessThan, current_i, end_val);
+                builder.ins().brif(cond, body_block, &[], exit_block, &[]);
+
+                // Body: execute loop body and increment counter
+                builder.switch_to_block(body_block);
+                builder.seal_block(body_block);
+
+                // Execute body (result is ignored)
+                body.codegen(builder);
+
+                // Increment loop counter: i = i + 1
+                let current_i = builder.use_var(loop_var);
+                let one = builder.ins().iconst(types::I64, 1);
+                let next_i = builder.ins().iadd(current_i, one);
+                builder.def_var(loop_var, next_i);
+
+                // Jump back to header (this is the back-edge)
+                builder.ins().jump(header_block, &[]);
+
+                // NOW we can seal the header - all predecessors are known
+                builder.seal_block(header_block);
+
+                // Exit block
+                builder.switch_to_block(exit_block);
+                builder.seal_block(exit_block);
+
+                // ForLoop returns unit, represented as 0
+                builder.ins().iconst(types::I64, 0)
+            }
         }
     }
 }
@@ -339,7 +470,7 @@ impl StagedBuilder {
         let var_type = value.data_type();
 
         // Create a variable reference for the closure
-        let var = Var::new(Variable::from_u32(var_id), var_type);
+        let var = Var::new(Variable::from_u32(var_id), var_type.clone());
 
         // Build the body
         let body_expr = body(self, var);
@@ -382,7 +513,7 @@ impl StagedBuilder {
             self.next_var_id += 1;
 
             let var_type = value.data_type();
-            let var = Var::new(Variable::from_u32(var_id), var_type);
+            let var = Var::new(Variable::from_u32(var_id), var_type.clone());
 
             bindings.push((var_id, var_type, Box::new(value)));
             vars.push(var);
@@ -444,6 +575,74 @@ impl StagedBuilder {
             then_branch: Box::new(then_branch),
             else_branch: Box::new(else_branch),
             result_type,
+        }
+    }
+
+    /// Create a for loop: for i in start..end { body }
+    ///
+    /// # Example
+    /// ```
+    /// # use tutorial::*;
+    /// let mut builder = StagedBuilder::new();
+    /// // for i in 0..10 { ... }
+    /// builder.for_loop(
+    ///     StagedU64::constant(0),
+    ///     StagedU64::constant(10),
+    ///     |builder, i| {
+    ///         // i is a Var holding the loop counter
+    ///         // use i.to_u64() to get StagedU64
+    ///         Expr::U64(StagedU64::constant(0))  // body
+    ///     }
+    /// );
+    /// ```
+    pub fn for_loop<F>(&mut self, start: StagedU64, end: StagedU64, body: F) -> Expr
+    where
+        F: FnOnce(&mut Self, Var) -> Expr,
+    {
+        let loop_var_id = self.next_var_id;
+        self.next_var_id += 1;
+
+        // Create a variable reference for the loop counter
+        let loop_var = Var::new(Variable::from_u32(loop_var_id), DataType::U64);
+
+        // Build the body
+        let body_expr = body(self, loop_var);
+
+        Expr::ForLoop {
+            loop_var_id,
+            start: Box::new(Expr::U64(start)),
+            end: Box::new(Expr::U64(end)),
+            body: Box::new(body_expr),
+        }
+    }
+
+    /// Get element from array at index
+    ///
+    /// # Example
+    /// ```ignore
+    /// let value = builder.array_get(array, StagedU64::constant(5));
+    /// ```
+    pub fn array_get(&self, array: StagedArray, index: StagedU64) -> Expr {
+        let element_type = array.element_type();
+        Expr::ArrayGet {
+            array,
+            index: Box::new(Expr::U64(index)),
+            element_type,
+        }
+    }
+
+    /// Set element in array at index
+    ///
+    /// # Example
+    /// ```ignore
+    /// builder.array_set(array, StagedU64::constant(5), Expr::U64(value));
+    /// ```
+    pub fn array_set(&self, array: StagedArray, index: StagedU64, value: Expr) -> Expr {
+        assert!(array.is_mutable(), "Cannot write to immutable array");
+        Expr::ArraySet {
+            array,
+            index: Box::new(Expr::U64(index)),
+            value: Box::new(value),
         }
     }
 }
@@ -717,6 +916,13 @@ impl Compiler {
         builder.seal_all_blocks();
         builder.finalize();
 
+        // Debug output if requested
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            eprintln!("\n========== CRANELIFT IR ==========");
+            eprintln!("{}", func);
+            eprintln!("==================================\n");
+        }
+
         // Compile to machine code
         let mut ctx = Context::new();
         ctx.func = func;
@@ -959,11 +1165,36 @@ impl Staged for StagedU64 {
 // use ArrayRef with type erasure.
 
 /// Runtime data type for parameters and return values
-#[derive(Debug, Clone, Copy, PartialEq, Eq)]
+#[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataType {
     I64,
     U64,
     Bool,
+    /// Array type with element type and mutability flag
+    Array {
+        element_type: Box<DataType>,
+        mutable: bool,
+    },
+    /// Unit type for statements that don't return a value
+    Unit,
+}
+
+impl DataType {
+    /// Create an immutable array type
+    pub fn arr(element_type: DataType) -> Self {
+        DataType::Array {
+            element_type: Box::new(element_type),
+            mutable: false,
+        }
+    }
+
+    /// Create a mutable array type
+    pub fn mut_arr(element_type: DataType) -> Self {
+        DataType::Array {
+            element_type: Box::new(element_type),
+            mutable: true,
+        }
+    }
 }
 
 /// A runtime scalar value that can be passed to compiled functions
@@ -1031,6 +1262,8 @@ impl ScalarValue {
             DataType::I64 => ScalarValue::I64(bits as i64),
             DataType::U64 => ScalarValue::U64(bits),
             DataType::Bool => ScalarValue::Bool(bits != 0),
+            DataType::Array { .. } => panic!("Cannot convert bits to array type"),
+            DataType::Unit => panic!("Cannot convert bits to unit type"),
         }
     }
 
@@ -1066,7 +1299,19 @@ impl DataType {
             DataType::I64 => types::I64,
             DataType::U64 => types::I64, // U64 also uses I64 in Cranelift
             DataType::Bool => types::I8, // Booleans are i8 (0 or 1)
+            DataType::Array { .. } => types::I64, // Arrays are pointers (i64)
+            DataType::Unit => types::I64, // Unit represented as i64 (unused)
         }
+    }
+
+    /// Check if this is a scalar type
+    fn is_scalar(&self) -> bool {
+        matches!(self, DataType::I64 | DataType::U64 | DataType::Bool)
+    }
+
+    /// Check if this is an array type
+    fn is_array(&self) -> bool {
+        matches!(self, DataType::Array { .. })
     }
 }
 
@@ -1121,6 +1366,112 @@ impl From<StagedBool> for StagedValue {
     }
 }
 
+// =============================================================================
+// LESSON 7: ARRAYS (EXAMPLE - COMPLETE)
+// =============================================================================
+//
+// Arrays allow us to process multiple values efficiently. Unlike scalars which
+// hold a single value, arrays hold many values and we can loop over them.
+//
+// Key concepts:
+// - Arrays are passed as (pointer, length) pairs
+// - We can index into arrays to read values
+// - We can write values back to arrays
+// - For loops let us process each element
+//
+// This is similar to how dio4 passes arrays via *const u8 pointers!
+
+/// Reference to a function parameter (scalar or array)
+///
+/// This enum distinguishes between scalar parameters (single values stored in variables)
+/// and array parameters (pointer + length pairs).
+#[derive(Debug, Clone)]
+pub enum ParamRef {
+    /// A scalar parameter stored in a single variable
+    Scalar {
+        var: Variable,
+        data_type: DataType,
+    },
+
+    /// An array parameter stored as pointer + length
+    Array {
+        ptr_var: Variable,    // Variable holding the array pointer
+        len_var: Variable,    // Variable holding the array length
+        element_type: DataType, // Type of array elements
+        mutable: bool,        // Whether array is mutable (*mut vs *const)
+    },
+}
+
+impl ParamRef {
+    /// Get the underlying data type (scalar type or array type)
+    pub fn data_type(&self) -> DataType {
+        match self {
+            ParamRef::Scalar { data_type, .. } => data_type.clone(),
+            ParamRef::Array { element_type, mutable, .. } => DataType::Array {
+                element_type: Box::new(element_type.clone()),
+                mutable: *mutable,
+            },
+        }
+    }
+}
+
+/// A staged array reference
+///
+/// This represents an array that will exist at runtime. At compile time,
+/// we're building up operations on the array (indexing, length checks, etc.)
+/// that will be compiled to machine code.
+///
+/// Arrays work like Rust slices: they have a pointer and a length.
+#[derive(Debug, Clone)]
+pub struct StagedArray {
+    ptr_var: Variable,      // Variable holding pointer to array data
+    len_var: Variable,      // Variable holding array length
+    element_type: DataType, // Type of elements
+    mutable: bool,          // Whether we can write to this array
+}
+
+impl StagedArray {
+    /// Create an array reference from a ParamRef
+    pub fn from_param(param: &ParamRef) -> Self {
+        match param {
+            ParamRef::Array { ptr_var, len_var, element_type, mutable } => {
+                StagedArray {
+                    ptr_var: *ptr_var,
+                    len_var: *len_var,
+                    element_type: element_type.clone(),
+                    mutable: *mutable,
+                }
+            }
+            _ => panic!("Expected array parameter, got scalar"),
+        }
+    }
+
+    /// Create an array reference from raw variables
+    pub fn new(ptr_var: Variable, len_var: Variable, element_type: DataType, mutable: bool) -> Self {
+        StagedArray {
+            ptr_var,
+            len_var,
+            element_type,
+            mutable,
+        }
+    }
+
+    /// Get the length of this array as a staged U64
+    pub fn len(&self) -> StagedU64 {
+        StagedU64::Variable(self.len_var)
+    }
+
+    /// Get the element type
+    pub fn element_type(&self) -> DataType {
+        self.element_type.clone()
+    }
+
+    /// Check if array is mutable
+    pub fn is_mutable(&self) -> bool {
+        self.mutable
+    }
+}
+
 impl Compiler {
     /// Compile a generic n-ary function with typed parameters
     ///
@@ -1151,11 +1502,25 @@ impl Compiler {
         return_type: DataType,
         body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> Expr,
     ) -> Result<CompiledNary, StagingError> {
-        let num_params = param_types.len();
+        // Count total variables needed (scalars use 1 var, arrays use 2: ptr + len)
+        let mut total_vars = 0;
+        let mut total_slots = 0;
+        for param_type in &param_types {
+            match param_type {
+                DataType::Array { .. } => {
+                    total_vars += 2; // ptr and len
+                    total_slots += 2; // ptr and len in parameter array
+                }
+                _ => {
+                    total_vars += 1;
+                    total_slots += 1;
+                }
+            }
+        }
 
         // Create function signature: *const u64 -> <return_type>
-        // We pass a pointer to an array of u64 values. Each parameter occupies one u64 slot.
-        // This is more efficient than byte-level operations and maintains proper alignment.
+        // We pass a pointer to an array of u64 values. Each scalar takes 1 slot,
+        // each array takes 2 slots (pointer, length).
         let mut sig = Signature::new(CallConv::SystemV);
         sig.params.push(AbiParam::new(types::I64)); // pointer (as i64) to u64 array
         sig.returns
@@ -1176,29 +1541,58 @@ impl Compiler {
         let params_ptr = builder.block_params(entry_block)[0];
 
         // Load each parameter from the u64 array and assign to variables
-        // Each parameter is stored in a u64 slot at offset i*8 bytes
+        // Scalars: single value
+        // Arrays: two values (pointer, length)
         let mut param_vars = Vec::new();
-        for i in 0..num_params {
-            let var = Variable::from_u32(i as u32);
-            let cranelift_type = param_types[i].to_cranelift_type();
-            builder.declare_var(var, cranelift_type);
+        let mut slot_offset = 0;
+        let mut var_id = 0u32;
 
-            // Compute byte offset: parameter i is at byte offset i*8
-            // (since each u64 slot is 8 bytes)
-            let byte_offset = i * 8;
-            let offset = builder.ins().iconst(types::I64, byte_offset as i64);
-            let param_addr = builder.ins().iadd(params_ptr, offset);
+        for param_type in &param_types {
+            match param_type {
+                DataType::Array { .. } => {
+                    // Arrays take 2 slots: pointer and length
 
-            // Load the value from the u64 slot
-            // For I64/U64, we load the full 8 bytes
-            // For Bool (i8), we load 1 byte but it's stored in an 8-byte slot
-            let param_val = builder
-                .ins()
-                .load(cranelift_type, MemFlags::trusted(), param_addr, 0);
+                    // Load pointer
+                    let ptr_var = Variable::from_u32(var_id);
+                    var_id += 1;
+                    builder.declare_var(ptr_var, types::I64);
+                    let ptr_offset = builder.ins().iconst(types::I64, (slot_offset * 8) as i64);
+                    let ptr_addr = builder.ins().iadd(params_ptr, ptr_offset);
+                    let ptr_val = builder.ins().load(types::I64, MemFlags::trusted(), ptr_addr, 0);
+                    builder.def_var(ptr_var, ptr_val);
+                    slot_offset += 1;
 
-            // Assign to variable
-            builder.def_var(var, param_val);
-            param_vars.push(var);
+                    // Load length
+                    let len_var = Variable::from_u32(var_id);
+                    var_id += 1;
+                    builder.declare_var(len_var, types::I64);
+                    let len_offset = builder.ins().iconst(types::I64, (slot_offset * 8) as i64);
+                    let len_addr = builder.ins().iadd(params_ptr, len_offset);
+                    let len_val = builder.ins().load(types::I64, MemFlags::trusted(), len_addr, 0);
+                    builder.def_var(len_var, len_val);
+                    slot_offset += 1;
+
+                    // For backward compatibility, add both to param_vars
+                    // (The user will need to know arrays use 2 consecutive vars)
+                    param_vars.push(ptr_var);
+                    param_vars.push(len_var);
+                }
+                _ => {
+                    // Scalars take 1 slot
+                    let var = Variable::from_u32(var_id);
+                    var_id += 1;
+                    let cranelift_type = param_type.to_cranelift_type();
+                    builder.declare_var(var, cranelift_type);
+
+                    let byte_offset = slot_offset * 8;
+                    let offset = builder.ins().iconst(types::I64, byte_offset as i64);
+                    let param_addr = builder.ins().iadd(params_ptr, offset);
+                    let param_val = builder.ins().load(cranelift_type, MemFlags::trusted(), param_addr, 0);
+                    builder.def_var(var, param_val);
+                    param_vars.push(var);
+                    slot_offset += 1;
+                }
+            }
         }
 
         // Generate the function body using StagedBuilder
@@ -1221,6 +1615,13 @@ impl Compiler {
         // Finalize
         builder.seal_all_blocks();
         builder.finalize();
+
+        // Debug output if requested
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            eprintln!("\n========== CRANELIFT IR ==========");
+            eprintln!("{}", func);
+            eprintln!("==================================\n");
+        }
 
         // Compile to machine code
         let mut ctx = Context::new();
@@ -1332,7 +1733,7 @@ impl CompiledNary {
         // Call the compiled function with different signatures based on return type
         // The Cranelift function receives *const u64 and loads values at u64 offsets
         unsafe {
-            match self.return_type {
+            match &self.return_type {
                 DataType::I64 => {
                     type Fn = extern "C" fn(*const u64) -> i64;
                     let func: Fn = std::mem::transmute(self.code_ptr);
@@ -1350,6 +1751,18 @@ impl CompiledNary {
                     let func: Fn = std::mem::transmute(self.code_ptr);
                     let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::Bool(result != 0))
+                }
+                DataType::Array { .. } => {
+                    Err(StagingError::ExecutionFailed {
+                        reason: "Cannot return array from compiled function via call()".to_string(),
+                    })
+                }
+                DataType::Unit => {
+                    // Unit type - just call the function and ignore result
+                    type Fn = extern "C" fn(*const u64) -> i64;
+                    let func: Fn = std::mem::transmute(self.code_ptr);
+                    let _result = func(self.arg_buffer.as_ptr());
+                    Ok(ScalarValue::U64(0))  // Return dummy value for unit
                 }
             }
         }
@@ -1427,7 +1840,7 @@ impl CompiledNary {
 
     /// Get the return type
     pub fn return_type(&self) -> DataType {
-        self.return_type
+        self.return_type.clone()
     }
 }
 
@@ -2593,6 +3006,106 @@ mod tests {
         // Should panic when unwrapping as wrong type
         let i64_val = ScalarValue::I64(42);
         i64_val.as_u64_unchecked(); // This should panic
+    }
+
+    // -------------------------------------------------------------------------
+    // LESSON 7 TESTS: Arrays and Loops (COMPLETE EXAMPLES)
+    // -------------------------------------------------------------------------
+
+    #[test]
+    fn test_lesson7_array_double() {
+        // Compile: f(input: &[u64], output: &mut [u64]) that doubles each element
+        // This is an element-wise operation: output[i] = input[i] * 2
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![
+                    DataType::arr(DataType::U64),      // input array
+                    DataType::mut_arr(DataType::U64),  // output array (mutable)
+                ],
+                DataType::U64,  // return the length processed
+                |builder, vars| {
+                    // vars[0] = input_ptr, vars[1] = input_len
+                    // vars[2] = output_ptr, vars[3] = output_len
+                    let input = StagedArray::new(vars[0], vars[1], DataType::U64, false);
+                    let output = StagedArray::new(vars[2], vars[3], DataType::U64, true);
+
+                    let len = input.len();
+
+                    // for i in 0..len {
+                    //     output[i] = input[i] * 2
+                    // }
+                    // Create the for loop first, then execute it via let1
+                    let loop_expr = builder.for_loop(
+                        StagedU64::constant(0),
+                        len.clone(),
+                        |builder, i| {
+                            let i_val = i.to_u64();
+
+                            // Use let binding to materialize the array element
+                            builder.let1(
+                                builder.array_get(input, i_val.clone()),
+                                |builder, elem_var| {
+                                    // elem_var is now a Var we can use
+                                    let elem = elem_var.to_u64();
+                                    let doubled = elem * StagedU64::constant(2);
+                                    builder.array_set(output, i_val, Expr::U64(doubled))
+                                }
+                            )
+                        },
+                    );
+
+                    // Execute the loop, then return the length
+                    builder.let1(loop_expr, |_, _| Expr::U64(len))
+                },
+            )
+            .unwrap();
+
+        // Test with actual data
+        let input_data: Vec<u64> = vec![1, 2, 3, 4, 5];
+        let mut output_data: Vec<u64> = vec![0; 5];
+
+        // Call the compiled function
+        // Arguments: [input_ptr, input_len, output_ptr, output_len]
+        let args_u64 = vec![
+            input_data.as_ptr() as u64,
+            input_data.len() as u64,
+            output_data.as_mut_ptr() as u64,
+            output_data.len() as u64,
+        ];
+
+        let result_len = compiled.call_u64(&args_u64);
+        assert_eq!(result_len, 5);
+        assert_eq!(output_data, vec![2, 4, 6, 8, 10]);
+    }
+
+    #[test]
+    fn test_lesson7_array_simple_length() {
+        // Simple test: just return the array length
+        let mut compiler = Compiler::new().unwrap();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![DataType::arr(DataType::U64)],  // input array
+                DataType::U64,                        // return length
+                |_builder, vars| {
+                    // vars[0] = input_ptr, vars[1] = input_len
+                    let input = StagedArray::new(vars[0], vars[1], DataType::U64, false);
+                    Expr::U64(input.len())
+                },
+            )
+            .unwrap();
+
+        // Test with actual data
+        let input_data: Vec<u64> = vec![1, 6, 3, 8, 5, 9, 2];
+
+        // Call the compiled function
+        let args_u64 = vec![
+            input_data.as_ptr() as u64,
+            input_data.len() as u64,
+        ];
+
+        let result = compiled.call_u64(&args_u64);
+        assert_eq!(result, 7);
     }
 }
 
