@@ -79,8 +79,8 @@ impl Var {
     }
 
     /// Get the data type of this variable
-    pub fn data_type(&self) -> DataType {
-        self.var_type.clone()
+    pub fn data_type(&self) -> &DataType {
+        &self.var_type
     }
 
     /// Convert to an expression
@@ -90,19 +90,19 @@ impl Var {
 
     /// Convert to StagedI64 (panics if not I64 type)
     pub fn to_i64(self) -> StagedI64 {
-        assert_eq!(self.var_type, DataType::I64, "Expected I64, got {:?}", self.var_type);
+        assert_eq!(&self.var_type, &DataType::I64, "Expected I64, got {:?}", self.var_type);
         StagedI64::Variable(self.var)
     }
 
     /// Convert to StagedU64 (panics if not U64 type)
     pub fn to_u64(self) -> StagedU64 {
-        assert_eq!(self.var_type, DataType::U64, "Expected U64, got {:?}", self.var_type);
+        assert_eq!(&self.var_type, &DataType::U64, "Expected U64, got {:?}", self.var_type);
         StagedU64::Variable(self.var)
     }
 
     /// Convert to StagedBool (panics if not Bool type)
     pub fn to_bool(self) -> StagedBool {
-        assert_eq!(self.var_type, DataType::Bool, "Expected Bool, got {:?}", self.var_type);
+        assert_eq!(&self.var_type, &DataType::Bool, "Expected Bool, got {:?}", self.var_type);
         StagedBool::Variable(self.var)
     }
 }
@@ -136,6 +136,15 @@ pub enum Expr {
         body: Box<Expr>,
     },
 
+    /// Mutable let binding: declare a mutable variable that can be updated with SetVar
+    /// Type is inferred from the initial value
+    LetMut {
+        var_id: u32,                     // Variable ID
+        var_type: DataType,              // Variable type
+        initial_value: Box<Expr>,        // Initial value
+        body: Box<Expr>,                 // Body where var can be read/updated
+    },
+
     /// If-then-else conditional
     /// Both branches must have the same type
     If {
@@ -161,12 +170,17 @@ pub enum Expr {
         value: Box<Expr>,         // Value to write (type must match element_type)
     },
 
-    /// For loop: for i in start..end { body }
-    /// Returns unit/void (for loops are statements)
-    ForLoop {
-        loop_var_id: u32,         // Variable ID for loop counter
-        start: Box<Expr>,         // Start value (must be U64)
-        end: Box<Expr>,           // End value exclusive (must be U64)
+    /// Update a variable's value (for loops and mutable state)
+    /// This is a statement that returns unit/void
+    SetVar {
+        var: Var,                 // Variable to update
+        value: Box<Expr>,         // New value (must match variable's type)
+    },
+
+    /// While loop: while condition { body }
+    /// Returns unit/void (while loops are statements)
+    WhileLoop {
+        condition: Box<Expr>,     // Condition expression (must be Bool)
         body: Box<Expr>,          // Body expression (can be any type, result ignored)
     },
 }
@@ -178,12 +192,14 @@ impl Expr {
             Expr::I64(_) => DataType::I64,
             Expr::U64(_) => DataType::U64,
             Expr::Bool(_) => DataType::Bool,
-            Expr::Variable(var) => var.data_type(),
+            Expr::Variable(var) => var.data_type().clone(),
             Expr::Let { body, .. } => body.data_type(),
+            Expr::LetMut { body, .. } => body.data_type(),
             Expr::If { result_type, .. } => result_type.clone(),
             Expr::ArrayGet { element_type, .. } => element_type.clone(),
             Expr::ArraySet { .. } => DataType::Unit,
-            Expr::ForLoop { .. } => DataType::Unit,
+            Expr::SetVar { .. } => DataType::Unit,
+            Expr::WhileLoop { .. } => DataType::Unit,
         }
     }
 
@@ -264,6 +280,18 @@ impl Expr {
                 }
 
                 // Evaluate the body (which can reference these variables)
+                body.codegen(builder)
+            }
+            Expr::LetMut { var_id, var_type, initial_value, body } => {
+                // Declare the mutable variable
+                let var = Variable::from_u32(*var_id);
+                builder.declare_var(var, var_type.to_cranelift_type());
+
+                // Evaluate and set the initial value
+                let val = initial_value.codegen(builder);
+                builder.def_var(var, val);
+
+                // Evaluate the body (which can read and update this variable)
                 body.codegen(builder)
             }
             Expr::If { condition, then_branch, else_branch, result_type } => {
@@ -349,18 +377,17 @@ impl Expr {
                 // ArraySet returns unit, represented as 0
                 builder.ins().iconst(types::I64, 0)
             }
-            Expr::ForLoop { loop_var_id, start, end, body } => {
-                // Declare the loop variable
-                let loop_var = Variable::from_u32(*loop_var_id);
-                builder.declare_var(loop_var, types::I64);
+            Expr::SetVar { var, value } => {
+                // Evaluate the new value
+                let new_val = value.codegen(builder);
 
-                // Evaluate start and end values
-                let start_val = start.codegen(builder);
-                let end_val = end.codegen(builder);
+                // Update the variable
+                builder.def_var(var.var, new_val);
 
-                // Initialize loop counter
-                builder.def_var(loop_var, start_val);
-
+                // SetVar returns unit, represented as 0
+                builder.ins().iconst(types::I64, 0)
+            }
+            Expr::WhileLoop { condition, body } => {
                 // Create blocks for the loop
                 let header_block = builder.create_block();
                 let body_block = builder.create_block();
@@ -369,26 +396,19 @@ impl Expr {
                 // Jump to header
                 builder.ins().jump(header_block, &[]);
 
-                // Header: check loop condition (i < end)
+                // Header: evaluate condition
                 // Note: Don't seal yet - we have a back-edge from the loop body!
                 builder.switch_to_block(header_block);
 
-                let current_i = builder.use_var(loop_var);
-                let cond = builder.ins().icmp(IntCC::UnsignedLessThan, current_i, end_val);
-                builder.ins().brif(cond, body_block, &[], exit_block, &[]);
+                let cond_val = condition.codegen(builder);
+                builder.ins().brif(cond_val, body_block, &[], exit_block, &[]);
 
-                // Body: execute loop body and increment counter
+                // Body: execute loop body
                 builder.switch_to_block(body_block);
                 builder.seal_block(body_block);
 
                 // Execute body (result is ignored)
                 body.codegen(builder);
-
-                // Increment loop counter: i = i + 1
-                let current_i = builder.use_var(loop_var);
-                let one = builder.ins().iconst(types::I64, 1);
-                let next_i = builder.ins().iadd(current_i, one);
-                builder.def_var(loop_var, next_i);
 
                 // Jump back to header (this is the back-edge)
                 builder.ins().jump(header_block, &[]);
@@ -400,7 +420,7 @@ impl Expr {
                 builder.switch_to_block(exit_block);
                 builder.seal_block(exit_block);
 
-                // ForLoop returns unit, represented as 0
+                // WhileLoop returns unit, represented as 0
                 builder.ins().iconst(types::I64, 0)
             }
         }
@@ -423,6 +443,91 @@ impl From<StagedU64> for Expr {
 impl From<StagedBool> for Expr {
     fn from(v: StagedBool) -> Self {
         Expr::Bool(v)
+    }
+}
+
+// Display trait for C-like pretty printing
+impl std::fmt::Display for Expr {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            Expr::I64(v) => write!(f, "{}", v),
+            Expr::U64(v) => write!(f, "{}", v),
+            Expr::Bool(v) => write!(f, "{}", v),
+            Expr::Variable(var) => write!(f, "v{}", var.var.as_u32()),
+            Expr::Let { bindings, body } => {
+                writeln!(f, "{{")?;
+                for (var_id, var_type, value) in bindings {
+                    writeln!(f, "  {:?} v{} = {};", var_type, var_id, value)?;
+                }
+                writeln!(f, "  {}", body)?;
+                write!(f, "}}")
+            }
+            Expr::LetMut { var_id, var_type, initial_value, body } => {
+                writeln!(f, "{{")?;
+                writeln!(f, "  {:?} mut v{} = {};", var_type, var_id, initial_value)?;
+                writeln!(f, "  {}", body)?;
+                write!(f, "}}")
+            }
+            Expr::If { condition, then_branch, else_branch, .. } => {
+                write!(f, "if ({}) {{ {} }} else {{ {} }}", condition, then_branch, else_branch)
+            }
+            Expr::ArrayGet { array, index, .. } => {
+                write!(f, "array_{}[{}]", array.ptr_var.as_u32(), index)
+            }
+            Expr::ArraySet { array, index, value } => {
+                write!(f, "array_{}[{}] = {}", array.ptr_var.as_u32(), index, value)
+            }
+            Expr::SetVar { var, value } => {
+                write!(f, "v{} = {}", var.var.as_u32(), value)
+            }
+            Expr::WhileLoop { condition, body } => {
+                write!(f, "while ({}) {{ {} }}", condition, body)
+            }
+        }
+    }
+}
+
+impl std::fmt::Display for StagedI64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StagedI64::Constant(val) => write!(f, "{}i64", val),
+            StagedI64::Variable(var) => write!(f, "v{}", var.as_u32()),
+            StagedI64::Add(left, right) => write!(f, "({} + {})", left, right),
+            StagedI64::Sub(left, right) => write!(f, "({} - {})", left, right),
+            StagedI64::Mul(left, right) => write!(f, "({} * {})", left, right),
+        }
+    }
+}
+
+impl std::fmt::Display for StagedU64 {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StagedU64::Constant(val) => write!(f, "{}u64", val),
+            StagedU64::Variable(var) => write!(f, "v{}", var.as_u32()),
+            StagedU64::Add(left, right) => write!(f, "({} + {})", left, right),
+            StagedU64::Sub(left, right) => write!(f, "({} - {})", left, right),
+            StagedU64::Mul(left, right) => write!(f, "({} * {})", left, right),
+        }
+    }
+}
+
+impl std::fmt::Display for StagedBool {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        match self {
+            StagedBool::Constant(val) => write!(f, "{}", val),
+            StagedBool::Variable(var) => write!(f, "v{}", var.as_u32()),
+            StagedBool::And(left, right) => write!(f, "({} && {})", left, right),
+            StagedBool::Or(left, right) => write!(f, "({} || {})", left, right),
+            StagedBool::Not(expr) => write!(f, "!{}", expr),
+            StagedBool::LessThan(left, right) => write!(f, "({} < {})", left, right),
+            StagedBool::LessThanOrEqual(left, right) => write!(f, "({} <= {})", left, right),
+            StagedBool::GreaterThan(left, right) => write!(f, "({} > {})", left, right),
+            StagedBool::GreaterThanOrEqual(left, right) => write!(f, "({} >= {})", left, right),
+            StagedBool::Equal(left, right) => write!(f, "({} == {})", left, right),
+            StagedBool::NotEqual(left, right) => write!(f, "({} != {})", left, right),
+            StagedBool::Cmp(cond, left, right) => write!(f, "({} {:?} {})", left, cond, right),
+            StagedBool::I64Cmp(cond, left, right) => write!(f, "({} {:?} {})", left, cond, right),
+        }
     }
 }
 
@@ -578,40 +683,34 @@ impl StagedBuilder {
         }
     }
 
-    /// Create a for loop: for i in start..end { body }
+    /// Create a while loop: while condition { body }
     ///
     /// # Example
     /// ```
     /// # use tutorial::*;
     /// let mut builder = StagedBuilder::new();
-    /// // for i in 0..10 { ... }
-    /// builder.for_loop(
-    ///     StagedU64::constant(0),
-    ///     StagedU64::constant(10),
-    ///     |builder, i| {
-    ///         // i is a Var holding the loop counter
-    ///         // use i.to_u64() to get StagedU64
-    ///         Expr::U64(StagedU64::constant(0))  // body
+    /// // while i < 10 { ... }
+    /// builder.while_loop(
+    ///     |builder| {
+    ///         // Return a boolean condition expression
+    ///         Expr::Bool(StagedBool::constant(true))
+    ///     },
+    ///     |builder| {
+    ///         // Return body expression
+    ///         Expr::U64(StagedU64::constant(0))
     ///     }
     /// );
     /// ```
-    pub fn for_loop<F>(&mut self, start: StagedU64, end: StagedU64, body: F) -> Expr
+    pub fn while_loop<C, B>(&mut self, condition: C, body: B) -> Expr
     where
-        F: FnOnce(&mut Self, Var) -> Expr,
+        C: FnOnce(&mut Self) -> Expr,
+        B: FnOnce(&mut Self) -> Expr,
     {
-        let loop_var_id = self.next_var_id;
-        self.next_var_id += 1;
+        let condition_expr = condition(self);
+        let body_expr = body(self);
 
-        // Create a variable reference for the loop counter
-        let loop_var = Var::new(Variable::from_u32(loop_var_id), DataType::U64);
-
-        // Build the body
-        let body_expr = body(self, loop_var);
-
-        Expr::ForLoop {
-            loop_var_id,
-            start: Box::new(Expr::U64(start)),
-            end: Box::new(Expr::U64(end)),
+        Expr::WhileLoop {
+            condition: Box::new(condition_expr),
             body: Box::new(body_expr),
         }
     }
@@ -623,7 +722,7 @@ impl StagedBuilder {
     /// let value = builder.array_get(array, StagedU64::constant(5));
     /// ```
     pub fn array_get(&self, array: StagedArray, index: StagedU64) -> Expr {
-        let element_type = array.element_type();
+        let element_type = array.element_type().clone();
         Expr::ArrayGet {
             array,
             index: Box::new(Expr::U64(index)),
@@ -643,6 +742,52 @@ impl StagedBuilder {
             array,
             index: Box::new(Expr::U64(index)),
             value: Box::new(value),
+        }
+    }
+
+    /// Update a variable's value (for mutable loop counters, etc.)
+    ///
+    /// # Example
+    /// ```ignore
+    /// builder.set_var(i_var, Expr::U64(new_value));
+    /// ```
+    pub fn set_var(&self, var: Var, value: Expr) -> Expr {
+        Expr::SetVar {
+            var,
+            value: Box::new(value),
+        }
+    }
+
+    /// Create a mutable let binding: let mut var = value; body
+    /// The variable can be read and updated with set_var in the body
+    ///
+    /// # Example
+    /// ```ignore
+    /// builder.let_mut(
+    ///     Expr::U64(StagedU64::constant(0)),  // i = 0
+    ///     |builder, i_var| {
+    ///         // i_var can be read and updated
+    ///         builder.set_var(i_var.clone(), Expr::U64(StagedU64::constant(1)));
+    ///         Expr::U64(i_var.to_u64())
+    ///     }
+    /// )
+    /// ```
+    pub fn let_mut<F>(&mut self, value: Expr, body: F) -> Expr
+    where
+        F: FnOnce(&mut Self, Var) -> Expr,
+    {
+        let var_type = value.data_type();
+        let var_id = self.next_var_id;
+        self.next_var_id += 1;
+
+        let var = Var::new(Variable::from_u32(var_id), var_type.clone());
+        let body_expr = body(self, var);
+
+        Expr::LetMut {
+            var_id,
+            var_type,
+            initial_value: Box::new(value),
+            body: Box::new(body_expr),
         }
     }
 }
@@ -1092,6 +1237,36 @@ impl StagedU64 {
     pub fn variable(var: Variable) -> Self {
         StagedU64::Variable(var)
     }
+
+    /// Less than comparison: self < other
+    pub fn lt(self, other: StagedU64) -> StagedBool {
+        StagedBool::LessThan(Box::new(self), Box::new(other))
+    }
+
+    /// Less than or equal comparison: self <= other
+    pub fn le(self, other: StagedU64) -> StagedBool {
+        StagedBool::LessThanOrEqual(Box::new(self), Box::new(other))
+    }
+
+    /// Greater than comparison: self > other
+    pub fn gt(self, other: StagedU64) -> StagedBool {
+        StagedBool::GreaterThan(Box::new(self), Box::new(other))
+    }
+
+    /// Greater than or equal comparison: self >= other
+    pub fn ge(self, other: StagedU64) -> StagedBool {
+        StagedBool::GreaterThanOrEqual(Box::new(self), Box::new(other))
+    }
+
+    /// Equality comparison: self == other
+    pub fn eq(self, other: StagedU64) -> StagedBool {
+        StagedBool::Equal(Box::new(self), Box::new(other))
+    }
+
+    /// Inequality comparison: self != other
+    pub fn ne(self, other: StagedU64) -> StagedBool {
+        StagedBool::NotEqual(Box::new(self), Box::new(other))
+    }
 }
 
 impl Add<StagedU64> for StagedU64 {
@@ -1462,8 +1637,8 @@ impl StagedArray {
     }
 
     /// Get the element type
-    pub fn element_type(&self) -> DataType {
-        self.element_type.clone()
+    pub fn element_type(&self) -> &DataType {
+        &self.element_type
     }
 
     /// Check if array is mutable
@@ -1598,6 +1773,13 @@ impl Compiler {
         // Generate the function body using StagedBuilder
         let mut staged_builder = StagedBuilder::new();
         let result_expr = body(&mut staged_builder, &param_vars);
+
+        // Debug output: expression tree
+        if std::env::var("DIO_DEBUG_JIT").is_ok() {
+            eprintln!("\n========== EXPRESSION TREE ==========");
+            eprintln!("{}", result_expr);
+            eprintln!("=====================================\n");
+        }
 
         // Verify return type matches
         if result_expr.data_type() != return_type {
@@ -1839,8 +2021,8 @@ impl CompiledNary {
     }
 
     /// Get the return type
-    pub fn return_type(&self) -> DataType {
-        self.return_type.clone()
+    pub fn return_type(&self) -> &DataType {
+        &self.return_type
     }
 }
 
@@ -1875,6 +2057,24 @@ pub enum StagedBool {
 
     /// Logical NOT of a staged boolean
     Not(Box<StagedBool>),
+
+    /// Comparison: less than
+    LessThan(Box<StagedU64>, Box<StagedU64>),
+
+    /// Comparison: less than or equal
+    LessThanOrEqual(Box<StagedU64>, Box<StagedU64>),
+
+    /// Comparison: greater than
+    GreaterThan(Box<StagedU64>, Box<StagedU64>),
+
+    /// Comparison: greater than or equal
+    GreaterThanOrEqual(Box<StagedU64>, Box<StagedU64>),
+
+    /// Comparison: equal
+    Equal(Box<StagedU64>, Box<StagedU64>),
+
+    /// Comparison: not equal
+    NotEqual(Box<StagedU64>, Box<StagedU64>),
 
     /// Comparison between two staged booleans
     Cmp(Condition, Box<StagedBool>, Box<StagedBool>),
@@ -1948,6 +2148,36 @@ impl Staged for StagedBool {
                 // Generate: xor <expr>, 1 (to flip the boolean)
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(expr_val, one)
+            }
+            StagedBool::LessThan(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedLessThan, left_val, right_val)
+            }
+            StagedBool::LessThanOrEqual(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, left_val, right_val)
+            }
+            StagedBool::GreaterThan(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedGreaterThan, left_val, right_val)
+            }
+            StagedBool::GreaterThanOrEqual(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, left_val, right_val)
+            }
+            StagedBool::Equal(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::Equal, left_val, right_val)
+            }
+            StagedBool::NotEqual(left, right) => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+                builder.ins().icmp(IntCC::NotEqual, left_val, right_val)
             }
             StagedBool::Cmp(cond, left, right) => {
                 let left_val = left.codegen(builder);
@@ -3032,31 +3262,47 @@ mod tests {
 
                     let len = input.len();
 
-                    // for i in 0..len {
-                    //     output[i] = input[i] * 2
-                    // }
-                    // Create the for loop first, then execute it via let1
-                    let loop_expr = builder.for_loop(
-                        StagedU64::constant(0),
-                        len.clone(),
-                        |builder, i| {
-                            let i_val = i.to_u64();
+                    // Use let_mut to create a mutable loop counter: let mut i = 0
+                    // Then use while loop: while i < len { output[i] = input[i] * 2; i = i + 1 }
+                    // This shows how while loops are more fundamental than for loops
+                    builder.let_mut(
+                        Expr::U64(StagedU64::constant(0)),  // i = 0
+                        |builder, i_var| {
+                            let loop_expr = builder.while_loop(
+                                |builder| {
+                                    // Condition: i < len
+                                    let i = i_var.clone().to_u64();
+                                    Expr::Bool(i.lt(len.clone()))
+                                },
+                                |builder| {
+                                    let i = i_var.clone().to_u64();
 
-                            // Use let binding to materialize the array element
-                            builder.let1(
-                                builder.array_get(input, i_val.clone()),
-                                |builder, elem_var| {
-                                    // elem_var is now a Var we can use
-                                    let elem = elem_var.to_u64();
-                                    let doubled = elem * StagedU64::constant(2);
-                                    builder.array_set(output, i_val, Expr::U64(doubled))
+                                    // Use let binding to materialize the array element
+                                    builder.let1(
+                                        builder.array_get(input, i.clone()),
+                                        |builder, elem_var| {
+                                            // elem_var is now a Var we can use
+                                            let elem = elem_var.to_u64();
+                                            let doubled = elem * StagedU64::constant(2);
+
+                                            // Set output[i] = doubled, then increment i
+                                            builder.let1(
+                                                builder.array_set(output, i.clone(), Expr::U64(doubled)),
+                                                |builder, _| {
+                                                    // i = i + 1
+                                                    let i_next = i_var.clone().to_u64() + StagedU64::constant(1);
+                                                    builder.set_var(i_var.clone(), Expr::U64(i_next))
+                                                }
+                                            )
+                                        }
+                                    )
                                 }
-                            )
-                        },
-                    );
+                            );
 
-                    // Execute the loop, then return the length
-                    builder.let1(loop_expr, |_, _| Expr::U64(len))
+                            // Execute the loop, then return the length
+                            builder.let1(loop_expr, |_, _| Expr::U64(len))
+                        }
+                    )
                 },
             )
             .unwrap();
