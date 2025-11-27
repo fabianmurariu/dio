@@ -39,6 +39,20 @@ use std::ops::{Add, BitAnd, BitOr, Mul, Not, Sub};
 use thiserror::Error;
 
 // =============================================================================
+// NUMERIC TYPES MODULE
+// =============================================================================
+
+pub mod num;
+
+// Re-export commonly used types
+pub use num::{
+    Numeric, PrimType,
+    StagedNum, StagedI8, StagedU8, StagedI16, StagedU16,
+    StagedI32, StagedU32, StagedI64, StagedU64,
+    StagedF32, StagedF64,
+};
+
+// =============================================================================
 // CORE INFRASTRUCTURE - The foundation for all lessons
 // =============================================================================
 
@@ -335,7 +349,7 @@ impl Expr {
 
                 // Calculate element size in bytes
                 let element_size = match element_type {
-                    DataType::I64 | DataType::U64 => 8,
+                    DataType::Prim(prim_type) => (prim_type.bit_width() / 8) as i64,
                     DataType::Bool => 1,
                     _ => panic!("Unsupported array element type: {:?}", element_type),
                 };
@@ -358,8 +372,8 @@ impl Expr {
                 let value_val = value.codegen(builder);
 
                 // Calculate element size in bytes
-                let element_size = match array.element_type {
-                    DataType::I64 | DataType::U64 => 8,
+                let element_size = match &array.element_type {
+                    DataType::Prim(prim_type) => (prim_type.bit_width() / 8) as i64,
                     DataType::Bool => 1,
                     _ => panic!("Unsupported array element type: {:?}", array.element_type),
                 };
@@ -487,29 +501,7 @@ impl std::fmt::Display for Expr {
     }
 }
 
-impl std::fmt::Display for StagedI64 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StagedI64::Constant(val) => write!(f, "{}i64", val),
-            StagedI64::Variable(var) => write!(f, "v{}", var.as_u32()),
-            StagedI64::Add(left, right) => write!(f, "({} + {})", left, right),
-            StagedI64::Sub(left, right) => write!(f, "({} - {})", left, right),
-            StagedI64::Mul(left, right) => write!(f, "({} * {})", left, right),
-        }
-    }
-}
-
-impl std::fmt::Display for StagedU64 {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        match self {
-            StagedU64::Constant(val) => write!(f, "{}u64", val),
-            StagedU64::Variable(var) => write!(f, "v{}", var.as_u32()),
-            StagedU64::Add(left, right) => write!(f, "({} + {})", left, right),
-            StagedU64::Sub(left, right) => write!(f, "({} - {})", left, right),
-            StagedU64::Mul(left, right) => write!(f, "({} * {})", left, right),
-        }
-    }
-}
+// Display implementations for StagedI64 and StagedU64 are now in num.rs
 
 impl std::fmt::Display for StagedBool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -828,47 +820,26 @@ pub trait Staged {
 ///
 /// This represents an i64 value that will exist at runtime. At compile time,
 /// we're just building a description of how to compute it.
-#[derive(Debug, Clone)]
-pub enum StagedI64 {
-    /// A constant value known at compile time
-    Constant(i64),
+// #[derive(Debug, Clone)]
+// pub enum StagedI64 {
+//     /// A constant value known at compile time
+//     Constant(i64),
+//
+//     /// A variable (function parameter) known only at runtime
+//     Variable(Variable),
+//
+//     /// Addition of two staged values
+//     Add(Box<StagedI64>, Box<StagedI64>),
+//
+//     /// Subtraction of two staged values
+//     Sub(Box<StagedI64>, Box<StagedI64>),
+//
+//     /// Multiplication of two staged values
+//     Mul(Box<StagedI64>, Box<StagedI64>),
+// }
 
-    /// A variable (function parameter) known only at runtime
-    Variable(Variable),
-
-    /// Addition of two staged values
-    Add(Box<StagedI64>, Box<StagedI64>),
-
-    /// Subtraction of two staged values
-    Sub(Box<StagedI64>, Box<StagedI64>),
-
-    /// Multiplication of two staged values
-    Mul(Box<StagedI64>, Box<StagedI64>),
-}
-
-impl From<i32> for StagedI64 {
-    fn from(value: i32) -> Self {
-        StagedI64::Constant(value as i64)
-    }
-}
-
-impl From<i64> for StagedI64 {
-    fn from(value: i64) -> Self {
-        StagedI64::Constant(value)
-    }
-}
-
+// Comparison methods for StagedI64 (returns StagedBool)
 impl StagedI64 {
-    /// Create a constant staged value
-    pub fn constant(value: i64) -> Self {
-        StagedI64::Constant(value)
-    }
-
-    /// Create a variable staged value (represents a function parameter)
-    pub fn variable(var: Variable) -> Self {
-        StagedI64::Variable(var)
-    }
-
     pub fn lt(self, right: StagedI64) -> StagedBool {
         StagedBool::I64Cmp(Condition::LessThan, self.into(), right.into())
     }
@@ -891,68 +862,6 @@ impl StagedI64 {
 
     pub fn gte(self, right: StagedI64) -> StagedBool {
         StagedBool::I64Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
-    }
-}
-
-impl Add<StagedI64> for StagedI64 {
-    type Output = StagedI64;
-
-    fn add(self, rhs: StagedI64) -> StagedI64 {
-        StagedI64::Add(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Mul<StagedI64> for StagedI64 {
-    type Output = StagedI64;
-
-    fn mul(self, rhs: StagedI64) -> StagedI64 {
-        StagedI64::Mul(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Sub<StagedI64> for StagedI64 {
-    type Output = StagedI64;
-
-    fn sub(self, rhs: StagedI64) -> StagedI64 {
-        StagedI64::Sub(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Staged for StagedI64 {
-    type RuntimeType = i64;
-
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        match self {
-            StagedI64::Constant(val) => {
-                // Generate: iconst.i64 <val>
-                builder.ins().iconst(types::I64, *val)
-            }
-            StagedI64::Variable(var) => {
-                // Generate: use_var <var>
-                builder.use_var(*var)
-            }
-            StagedI64::Add(left, right) => {
-                // Generate code for left and right, then add them
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                // Generate: iadd <left>, <right>
-                builder.ins().iadd(left_val, right_val)
-            }
-            StagedI64::Sub(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().isub(left_val, right_val)
-            }
-            StagedI64::Mul(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().imul(left_val, right_val)
-            }
-        }
-    }
-
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
     }
 }
 
@@ -1208,36 +1117,8 @@ impl StagedI64 {
 //
 // YOUR TASK: Implement StagedU64 for unsigned 64-bit integers
 
-/// A staged 64-bit unsigned integer
-#[derive(Debug, Clone)]
-pub enum StagedU64 {
-    /// A constant value known at compile time
-    Constant(u64),
-
-    /// A variable (function parameter) known only at runtime
-    Variable(Variable),
-
-    /// Addition of two staged values
-    Add(Box<StagedU64>, Box<StagedU64>),
-
-    /// Subtraction of two staged values
-    Sub(Box<StagedU64>, Box<StagedU64>),
-
-    /// Multiplication of two staged values
-    Mul(Box<StagedU64>, Box<StagedU64>),
-}
-
+// Comparison methods for StagedU64 (returns StagedBool)
 impl StagedU64 {
-    /// Create a constant staged value
-    pub fn constant(value: u64) -> Self {
-        StagedU64::Constant(value)
-    }
-
-    /// Create a variable staged value (represents a function parameter)
-    pub fn variable(var: Variable) -> Self {
-        StagedU64::Variable(var)
-    }
-
     /// Less than comparison: self < other
     pub fn lt(self, other: StagedU64) -> StagedBool {
         StagedBool::LessThan(Box::new(self), Box::new(other))
@@ -1269,68 +1150,6 @@ impl StagedU64 {
     }
 }
 
-impl Add<StagedU64> for StagedU64 {
-    type Output = StagedU64;
-
-    fn add(self, rhs: StagedU64) -> StagedU64 {
-        StagedU64::Add(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Mul<StagedU64> for StagedU64 {
-    type Output = StagedU64;
-
-    fn mul(self, rhs: StagedU64) -> StagedU64 {
-        StagedU64::Mul(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Sub<StagedU64> for StagedU64 {
-    type Output = StagedU64;
-
-    fn sub(self, rhs: StagedU64) -> StagedU64 {
-        StagedU64::Sub(Box::new(self), Box::new(rhs))
-    }
-}
-
-impl Staged for StagedU64 {
-    type RuntimeType = u64;
-
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        match self {
-            StagedU64::Constant(val) => {
-                // Generate: iconst.i64 <val>
-                builder.ins().iconst(types::I64, *val as i64)
-            }
-            StagedU64::Variable(var) => {
-                // Generate: use_var <var>
-                builder.use_var(*var)
-            }
-            StagedU64::Add(left, right) => {
-                // Generate code for left and right, then add them
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                // Generate: iadd <left>, <right>
-                builder.ins().iadd(left_val, right_val)
-            }
-            StagedU64::Sub(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().isub(left_val, right_val)
-            }
-            StagedU64::Mul(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().imul(left_val, right_val)
-            }
-        }
-    }
-
-    fn cranelift_type() -> Type {
-        types::I64
-    }
-}
-
 // =============================================================================
 // GENERIC COMPILATION - Supporting multiple types
 // =============================================================================
@@ -1342,16 +1161,34 @@ impl Staged for StagedU64 {
 /// Runtime data type for parameters and return values
 #[derive(Debug, Clone, PartialEq, Eq)]
 pub enum DataType {
-    I64,
-    U64,
+    /// Primitive numeric type (i8, u8, ..., i64, u64, f32, f64)
+    Prim(PrimType),
+
+    /// Boolean type
     Bool,
+
     /// Array type with element type and mutability flag
     Array {
         element_type: Box<DataType>,
         mutable: bool,
     },
+
     /// Unit type for statements that don't return a value
     Unit,
+}
+
+// Convenience constants for common types
+impl DataType {
+    pub const I8: DataType = DataType::Prim(PrimType::I8);
+    pub const U8: DataType = DataType::Prim(PrimType::U8);
+    pub const I16: DataType = DataType::Prim(PrimType::I16);
+    pub const U16: DataType = DataType::Prim(PrimType::U16);
+    pub const I32: DataType = DataType::Prim(PrimType::I32);
+    pub const U32: DataType = DataType::Prim(PrimType::U32);
+    pub const I64: DataType = DataType::Prim(PrimType::I64);
+    pub const U64: DataType = DataType::Prim(PrimType::U64);
+    pub const F32: DataType = DataType::Prim(PrimType::F32);
+    pub const F64: DataType = DataType::Prim(PrimType::F64);
 }
 
 impl DataType {
@@ -1432,11 +1269,12 @@ impl ScalarValue {
     }
 
     /// Convert from u64 bit representation back to typed ScalarValue
-    pub fn from_u64_bits(bits: u64, data_type: DataType) -> Self {
+    pub fn from_u64_bits(bits: u64, data_type: &DataType) -> Self {
         match data_type {
-            DataType::I64 => ScalarValue::I64(bits as i64),
-            DataType::U64 => ScalarValue::U64(bits),
+            DataType::Prim(PrimType::I64) => ScalarValue::I64(bits as i64),
+            DataType::Prim(PrimType::U64) => ScalarValue::U64(bits),
             DataType::Bool => ScalarValue::Bool(bits != 0),
+            DataType::Prim(_) => panic!("ScalarValue only supports I64/U64/Bool, got {:?}", data_type),
             DataType::Array { .. } => panic!("Cannot convert bits to array type"),
             DataType::Unit => panic!("Cannot convert bits to unit type"),
         }
@@ -1471,22 +1309,26 @@ impl DataType {
     /// Get the Cranelift type for this data type
     fn to_cranelift_type(&self) -> Type {
         match self {
-            DataType::I64 => types::I64,
-            DataType::U64 => types::I64, // U64 also uses I64 in Cranelift
+            DataType::Prim(prim_type) => prim_type.to_cranelift_type(),
             DataType::Bool => types::I8, // Booleans are i8 (0 or 1)
             DataType::Array { .. } => types::I64, // Arrays are pointers (i64)
             DataType::Unit => types::I64, // Unit represented as i64 (unused)
         }
     }
 
-    /// Check if this is a scalar type
-    fn is_scalar(&self) -> bool {
-        matches!(self, DataType::I64 | DataType::U64 | DataType::Bool)
+    /// Check if this is a scalar type (primitive numeric or boolean)
+    pub fn is_scalar(&self) -> bool {
+        matches!(self, DataType::Prim(_) | DataType::Bool)
     }
 
     /// Check if this is an array type
-    fn is_array(&self) -> bool {
+    pub fn is_array(&self) -> bool {
         matches!(self, DataType::Array { .. })
+    }
+
+    /// Check if this is a primitive numeric type
+    pub fn is_prim(&self) -> bool {
+        matches!(self, DataType::Prim(_))
     }
 }
 
@@ -1916,17 +1758,22 @@ impl CompiledNary {
         // The Cranelift function receives *const u64 and loads values at u64 offsets
         unsafe {
             match &self.return_type {
-                DataType::I64 => {
+                DataType::Prim(PrimType::I64) => {
                     type Fn = extern "C" fn(*const u64) -> i64;
                     let func: Fn = std::mem::transmute(self.code_ptr);
                     let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::I64(result))
                 }
-                DataType::U64 => {
+                DataType::Prim(PrimType::U64) => {
                     type Fn = extern "C" fn(*const u64) -> i64;
                     let func: Fn = std::mem::transmute(self.code_ptr);
                     let result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::U64(result as u64))
+                }
+                DataType::Prim(_) => {
+                    Err(StagingError::ExecutionFailed {
+                        reason: format!("ScalarValue only supports I64/U64, got {:?}", self.return_type),
+                    })
                 }
                 DataType::Bool => {
                     type Fn = extern "C" fn(*const u64) -> i8;
