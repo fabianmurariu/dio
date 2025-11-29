@@ -581,10 +581,10 @@ impl StagedBuilder {
     /// let y = Expr::I64(StagedI64::constant(4));
     ///
     /// let expr = builder.let_n(vec![x, y], |builder, vars| {
-    ///     let x = &vars[0].to_i64();
-    ///     let y = &vars[1].to_i64();
+    ///     let x = vars[0].clone().to_i64();
+    ///     let y = vars[1].clone().to_i64();
     ///     // x^2 + y^2
-    ///     Expr::I64((x.clone() * x) + (y.clone() * y))
+    ///     Expr::I64((x.clone() * x.clone()) + (y.clone() * y.clone()))
     /// });
     /// ```
     pub fn let_n<F>(&mut self, values: Vec<Expr>, body: F) -> Expr
