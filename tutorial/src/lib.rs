@@ -581,8 +581,8 @@ impl StagedBuilder {
     /// let y = Expr::I64(StagedI64::constant(4));
     ///
     /// let expr = builder.let_n(vec![x, y], |builder, vars| {
-    ///     let x = vars[0].to_i64();
-    ///     let y = vars[1].to_i64();
+    ///     let x = &vars[0].to_i64();
+    ///     let y = &vars[1].to_i64();
     ///     // x^2 + y^2
     ///     Expr::I64((x.clone() * x) + (y.clone() * y))
     /// });
@@ -828,32 +828,6 @@ pub trait Staged {
 //     Mul(Box<StagedI64>, Box<StagedI64>),
 // }
 
-// Comparison methods for StagedI64 (returns StagedBool)
-impl StagedI64 {
-    pub fn lt(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::LessThan, self.into(), right.into())
-    }
-
-    pub fn gt(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::GreaterThan, self.into(), right.into())
-    }
-
-    pub fn eq(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::Equal, self.into(), right.into())
-    }
-
-    pub fn ne(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::NotEqual, self.into(), right.into())
-    }
-
-    pub fn lte(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::LessThanOrEqual, self.into(), right.into())
-    }
-
-    pub fn gte(self, right: StagedI64) -> StagedBool {
-        StagedBool::I64Cmp(Condition::GreaterThanOrEqual, self.into(), right.into())
-    }
-}
 
 /// A JIT compiler that can compile staged functions to machine code
 pub struct Compiler {
@@ -1107,38 +1081,6 @@ impl StagedI64 {
 //
 // YOUR TASK: Implement StagedU64 for unsigned 64-bit integers
 
-// Comparison methods for StagedU64 (returns StagedBool)
-impl StagedU64 {
-    /// Less than comparison: self < other
-    pub fn lt(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::LessThan, Box::new(self), Box::new(other))
-    }
-
-    /// Less than or equal comparison: self <= other
-    pub fn le(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::LessThanOrEqual, Box::new(self), Box::new(other))
-    }
-
-    /// Greater than comparison: self > other
-    pub fn gt(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::GreaterThan, Box::new(self), Box::new(other))
-    }
-
-    /// Greater than or equal comparison: self >= other
-    pub fn ge(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::GreaterThanOrEqual, Box::new(self), Box::new(other))
-    }
-
-    /// Equality comparison: self == other
-    pub fn eq(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::Equal, Box::new(self), Box::new(other))
-    }
-
-    /// Inequality comparison: self != other
-    pub fn ne(self, other: StagedU64) -> StagedBool {
-        StagedBool::U64Cmp(Condition::NotEqual, Box::new(self), Box::new(other))
-    }
-}
 
 // =============================================================================
 // GENERIC COMPILATION - Supporting multiple types
@@ -1439,11 +1381,11 @@ impl Compiler {
     ///     }
     /// ).unwrap();
     /// ```
-    pub fn compile_nary(
+    pub fn compile_nary<E:Into<Expr>>(
         &mut self,
         param_types: Vec<DataType>,
         return_type: DataType,
-        body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> Expr,
+        body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> E,
     ) -> Result<CompiledNary, StagingError> {
         // Count total variables needed (scalars use 1 var, arrays use 2: ptr + len)
         let mut total_vars = 0;
@@ -1541,6 +1483,7 @@ impl Compiler {
         // Generate the function body using StagedBuilder
         let mut staged_builder = StagedBuilder::new();
         let result_expr = body(&mut staged_builder, &param_vars);
+        let result_expr = result_expr.into();
 
         // Debug output: expression tree
         if std::env::var("DIO_DEBUG_JIT").is_ok() {
@@ -1881,7 +1824,7 @@ mod tests {
             .compile_nary(vec![DataType::U64], DataType::U64, |_, param| {
                 let x = StagedU64::variable(param[0]);
                 let ten = StagedU64::constant(10);
-                (x + ten).into()
+                (x + ten)
             })
             .unwrap();
 
@@ -1904,7 +1847,7 @@ mod tests {
             .compile_nary(vec![DataType::I64], DataType::Bool, |_, param| {
                 let x = StagedI64::variable(param[0]);
                 let ten = StagedI64::constant(10);
-                (x.lt(ten)).into()
+                x.lt(&ten)
             })
             .unwrap();
 
@@ -1927,7 +1870,7 @@ mod tests {
             .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let ten = StagedI64::constant(10);
-                let cond = x.lt(ten);
+                let cond = x.lt(&ten);
                 let one = StagedI64::constant(1);
                 let zero = StagedI64::constant(0);
                 builder.if_then_else(
@@ -1969,7 +1912,7 @@ mod tests {
             .compile_nary(vec![DataType::I64], DataType::I64, |builder, vars| {
                 let x = StagedI64::variable(vars[0]);
                 let zero = StagedI64::constant(0);
-                let cond = x.clone().lt(zero.clone());
+                let cond = x.lt(&zero);
                 let neg_x = zero - x.clone();
                 builder.if_then_else(
                     Expr::Bool(cond),
@@ -2125,7 +2068,7 @@ mod tests {
                 let two = StagedI64::constant(2);
 
                 // Absolute value using if-then-else
-                let cond = x.clone().lt(zero.clone());
+                let cond = x.lt(&zero);
                 let neg_x = zero - x.clone();
 
                 // Compute the if-then-else expression first
@@ -2170,7 +2113,7 @@ mod tests {
                 let zero = StagedI64::constant(0);
                 let two = StagedI64::constant(2);
 
-                let cond = x.clone().lt(zero.clone());
+                let cond = x.lt(&zero);
                 let neg_x = zero - x.clone();
 
                 builder.if_then_else(
@@ -2663,7 +2606,7 @@ mod tests {
                                 |builder| {
                                     // Condition: i < len
                                     let i = i_var.clone().to_u64();
-                                    Expr::Bool(i.lt(len.clone()))
+                                    Expr::Bool(i.lt(&len))
                                 },
                                 |builder| {
                                     let i = i_var.clone().to_u64();
@@ -2743,6 +2686,166 @@ mod tests {
 
         let result = compiled.call_u64(&args_u64);
         assert_eq!(result, 7);
+    }
+
+    // -------------------------------------------------------------------------
+    // PROPERTY-BASED TESTS FOR COMPARISONS
+    // -------------------------------------------------------------------------
+
+    use proptest::prelude::*;
+
+    // Property: Compiled comparisons should match Rust's native comparisons
+    proptest! {
+        #[test]
+        fn prop_i64_lt_matches_native(x in -1000i64..1000, y in -1000i64..1000) {
+            let mut compiler = Compiler::new().unwrap();
+            let mut compiled = compiler.compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    x.lt(&y)
+                }
+            ).unwrap();
+
+            let result = compiled.call(&[ScalarValue::I64(x), ScalarValue::I64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+            assert_eq!(result, x < y, "Compiled x < y should match native for x={}, y={}", x, y);
+        }
+
+        #[test]
+        fn prop_u64_lt_matches_native(x in 0u64..1000, y in 0u64..1000) {
+            let mut compiler = Compiler::new().unwrap();
+            let mut compiled = compiler.compile_nary(
+                vec![DataType::U64, DataType::U64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedU64::variable(vars[0]);
+                    let y = StagedU64::variable(vars[1]);
+                    x.lt(&y)
+                }
+            ).unwrap();
+
+            let result = compiled.call(&[ScalarValue::U64(x), ScalarValue::U64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+            assert_eq!(result, x < y, "Compiled x < y should match native for x={}, y={}", x, y);
+        }
+
+        #[test]
+        fn prop_i64_eq_matches_native(x in -1000i64..1000, y in -1000i64..1000) {
+            let mut compiler = Compiler::new().unwrap();
+            let mut compiled = compiler.compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    x.eq(&y)
+                }
+            ).unwrap();
+
+            let result = compiled.call(&[ScalarValue::I64(x), ScalarValue::I64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+            assert_eq!(result, x == y, "Compiled x == y should match native for x={}, y={}", x, y);
+        }
+    }
+
+    // Property: Reflexivity - x == x should always be true
+    proptest! {
+        #[test]
+        fn prop_i64_eq_reflexive(x in -1000i64..1000) {
+            let mut compiler = Compiler::new().unwrap();
+            let mut compiled = compiler.compile_nary(
+                vec![DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x1 = StagedI64::variable(vars[0]);
+                    let x2 = StagedI64::variable(vars[0]);
+                    x1.eq(&x2)
+                }
+            ).unwrap();
+
+            let result = compiled.call(&[ScalarValue::I64(x)])
+                .unwrap()
+                .as_bool_unchecked();
+            assert!(result, "x == x should always be true for x={}", x);
+        }
+
+        #[test]
+        fn prop_u64_eq_reflexive(x in 0u64..1000) {
+            let mut compiler = Compiler::new().unwrap();
+            let mut compiled = compiler.compile_nary(
+                vec![DataType::U64],
+                DataType::Bool,
+                |_, vars| {
+                    let x1 = StagedU64::variable(vars[0]);
+                    let x2 = StagedU64::variable(vars[0]);
+                    x1.eq(&x2)
+                }
+            ).unwrap();
+
+            let result = compiled.call(&[ScalarValue::U64(x)])
+                .unwrap()
+                .as_bool_unchecked();
+            assert!(result, "x == x should always be true for x={}", x);
+        }
+    }
+
+    // Property: Trichotomy - exactly one of x < y, x == y, x > y is true
+    proptest! {
+        #[test]
+        fn prop_i64_trichotomy(x in -1000i64..1000, y in -1000i64..1000) {
+            // Use separate compiler instances to avoid function name conflicts
+            let mut compiler_lt = Compiler::new().unwrap();
+            let mut lt_compiled = compiler_lt.compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    x.lt(&y)
+                }
+            ).unwrap();
+
+            let mut compiler_eq = Compiler::new().unwrap();
+            let mut eq_compiled = compiler_eq.compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    x.eq(&y)
+                }
+            ).unwrap();
+
+            let mut compiler_gt = Compiler::new().unwrap();
+            let mut gt_compiled = compiler_gt.compile_nary(
+                vec![DataType::I64, DataType::I64],
+                DataType::Bool,
+                |_, vars| {
+                    let x = StagedI64::variable(vars[0]);
+                    let y = StagedI64::variable(vars[1]);
+                    x.gt(&y)
+                }
+            ).unwrap();
+
+            let lt = lt_compiled.call(&[ScalarValue::I64(x), ScalarValue::I64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+            let eq = eq_compiled.call(&[ScalarValue::I64(x), ScalarValue::I64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+            let gt = gt_compiled.call(&[ScalarValue::I64(x), ScalarValue::I64(y)])
+                .unwrap()
+                .as_bool_unchecked();
+
+            let count = (lt as u8) + (eq as u8) + (gt as u8);
+            assert_eq!(count, 1, "Exactly one of x < y, x == y, x > y should be true for x={}, y={}", x, y);
+        }
     }
 }
 

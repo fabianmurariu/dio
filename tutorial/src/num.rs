@@ -391,3 +391,65 @@ pub type StagedI64 = StagedNum<i64>;
 pub type StagedU64 = StagedNum<u64>;
 pub type StagedF32 = StagedNum<f32>;
 pub type StagedF64 = StagedNum<f64>;
+
+// =============================================================================
+// COMPARISON OPERATIONS
+// =============================================================================
+
+// Import StagedBool and Condition for comparison operations
+use crate::bool::{Condition, StagedBool};
+
+/// Macro to implement comparison methods for a specific numeric type
+///
+/// This generates all six comparison operations (lt, le, gt, ge, eq, ne)
+/// for the given type, returning the appropriate StagedBool variant.
+///
+/// Note: These methods take `&self` instead of consuming `self` for ergonomics.
+/// The cloning is handled internally, so callers don't need to clone explicitly.
+macro_rules! impl_staged_num_comparisons {
+    ($rust_type:ty, $cmp_variant:ident) => {
+        impl StagedNum<$rust_type> {
+            /// Less than: self < other
+            pub fn lt(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::LessThan, Box::new(self.clone()), Box::new(other.clone()))
+            }
+
+            /// Less than or equal: self <= other
+            pub fn le(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::LessThanOrEqual, Box::new(self.clone()), Box::new(other.clone()))
+            }
+
+            /// Greater than: self > other
+            pub fn gt(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::GreaterThan, Box::new(self.clone()), Box::new(other.clone()))
+            }
+
+            /// Greater than or equal: self >= other
+            pub fn ge(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::GreaterThanOrEqual, Box::new(self.clone()), Box::new(other.clone()))
+            }
+
+            /// Equal: self == other
+            pub fn eq(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::Equal, Box::new(self.clone()), Box::new(other.clone()))
+            }
+
+            /// Not equal: self != other
+            pub fn ne(&self, other: &Self) -> StagedBool {
+                StagedBool::$cmp_variant(Condition::NotEqual, Box::new(self.clone()), Box::new(other.clone()))
+            }
+        }
+    };
+}
+
+// Generate comparison implementations for all numeric types
+impl_staged_num_comparisons!(i8, I8Cmp);
+impl_staged_num_comparisons!(u8, U8Cmp);
+impl_staged_num_comparisons!(i16, I16Cmp);
+impl_staged_num_comparisons!(u16, U16Cmp);
+impl_staged_num_comparisons!(i32, I32Cmp);
+impl_staged_num_comparisons!(u32, U32Cmp);
+impl_staged_num_comparisons!(i64, I64Cmp);
+impl_staged_num_comparisons!(u64, U64Cmp);
+impl_staged_num_comparisons!(f32, F32Cmp);
+impl_staged_num_comparisons!(f64, F64Cmp);

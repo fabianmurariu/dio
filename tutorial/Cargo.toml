@@ -16,4 +16,4 @@ cranelift-native = { workspace = true }
 thiserror = { workspace = true }
 
 [dev-dependencies]
-# None needed yet
+proptest = "1.4"
