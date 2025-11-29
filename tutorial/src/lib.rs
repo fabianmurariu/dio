@@ -53,6 +53,9 @@ pub mod expr;
 /// Runtime execution components (ScalarValue, CompiledNary)
 pub mod runtime;
 
+/// Foreign Function Interface for calling Rust functions from JIT code
+pub mod ffi;
+
 // Re-export commonly used types
 pub use num::{
     Numeric, PrimType,
@@ -407,6 +410,10 @@ pub enum DataType {
         mutable: bool,
     },
 
+    /// External pointer (opaque pointer to Rust data)
+    /// The String describes what it points to (for debugging/error messages)
+    ExtPtr(String),
+
     /// Unit type for statements that don't return a value
     Unit,
 }
@@ -482,6 +489,7 @@ impl DataType {
             DataType::Prim(prim_type) => prim_type.to_cranelift_type(),
             DataType::Bool => types::I8, // Booleans are i8 (0 or 1)
             DataType::Array { .. } => types::I64, // Arrays are pointers (i64)
+            DataType::ExtPtr(_) => types::I64, // External pointers are i64
             DataType::Unit => types::I64, // Unit represented as i64 (unused)
         }
     }
@@ -2148,6 +2156,64 @@ mod tests {
             let count = (lt as u8) + (eq as u8) + (gt as u8);
             assert_eq!(count, 1, "Exactly one of x < y, x == y, x > y should be true for x={}, y={}", x, y);
         }
+    }
+
+    // -------------------------------------------------------------------------
+    // FFI TESTS - External function calls and iterators
+    // -------------------------------------------------------------------------
+
+    use crate::ffi::*;
+
+    #[test]
+    fn test_ffi_option_i64() {
+        // Test OptionI64 struct
+        let some_val = OptionI64::some(42);
+        assert_eq!(some_val.has_value, 1);
+        assert_eq!(some_val.value, 42);
+        assert_eq!(some_val.to_option(), Some(42));
+
+        let none_val = OptionI64::none();
+        assert_eq!(none_val.has_value, 0);
+        assert_eq!(none_val.to_option(), None);
+    }
+
+    #[test]
+    fn test_ffi_iterator_basic() {
+        // Create an iterator from 0..5
+        let iter_ptr = iter_create_range(0, 5);
+
+        // Iterate and collect values
+        let mut values = Vec::new();
+        loop {
+            let option = iter_next_i64(iter_ptr);
+            match option.to_option() {
+                Some(val) => values.push(val),
+                None => break,
+            }
+        }
+
+        assert_eq!(values, vec![0, 1, 2, 3, 4]);
+
+        // Clean up
+        iter_drop(iter_ptr);
+    }
+
+    #[test]
+    fn test_ffi_external_function_registry() {
+        let mut registry = ExternalFunctionRegistry::new();
+
+        // Register iter_next_i64
+        registry.register(
+            "iter_next_i64".to_string(),
+            vec![DataType::ExtPtr("IterBoxI64".to_string())],
+            DataType::ExtPtr("OptionI64".to_string()),
+            iter_next_i64 as *const u8,
+        );
+
+        assert!(registry.has_function("iter_next_i64"));
+        let sig = registry.get_signature("iter_next_i64").unwrap();
+        assert_eq!(sig.name, "iter_next_i64");
+        assert_eq!(sig.params.len(), 1);
     }
 }
 

@@ -142,6 +142,14 @@ pub enum Expr {
         condition: Box<Expr>,     // Condition expression (must be Bool)
         body: Box<Expr>,          // Body expression (can be any type, result ignored)
     },
+
+    /// Call an external (Rust) function
+    /// The function must be registered in the Compiler's function registry
+    ExternalCall {
+        function_name: String,    // Name of the external function
+        args: Vec<Box<Expr>>,     // Arguments (types must match signature)
+        return_type: DataType,    // Return type from the function signature
+    },
 }
 
 impl Expr {
@@ -159,6 +167,7 @@ impl Expr {
             Expr::ArraySet { .. } => DataType::Unit,
             Expr::SetVar { .. } => DataType::Unit,
             Expr::WhileLoop { .. } => DataType::Unit,
+            Expr::ExternalCall { return_type, .. } => return_type.clone(),
         }
     }
 
@@ -382,6 +391,17 @@ impl Expr {
                 // WhileLoop returns unit, represented as 0
                 builder.ins().iconst(types::I64, 0)
             }
+            Expr::ExternalCall { function_name, args, return_type } => {
+                // TODO: Implement external function calls
+                // This requires:
+                // 1. Looking up the function signature from the registry
+                // 2. Declaring the external function in the module
+                // 3. Getting a FuncRef for it
+                // 4. Generating argument values
+                // 5. Calling the function with builder.ins().call()
+                // For now, we'll implement this in the Compiler update
+                unimplemented!("External function calls not yet implemented: {}", function_name)
+            }
         }
     }
 }
@@ -447,6 +467,16 @@ impl std::fmt::Display for Expr {
             }
             Expr::WhileLoop { condition, body } => {
                 write!(f, "while ({}) {{ {} }}", condition, body)
+            }
+            Expr::ExternalCall { function_name, args, .. } => {
+                write!(f, "{}(", function_name)?;
+                for (i, arg) in args.iter().enumerate() {
+                    if i > 0 {
+                        write!(f, ", ")?;
+                    }
+                    write!(f, "{}", arg)?;
+                }
+                write!(f, ")")
             }
         }
     }
@@ -709,6 +739,33 @@ impl StagedBuilder {
             var_type,
             initial_value: Box::new(value),
             body: Box::new(body_expr),
+        }
+    }
+
+    /// Call an external (Rust) function
+    ///
+    /// The function must be registered in the Compiler's function registry before compilation.
+    /// Arguments and return type must match the registered signature.
+    ///
+    /// # Example
+    /// ```ignore
+    /// // Assuming iter_next_i64 is registered as: (ExtPtr) -> (I8, I64)
+    /// let option_i64 = builder.call_external(
+    ///     "iter_next_i64",
+    ///     vec![Expr::Variable(iter_ptr_var)],
+    ///     DataType::ExtPtr("OptionI64".to_string()),
+    /// );
+    /// ```
+    pub fn call_external(
+        &self,
+        function_name: &str,
+        args: Vec<Expr>,
+        return_type: DataType,
+    ) -> Expr {
+        Expr::ExternalCall {
+            function_name: function_name.to_string(),
+            args: args.into_iter().map(Box::new).collect(),
+            return_type,
         }
     }
 }
