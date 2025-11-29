@@ -1111,32 +1111,32 @@ impl StagedI64 {
 impl StagedU64 {
     /// Less than comparison: self < other
     pub fn lt(self, other: StagedU64) -> StagedBool {
-        StagedBool::LessThan(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::LessThan, Box::new(self), Box::new(other))
     }
 
     /// Less than or equal comparison: self <= other
     pub fn le(self, other: StagedU64) -> StagedBool {
-        StagedBool::LessThanOrEqual(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::LessThanOrEqual, Box::new(self), Box::new(other))
     }
 
     /// Greater than comparison: self > other
     pub fn gt(self, other: StagedU64) -> StagedBool {
-        StagedBool::GreaterThan(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::GreaterThan, Box::new(self), Box::new(other))
     }
 
     /// Greater than or equal comparison: self >= other
     pub fn ge(self, other: StagedU64) -> StagedBool {
-        StagedBool::GreaterThanOrEqual(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::GreaterThanOrEqual, Box::new(self), Box::new(other))
     }
 
     /// Equality comparison: self == other
     pub fn eq(self, other: StagedU64) -> StagedBool {
-        StagedBool::Equal(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::Equal, Box::new(self), Box::new(other))
     }
 
     /// Inequality comparison: self != other
     pub fn ne(self, other: StagedU64) -> StagedBool {
-        StagedBool::NotEqual(Box::new(self), Box::new(other))
+        StagedBool::U64Cmp(Condition::NotEqual, Box::new(self), Box::new(other))
     }
 }
 

@@ -9,10 +9,10 @@ use cranelift_codegen::ir::{types, InstBuilder, Type, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use std::ops::{BitAnd, BitOr, Not};
 
-use crate::num::{StagedI64, StagedU64};
+use crate::num::*;
 use crate::Staged;
 
-/// Comparison condition for integer comparisons
+/// Comparison condition for integer and float comparisons
 #[derive(Debug, Clone, Copy)]
 pub enum Condition {
     LessThan,
@@ -36,50 +36,53 @@ impl From<Condition> for IntCC {
     }
 }
 
-/// A staged boolean value
+/// Macro to generate comparison variants for all numeric types
 ///
-/// Represents boolean computations that will be compiled to machine code.
-/// Booleans are represented as i8 in Cranelift (0 = false, 1 = true).
-#[derive(Debug, Clone)]
-pub enum StagedBool {
-    /// A constant boolean value
-    Constant(bool),
+/// This reduces boilerplate while maintaining type safety - each numeric type
+/// gets its own comparison variant with proper type checking at compile time.
+macro_rules! numeric_cmp_variants {
+    ($($variant:ident => $type:ty),* $(,)?) => {
+        /// A staged boolean value
+        ///
+        /// Represents boolean computations that will be compiled to machine code.
+        /// Booleans are represented as i8 in Cranelift (0 = false, 1 = true).
+        #[derive(Debug, Clone)]
+        pub enum StagedBool {
+            /// A constant boolean value
+            Constant(bool),
 
-    /// A variable (function parameter) known only at runtime
-    Variable(Variable),
+            /// A variable (function parameter) known only at runtime
+            Variable(Variable),
 
-    /// Logical AND of two staged booleans
-    And(Box<StagedBool>, Box<StagedBool>),
+            /// Logical AND of two staged booleans
+            And(Box<StagedBool>, Box<StagedBool>),
 
-    /// Logical OR of two staged booleans
-    Or(Box<StagedBool>, Box<StagedBool>),
+            /// Logical OR of two staged booleans
+            Or(Box<StagedBool>, Box<StagedBool>),
 
-    /// Logical NOT of a staged boolean
-    Not(Box<StagedBool>),
+            /// Logical NOT of a staged boolean
+            Not(Box<StagedBool>),
 
-    /// Comparison: less than (unsigned)
-    LessThan(Box<StagedU64>, Box<StagedU64>),
+            $(
+                #[doc = concat!("Comparison between two ", stringify!($type), " values")]
+                $variant(Condition, Box<$type>, Box<$type>),
+            )*
+        }
+    };
+}
 
-    /// Comparison: less than or equal (unsigned)
-    LessThanOrEqual(Box<StagedU64>, Box<StagedU64>),
-
-    /// Comparison: greater than (unsigned)
-    GreaterThan(Box<StagedU64>, Box<StagedU64>),
-
-    /// Comparison: greater than or equal (unsigned)
-    GreaterThanOrEqual(Box<StagedU64>, Box<StagedU64>),
-
-    /// Comparison: equal (unsigned)
-    Equal(Box<StagedU64>, Box<StagedU64>),
-
-    /// Comparison: not equal (unsigned)
-    NotEqual(Box<StagedU64>, Box<StagedU64>),
-
-    /// Generic comparison between two staged booleans
-    Cmp(Condition, Box<StagedBool>, Box<StagedBool>),
-
-    /// Comparison between two staged i64 values
-    I64Cmp(Condition, Box<StagedI64>, Box<StagedI64>),
+// Generate the StagedBool enum with all numeric comparison variants
+numeric_cmp_variants! {
+    I8Cmp => StagedI8,
+    U8Cmp => StagedU8,
+    I16Cmp => StagedI16,
+    U16Cmp => StagedU16,
+    I32Cmp => StagedI32,
+    U32Cmp => StagedU32,
+    I64Cmp => StagedI64,
+    U64Cmp => StagedU64,
+    F32Cmp => StagedF32,
+    F64Cmp => StagedF64,
 }
 
 impl StagedBool {
@@ -94,6 +97,16 @@ impl StagedBool {
     }
 }
 
+/// Helper macro to generate codegen for each comparison variant
+macro_rules! codegen_cmp {
+    ($builder:expr, $cond:expr, $left:expr, $right:expr) => {{
+        let left_val = $left.codegen($builder);
+        let right_val = $right.codegen($builder);
+        let int_cc: IntCC = (*$cond).into();
+        $builder.ins().icmp(int_cc, left_val, right_val)
+    }};
+}
+
 impl Staged for StagedBool {
     type RuntimeType = bool;
 
@@ -103,9 +116,7 @@ impl Staged for StagedBool {
                 let int_val = if *val { 1 } else { 0 };
                 builder.ins().iconst(types::I8, int_val)
             }
-            StagedBool::Variable(var) => {
-                builder.use_var(*var)
-            }
+            StagedBool::Variable(var) => builder.use_var(*var),
             StagedBool::And(left, right) => {
                 let left_val = left.codegen(builder);
                 let right_val = right.codegen(builder);
@@ -118,52 +129,20 @@ impl Staged for StagedBool {
             }
             StagedBool::Not(expr) => {
                 let expr_val = expr.codegen(builder);
-                // XOR with 1 flips the boolean
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(expr_val, one)
             }
-            StagedBool::LessThan(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::UnsignedLessThan, left_val, right_val)
-            }
-            StagedBool::LessThanOrEqual(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::UnsignedLessThanOrEqual, left_val, right_val)
-            }
-            StagedBool::GreaterThan(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::UnsignedGreaterThan, left_val, right_val)
-            }
-            StagedBool::GreaterThanOrEqual(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::UnsignedGreaterThanOrEqual, left_val, right_val)
-            }
-            StagedBool::Equal(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::Equal, left_val, right_val)
-            }
-            StagedBool::NotEqual(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                builder.ins().icmp(IntCC::NotEqual, left_val, right_val)
-            }
-            StagedBool::Cmp(cond, left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                let int_cc: IntCC = (*cond).into();
-                builder.ins().icmp(int_cc, left_val, right_val)
-            }
-            StagedBool::I64Cmp(cond, left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
-                let int_cc: IntCC = (*cond).into();
-                builder.ins().icmp(int_cc, left_val, right_val)
-            }
+            // Each comparison variant (all follow the same pattern)
+            StagedBool::I8Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::U8Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::I16Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::U16Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::I32Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::U32Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::I64Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::U64Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::F32Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
+            StagedBool::F64Cmp(cond, left, right) => codegen_cmp!(builder, cond, left, right),
         }
     }
 
@@ -198,6 +177,18 @@ impl Not for StagedBool {
     }
 }
 
+/// Helper to format comparison operator
+fn format_condition(cond: &Condition) -> &'static str {
+    match cond {
+        Condition::LessThan => "<",
+        Condition::LessThanOrEqual => "<=",
+        Condition::GreaterThan => ">",
+        Condition::GreaterThanOrEqual => ">=",
+        Condition::NotEqual => "!=",
+        Condition::Equal => "==",
+    }
+}
+
 // Display implementation for debugging
 impl std::fmt::Display for StagedBool {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
@@ -207,14 +198,37 @@ impl std::fmt::Display for StagedBool {
             StagedBool::And(left, right) => write!(f, "({} && {})", left, right),
             StagedBool::Or(left, right) => write!(f, "({} || {})", left, right),
             StagedBool::Not(expr) => write!(f, "!{}", expr),
-            StagedBool::LessThan(left, right) => write!(f, "({} < {})", left, right),
-            StagedBool::LessThanOrEqual(left, right) => write!(f, "({} <= {})", left, right),
-            StagedBool::GreaterThan(left, right) => write!(f, "({} > {})", left, right),
-            StagedBool::GreaterThanOrEqual(left, right) => write!(f, "({} >= {})", left, right),
-            StagedBool::Equal(left, right) => write!(f, "({} == {})", left, right),
-            StagedBool::NotEqual(left, right) => write!(f, "({} != {})", left, right),
-            StagedBool::Cmp(cond, left, right) => write!(f, "({} {:?} {})", left, cond, right),
-            StagedBool::I64Cmp(cond, left, right) => write!(f, "({} {:?} {})", left, cond, right),
+            // Each numeric comparison variant needs its own arm due to type differences
+            StagedBool::I8Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::U8Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::I16Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::U16Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::I32Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::U32Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::I64Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::U64Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::F32Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
+            StagedBool::F64Cmp(cond, left, right) => {
+                write!(f, "({} {} {})", left, format_condition(cond), right)
+            }
         }
     }
 }
