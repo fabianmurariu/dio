@@ -149,6 +149,11 @@ impl ExternalFunctionRegistry {
     pub fn has_function(&self, name: &str) -> bool {
         self.functions.contains_key(name)
     }
+
+    /// Get an iterator over all registered functions
+    pub fn iter(&self) -> impl Iterator<Item = (&String, &(FunctionSignature, *const u8))> {
+        self.functions.iter()
+    }
 }
 
 // =============================================================================

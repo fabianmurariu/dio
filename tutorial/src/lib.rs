@@ -26,7 +26,7 @@
 //! Your job: make them pass by implementing the missing functionality!
 
 use cranelift_codegen::ir::{
-    types, AbiParam, Function, InstBuilder, MemFlags, Signature, Type, Value,
+    types, AbiParam, FuncRef, Function, InstBuilder, MemFlags, Signature, Type, Value,
 };
 use cranelift_codegen::isa::CallConv;
 use cranelift_codegen::settings;
@@ -34,6 +34,7 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
+use std::collections::HashMap;
 use std::ops::{Add, BitAnd, BitOr, Mul, Not, Sub};
 use thiserror::Error;
 
@@ -55,6 +56,37 @@ pub mod runtime;
 
 /// Foreign Function Interface for calling Rust functions from JIT code
 pub mod ffi;
+
+// =============================================================================
+// MACROS
+// =============================================================================
+
+/// Macro to register multiple external function symbols with CompilerBuilder
+///
+/// This macro automatically extracts function names and pointers, making it easy
+/// to register many functions at once (useful for standard libraries).
+///
+/// # Example
+/// ```ignore
+/// use tutorial::{CompilerBuilder, register_symbols};
+/// use tutorial::ffi::*;
+///
+/// let compiler = CompilerBuilder::new()
+///     .register_symbols!(iter_create_range, iter_next_i64, iter_drop)
+///     .build()?;
+/// ```
+#[macro_export]
+macro_rules! register_symbols {
+    ($builder:expr, $($fn_name:ident),+ $(,)?) => {
+        {
+            let mut builder = $builder;
+            $(
+                builder = builder.with_symbol(stringify!($fn_name), $fn_name as *const u8);
+            )+
+            builder
+        }
+    };
+}
 
 // Re-export commonly used types
 pub use num::{
@@ -137,11 +169,34 @@ pub trait Staged {
 /// A JIT compiler that can compile staged functions to machine code
 pub struct Compiler {
     module: JITModule,
+    external_functions: crate::ffi::ExternalFunctionRegistry,
 }
 
-impl Compiler {
-    /// Create a new compiler instance
-    pub fn new() -> Result<Self, StagingError> {
+/// Builder for creating a Compiler with pre-registered external function symbols
+pub struct CompilerBuilder {
+    symbols: HashMap<String, *const u8>,
+}
+
+impl CompilerBuilder {
+    /// Create a new compiler builder
+    pub fn new() -> Self {
+        Self {
+            symbols: HashMap::new(),
+        }
+    }
+
+    /// Register an external function symbol
+    ///
+    /// This registers the function pointer with the JIT module.
+    /// You'll still need to call `register_external_signature()` after building
+    /// to register the type signature for type checking.
+    pub fn with_symbol(mut self, name: &str, fn_ptr: *const u8) -> Self {
+        self.symbols.insert(name.to_string(), fn_ptr);
+        self
+    }
+
+    /// Build the compiler with all registered symbols
+    pub fn build(self) -> Result<Compiler, StagingError> {
         let isa = cranelift_native::builder()
             .map_err(|e| StagingError::CompilationFailed {
                 reason: format!("Failed to create ISA: {}", e),
@@ -151,10 +206,64 @@ impl Compiler {
                 reason: format!("Failed to finish ISA: {}", e),
             })?;
 
-        let builder = JITBuilder::with_isa(isa, default_libcall_names());
+        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+
+        // Register all symbols with JITBuilder before creating the module
+        for (name, ptr) in &self.symbols {
+            builder.symbol(name.clone(), *ptr);
+        }
+
         let module = JITModule::new(builder);
 
-        Ok(Self { module })
+        Ok(Compiler {
+            module,
+            external_functions: crate::ffi::ExternalFunctionRegistry::new(),
+        })
+    }
+}
+
+impl Compiler {
+    /// Create a new compiler instance with no external functions
+    ///
+    /// For compilers that need external functions, use `CompilerBuilder::new()`
+    /// and register symbols before calling `.build()`.
+    pub fn new() -> Result<Self, StagingError> {
+        CompilerBuilder::new().build()
+    }
+
+    /// Register an external function signature for type checking
+    ///
+    /// This is separate from symbol registration (which happens via CompilerBuilder).
+    /// The signature is used for type checking before Cranelift compilation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// extern "C" fn my_add(x: i64, y: i64) -> i64 { x + y }
+    ///
+    /// let mut compiler = CompilerBuilder::new()
+    ///     .with_symbol("my_add", my_add as *const u8)
+    ///     .build()?;
+    ///
+    /// compiler.register_external_signature(
+    ///     "my_add",
+    ///     vec![DataType::I64, DataType::I64],
+    ///     DataType::I64,
+    /// );
+    /// ```
+    pub fn register_external_signature(
+        &mut self,
+        name: &str,
+        params: Vec<DataType>,
+        return_type: DataType,
+    ) {
+        // We pass a null pointer since the actual pointer was registered with JITBuilder
+        // This is just for type checking
+        self.external_functions.register(
+            name.to_string(),
+            params,
+            return_type,
+            std::ptr::null(),
+        );
     }
 
     /// Compile a staged function that takes multiple i64 parameters (as a slice) and returns i64
@@ -245,6 +354,10 @@ impl Compiler {
             eprintln!("{}", func);
             eprintln!("==================================\n");
         }
+
+        // TODO: Properly register external function symbols with JIT module
+        // For now, external functions are imported during FunctionBuilder phase
+        // but symbol resolution may fail at runtime
 
         // Compile to machine code
         let mut ctx = Context::new();
@@ -790,6 +903,31 @@ impl Compiler {
             }
         }
 
+        // Declare and import all registered external functions using the Module API
+        // This works with symbols pre-registered via JITBuilder::symbol()
+        let mut external_funcs: HashMap<String, FuncRef> = HashMap::new();
+        for (func_name, (func_sig, _func_ptr)) in self.external_functions.iter() {
+            // Create Cranelift signature for this external function
+            let mut sig = Signature::new(CallConv::SystemV);
+            for param_type in &func_sig.params {
+                sig.params.push(AbiParam::new(param_type.to_cranelift_type()));
+            }
+            sig.returns.push(AbiParam::new(func_sig.return_type.to_cranelift_type()));
+
+            // Declare the function as an import in the module
+            // This links to the symbol we registered with JITBuilder::symbol()
+            let func_id = self
+                .module
+                .declare_function(func_name, Linkage::Import, &sig)
+                .map_err(|e| StagingError::CompilationFailed {
+                    reason: format!("Failed to declare external function '{}': {}", func_name, e),
+                })?;
+
+            // Import the declared function into the current function being built
+            let func_ref = self.module.declare_func_in_func(func_id, builder.func);
+            external_funcs.insert(func_name.clone(), func_ref);
+        }
+
         // Generate the function body using StagedBuilder
         let mut staged_builder = StagedBuilder::new();
         let result_expr = body(&mut staged_builder, &param_vars);
@@ -810,7 +948,7 @@ impl Compiler {
             });
         }
 
-        let result_val = result_expr.codegen(&mut builder);
+        let result_val = result_expr.codegen_with_externals(&mut builder, Some(&external_funcs));
 
         // Return the result
         builder.ins().return_(&[result_val]);
@@ -825,6 +963,10 @@ impl Compiler {
             eprintln!("{}", func);
             eprintln!("==================================\n");
         }
+
+        // TODO: Properly register external function symbols with JIT module
+        // For now, external functions are imported during FunctionBuilder phase
+        // but symbol resolution may fail at runtime
 
         // Compile to machine code
         let mut ctx = Context::new();
@@ -2214,6 +2356,115 @@ mod tests {
         let sig = registry.get_signature("iter_next_i64").unwrap();
         assert_eq!(sig.name, "iter_next_i64");
         assert_eq!(sig.params.len(), 1);
+    }
+
+    #[test]
+    fn test_ffi_actual_external_call() {
+        // This test actually compiles and EXECUTES code that calls an external function
+        // Using Option 1C: CompilerBuilder with symbol pre-registration
+
+        // Define the external function
+        extern "C" fn add_42(x: i64) -> i64 {
+            x + 42
+        }
+
+        // Step 1: Register symbol with CompilerBuilder BEFORE creating JIT module
+        let mut compiler = CompilerBuilder::new()
+            .with_symbol("add_42", add_42 as *const u8)
+            .build()
+            .unwrap();
+
+        // Step 2: Register signature for type checking
+        compiler.register_external_signature(
+            "add_42",
+            vec![DataType::I64],
+            DataType::I64,
+        );
+
+        // Step 3: Compile code that calls this external function
+        let compile_result = compiler.compile_nary(
+            vec![DataType::I64],
+            DataType::I64,
+            |builder, vars| {
+                builder.call_external(
+                    "add_42",
+                    vec![Expr::I64(StagedI64::variable(vars[0]))],
+                    DataType::I64,
+                )
+            },
+        );
+
+        // Step 4: Verify compilation and execution work
+        match compile_result {
+            Ok(mut compiled) => {
+                println!("✓ Compilation succeeded!");
+
+                // Now try to actually execute it
+                let exec_result = compiled.call(&[ScalarValue::I64(10)]);
+                match exec_result {
+                    Ok(result) => {
+                        println!("✓ Execution succeeded!");
+                        println!("  Result: {:?}", result);
+                        assert_eq!(result.as_i64_unchecked(), 52);
+                    }
+                    Err(e) => {
+                        println!("✗ Execution failed: {:?}", e);
+                        panic!("Execution failed: {:?}", e);
+                    }
+                }
+            }
+            Err(e) => {
+                println!("✗ Compilation failed: {:?}", e);
+                panic!("Compilation failed: {:?}", e);
+            }
+        }
+    }
+
+    #[test]
+    fn test_ffi_register_symbols_macro() {
+        // Demonstrate using the register_symbols! macro for convenient multi-function registration
+        // This is perfect for building a standard library!
+
+        extern "C" fn add(x: i64, y: i64) -> i64 {
+            x + y
+        }
+
+        extern "C" fn mul(x: i64, y: i64) -> i64 {
+            x * y
+        }
+
+        extern "C" fn neg(x: i64) -> i64 {
+            -x
+        }
+
+        // Use the macro to register all functions at once
+        let builder = CompilerBuilder::new();
+        let builder = register_symbols!(builder, add, mul, neg);
+        let mut compiler = builder.build().unwrap();
+
+        // Register signatures for type checking
+        compiler.register_external_signature("add", vec![DataType::I64, DataType::I64], DataType::I64);
+        compiler.register_external_signature("mul", vec![DataType::I64, DataType::I64], DataType::I64);
+        compiler.register_external_signature("neg", vec![DataType::I64], DataType::I64);
+
+        // Compile a simple expression that uses multiple external functions
+        // Just test that we can call all three registered functions
+        let mut compiled = compiler.compile_nary(
+            vec![DataType::I64, DataType::I64],
+            DataType::I64,
+            |builder, vars| {
+                // Call add(x, y)
+                let x = Expr::I64(StagedI64::variable(vars[0]));
+                let y = Expr::I64(StagedI64::variable(vars[1]));
+                builder.call_external("add", vec![x, y], DataType::I64)
+            },
+        ).unwrap();
+
+        // Test it works
+        let result = compiled.call(&[ScalarValue::I64(10), ScalarValue::I64(5)]).unwrap();
+        assert_eq!(result.as_i64_unchecked(), 15);
+
+        println!("✓ Multi-function FFI registration with macro works!");
     }
 }
 

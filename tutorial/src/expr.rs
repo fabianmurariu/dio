@@ -5,8 +5,9 @@
 //! - `Expr`: Generic expression that can be any type (with type inference)
 //! - `StagedBuilder`: Ergonomic builder for constructing expression trees
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{types, FuncRef, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
+use std::collections::HashMap;
 
 use crate::bool::StagedBool;
 use crate::num::{StagedI64, StagedU64};
@@ -229,6 +230,15 @@ impl Expr {
 
     /// Generate Cranelift IR code for this expression
     pub(crate) fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
+        self.codegen_with_externals(builder, None)
+    }
+
+    /// Generate Cranelift IR code with external function support
+    pub(crate) fn codegen_with_externals(
+        &self,
+        builder: &mut FunctionBuilder,
+        external_funcs: Option<&HashMap<String, FuncRef>>,
+    ) -> Value {
         match self {
             Expr::I64(v) => v.codegen(builder),
             Expr::U64(v) => v.codegen(builder),
@@ -241,14 +251,14 @@ impl Expr {
                     builder.declare_var(var, var_type.to_cranelift_type());
 
                     // Evaluate the value expression
-                    let val = value.codegen(builder);
+                    let val = value.codegen_with_externals(builder, external_funcs);
 
                     // Store it in the variable
                     builder.def_var(var, val);
                 }
 
                 // Evaluate the body (which can reference these variables)
-                body.codegen(builder)
+                body.codegen_with_externals(builder, external_funcs)
             }
             Expr::LetMut { var_id, var_type, initial_value, body } => {
                 // Declare the mutable variable
@@ -256,15 +266,15 @@ impl Expr {
                 builder.declare_var(var, var_type.to_cranelift_type());
 
                 // Evaluate and set the initial value
-                let val = initial_value.codegen(builder);
+                let val = initial_value.codegen_with_externals(builder, external_funcs);
                 builder.def_var(var, val);
 
                 // Evaluate the body (which can read and update this variable)
-                body.codegen(builder)
+                body.codegen_with_externals(builder, external_funcs)
             }
             Expr::If { condition, then_branch, else_branch, result_type } => {
                 // Evaluate the condition
-                let cond_val = condition.codegen(builder);
+                let cond_val = condition.codegen_with_externals(builder, external_funcs);
 
                 // Create blocks for control flow
                 let then_block = builder.create_block();
@@ -280,13 +290,13 @@ impl Expr {
                 // Generate then branch
                 builder.switch_to_block(then_block);
                 builder.seal_block(then_block);
-                let then_val = then_branch.codegen(builder);
+                let then_val = then_branch.codegen_with_externals(builder, external_funcs);
                 builder.ins().jump(merge_block, &[then_val]);
 
                 // Generate else branch
                 builder.switch_to_block(else_block);
                 builder.seal_block(else_block);
-                let else_val = else_branch.codegen(builder);
+                let else_val = else_branch.codegen_with_externals(builder, external_funcs);
                 builder.ins().jump(merge_block, &[else_val]);
 
                 // Continue at merge block
@@ -299,7 +309,7 @@ impl Expr {
             Expr::ArrayGet { array, index, element_type } => {
                 // Get the array pointer and index
                 let arr_ptr = builder.use_var(array.ptr_var);
-                let index_val = index.codegen(builder);
+                let index_val = index.codegen_with_externals(builder, external_funcs);
 
                 // Calculate element size in bytes
                 let element_size = match element_type {
@@ -322,8 +332,8 @@ impl Expr {
             Expr::ArraySet { array, index, value } => {
                 // Get the array pointer, index, and value
                 let arr_ptr = builder.use_var(array.ptr_var);
-                let index_val = index.codegen(builder);
-                let value_val = value.codegen(builder);
+                let index_val = index.codegen_with_externals(builder, external_funcs);
+                let value_val = value.codegen_with_externals(builder, external_funcs);
 
                 // Calculate element size in bytes
                 let element_size = match &array.element_type {
@@ -347,7 +357,7 @@ impl Expr {
             }
             Expr::SetVar { var, value } => {
                 // Evaluate the new value
-                let new_val = value.codegen(builder);
+                let new_val = value.codegen_with_externals(builder, external_funcs);
 
                 // Update the variable
                 builder.def_var(var.var, new_val);
@@ -368,7 +378,7 @@ impl Expr {
                 // Note: Don't seal yet - we have a back-edge from the loop body!
                 builder.switch_to_block(header_block);
 
-                let cond_val = condition.codegen(builder);
+                let cond_val = condition.codegen_with_externals(builder, external_funcs);
                 builder.ins().brif(cond_val, body_block, &[], exit_block, &[]);
 
                 // Body: execute loop body
@@ -376,7 +386,7 @@ impl Expr {
                 builder.seal_block(body_block);
 
                 // Execute body (result is ignored)
-                body.codegen(builder);
+                body.codegen_with_externals(builder, external_funcs);
 
                 // Jump back to header (this is the back-edge)
                 builder.ins().jump(header_block, &[]);
@@ -392,15 +402,30 @@ impl Expr {
                 builder.ins().iconst(types::I64, 0)
             }
             Expr::ExternalCall { function_name, args, return_type } => {
-                // TODO: Implement external function calls
-                // This requires:
-                // 1. Looking up the function signature from the registry
-                // 2. Declaring the external function in the module
-                // 3. Getting a FuncRef for it
-                // 4. Generating argument values
-                // 5. Calling the function with builder.ins().call()
-                // For now, we'll implement this in the Compiler update
-                unimplemented!("External function calls not yet implemented: {}", function_name)
+                // Look up the FuncRef for this external function
+                let func_ref = external_funcs
+                    .and_then(|funcs| funcs.get(function_name))
+                    .unwrap_or_else(|| {
+                        panic!("External function '{}' not registered or not imported", function_name)
+                    });
+
+                // Generate code for all arguments
+                let mut arg_vals = Vec::new();
+                for arg in args {
+                    let arg_val = arg.codegen_with_externals(builder, external_funcs);
+                    arg_vals.push(arg_val);
+                }
+
+                // Call the external function
+                let call_inst = builder.ins().call(*func_ref, &arg_vals);
+
+                // Get the return value (first result of the call)
+                // For void functions, we still need to return something
+                if matches!(return_type, DataType::Unit) {
+                    builder.ins().iconst(types::I64, 0)
+                } else {
+                    builder.inst_results(call_inst)[0]
+                }
             }
         }
     }
