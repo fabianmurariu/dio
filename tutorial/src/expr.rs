@@ -11,6 +11,7 @@ use std::collections::HashMap;
 
 use crate::bool::StagedBool;
 use crate::num::{StagedI64, StagedU64};
+use crate::staged_value::StagedValue;
 use crate::{DataType, Staged, StagedArray};
 
 // =============================================================================
@@ -69,22 +70,16 @@ impl Var {
 
 /// Generic expression that can be any type
 ///
-/// This wraps type-specific expressions (StagedI64, StagedU64, StagedBool)
-/// and adds generic control flow (Let, If) that works with any type.
+/// This uses a trait-based design where any type implementing `StagedValue`
+/// can be used, making the system extensible without modifying this enum.
 ///
 /// Note: Expr is NOT Clone because it represents a computation tree.
 /// Cloning would duplicate the entire tree, which is expensive and usually unintended.
 /// If you need to reference a computed value multiple times, use Let to bind it to a Var.
 #[derive(Debug)]
 pub enum Expr {
-    /// A 64-bit signed integer expression
-    I64(StagedI64),
-
-    /// A 64-bit unsigned integer expression
-    U64(StagedU64),
-
-    /// A boolean expression
-    Bool(StagedBool),
+    /// A staged value (numeric, boolean, or any custom type implementing StagedValue)
+    Staged(Box<dyn StagedValue>),
 
     /// Variable reference (can be any type)
     Variable(Var),
@@ -157,9 +152,7 @@ impl Expr {
     /// Get the type of this expression (type inference!)
     pub fn data_type(&self) -> DataType {
         match self {
-            Expr::I64(_) => DataType::I64,
-            Expr::U64(_) => DataType::U64,
-            Expr::Bool(_) => DataType::Bool,
+            Expr::Staged(v) => v.data_type(),
             Expr::Variable(var) => var.data_type().clone(),
             Expr::Let { body, .. } => body.data_type(),
             Expr::LetMut { body, .. } => body.data_type(),
@@ -175,7 +168,7 @@ impl Expr {
     /// Extract as I64 (consuming)
     pub fn into_i64(self) -> Option<StagedI64> {
         match self {
-            Expr::I64(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedI64>().cloned(),
             Expr::Variable(var) if var.var_type == DataType::I64 => Some(StagedI64::Variable(var.var)),
             _ => None,
         }
@@ -184,7 +177,7 @@ impl Expr {
     /// Extract as U64 (consuming)
     pub fn into_u64(self) -> Option<StagedU64> {
         match self {
-            Expr::U64(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedU64>().cloned(),
             Expr::Variable(var) if var.var_type == DataType::U64 => Some(StagedU64::Variable(var.var)),
             _ => None,
         }
@@ -193,7 +186,7 @@ impl Expr {
     /// Extract as Bool (consuming)
     pub fn into_bool(self) -> Option<StagedBool> {
         match self {
-            Expr::Bool(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedBool>().cloned(),
             Expr::Variable(var) if var.var_type == DataType::Bool => Some(StagedBool::Variable(var.var)),
             _ => None,
         }
@@ -202,7 +195,7 @@ impl Expr {
     /// Borrow as I64
     pub fn as_i64(&self) -> Option<&StagedI64> {
         match self {
-            Expr::I64(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedI64>(),
             _ => None,
         }
     }
@@ -210,7 +203,7 @@ impl Expr {
     /// Borrow as U64
     pub fn as_u64(&self) -> Option<&StagedU64> {
         match self {
-            Expr::U64(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedU64>(),
             _ => None,
         }
     }
@@ -218,9 +211,27 @@ impl Expr {
     /// Borrow as Bool
     pub fn as_bool(&self) -> Option<&StagedBool> {
         match self {
-            Expr::Bool(v) => Some(v),
+            Expr::Staged(v) => v.as_any().downcast_ref::<StagedBool>(),
             _ => None,
         }
+    }
+
+    /// Create an I64 expression
+    #[allow(non_snake_case)]
+    pub fn I64(v: StagedI64) -> Self {
+        Expr::Staged(Box::new(v))
+    }
+
+    /// Create a U64 expression
+    #[allow(non_snake_case)]
+    pub fn U64(v: StagedU64) -> Self {
+        Expr::Staged(Box::new(v))
+    }
+
+    /// Create a Bool expression
+    #[allow(non_snake_case)]
+    pub fn Bool(v: StagedBool) -> Self {
+        Expr::Staged(Box::new(v))
     }
 
     /// Create a variable reference
@@ -240,9 +251,7 @@ impl Expr {
         external_funcs: Option<&HashMap<String, FuncRef>>,
     ) -> Value {
         match self {
-            Expr::I64(v) => v.codegen(builder),
-            Expr::U64(v) => v.codegen(builder),
-            Expr::Bool(v) => v.codegen(builder),
+            Expr::Staged(v) => v.codegen(builder),
             Expr::Variable(var) => builder.use_var(var.var),
             Expr::Let { bindings, body } => {
                 // Declare and define all bindings
@@ -437,19 +446,19 @@ impl Expr {
 
 impl From<StagedI64> for Expr {
     fn from(v: StagedI64) -> Self {
-        Expr::I64(v)
+        Expr::Staged(Box::new(v))
     }
 }
 
 impl From<StagedU64> for Expr {
     fn from(v: StagedU64) -> Self {
-        Expr::U64(v)
+        Expr::Staged(Box::new(v))
     }
 }
 
 impl From<StagedBool> for Expr {
     fn from(v: StagedBool) -> Self {
-        Expr::Bool(v)
+        Expr::Staged(Box::new(v))
     }
 }
 
@@ -460,9 +469,7 @@ impl From<StagedBool> for Expr {
 impl std::fmt::Display for Expr {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         match self {
-            Expr::I64(v) => write!(f, "{}", v),
-            Expr::U64(v) => write!(f, "{}", v),
-            Expr::Bool(v) => write!(f, "{}", v),
+            Expr::Staged(v) => write!(f, "{}", v),
             Expr::Variable(var) => write!(f, "v{}", var.var.as_u32()),
             Expr::Let { bindings, body } => {
                 writeln!(f, "{{")?;
@@ -701,7 +708,7 @@ impl StagedBuilder {
         let element_type = array.element_type().clone();
         Expr::ArrayGet {
             array,
-            index: Box::new(Expr::U64(index)),
+            index: Box::new(Expr::Staged(Box::new(index))),
             element_type,
         }
     }
@@ -716,7 +723,7 @@ impl StagedBuilder {
         assert!(array.is_mutable(), "Cannot write to immutable array");
         Expr::ArraySet {
             array,
-            index: Box::new(Expr::U64(index)),
+            index: Box::new(Expr::Staged(Box::new(index))),
             value: Box::new(value),
         }
     }

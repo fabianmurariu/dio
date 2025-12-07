@@ -453,3 +453,28 @@ impl_staged_num_comparisons!(i64, I64Cmp);
 impl_staged_num_comparisons!(u64, U64Cmp);
 impl_staged_num_comparisons!(f32, F32Cmp);
 impl_staged_num_comparisons!(f64, F64Cmp);
+
+// =============================================================================
+// STAGEDVALUE TRAIT IMPLEMENTATION
+// =============================================================================
+
+use crate::staged_value::StagedValue;
+
+impl<T: Numeric> StagedValue for StagedNum<T> {
+    fn data_type(&self) -> crate::DataType {
+        crate::DataType::Prim(T::prim_type())
+    }
+
+    fn codegen(&self, builder: &mut FunctionBuilder) -> cranelift_codegen::ir::Value {
+        // Delegate to the existing codegen method
+        self.codegen(builder)
+    }
+
+    fn clone_box(&self) -> Box<dyn StagedValue> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}

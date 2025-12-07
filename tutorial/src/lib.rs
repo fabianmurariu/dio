@@ -42,6 +42,9 @@ use thiserror::Error;
 // MODULE DECLARATIONS
 // =============================================================================
 
+/// Trait abstraction for staged values
+pub mod staged_value;
+
 /// Generic numeric types supporting all primitive numeric types
 pub mod num;
 

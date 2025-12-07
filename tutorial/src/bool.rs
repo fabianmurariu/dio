@@ -163,17 +163,17 @@ impl Staged for StagedBool {
             }
             StagedBool::Variable(var) => builder.use_var(*var),
             StagedBool::And(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
+                let left_val = Staged::codegen(left.as_ref(), builder);
+                let right_val = Staged::codegen(right.as_ref(), builder);
                 builder.ins().band(left_val, right_val)
             }
             StagedBool::Or(left, right) => {
-                let left_val = left.codegen(builder);
-                let right_val = right.codegen(builder);
+                let left_val = Staged::codegen(left.as_ref(), builder);
+                let right_val = Staged::codegen(right.as_ref(), builder);
                 builder.ins().bor(left_val, right_val)
             }
             StagedBool::Not(expr) => {
-                let expr_val = expr.codegen(builder);
+                let expr_val = Staged::codegen(expr.as_ref(), builder);
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(expr_val, one)
             }
@@ -275,5 +275,31 @@ impl std::fmt::Display for StagedBool {
                 write!(f, "({} {} {})", left, format_condition(cond), right)
             }
         }
+    }
+}
+
+// =============================================================================
+// STAGEDVALUE TRAIT IMPLEMENTATION
+// =============================================================================
+
+use crate::staged_value::StagedValue;
+use crate::DataType;
+
+impl StagedValue for StagedBool {
+    fn data_type(&self) -> DataType {
+        DataType::Bool
+    }
+
+    fn codegen(&self, builder: &mut FunctionBuilder) -> cranelift_codegen::ir::Value {
+        // Delegate to the Staged trait implementation
+        <Self as Staged>::codegen(self, builder)
+    }
+
+    fn clone_box(&self) -> Box<dyn StagedValue> {
+        Box::new(self.clone())
+    }
+
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
     }
 }
