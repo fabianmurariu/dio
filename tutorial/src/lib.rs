@@ -63,6 +63,9 @@ pub mod ffi;
 /// Code generation and JIT compilation infrastructure
 pub mod codegen;
 
+/// Iterator support for staged computations
+pub mod iter;
+
 // =============================================================================
 // MACROS
 // =============================================================================
@@ -105,6 +108,7 @@ pub use num::{
 pub use bool::{Condition, StagedBool};
 pub use codegen::{Compiler, CompilerBuilder};
 pub use expr::{Expr, StagedBuilder, Var};
+pub use iter::{StagedArrayIter, StagedExternIter, StagedExternIterConfig};
 pub use runtime::{CompiledNary, ScalarValue};
 
 // =============================================================================
@@ -1949,27 +1953,3 @@ mod tests {
         println!("✓ Multi-function FFI registration with macro works!");
     }
 }
-
-// =============================================================================
-// WHAT'S NEXT?
-// =============================================================================
-//
-// Once you complete these lessons, you'll understand:
-// ✅ Staging - Building code generators instead of computing directly
-// ✅ Partial evaluation - Fixing some inputs to specialize code
-// ✅ Futamura projections - How specialization creates compilers
-// ✅ JIT compilation - Generating machine code at runtime
-//
-// In future prompts, we'll add:
-// - Lesson 6-8: Arrays and loops
-// - Lesson 9-11: Conditionals and control flow
-// - Lesson 12-14: Functions and inlining
-// - Lesson 15+: SIMD and advanced optimizations
-//
-// The root function will take:
-// - input_arrays: Array of pointers to input arrays
-// - input_scalars: Array of scalar inputs
-// - output_array: Pointer to output array
-// - length: Number of elements to process
-//
-// This matches the NaryOpFn signature from dio4!
