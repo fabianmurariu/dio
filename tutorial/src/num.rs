@@ -399,60 +399,90 @@ pub type StagedF64 = StagedNum<f64>;
 // Import StagedBool and Condition for comparison operations
 use crate::bool::{Condition, StagedBool};
 
-/// Macro to implement comparison methods for a specific numeric type
+/// Macro to implement comparison methods using type-erased Compare variant
 ///
 /// This generates all six comparison operations (lt, le, gt, ge, eq, ne)
-/// for the given type, returning the appropriate StagedBool variant.
+/// for the given type, using the unified StagedBool::Compare variant with trait objects.
 ///
 /// Note: These methods take `&self` instead of consuming `self` for ergonomics.
 /// The cloning is handled internally, so callers don't need to clone explicitly.
 macro_rules! impl_staged_num_comparisons {
-    ($rust_type:ty, $cmp_variant:ident) => {
+    ($rust_type:ty) => {
         impl StagedNum<$rust_type> {
             /// Less than: self < other
             pub fn lt(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::LessThan, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::LessThan,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
 
             /// Less than or equal: self <= other
             pub fn le(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::LessThanOrEqual, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::LessThanOrEqual,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
 
             /// Greater than: self > other
             pub fn gt(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::GreaterThan, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::GreaterThan,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
 
             /// Greater than or equal: self >= other
             pub fn ge(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::GreaterThanOrEqual, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::GreaterThanOrEqual,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
 
             /// Equal: self == other
             pub fn eq(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::Equal, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::Equal,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
 
             /// Not equal: self != other
             pub fn ne(&self, other: &Self) -> StagedBool {
-                StagedBool::$cmp_variant(Condition::NotEqual, Box::new(self.clone()), Box::new(other.clone()))
+                StagedBool::Compare {
+                    condition: Condition::NotEqual,
+                    left: Box::new(self.clone()),
+                    right: Box::new(other.clone()),
+                    operand_type: <$rust_type>::prim_type(),
+                }
             }
         }
     };
 }
 
 // Generate comparison implementations for all numeric types
-impl_staged_num_comparisons!(i8, I8Cmp);
-impl_staged_num_comparisons!(u8, U8Cmp);
-impl_staged_num_comparisons!(i16, I16Cmp);
-impl_staged_num_comparisons!(u16, U16Cmp);
-impl_staged_num_comparisons!(i32, I32Cmp);
-impl_staged_num_comparisons!(u32, U32Cmp);
-impl_staged_num_comparisons!(i64, I64Cmp);
-impl_staged_num_comparisons!(u64, U64Cmp);
-impl_staged_num_comparisons!(f32, F32Cmp);
-impl_staged_num_comparisons!(f64, F64Cmp);
+impl_staged_num_comparisons!(i8);
+impl_staged_num_comparisons!(u8);
+impl_staged_num_comparisons!(i16);
+impl_staged_num_comparisons!(u16);
+impl_staged_num_comparisons!(i32);
+impl_staged_num_comparisons!(u32);
+impl_staged_num_comparisons!(i64);
+impl_staged_num_comparisons!(u64);
+impl_staged_num_comparisons!(f32);
+impl_staged_num_comparisons!(f64);
 
 // =============================================================================
 // STAGEDVALUE TRAIT IMPLEMENTATION

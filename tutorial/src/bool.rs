@@ -61,53 +61,45 @@ impl Condition {
     }
 }
 
-/// Macro to generate comparison variants for all numeric types
+/// A staged boolean value
 ///
-/// This reduces boilerplate while maintaining type safety - each numeric type
-/// gets its own comparison variant with proper type checking at compile time.
-macro_rules! numeric_cmp_variants {
-    ($($variant:ident => $type:ty),* $(,)?) => {
-        /// A staged boolean value
-        ///
-        /// Represents boolean computations that will be compiled to machine code.
-        /// Booleans are represented as i8 in Cranelift (0 = false, 1 = true).
-        #[derive(Debug, Clone)]
-        pub enum StagedBool {
-            /// A constant boolean value
-            Constant(bool),
+/// Represents boolean computations that will be compiled to machine code.
+/// Booleans are represented as i8 in Cranelift (0 = false, 1 = true).
+///
+/// # Type-Erased Comparisons
+///
+/// This enum uses trait objects for comparisons (via `StagedValue`), which allows
+/// new numeric types to be added without modifying this enum. This solves the
+/// "StagedBool explosion" problem where each numeric type required its own variant.
+#[derive(Debug, Clone)]
+pub enum StagedBool {
+    /// A constant boolean value
+    Constant(bool),
 
-            /// A variable (function parameter) known only at runtime
-            Variable(Variable),
+    /// A variable (function parameter) known only at runtime
+    Variable(Variable),
 
-            /// Logical AND of two staged booleans
-            And(Box<StagedBool>, Box<StagedBool>),
+    /// Logical AND of two staged booleans
+    And(Box<StagedBool>, Box<StagedBool>),
 
-            /// Logical OR of two staged booleans
-            Or(Box<StagedBool>, Box<StagedBool>),
+    /// Logical OR of two staged booleans
+    Or(Box<StagedBool>, Box<StagedBool>),
 
-            /// Logical NOT of a staged boolean
-            Not(Box<StagedBool>),
+    /// Logical NOT of a staged boolean
+    Not(Box<StagedBool>),
 
-            $(
-                #[doc = concat!("Comparison between two ", stringify!($type), " values")]
-                $variant(Condition, Box<$type>, Box<$type>),
-            )*
-        }
-    };
-}
-
-// Generate the StagedBool enum with all numeric comparison variants
-numeric_cmp_variants! {
-    I8Cmp => StagedI8,
-    U8Cmp => StagedU8,
-    I16Cmp => StagedI16,
-    U16Cmp => StagedU16,
-    I32Cmp => StagedI32,
-    U32Cmp => StagedU32,
-    I64Cmp => StagedI64,
-    U64Cmp => StagedU64,
-    F32Cmp => StagedF32,
-    F64Cmp => StagedF64,
+    /// Type-erased comparison between two values
+    ///
+    /// This variant uses trait objects to support comparison of any two values
+    /// that implement `StagedValue`, making the type system more extensible.
+    /// The `operand_type` field is used during codegen to determine whether to
+    /// generate signed/unsigned integer or float comparison instructions.
+    Compare {
+        condition: Condition,
+        left: Box<dyn crate::staged_value::StagedValue>,
+        right: Box<dyn crate::staged_value::StagedValue>,
+        operand_type: PrimType,
+    },
 }
 
 impl StagedBool {
@@ -122,35 +114,6 @@ impl StagedBool {
     }
 }
 
-/// Helper macro to generate codegen for signed integer comparisons
-macro_rules! codegen_signed_cmp {
-    ($builder:expr, $cond:expr, $left:expr, $right:expr) => {{
-        let left_val = $left.codegen($builder);
-        let right_val = $right.codegen($builder);
-        let int_cc = $cond.to_signed_int_cc();
-        $builder.ins().icmp(int_cc, left_val, right_val)
-    }};
-}
-
-/// Helper macro to generate codegen for unsigned integer comparisons
-macro_rules! codegen_unsigned_cmp {
-    ($builder:expr, $cond:expr, $left:expr, $right:expr) => {{
-        let left_val = $left.codegen($builder);
-        let right_val = $right.codegen($builder);
-        let int_cc = $cond.to_unsigned_int_cc();
-        $builder.ins().icmp(int_cc, left_val, right_val)
-    }};
-}
-
-/// Helper macro to generate codegen for float comparisons (ordered)
-macro_rules! codegen_float_cmp {
-    ($builder:expr, $cond:expr, $left:expr, $right:expr) => {{
-        let left_val = $left.codegen($builder);
-        let right_val = $right.codegen($builder);
-        let float_cc = $cond.to_float_cc();
-        $builder.ins().fcmp(float_cc, left_val, right_val)
-    }};
-}
 
 impl Staged for StagedBool {
     type RuntimeType = bool;
@@ -177,17 +140,29 @@ impl Staged for StagedBool {
                 let one = builder.ins().iconst(types::I8, 1);
                 builder.ins().bxor(expr_val, one)
             }
-            // Each comparison variant uses the appropriate macro based on type
-            StagedBool::I8Cmp(cond, left, right) => codegen_signed_cmp!(builder, cond, left, right),
-            StagedBool::U8Cmp(cond, left, right) => codegen_unsigned_cmp!(builder, cond, left, right),
-            StagedBool::I16Cmp(cond, left, right) => codegen_signed_cmp!(builder, cond, left, right),
-            StagedBool::U16Cmp(cond, left, right) => codegen_unsigned_cmp!(builder, cond, left, right),
-            StagedBool::I32Cmp(cond, left, right) => codegen_signed_cmp!(builder, cond, left, right),
-            StagedBool::U32Cmp(cond, left, right) => codegen_unsigned_cmp!(builder, cond, left, right),
-            StagedBool::I64Cmp(cond, left, right) => codegen_signed_cmp!(builder, cond, left, right),
-            StagedBool::U64Cmp(cond, left, right) => codegen_unsigned_cmp!(builder, cond, left, right),
-            StagedBool::F32Cmp(cond, left, right) => codegen_float_cmp!(builder, cond, left, right),
-            StagedBool::F64Cmp(cond, left, right) => codegen_float_cmp!(builder, cond, left, right),
+            // Type-erased comparison using trait objects
+            StagedBool::Compare {
+                condition,
+                left,
+                right,
+                operand_type,
+            } => {
+                let left_val = left.codegen(builder);
+                let right_val = right.codegen(builder);
+
+                // Dispatch to appropriate comparison instruction based on type
+                if operand_type.is_signed_int() {
+                    let int_cc = condition.to_signed_int_cc();
+                    builder.ins().icmp(int_cc, left_val, right_val)
+                } else if operand_type.is_unsigned_int() {
+                    let int_cc = condition.to_unsigned_int_cc();
+                    builder.ins().icmp(int_cc, left_val, right_val)
+                } else {
+                    // Float comparison
+                    let float_cc = condition.to_float_cc();
+                    builder.ins().fcmp(float_cc, left_val, right_val)
+                }
+            }
         }
     }
 
@@ -243,36 +218,14 @@ impl std::fmt::Display for StagedBool {
             StagedBool::And(left, right) => write!(f, "({} && {})", left, right),
             StagedBool::Or(left, right) => write!(f, "({} || {})", left, right),
             StagedBool::Not(expr) => write!(f, "!{}", expr),
-            // Each numeric comparison variant needs its own arm due to type differences
-            StagedBool::I8Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::U8Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::I16Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::U16Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::I32Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::U32Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::I64Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::U64Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::F32Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
-            }
-            StagedBool::F64Cmp(cond, left, right) => {
-                write!(f, "({} {} {})", left, format_condition(cond), right)
+            // Type-erased comparison - uses Display trait on boxed values
+            StagedBool::Compare {
+                condition,
+                left,
+                right,
+                operand_type: _,
+            } => {
+                write!(f, "({} {} {})", left, format_condition(condition), right)
             }
         }
     }

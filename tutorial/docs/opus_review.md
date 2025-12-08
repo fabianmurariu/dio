@@ -115,7 +115,7 @@ enum DataType {
 }
 ```
 
-### Problem 1: Incomplete Type Unification
+### ~~Problem 1: Incomplete Type Unification~~
 
 The `StagedNum<T>` generic in `num.rs` is excellent, but it doesn't integrate with `Expr`:
 
@@ -154,7 +154,7 @@ pub enum Expr {
 
 Or use the `lib_rep_version.rs` approach with `Rep<T>` phantom types more thoroughly.
 
-### Problem 2: StagedBool Explosion
+### ~~Problem 2: StagedBool Explosion~~
 
 `StagedBool` has 10 comparison variants (one per numeric type):
 
