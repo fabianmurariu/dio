@@ -13,7 +13,7 @@ use cranelift_codegen::Context;
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
-use std::collections::HashMap;
+use std::collections::HashMap; // Still needed for external_funcs in compile_nary
 
 use crate::expr::Expr;
 use crate::num::StagedI64;
@@ -27,30 +27,16 @@ pub struct Compiler {
 }
 
 /// Builder for creating a Compiler with pre-registered external function symbols
+///
+/// This wraps Cranelift's `JITBuilder` and provides a convenient builder pattern
+/// for configuring the compiler before creation.
 pub struct CompilerBuilder {
-    symbols: HashMap<String, *const u8>,
+    jit_builder: JITBuilder,
 }
 
 impl CompilerBuilder {
-    /// Create a new compiler builder
-    pub fn new() -> Self {
-        Self {
-            symbols: HashMap::new(),
-        }
-    }
-
-    /// Register an external function symbol
-    ///
-    /// This registers the function pointer with the JIT module.
-    /// You'll still need to call `register_external_signature()` after building
-    /// to register the type signature for type checking.
-    pub fn with_symbol(mut self, name: &str, fn_ptr: *const u8) -> Self {
-        self.symbols.insert(name.to_string(), fn_ptr);
-        self
-    }
-
-    /// Build the compiler with all registered symbols
-    pub fn build(self) -> Result<Compiler, StagingError> {
+    /// Create a new compiler builder with the native ISA
+    pub fn new() -> Result<Self, StagingError> {
         let isa = cranelift_native::builder()
             .map_err(|e| StagingError::CompilationFailed {
                 reason: format!("Failed to create ISA: {}", e),
@@ -60,14 +46,33 @@ impl CompilerBuilder {
                 reason: format!("Failed to finish ISA: {}", e),
             })?;
 
-        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
+        Ok(Self {
+            jit_builder: JITBuilder::with_isa(isa, default_libcall_names()),
+        })
+    }
 
-        // Register all symbols with JITBuilder before creating the module
-        for (name, ptr) in &self.symbols {
-            builder.symbol(name.clone(), *ptr);
-        }
+    /// Register an external function symbol with the JIT
+    ///
+    /// This registers the function pointer with Cranelift's JIT module.
+    /// You'll still need to call `register_external_signature()` after building
+    /// to register the type signature for type checking during compilation.
+    ///
+    /// # Example
+    /// ```ignore
+    /// extern "C" fn my_add(x: i64, y: i64) -> i64 { x + y }
+    ///
+    /// let compiler = CompilerBuilder::new()?
+    ///     .with_symbol("my_add", my_add as *const u8)
+    ///     .build()?;
+    /// ```
+    pub fn with_symbol(mut self, name: &str, fn_ptr: *const u8) -> Self {
+        self.jit_builder.symbol(name, fn_ptr);
+        self
+    }
 
-        let module = JITModule::new(builder);
+    /// Build the compiler with all registered symbols
+    pub fn build(self) -> Result<Compiler, StagingError> {
+        let module = JITModule::new(self.jit_builder);
 
         Ok(Compiler {
             module,
@@ -79,10 +84,10 @@ impl CompilerBuilder {
 impl Compiler {
     /// Create a new compiler instance with no external functions
     ///
-    /// For compilers that need external functions, use `CompilerBuilder::new()`
+    /// For compilers that need external functions, use `CompilerBuilder::new()?`
     /// and register symbols before calling `.build()`.
     pub fn new() -> Result<Self, StagingError> {
-        CompilerBuilder::new().build()
+        CompilerBuilder::new()?.build()
     }
 
     /// Register an external function signature for type checking

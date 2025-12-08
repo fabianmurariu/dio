@@ -77,7 +77,7 @@ pub mod codegen;
 /// use tutorial::{CompilerBuilder, register_symbols};
 /// use tutorial::ffi::*;
 ///
-/// let compiler = CompilerBuilder::new()
+/// let compiler = CompilerBuilder::new()?
 ///     .register_symbols!(iter_create_range, iter_next_i64, iter_drop)
 ///     .build()?;
 /// ```
@@ -1851,6 +1851,7 @@ mod tests {
 
         // Step 1: Register symbol with CompilerBuilder BEFORE creating JIT module
         let mut compiler = CompilerBuilder::new()
+            .unwrap()
             .with_symbol("add_42", add_42 as *const u8)
             .build()
             .unwrap();
@@ -1919,7 +1920,7 @@ mod tests {
         }
 
         // Use the macro to register all functions at once
-        let builder = CompilerBuilder::new();
+        let builder = CompilerBuilder::new().unwrap();
         let builder = register_symbols!(builder, add, mul, neg);
         let mut compiler = builder.build().unwrap();
 
