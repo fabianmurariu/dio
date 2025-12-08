@@ -12,7 +12,7 @@ use std::collections::HashMap;
 use crate::bool::StagedBool;
 use crate::num::{StagedI64, StagedU64};
 use crate::staged_value::StagedValue;
-use crate::{DataType, Staged, StagedArray};
+use crate::{DataType, StagedArray};
 
 // =============================================================================
 // VAR: LIGHTWEIGHT VARIABLE REFERENCE
