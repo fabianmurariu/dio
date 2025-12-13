@@ -73,6 +73,8 @@ impl ScalarValue {
             DataType::Array { .. } => panic!("Cannot convert bits to array type"),
             DataType::ExtPtr(_) => panic!("Cannot convert bits to external pointer"),
             DataType::Unit => panic!("Cannot convert bits to unit type"),
+            DataType::Struct(_) => panic!("Cannot convert bits to struct type"),
+            DataType::Slice { .. } => panic!("Cannot convert bits to slice type"),
         }
     }
 
@@ -234,6 +236,16 @@ impl CompiledNary {
                     let func: Fn = std::mem::transmute(self.code_ptr);
                     let _result = func(self.arg_buffer.as_ptr());
                     Ok(ScalarValue::U64(0))  // Return dummy value for unit
+                }
+                DataType::Struct(_) => {
+                    Err(StagingError::ExecutionFailed {
+                        reason: "Cannot return struct from compiled function via call() - use pointer return".to_string(),
+                    })
+                }
+                DataType::Slice { .. } => {
+                    Err(StagingError::ExecutionFailed {
+                        reason: "Cannot return slice from compiled function via call() - use pointer return".to_string(),
+                    })
                 }
             }
         }

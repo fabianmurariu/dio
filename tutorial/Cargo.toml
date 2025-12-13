@@ -17,3 +17,5 @@ thiserror = { workspace = true }
 
 [dev-dependencies]
 proptest = "1.4"
+memoffset = "0.9"
+tutorial-derive = { path = "../tutorial-derive" }

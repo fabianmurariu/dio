@@ -146,6 +146,29 @@ pub enum Expr {
         args: Vec<Box<Expr>>,     // Arguments (types must match signature)
         return_type: DataType,    // Return type from the function signature
     },
+
+    /// External pointer variable
+    /// Used for struct pointers and other opaque pointers
+    ExtPtr {
+        var: Variable,            // Variable holding the pointer
+        name: String,             // Type name for debugging
+    },
+
+    /// Load a field from a struct pointer
+    /// Generates: load(ptr + offset)
+    LoadField {
+        ptr: Box<Expr>,           // Pointer expression (must be ExtPtr)
+        offset: Box<Expr>,        // Offset in bytes (must be U64)
+        field_type: DataType,     // Type of the field to load
+    },
+
+    /// Store a value to a struct field
+    /// Generates: store(ptr + offset, value)
+    StoreField {
+        ptr: Box<Expr>,           // Pointer expression (must be ExtPtr)
+        offset: Box<Expr>,        // Offset in bytes (must be U64)
+        value: Box<Expr>,         // Value to store
+    },
 }
 
 impl Expr {
@@ -162,6 +185,9 @@ impl Expr {
             Expr::SetVar { .. } => DataType::Unit,
             Expr::WhileLoop { .. } => DataType::Unit,
             Expr::ExternalCall { return_type, .. } => return_type.clone(),
+            Expr::ExtPtr { name, .. } => DataType::ExtPtr(name.clone()),
+            Expr::LoadField { field_type, .. } => field_type.clone(),
+            Expr::StoreField { .. } => DataType::Unit,
         }
     }
 
@@ -436,6 +462,43 @@ impl Expr {
                     builder.inst_results(call_inst)[0]
                 }
             }
+            Expr::ExtPtr { var, .. } => {
+                // External pointer is just a variable containing a pointer
+                builder.use_var(*var)
+            }
+            Expr::LoadField { ptr, offset, field_type } => {
+                // Get the base pointer
+                let ptr_val = ptr.codegen_with_externals(builder, external_funcs);
+
+                // Get the offset
+                let offset_val = offset.codegen_with_externals(builder, external_funcs);
+
+                // Calculate the field address: ptr + offset
+                let field_addr = builder.ins().iadd(ptr_val, offset_val);
+
+                // Load the field value
+                let cranelift_type = field_type.to_cranelift_type();
+                builder.ins().load(cranelift_type, MemFlags::trusted(), field_addr, 0)
+            }
+            Expr::StoreField { ptr, offset, value } => {
+                // Get the base pointer
+                let ptr_val = ptr.codegen_with_externals(builder, external_funcs);
+
+                // Get the offset
+                let offset_val = offset.codegen_with_externals(builder, external_funcs);
+
+                // Calculate the field address: ptr + offset
+                let field_addr = builder.ins().iadd(ptr_val, offset_val);
+
+                // Get the value to store
+                let value_val = value.codegen_with_externals(builder, external_funcs);
+
+                // Store the value
+                builder.ins().store(MemFlags::trusted(), value_val, field_addr, 0);
+
+                // StoreField returns unit, represented as 0
+                builder.ins().iconst(types::I64, 0)
+            }
         }
     }
 }
@@ -509,6 +572,15 @@ impl std::fmt::Display for Expr {
                     write!(f, "{}", arg)?;
                 }
                 write!(f, ")")
+            }
+            Expr::ExtPtr { var, name } => {
+                write!(f, "ptr<{}>_v{}", name, var.as_u32())
+            }
+            Expr::LoadField { ptr, offset, field_type } => {
+                write!(f, "load<{:?}>({} + {})", field_type, ptr, offset)
+            }
+            Expr::StoreField { ptr, offset, value } => {
+                write!(f, "store({} + {}, {})", ptr, offset, value)
             }
         }
     }

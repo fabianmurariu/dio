@@ -1,5 +1,5 @@
 [workspace]
-members = ["tutorial"]
+members = ["tutorial", "tutorial-derive"]
 resolver = "2"
 
 [workspace.dependencies]

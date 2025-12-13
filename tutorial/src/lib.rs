@@ -66,6 +66,9 @@ pub mod codegen;
 /// Iterator support for staged computations
 pub mod iter;
 
+/// Struct type support for staged computations
+pub mod struct_type;
+
 // =============================================================================
 // MACROS
 // =============================================================================
@@ -110,6 +113,7 @@ pub use codegen::{Compiler, CompilerBuilder};
 pub use expr::{Expr, StagedBuilder, Var};
 pub use iter::{StagedArrayIter, StagedExternIter, StagedExternIterConfig};
 pub use runtime::{CompiledNary, ScalarValue};
+pub use struct_type::{Field, SliceDef, StagedSlice, StagedStruct, StagedType, StructDef, StructDefBuilder};
 
 // =============================================================================
 // CORE INFRASTRUCTURE - The foundation for all lessons
@@ -281,6 +285,14 @@ pub enum DataType {
 
     /// Unit type for statements that don't return a value
     Unit,
+
+    /// Struct type with defined fields and layout
+    Struct(std::sync::Arc<struct_type::StructDef>),
+
+    /// Slice type `&[T]` represented as (ptr, len)
+    Slice {
+        element_type: Box<DataType>,
+    },
 }
 
 // Convenience constants for common types
@@ -356,6 +368,8 @@ impl DataType {
             DataType::Array { .. } => types::I64, // Arrays are pointers (i64)
             DataType::ExtPtr(_) => types::I64, // External pointers are i64
             DataType::Unit => types::I64, // Unit represented as i64 (unused)
+            DataType::Struct(_) => types::I64, // Structs are passed as pointers
+            DataType::Slice { .. } => types::I64, // Slices are passed as pointers to (ptr, len)
         }
     }
 
