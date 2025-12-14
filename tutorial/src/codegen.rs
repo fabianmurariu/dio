@@ -14,6 +14,7 @@ use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, Linkage, Module};
 use std::collections::HashMap; // Still needed for external_funcs in compile_nary
+use std::sync::Arc;
 
 use crate::expr::Expr;
 use crate::num::StagedI64;
@@ -21,6 +22,11 @@ use crate::runtime::CompiledNary;
 use crate::{DataType, StagedBuilder, StagingError};
 
 /// A JIT compiler that can compile staged functions to machine code
+///
+/// The Compiler owns a `JITModule` that gets transferred to `CompiledNary` via Arc.
+/// Each `Compiler` can only compile one function, after which it is consumed.
+/// This ensures that compiled code remains valid as long as the `CompiledNary`
+/// holding a reference to the module exists.
 pub struct Compiler {
     pub(crate) module: JITModule,
     pub(crate) external_functions: crate::ffi::ExternalFunctionRegistry,
@@ -157,7 +163,7 @@ impl Compiler {
     /// ).unwrap();
     /// ```
     pub fn compile_nary<E: Into<Expr>>(
-        &mut self,
+        mut self,
         param_types: Vec<DataType>,
         return_type: DataType,
         body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> E,
@@ -345,7 +351,14 @@ impl Compiler {
 
         let code_ptr = self.module.get_finalized_function(func_id);
 
-        Ok(CompiledNary::new(code_ptr, param_types, return_type))
+        // Wrap the module in Arc and transfer ownership to CompiledNary
+        // This ensures the compiled code remains valid as long as CompiledNary exists
+        Ok(CompiledNary::new(
+            Arc::new(self.module),
+            code_ptr,
+            param_types,
+            return_type,
+        ))
     }
 
     /// Compile a staged function that takes multiple i64 parameters (as a slice) and returns i64
@@ -372,7 +385,7 @@ impl Compiler {
     /// assert_eq!(compiled.call_i64(&[2, 3, 4]), 20); // (2 + 3) * 4 = 20
     /// ```
     pub fn compile_nary_i64<E: Into<Expr>>(
-        &mut self,
+        self,
         num_params: usize,
         body: impl FnOnce(&mut StagedBuilder, &[Variable]) -> E,
     ) -> Result<CompiledNary, StagingError> {

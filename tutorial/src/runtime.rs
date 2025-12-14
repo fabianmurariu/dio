@@ -5,6 +5,9 @@
 //! runtime execution.
 
 use crate::{DataType, PrimType, StagingError};
+use cranelift_jit::JITModule;
+use std::marker::PhantomData;
+use std::sync::Arc;
 
 /// A scalar runtime value that can be passed to and returned from compiled functions
 ///
@@ -107,7 +110,15 @@ impl ScalarValue {
 ///
 /// This is similar to how dio3/dio4 handle compiled functions with type information
 /// preserved for proper execution.
+///
+/// # Lifetime Safety
+///
+/// CompiledNary holds an `Arc<JITModule>` to ensure the compiled code remains valid
+/// for the lifetime of this struct. This prevents use-after-free bugs that would occur
+/// if the JITModule were dropped while CompiledNary still holds a code pointer.
 pub struct CompiledNary {
+    /// Shared ownership of the JIT module to keep compiled code alive
+    _module: Arc<JITModule>,
     code_ptr: *const u8,
     param_types: Vec<DataType>,
     return_type: DataType,
@@ -120,13 +131,15 @@ impl CompiledNary {
     ///
     /// # Safety
     /// The caller must ensure that code_ptr points to valid compiled machine code
-    /// that matches the provided parameter and return types.
+    /// within the provided module, and that it matches the provided parameter and return types.
     pub(crate) fn new(
+        module: Arc<JITModule>,
         code_ptr: *const u8,
         param_types: Vec<DataType>,
         return_type: DataType,
     ) -> Self {
         Self {
+            _module: module,
             code_ptr,
             param_types,
             return_type,
@@ -324,5 +337,112 @@ impl CompiledNary {
     /// Get the return type
     pub fn return_type(&self) -> &DataType {
         &self.return_type
+    }
+}
+
+/// Safe wrapper for immutable array arguments passed to JIT code
+///
+/// This wrapper encapsulates the lifetime safety invariants for array pointers,
+/// ensuring that the JIT code cannot outlive the array data.
+///
+/// # Example
+///
+/// ```
+/// use tutorial::{ArrayArg, Compiler, DataType, StagedArray};
+///
+/// let input_data: Vec<u64> = vec![1, 2, 3, 4, 5];
+/// let array_arg = ArrayArg::from(&input_data);
+///
+/// // The array_arg can now be safely passed to JIT code
+/// // and the lifetime system ensures input_data outlives array_arg
+/// ```
+pub struct ArrayArg<'a, T> {
+    ptr: *const T,
+    len: usize,
+    _lifetime: PhantomData<&'a [T]>,
+}
+
+impl<'a, T> ArrayArg<'a, T> {
+    /// Create an ArrayArg from a slice
+    pub fn from(slice: &'a [T]) -> Self {
+        Self {
+            ptr: slice.as_ptr(),
+            len: slice.len(),
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Get the pointer as u64 (for passing to JIT functions)
+    pub fn ptr_as_u64(&self) -> u64 {
+        self.ptr as u64
+    }
+
+    /// Get the length as u64 (for passing to JIT functions)
+    pub fn len_as_u64(&self) -> u64 {
+        self.len as u64
+    }
+
+    /// Get the raw pointer
+    pub fn as_ptr(&self) -> *const T {
+        self.ptr
+    }
+
+    /// Get the length
+    pub fn len(&self) -> usize {
+        self.len
+    }
+}
+
+/// Safe wrapper for mutable array arguments passed to JIT code
+///
+/// This wrapper encapsulates the lifetime safety invariants for mutable array pointers,
+/// ensuring that the JIT code cannot outlive the array data and that there is exclusive
+/// mutable access.
+///
+/// # Example
+///
+/// ```
+/// use tutorial::{MutableArrayArg, Compiler, DataType, StagedArray};
+///
+/// let mut output_data: Vec<u64> = vec![0; 5];
+/// let mut_array_arg = MutableArrayArg::from(&mut output_data);
+///
+/// // The mut_array_arg can now be safely passed to JIT code
+/// // and the lifetime system ensures output_data outlives mut_array_arg
+/// ```
+pub struct MutableArrayArg<'a, T> {
+    ptr: *mut T,
+    len: usize,
+    _lifetime: PhantomData<&'a mut [T]>,
+}
+
+impl<'a, T> MutableArrayArg<'a, T> {
+    /// Create a MutableArrayArg from a mutable slice
+    pub fn from(slice: &'a mut [T]) -> Self {
+        Self {
+            ptr: slice.as_mut_ptr(),
+            len: slice.len(),
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Get the pointer as u64 (for passing to JIT functions)
+    pub fn ptr_as_u64(&self) -> u64 {
+        self.ptr as u64
+    }
+
+    /// Get the length as u64 (for passing to JIT functions)
+    pub fn len_as_u64(&self) -> u64 {
+        self.len as u64
+    }
+
+    /// Get the raw pointer
+    pub fn as_mut_ptr(&self) -> *mut T {
+        self.ptr
+    }
+
+    /// Get the length
+    pub fn len(&self) -> usize {
+        self.len
     }
 }

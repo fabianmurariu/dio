@@ -112,7 +112,7 @@ pub use bool::{Condition, StagedBool};
 pub use codegen::{Compiler, CompilerBuilder};
 pub use expr::{Expr, StagedBuilder, Var};
 pub use iter::{StagedArrayIter, StagedExternIter, StagedExternIterConfig};
-pub use runtime::{CompiledNary, ScalarValue};
+pub use runtime::{ArrayArg, CompiledNary, MutableArrayArg, ScalarValue};
 pub use struct_type::{Field, SliceDef, StagedSlice, StagedStruct, StagedType, StructDef, StructDefBuilder};
 
 // =============================================================================
