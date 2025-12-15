@@ -722,7 +722,7 @@ mod tests {
     // JIT COMPILATION TESTS FOR STRUCT FIELD ACCESS
     // =========================================================================
 
-    use crate::{Compiler, Expr};
+    use crate::{Compiler, Expr, Ref};
     use crate::num::StagedU64;
 
     #[test]
@@ -771,11 +771,10 @@ mod tests {
             )
             .unwrap();
 
-        // Call with pointer to our edge struct
-        let edge_ptr = &edge as *const Edge as u64;
-        let result = compiled.call_u64(&[edge_ptr]);
+        // Call with reference to our edge struct using Ref wrapper
+        let result = compiled.call([Ref::new(&edge)]).unwrap();
 
-        assert_eq!(result, 141); // 42 + 99 = 141
+        assert_eq!(result.as_u64(), 141); // 42 + 99 = 141
     }
 
     #[test]
@@ -827,10 +826,9 @@ mod tests {
             )
             .unwrap();
 
-        let mixed_ptr = &mixed as *const Mixed as u64;
-        let result = compiled.call_u64(&[mixed_ptr]);
+        let result = compiled.call([Ref::new(&mixed)]).unwrap();
 
-        assert_eq!(result, 1000);
+        assert_eq!(result.as_u64(), 1000);
     }
 
     #[test]
@@ -913,10 +911,9 @@ mod tests {
             )
             .unwrap();
 
-        let line_ptr = &line as *const Line as u64;
-        let result = compiled.call_u64(&[line_ptr]);
+        let result = compiled.call([Ref::new(&line)]).unwrap();
 
-        assert_eq!(result, 50); // 10 + 40 = 50
+        assert_eq!(result.as_u64(), 50); // 10 + 40 = 50
     }
 
     #[test]
@@ -1028,10 +1025,10 @@ mod tests {
             )
             .unwrap();
 
-        let pair_ptr = &pair as *const Pair as u64;
-        let result = compiled.call_u64(&[pair_ptr]);
+        use crate::Ref;
+        let result = compiled.call([Ref::new(&pair)]).unwrap();
 
-        assert_eq!(result, 300); // 100 + 200 = 300
+        assert_eq!(result.as_u64(), 300); // 100 + 200 = 300
     }
 
     #[test]
@@ -1136,5 +1133,98 @@ mod tests {
         // ExtPtr is a pointer = 8 bytes
         assert_eq!(DataType::ExtPtr("test".to_string()).size_of(), 8);
         assert_eq!(DataType::ExtPtr("test".to_string()).align_of(), 8);
+    }
+
+    #[test]
+    fn test_ref_wrapper_with_staged_struct() {
+        // Test: Using Ref wrapper with StagedStruct for proper lifetime tracking
+        // This demonstrates the new safe API for passing struct references
+
+        // Define struct: Point { x: u64, y: u64 }
+        let point_def = Arc::new(StructDef::builder("Point")
+            .field("x", DataType::U64)
+            .field("y", DataType::U64)
+            .build());
+
+        #[repr(C)]
+        struct Point {
+            x: u64,
+            y: u64,
+        }
+
+        let point = Point { x: 100, y: 200 };
+
+        // Compile function using StagedStruct field access API
+        let compiler = Compiler::new().unwrap();
+        let point_def_clone = point_def.clone();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Point".to_string())],
+                DataType::U64,
+                move |builder, vars| {
+                    let point_struct = StagedStruct::new(vars[0], point_def_clone.clone());
+
+                    let x_expr = point_struct.field("x", builder);
+                    let y_expr = point_struct.field("y", builder);
+
+                    builder.let1(x_expr, |builder, x_var| {
+                        builder.let1(y_expr, |_, y_var| {
+                            Expr::U64(x_var.to_u64() + y_var.to_u64())
+                        })
+                    })
+                },
+            )
+            .unwrap();
+
+        // Call with Ref wrapper - properly tracks lifetime
+        use crate::Ref;
+        let result = compiled.call([Ref::new(&point)]).unwrap();
+        assert_eq!(result.as_u64(), 300); // 100 + 200 = 300
+    }
+
+    #[test]
+    fn test_refmut_wrapper_with_staged_struct() {
+        // Test: Using RefMut wrapper with StagedStruct
+        // This verifies that mutable references work correctly
+
+        let edge_def = Arc::new(StructDef::builder("Edge")
+            .field("src", DataType::U64)
+            .field("dst", DataType::U64)
+            .build());
+
+        #[repr(C)]
+        struct Edge {
+            src: u64,
+            dst: u64,
+        }
+
+        let mut edge = Edge { src: 42, dst: 58 };
+
+        // Compile function to read from struct
+        let compiler = Compiler::new().unwrap();
+        let edge_def_clone = edge_def.clone();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Edge".to_string())],
+                DataType::U64,
+                move |builder, vars| {
+                    let edge_struct = StagedStruct::new(vars[0], edge_def_clone.clone());
+
+                    let src_expr = edge_struct.field("src", builder);
+                    let dst_expr = edge_struct.field("dst", builder);
+
+                    builder.let1(src_expr, |builder, src_var| {
+                        builder.let1(dst_expr, |_, dst_var| {
+                            Expr::U64(src_var.to_u64() + dst_var.to_u64())
+                        })
+                    })
+                },
+            )
+            .unwrap();
+
+        // Call with RefMut wrapper - lifetime tracking prevents use-after-free
+        use crate::RefMut;
+        let result = compiled.call([RefMut::new(&mut edge)]).unwrap();
+        assert_eq!(result.as_u64(), 100); // 42 + 58 = 100
     }
 }

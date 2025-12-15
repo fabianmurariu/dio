@@ -9,6 +9,56 @@ use cranelift_jit::JITModule;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Wrapper for an immutable reference to any type T.
+///
+/// This tracks the lifetime of the reference to ensure the JIT code
+/// cannot outlive the data it points to.
+#[derive(Copy, Clone, Debug)]
+pub struct Ref<'a> {
+    ptr: *const u8,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl<'a> Ref<'a> {
+    /// Create a new immutable reference wrapper
+    pub fn new<T>(value: &'a T) -> Self {
+        Self {
+            ptr: value as *const T as *const u8,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Get the raw pointer
+    pub fn as_ptr(&self) -> *const u8 {
+        self.ptr
+    }
+}
+
+/// Wrapper for a mutable reference to any type T.
+///
+/// This tracks the lifetime of the mutable reference to ensure the JIT code
+/// cannot outlive the data it points to.
+#[derive(Copy, Clone, Debug)]
+pub struct RefMut<'a> {
+    ptr: *mut u8,
+    _lifetime: PhantomData<&'a mut ()>,
+}
+
+impl<'a> RefMut<'a> {
+    /// Create a new mutable reference wrapper
+    pub fn new<T>(value: &'a mut T) -> Self {
+        Self {
+            ptr: value as *mut T as *mut u8,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Get the raw pointer
+    pub fn as_mut_ptr(&self) -> *mut u8 {
+        self.ptr
+    }
+}
+
 /// Runtime argument that can be passed to compiled JIT functions.
 ///
 /// This enum is Copy and uses PhantomData to track lifetimes, ensuring that
@@ -29,16 +79,22 @@ pub enum Arg<'a> {
         len: usize,
         _lifetime: PhantomData<&'a mut [u8]>,
     },
+    /// An immutable reference to a struct/value
+    Ref(Ref<'a>),
+    /// A mutable reference to a struct/value
+    RefMut(RefMut<'a>),
 }
 
 impl<'a> Arg<'a> {
     /// Convert to u64 slots for passing to JIT code
-    /// Returns (slot1, slot2_opt) - scalars use 1 slot, arrays use 2 (ptr, len)
+    /// Returns (slot1, slot2_opt) - scalars and refs use 1 slot, arrays use 2 (ptr, len)
     fn to_u64_slots(&self) -> (u64, Option<u64>) {
         match self {
             Arg::Scalar(val) => (*val, None),
             Arg::Array { ptr, len, .. } => (*ptr as u64, Some(*len as u64)),
             Arg::ArrayMut { ptr, len, .. } => (*ptr as u64, Some(*len as u64)),
+            Arg::Ref(r) => (r.as_ptr() as u64, None),
+            Arg::RefMut(r) => (r.as_mut_ptr() as u64, None),
         }
     }
 }
@@ -129,6 +185,19 @@ impl<'a> ArgLike<'a> for &'a ScalarValue {
 impl<'a> ArgLike<'a> for Arg<'a> {
     fn into_arg(self) -> Arg<'a> {
         self
+    }
+}
+
+// Ref and RefMut implement ArgLike
+impl<'a> ArgLike<'a> for Ref<'a> {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Ref(self)
+    }
+}
+
+impl<'a> ArgLike<'a> for RefMut<'a> {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::RefMut(self)
     }
 }
 
@@ -364,7 +433,7 @@ impl CompiledNary {
     ///     }
     /// ).unwrap();
     ///
-    /// let result = compiled.call_with(&[10u64, 20u64]).unwrap();
+    /// let result = compiled.call_with([10u64, 20u64]).unwrap();
     /// assert_eq!(result.as_u64(), 30);
     /// ```
     pub fn call_with<'a, A: ArgLike<'a>>(&mut self, args: impl IntoIterator<Item = A>) -> Result<Res<'a>, StagingError> {
