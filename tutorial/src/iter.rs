@@ -784,7 +784,7 @@ mod tests {
     fn test_array_iter_for_each() {
         // Test counting elements greater than 3
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::arr(DataType::U64)],
                 DataType::U64,
@@ -834,7 +834,7 @@ mod tests {
     fn test_array_iter_with_index() {
         // Test that for_each_with_index provides correct indices
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![
                     DataType::arr(DataType::U64),      // input

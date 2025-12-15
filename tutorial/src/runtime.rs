@@ -9,6 +9,202 @@ use cranelift_jit::JITModule;
 use std::marker::PhantomData;
 use std::sync::Arc;
 
+/// Runtime argument that can be passed to compiled JIT functions.
+///
+/// This enum is Copy and uses PhantomData to track lifetimes, ensuring that
+/// the JIT code cannot outlive the data it references.
+#[derive(Copy, Clone, Debug)]
+pub enum Arg<'a> {
+    /// A scalar value (i64, u64, bool) stored as raw u64 bits
+    Scalar(u64),
+    /// An immutable array/slice reference
+    Array {
+        ptr: *const u8,
+        len: usize,
+        _lifetime: PhantomData<&'a [u8]>,
+    },
+    /// A mutable array/slice reference
+    ArrayMut {
+        ptr: *mut u8,
+        len: usize,
+        _lifetime: PhantomData<&'a mut [u8]>,
+    },
+}
+
+impl<'a> Arg<'a> {
+    /// Convert to u64 slots for passing to JIT code
+    /// Returns (slot1, slot2_opt) - scalars use 1 slot, arrays use 2 (ptr, len)
+    fn to_u64_slots(&self) -> (u64, Option<u64>) {
+        match self {
+            Arg::Scalar(val) => (*val, None),
+            Arg::Array { ptr, len, .. } => (*ptr as u64, Some(*len as u64)),
+            Arg::ArrayMut { ptr, len, .. } => (*ptr as u64, Some(*len as u64)),
+        }
+    }
+}
+
+/// Trait for types that can be converted into runtime arguments.
+///
+/// This allows convenient calling syntax where you can pass primitives,
+/// slices, and mutable slices directly without manually constructing `Arg`.
+pub trait ArgLike<'a> {
+    fn into_arg(self) -> Arg<'a>;
+}
+
+// Scalar implementations
+impl<'a> ArgLike<'a> for i64 {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Scalar(self as u64)
+    }
+}
+
+impl<'a> ArgLike<'a> for u64 {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Scalar(self)
+    }
+}
+
+impl<'a> ArgLike<'a> for bool {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Scalar(if self { 1 } else { 0 })
+    }
+}
+
+// Immutable slice implementations
+impl<'a> ArgLike<'a> for &'a [i64] {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Array {
+            ptr: self.as_ptr() as *const u8,
+            len: self.len(),
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+impl<'a> ArgLike<'a> for &'a [u64] {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Array {
+            ptr: self.as_ptr() as *const u8,
+            len: self.len(),
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+// Mutable slice implementations
+impl<'a> ArgLike<'a> for &'a mut [i64] {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::ArrayMut {
+            ptr: self.as_mut_ptr() as *mut u8,
+            len: self.len(),
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+impl<'a> ArgLike<'a> for &'a mut [u64] {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::ArrayMut {
+            ptr: self.as_mut_ptr() as *mut u8,
+            len: self.len(),
+            _lifetime: PhantomData,
+        }
+    }
+}
+
+// ScalarValue implementation for backward compatibility
+impl<'a> ArgLike<'a> for ScalarValue {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Scalar(self.to_u64_bits())
+    }
+}
+
+impl<'a> ArgLike<'a> for &'a ScalarValue {
+    fn into_arg(self) -> Arg<'a> {
+        Arg::Scalar(self.to_u64_bits())
+    }
+}
+
+// Arg implements ArgLike (identity conversion)
+impl<'a> ArgLike<'a> for Arg<'a> {
+    fn into_arg(self) -> Arg<'a> {
+        self
+    }
+}
+
+/// Result of a JIT function call with lifetime tracking.
+///
+/// The return value is always i64 (raw bits), but the lifetime is tracked
+/// to ensure it doesn't outlive any input references.
+#[derive(Debug, Copy, Clone, PartialEq, Eq)]
+pub struct Res<'a> {
+    value: i64,
+    _lifetime: PhantomData<&'a ()>,
+}
+
+impl<'a> Res<'a> {
+    /// Create a new result with lifetime tracking
+    fn new(value: i64) -> Self {
+        Self {
+            value,
+            _lifetime: PhantomData,
+        }
+    }
+
+    /// Get the raw i64 value
+    pub fn as_i64(self) -> i64 {
+        self.value
+    }
+
+    /// Get the value reinterpreted as u64
+    pub fn as_u64(self) -> u64 {
+        self.value as u64
+    }
+
+    /// Get the value as bool (non-zero = true)
+    pub fn as_bool(self) -> bool {
+        self.value != 0
+    }
+
+    /// Unchecked conversion to i64 (for backward compatibility)
+    ///
+    /// This is the same as `as_i64()` but matches the ScalarValue API.
+    pub fn as_i64_unchecked(self) -> i64 {
+        self.as_i64()
+    }
+
+    /// Unchecked conversion to u64 (for backward compatibility)
+    ///
+    /// This is the same as `as_u64()` but matches the ScalarValue API.
+    pub fn as_u64_unchecked(self) -> u64 {
+        self.as_u64()
+    }
+
+    /// Unchecked conversion to bool (for backward compatibility)
+    ///
+    /// This is the same as `as_bool()` but matches the ScalarValue API.
+    pub fn as_bool_unchecked(self) -> bool {
+        self.as_bool()
+    }
+}
+
+// PartialEq with ScalarValue for backward compatibility
+impl<'a> PartialEq<ScalarValue> for Res<'a> {
+    fn eq(&self, other: &ScalarValue) -> bool {
+        match other {
+            ScalarValue::I64(v) => self.value == *v,
+            ScalarValue::U64(v) => self.value == (*v as i64),
+            ScalarValue::Bool(v) => (self.value != 0) == *v,
+        }
+    }
+}
+
+impl<'a> PartialEq<Res<'a>> for ScalarValue {
+    fn eq(&self, other: &Res<'a>) -> bool {
+        other.eq(self)
+    }
+}
+
 /// A scalar runtime value that can be passed to and returned from compiled functions
 ///
 /// This represents actual runtime values (not staged/compile-time computations).
@@ -147,18 +343,17 @@ impl CompiledNary {
         }
     }
 
-    /// Execute the compiled function with type-safe ScalarValue arguments
+    /// Execute the compiled function with lifetime-tracked arguments
     ///
-    /// This is the primary calling interface, similar to how dio4's execute()
-    /// takes ArrayRef and extracts raw pointers. Here we take ScalarValues,
-    /// perform type checking, extract raw values, and call the compiled function.
+    /// This is the primary calling interface that accepts an iterator of `Arg` values.
+    /// The lifetime tracking ensures that the JIT code cannot outlive any referenced data.
     ///
     /// # Example
     ///
     /// ```
-    /// use tutorial::{Compiler, DataType, StagedU64, Expr, ScalarValue};
+    /// use tutorial::{Compiler, DataType, StagedU64, Expr, Arg};
     ///
-    /// let mut compiler = Compiler::new().unwrap();
+    /// let compiler = Compiler::new().unwrap();
     /// let mut compiled = compiler.compile_nary(
     ///     vec![DataType::U64, DataType::U64],
     ///     DataType::U64,
@@ -169,163 +364,83 @@ impl CompiledNary {
     ///     }
     /// ).unwrap();
     ///
-    /// let result = compiled.call(&[
-    ///     ScalarValue::U64(10),
-    ///     ScalarValue::U64(20)
-    /// ]).unwrap();
-    ///
-    /// assert_eq!(result, ScalarValue::U64(30));
+    /// let result = compiled.call_with(&[10u64, 20u64]).unwrap();
+    /// assert_eq!(result.as_u64(), 30);
     /// ```
-    pub fn call(&mut self, args: &[ScalarValue]) -> Result<ScalarValue, StagingError> {
-        // Verify argument count
-        if args.len() != self.param_types.len() {
-            return Err(StagingError::ExecutionFailed {
-                reason: format!(
-                    "Expected {} arguments, got {}",
-                    self.param_types.len(),
-                    args.len()
-                ),
-            });
-        }
-
-        // Verify argument types match expected parameter types
-        for (i, (arg, expected_type)) in args.iter().zip(&self.param_types).enumerate() {
-            if arg.data_type() != *expected_type {
-                return Err(StagingError::TypeMismatch {
-                    expected: format!("argument {} type {:?}", i, expected_type),
-                    actual: format!("got {:?}", arg.data_type()),
-                });
-            }
-        }
-
-        // Reuse the buffer, clear and fill with new args
-        // Using Vec<u64> is more efficient than Vec<u8> with byte-level copies
+    pub fn call_with<'a, A: ArgLike<'a>>(&mut self, args: impl IntoIterator<Item = A>) -> Result<Res<'a>, StagingError> {
+        // Clear and build arg buffer
         self.arg_buffer.clear();
-        self.arg_buffer.reserve(args.len());
-        for arg in args {
-            self.arg_buffer.push(arg.to_u64_bits());
-        }
 
-        // Call the compiled function with different signatures based on return type
-        // The Cranelift function receives *const u64 and loads values at u64 offsets
-        unsafe {
-            match &self.return_type {
-                DataType::Prim(PrimType::I64) => {
-                    type Fn = extern "C" fn(*const u64) -> i64;
-                    let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(self.arg_buffer.as_ptr());
-                    Ok(ScalarValue::I64(result))
-                }
-                DataType::Prim(PrimType::U64) => {
-                    type Fn = extern "C" fn(*const u64) -> i64;
-                    let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(self.arg_buffer.as_ptr());
-                    Ok(ScalarValue::U64(result as u64))
-                }
-                DataType::Prim(_) => {
-                    Err(StagingError::ExecutionFailed {
-                        reason: format!("ScalarValue only supports I64/U64, got {:?}", self.return_type),
-                    })
-                }
-                DataType::Bool => {
-                    type Fn = extern "C" fn(*const u64) -> i8;
-                    let func: Fn = std::mem::transmute(self.code_ptr);
-                    let result = func(self.arg_buffer.as_ptr());
-                    Ok(ScalarValue::Bool(result != 0))
-                }
-                DataType::Array { .. } => {
-                    Err(StagingError::ExecutionFailed {
-                        reason: "Cannot return array from compiled function via call()".to_string(),
-                    })
-                }
-                DataType::ExtPtr(_) => {
-                    Err(StagingError::ExecutionFailed {
-                        reason: "Cannot return external pointer from compiled function via call()".to_string(),
-                    })
-                }
-                DataType::Unit => {
-                    // Unit type - just call the function and ignore result
-                    type Fn = extern "C" fn(*const u64) -> i64;
-                    let func: Fn = std::mem::transmute(self.code_ptr);
-                    let _result = func(self.arg_buffer.as_ptr());
-                    Ok(ScalarValue::U64(0))  // Return dummy value for unit
-                }
-                DataType::Struct(_) => {
-                    Err(StagingError::ExecutionFailed {
-                        reason: "Cannot return struct from compiled function via call() - use pointer return".to_string(),
-                    })
-                }
-                DataType::Slice { .. } => {
-                    Err(StagingError::ExecutionFailed {
-                        reason: "Cannot return slice from compiled function via call() - use pointer return".to_string(),
-                    })
-                }
+        for arg_like in args {
+            let arg = arg_like.into_arg();
+            let (slot1, slot2_opt) = arg.to_u64_slots();
+            self.arg_buffer.push(slot1);
+            if let Some(slot2) = slot2_opt {
+                self.arg_buffer.push(slot2);
             }
         }
-    }
 
-    /// Execute the compiled function with i64 arguments (low-level interface)
-    ///
-    /// Similar to how dio3/dio4's call_nary_op works, we pass a pointer to
-    /// a byte array. The types are interpreted based on param_types.
-    ///
-    /// # Safety
-    /// The caller must ensure that `args.len() >= param_types.len()`
-    pub fn call_i64(&self, args: &[i64]) -> i64 {
-        assert!(
-            args.len() >= self.param_types.len(),
-            "Expected at least {} arguments, got {}",
-            self.param_types.len(),
-            args.len()
-        );
-
-        // Pack i64 arguments into byte buffer
-        let mut arg_buffer = vec![0u8; args.len() * 8];
-        for (i, &arg) in args.iter().enumerate() {
-            let bytes = arg.to_ne_bytes();
-            let offset = i * 8;
-            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
-        }
-
+        // Call the compiled function - always returns i64
         unsafe {
-            let func: extern "C" fn(*const u8) -> i64 = std::mem::transmute(self.code_ptr);
-            func(arg_buffer.as_ptr())
+            type Fn = extern "C" fn(*const u64) -> i64;
+            let func: Fn = std::mem::transmute(self.code_ptr);
+            let result = func(self.arg_buffer.as_ptr());
+            Ok(Res::new(result))
         }
     }
 
-    /// Execute the compiled function with u64 arguments (low-level interface)
+    /// Execute the compiled function with any ArgLike values
     ///
-    /// # Safety
-    /// The caller must ensure that `args.len() >= param_types.len()`
-    pub fn call_u64(&self, args: &[u64]) -> u64 {
-        assert!(
-            args.len() >= self.param_types.len(),
-            "Expected at least {} arguments, got {}",
-            self.param_types.len(),
-            args.len()
-        );
-
-        // Pack u64 arguments into byte buffer (reinterpret as i64 for storage)
-        let mut arg_buffer = vec![0u8; args.len() * 8];
-        for (i, &arg) in args.iter().enumerate() {
-            let bytes = (arg as i64).to_ne_bytes();
-            let offset = i * 8;
-            arg_buffer[offset..offset + 8].copy_from_slice(&bytes);
-        }
-
-        unsafe {
-            // Note: return type is still i64 in Cranelift, we reinterpret as u64
-            let func: extern "C" fn(*const u8) -> i64 = std::mem::transmute(self.code_ptr);
-            let result = func(arg_buffer.as_ptr());
-            result as u64
-        }
+    /// This is an alias for `call_with` that accepts any type implementing `ArgLike`.
+    /// Works with `Arg`, `ScalarValue`, primitives (i64, u64, bool), and slices.
+    ///
+    /// # Example
+    ///
+    /// ```
+    /// use tutorial::{Compiler, DataType, StagedU64, Expr, ScalarValue};
+    ///
+    /// let compiler = Compiler::new().unwrap();
+    /// let mut compiled = compiler.compile_nary(
+    ///     vec![DataType::U64, DataType::U64],
+    ///     DataType::U64,
+    ///     |_, vars| {
+    ///         let x = StagedU64::variable(vars[0]);
+    ///         let y = StagedU64::variable(vars[1]);
+    ///         Expr::U64(x + y)
+    ///     }
+    /// ).unwrap();
+    ///
+    /// // Works with ScalarValue (backward compat)
+    /// let result = compiled.call(&[ScalarValue::U64(10), ScalarValue::U64(20)]).unwrap();
+    /// assert_eq!(result.as_u64(), 30);
+    /// ```
+    pub fn call<'a, A: ArgLike<'a>>(&mut self, args: impl IntoIterator<Item = A>) -> Result<Res<'a>, StagingError> {
+        self.call_with(args)
     }
 
-    /// Execute with mixed i64/u64 arguments based on parameter types (low-level interface)
+    /// Legacy method: Execute with i64 arguments and return i64
     ///
-    /// This is the most flexible calling convention - values are passed
-    /// as bytes but interpreted according to their declared types.
-    pub fn call_mixed(&self, args: &[i64]) -> i64 {
+    /// This is kept for backward compatibility with existing tests.
+    /// Prefer using `call` or `call_with` for new code.
+    pub fn call_i64(&mut self, args: &[i64]) -> i64 {
+        let result = self.call_with(args.iter().copied()).unwrap();
+        result.as_i64()
+    }
+
+    /// Legacy method: Execute with u64 arguments and return u64
+    ///
+    /// This is kept for backward compatibility with existing tests.
+    /// Prefer using `call` or `call_with` for new code.
+    pub fn call_u64(&mut self, args: &[u64]) -> u64 {
+        let result = self.call_with(args.iter().copied()).unwrap();
+        result.as_u64()
+    }
+
+    /// Legacy method: Execute with mixed arguments
+    ///
+    /// This is kept for backward compatibility with existing tests.
+    /// Prefer using `call` or `call_with` for new code.
+    pub fn call_mixed(&mut self, args: &[i64]) -> i64 {
         self.call_i64(args)
     }
 

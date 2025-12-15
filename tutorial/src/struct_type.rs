@@ -810,7 +810,7 @@ mod tests {
         // Compile a function that just returns the value field (u64)
         let mut compiler = Compiler::new().unwrap();
         let mixed_def_clone = mixed_def.clone();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::ExtPtr("Mixed".to_string())],
                 DataType::U64,
@@ -1007,7 +1007,7 @@ mod tests {
 
         // Compile a function that returns a + b
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::ExtPtr("Pair".to_string())],
                 DataType::U64,
@@ -1045,7 +1045,7 @@ mod tests {
 
         // Compile a function that takes ptr and len, returns element at index 2
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64], // ptr, len
                 DataType::U64,
@@ -1074,7 +1074,7 @@ mod tests {
 
         // Compile a function that returns data[0] + data[1] + data[2]
         let mut compiler = Compiler::new().unwrap();
-        let compiled = compiler
+        let mut compiled = compiler
             .compile_nary(
                 vec![DataType::U64, DataType::U64], // ptr, len
                 DataType::U64,
