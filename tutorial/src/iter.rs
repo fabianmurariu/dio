@@ -692,13 +692,9 @@ mod tests {
 
         // Test with actual data
         let input_data: Vec<u64> = vec![1, 2, 3, 4, 5];
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-        ];
 
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 15); // 1 + 2 + 3 + 4 + 5 = 15
+        let result = compiled.call([input_data.as_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 15); // 1 + 2 + 3 + 4 + 5 = 15
     }
 
     #[test]
@@ -728,13 +724,9 @@ mod tests {
 
         // Empty array
         let input_data: Vec<u64> = vec![];
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-        ];
 
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 42); // Initial value unchanged
+        let result = compiled.call([input_data.as_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 42); // Initial value unchanged
     }
 
     #[test]
@@ -768,15 +760,8 @@ mod tests {
         let input_data: Vec<u64> = vec![1, 2, 3, 4, 5];
         let mut output_data: Vec<u64> = vec![0; 5];
 
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-            output_data.as_mut_ptr() as u64,
-            output_data.len() as u64,
-        ];
-
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 5);
+        let result = compiled.call([input_data.as_slice(), output_data.as_mut_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 5);
         assert_eq!(output_data, vec![2, 4, 6, 8, 10]);
     }
 
@@ -821,13 +806,9 @@ mod tests {
             .unwrap();
 
         let input_data: Vec<u64> = vec![1, 5, 2, 7, 3, 9, 4];
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-        ];
 
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 4); // 5, 7, 9, 4 are > 3
+        let result = compiled.call([input_data.as_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 4); // 5, 7, 9, 4 are > 3
     }
 
     #[test]
@@ -879,15 +860,8 @@ mod tests {
         let input_data: Vec<u64> = vec![1, 5, 2, 7, 3, 9];
         let mut output_data: Vec<u64> = vec![0; 6];
 
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-            output_data.as_mut_ptr() as u64,
-            output_data.len() as u64,
-        ];
-
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 9);
+        let result = compiled.call([input_data.as_slice(), output_data.as_mut_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 9);
     }
 
     #[test]
@@ -916,13 +890,9 @@ mod tests {
             .unwrap();
 
         let input_data: Vec<u64> = vec![2, 3, 4];
-        let args = vec![
-            input_data.as_ptr() as u64,
-            input_data.len() as u64,
-        ];
 
-        let result = compiled.call_u64(&args);
-        assert_eq!(result, 24); // 2 * 3 * 4 = 24
+        let result = compiled.call([input_data.as_slice()]).unwrap();
+        assert_eq!(result.as_u64(), 24); // 2 * 3 * 4 = 24
     }
 
     // -------------------------------------------------------------------------
