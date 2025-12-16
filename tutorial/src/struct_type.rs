@@ -433,6 +433,63 @@ impl StagedStruct {
             .map(|field| (field.name.clone(), self.load_field(field, builder)))
             .collect()
     }
+
+    /// Access a nested field by path.
+    ///
+    /// This allows accessing deeply nested struct fields with a single call.
+    /// The path is an array of field names to traverse.
+    ///
+    /// # Example
+    ///
+    /// ```ignore
+    /// // Instead of:
+    /// // let start = line_struct.field("start", builder);
+    /// // let x = start.as_struct().field("x", builder);
+    ///
+    /// // You can write:
+    /// let x = line_struct.field_path(&["start", "x"], builder);
+    /// ```
+    ///
+    /// # Panics
+    ///
+    /// Panics if:
+    /// - Any field name in the path doesn't exist
+    /// - An intermediate field is not a struct type (except for the last field)
+    /// - The path is empty
+    pub fn field_path(&self, path: &[&str], builder: &mut StagedBuilder) -> Expr {
+        assert!(!path.is_empty(), "field_path requires at least one field name");
+
+        // Walk the path, accumulating offset and tracking current type
+        let mut current_offset = 0u64;
+        let mut current_def = self.def.clone();
+        let mut final_type = None;
+
+        for (i, &field_name) in path.iter().enumerate() {
+            let field = current_def.field(field_name)
+                .unwrap_or_else(|| panic!("Struct '{}' has no field '{}'", current_def.name, field_name));
+
+            current_offset += field.offset as u64;
+            final_type = Some(field.data_type.clone());
+
+            // If not the last element, the field must be a struct to continue traversal
+            if i < path.len() - 1 {
+                match &field.data_type {
+                    DataType::Struct(nested_def) => {
+                        current_def = nested_def.clone();
+                    }
+                    _ => panic!(
+                        "Field '{}' in struct '{}' is not a struct, cannot traverse further",
+                        field_name, current_def.name
+                    ),
+                }
+            }
+        }
+
+        // Generate single LoadField with accumulated offset
+        let ptr = Var::new(self.ptr_var, DataType::ExtPtr(self.def.name.clone()));
+        let offset = StagedU64::constant(current_offset);
+        builder.load_from_ptr(ptr, offset, final_type.unwrap())
+    }
 }
 
 /// A staged slice value representing a `&[T]` as (ptr, len).
@@ -1226,5 +1283,315 @@ mod tests {
         use crate::RefMut;
         let result = compiled.call([RefMut::new(&mut edge)]).unwrap();
         assert_eq!(result.as_u64(), 100); // 42 + 58 = 100
+    }
+
+    #[test]
+    fn test_field_path_nested_access() {
+        // Test: field_path for accessing nested struct fields
+        // This tests the new API that replaces .field().as_struct().field()
+
+        // Define: struct Point { x: u64, y: u64 }
+        let point_def = Arc::new(StructDef::builder("Point")
+            .field("x", DataType::U64)
+            .field("y", DataType::U64)
+            .build());
+
+        // Define: struct Line { start: Point, end: Point }
+        let line_def = Arc::new(StructDef::builder("Line")
+            .field("start", DataType::Struct(point_def.clone()))
+            .field("end", DataType::Struct(point_def.clone()))
+            .build());
+
+        #[repr(C)]
+        struct Point {
+            x: u64,
+            y: u64,
+        }
+
+        #[repr(C)]
+        struct Line {
+            start: Point,
+            end: Point,
+        }
+
+        let line = Line {
+            start: Point { x: 10, y: 20 },
+            end: Point { x: 30, y: 40 },
+        };
+
+        // Compile function using field_path to access nested fields
+        let compiler = Compiler::new().unwrap();
+        let line_def_clone = line_def.clone();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Line".to_string())],
+                DataType::U64,
+                move |builder, vars| {
+                    let line_struct = StagedStruct::new(vars[0], line_def_clone.clone());
+
+                    // Access nested fields using field_path
+                    let start_x = line_struct.field_path(&["start", "x"], builder);
+                    let end_y = line_struct.field_path(&["end", "y"], builder);
+
+                    builder.let1(start_x, |builder, start_x_var| {
+                        builder.let1(end_y, |_, end_y_var| {
+                            let x = start_x_var.to_u64();
+                            let y = end_y_var.to_u64();
+                            Expr::U64(x + y)
+                        })
+                    })
+                },
+            )
+            .unwrap();
+
+        let result = compiled.call([Ref::new(&line)]).unwrap();
+        assert_eq!(result.as_u64(), 50); // 10 + 40 = 50
+    }
+
+    #[test]
+    fn test_field_path_mixed_sizes() {
+        // Test: field_path with different sized types (u8, i16, u32, u64, bool)
+        // This verifies that loading smaller types from structs works correctly
+
+        // Define: struct Inner { flag: bool, count: u32 }
+        let inner_def = Arc::new(StructDef::builder("Inner")
+            .field("flag", DataType::Bool)
+            .field("count", DataType::U32)
+            .build());
+
+        // Define: struct Outer { id: u8, code: i16, data: Inner, value: u64 }
+        let outer_def = Arc::new(StructDef::builder("Outer")
+            .field("id", DataType::U8)
+            .field("code", DataType::I16)
+            .field("data", DataType::Struct(inner_def.clone()))
+            .field("value", DataType::U64)
+            .build());
+
+        #[repr(C)]
+        struct Inner {
+            flag: bool,
+            count: u32,
+        }
+
+        #[repr(C)]
+        struct Outer {
+            id: u8,
+            code: i16,
+            data: Inner,
+            value: u64,
+        }
+
+        let outer = Outer {
+            id: 5,
+            code: -100,
+            data: Inner { flag: true, count: 42 },
+            value: 1000,
+        };
+
+        // Test 1: Access nested u32 field
+        let compiler = Compiler::new().unwrap();
+        let outer_def_clone = outer_def.clone();
+        let mut compiled_u32 = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Outer".to_string())],
+                DataType::U32,
+                move |builder, vars| {
+                    let outer_struct = StagedStruct::new(vars[0], outer_def_clone.clone());
+                    let count = outer_struct.field_path(&["data", "count"], builder);
+                    count // Returns U32
+                },
+            )
+            .unwrap();
+
+        let result = compiled_u32.call([Ref::new(&outer)]).unwrap();
+        assert_eq!(result.as_u64() as u32, 42);
+
+        // Test 2: Access nested bool field
+        let compiler = Compiler::new().unwrap();
+        let outer_def_clone = outer_def.clone();
+        let mut compiled_bool = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Outer".to_string())],
+                DataType::Bool,
+                move |builder, vars| {
+                    let outer_struct = StagedStruct::new(vars[0], outer_def_clone.clone());
+                    let flag = outer_struct.field_path(&["data", "flag"], builder);
+                    flag // Returns Bool
+                },
+            )
+            .unwrap();
+
+        let result = compiled_bool.call([Ref::new(&outer)]).unwrap();
+        assert_eq!(result.as_bool(), true);
+
+        // Test 3: Access top-level u8 field
+        let compiler = Compiler::new().unwrap();
+        let outer_def_clone = outer_def.clone();
+        let mut compiled_u8 = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Outer".to_string())],
+                DataType::U8,
+                move |builder, vars| {
+                    let outer_struct = StagedStruct::new(vars[0], outer_def_clone.clone());
+                    outer_struct.field_path(&["id"], builder)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_u8.call([Ref::new(&outer)]).unwrap();
+        assert_eq!(result.as_u64() as u8, 5);
+
+        // Test 4: Access top-level i16 field
+        let compiler = Compiler::new().unwrap();
+        let outer_def_clone = outer_def.clone();
+        let mut compiled_i16 = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Outer".to_string())],
+                DataType::I16,
+                move |builder, vars| {
+                    let outer_struct = StagedStruct::new(vars[0], outer_def_clone.clone());
+                    outer_struct.field_path(&["code"], builder)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_i16.call([Ref::new(&outer)]).unwrap();
+        assert_eq!(result.as_i64() as i16, -100);
+    }
+
+    #[test]
+    fn test_top_level_small_types() {
+        // Test: Passing small types (u8, i16, u32, bool) as top-level arguments
+        // This verifies that the argument passing mechanism handles small types correctly
+
+        // Test 1: u8 argument
+        let compiler = Compiler::new().unwrap();
+        let mut compiled_u8 = compiler
+            .compile_nary(
+                vec![DataType::U8],
+                DataType::U8,
+                |_builder, vars| {
+                    Expr::variable(vars[0], DataType::U8)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_u8.call([42u8 as u64]).unwrap();
+        assert_eq!(result.as_u64() as u8, 42);
+
+        // Test 2: i16 argument
+        let compiler = Compiler::new().unwrap();
+        let mut compiled_i16 = compiler
+            .compile_nary(
+                vec![DataType::I16],
+                DataType::I16,
+                |_builder, vars| {
+                    Expr::variable(vars[0], DataType::I16)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_i16.call([(-100i16 as u64)]).unwrap();
+        assert_eq!(result.as_i64() as i16, -100);
+
+        // Test 3: u32 argument
+        let compiler = Compiler::new().unwrap();
+        let mut compiled_u32 = compiler
+            .compile_nary(
+                vec![DataType::U32],
+                DataType::U32,
+                |_builder, vars| {
+                    Expr::variable(vars[0], DataType::U32)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_u32.call([12345u32 as u64]).unwrap();
+        assert_eq!(result.as_u64() as u32, 12345);
+
+        // Test 4: bool argument
+        let compiler = Compiler::new().unwrap();
+        let mut compiled_bool = compiler
+            .compile_nary(
+                vec![DataType::Bool],
+                DataType::Bool,
+                |_builder, vars| {
+                    Expr::variable(vars[0], DataType::Bool)
+                },
+            )
+            .unwrap();
+
+        let result = compiled_bool.call([1u64]).unwrap(); // true
+        assert_eq!(result.as_bool(), true);
+
+        let result = compiled_bool.call([0u64]).unwrap(); // false
+        assert_eq!(result.as_bool(), false);
+    }
+
+    #[test]
+    fn test_deeply_nested_field_path() {
+        // Test: field_path with 3 levels of nesting
+        // This ensures field_path works for arbitrary nesting depth
+
+        // Define: struct Point { x: u64, y: u64 }
+        let point_def = Arc::new(StructDef::builder("Point")
+            .field("x", DataType::U64)
+            .field("y", DataType::U64)
+            .build());
+
+        // Define: struct Box { min: Point, max: Point }
+        let box_def = Arc::new(StructDef::builder("Box")
+            .field("min", DataType::Struct(point_def.clone()))
+            .field("max", DataType::Struct(point_def.clone()))
+            .build());
+
+        // Define: struct Scene { bounds: Box, id: u64 }
+        let scene_def = Arc::new(StructDef::builder("Scene")
+            .field("bounds", DataType::Struct(box_def.clone()))
+            .field("id", DataType::U64)
+            .build());
+
+        #[repr(C)]
+        struct Point {
+            x: u64,
+            y: u64,
+        }
+
+        #[repr(C)]
+        struct Box {
+            min: Point,
+            max: Point,
+        }
+
+        #[repr(C)]
+        struct Scene {
+            bounds: Box,
+            id: u64,
+        }
+
+        let scene = Scene {
+            bounds: Box {
+                min: Point { x: 0, y: 0 },
+                max: Point { x: 100, y: 200 },
+            },
+            id: 42,
+        };
+
+        // Access scene.bounds.max.y (3 levels deep)
+        let compiler = Compiler::new().unwrap();
+        let scene_def_clone = scene_def.clone();
+        let mut compiled = compiler
+            .compile_nary(
+                vec![DataType::ExtPtr("Scene".to_string())],
+                DataType::U64,
+                move |builder, vars| {
+                    let scene_struct = StagedStruct::new(vars[0], scene_def_clone.clone());
+                    scene_struct.field_path(&["bounds", "max", "y"], builder)
+                },
+            )
+            .unwrap();
+
+        let result = compiled.call([Ref::new(&scene)]).unwrap();
+        assert_eq!(result.as_u64(), 200);
     }
 }
