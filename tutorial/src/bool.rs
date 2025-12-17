@@ -239,8 +239,8 @@ use crate::staged_value::StagedValue;
 use crate::DataType;
 
 impl StagedValue for StagedBool {
-    fn data_type(&self) -> DataType {
-        DataType::Bool
+    fn data_type(&self) -> &DataType {
+        &DataType::Bool
     }
 
     fn codegen(&self, builder: &mut FunctionBuilder) -> cranelift_codegen::ir::Value {

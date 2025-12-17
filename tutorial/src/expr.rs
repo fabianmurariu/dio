@@ -76,10 +76,12 @@ impl Var {
 /// Note: Expr is NOT Clone because it represents a computation tree.
 /// Cloning would duplicate the entire tree, which is expensive and usually unintended.
 /// If you need to reference a computed value multiple times, use Let to bind it to a Var.
+///
+/// All variants now store their computed DataType for O(1) type checking.
 #[derive(Debug)]
 pub enum Expr {
     /// A staged value (numeric, boolean, or any custom type implementing StagedValue)
-    Staged(Box<dyn StagedValue>),
+    Staged (Box<dyn StagedValue>),
 
     /// Variable reference (can be any type)
     Variable(Var),
@@ -89,6 +91,7 @@ pub enum Expr {
     Let {
         bindings: Vec<(u32, DataType, Box<Expr>)>,  // (var_id, type, value)
         body: Box<Expr>,
+        data_type: DataType,              // Cached type (same as body's type)
     },
 
     /// Mutable let binding: declare a mutable variable that can be updated with SetVar
@@ -98,6 +101,7 @@ pub enum Expr {
         var_type: DataType,              // Variable type
         initial_value: Box<Expr>,        // Initial value
         body: Box<Expr>,                 // Body where var can be read/updated
+        data_type: DataType,              // Cached type (same as body's type)
     },
 
     /// If-then-else conditional
@@ -106,7 +110,7 @@ pub enum Expr {
         condition: Box<Expr>,     // Must be Bool
         then_branch: Box<Expr>,   // Any type T
         else_branch: Box<Expr>,   // Must be same type T
-        result_type: DataType,    // Inferred from branches
+        data_type: DataType,      // Type of both branches
     },
 
     /// Get element from array at index
@@ -114,7 +118,7 @@ pub enum Expr {
     ArrayGet {
         array: StagedArray,       // The array to index into
         index: Box<Expr>,         // Index expression (must be U64)
-        element_type: DataType,   // Type of elements in the array
+        // array:DataType
     },
 
     /// Set element in array at index
@@ -123,6 +127,7 @@ pub enum Expr {
         array: StagedArray,       // The array to write to (must be mutable)
         index: Box<Expr>,         // Index expression (must be U64)
         value: Box<Expr>,         // Value to write (type must match element_type)
+        // Always DataType::Unit
     },
 
     /// Update a variable's value (for loops and mutable state)
@@ -130,6 +135,7 @@ pub enum Expr {
     SetVar {
         var: Var,                 // Variable to update
         value: Box<Expr>,         // New value (must match variable's type)
+        // Always DataType::Unit
     },
 
     /// While loop: while condition { body }
@@ -137,6 +143,7 @@ pub enum Expr {
     WhileLoop {
         condition: Box<Expr>,     // Condition expression (must be Bool)
         body: Box<Expr>,          // Body expression (can be any type, result ignored)
+        data_type: DataType,      // Always DataType::Unit
     },
 
     /// Call an external (Rust) function
@@ -144,7 +151,9 @@ pub enum Expr {
     ExternalCall {
         function_name: String,    // Name of the external function
         args: Vec<Box<Expr>>,     // Arguments (types must match signature)
+        param_types: Vec<DataType>, // Parameter types from the function signature
         return_type: DataType,    // Return type from the function signature
+        // Cached type (same as return_type)
     },
 
     /// External pointer variable
@@ -152,6 +161,7 @@ pub enum Expr {
     ExtPtr {
         var: Variable,            // Variable holding the pointer
         name: String,             // Type name for debugging
+        data_type: DataType,      // Always DataType::ExtPtr(name)
     },
 
     /// Load a field from a struct pointer
@@ -172,22 +182,22 @@ pub enum Expr {
 }
 
 impl Expr {
-    /// Get the type of this expression (type inference!)
-    pub fn data_type(&self) -> DataType {
+    /// Get the type of this expression (O(1) lookup, no computation needed)
+    pub fn data_type(&self) -> &DataType {
         match self {
-            Expr::Staged(v) => v.data_type(),
-            Expr::Variable(var) => var.data_type().clone(),
-            Expr::Let { body, .. } => body.data_type(),
-            Expr::LetMut { body, .. } => body.data_type(),
-            Expr::If { result_type, .. } => result_type.clone(),
-            Expr::ArrayGet { element_type, .. } => element_type.clone(),
-            Expr::ArraySet { .. } => DataType::Unit,
-            Expr::SetVar { .. } => DataType::Unit,
-            Expr::WhileLoop { .. } => DataType::Unit,
-            Expr::ExternalCall { return_type, .. } => return_type.clone(),
-            Expr::ExtPtr { name, .. } => DataType::ExtPtr(name.clone()),
-            Expr::LoadField { field_type, .. } => field_type.clone(),
-            Expr::StoreField { .. } => DataType::Unit,
+            Expr::Staged (value) => value.data_type(),
+            Expr::Variable(var) => var.data_type(),
+            Expr::Let { data_type, .. } => data_type,
+            Expr::LetMut { data_type, .. } => data_type,
+            Expr::If { data_type, .. } => data_type,
+            Expr::ArrayGet { array, .. } => array.element_type(),
+            Expr::ArraySet {..} => &DataType::Unit,
+            Expr::SetVar {..} => &DataType::Unit,
+            Expr::WhileLoop { data_type, .. } => data_type,
+            Expr::ExternalCall { return_type, .. } => return_type,
+            Expr::ExtPtr { data_type, .. } => data_type,
+            Expr::LoadField { field_type, .. } => field_type,
+            Expr::StoreField {..} => &DataType::Unit,
         }
     }
 

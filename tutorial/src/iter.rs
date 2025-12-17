@@ -1074,15 +1074,15 @@ mod tests {
             .unwrap();
 
         // Test: sum of range [0, 5) = 10
-        let result = compiled.call(&[ScalarValue::I64(0), ScalarValue::I64(5)]).unwrap();
+        let result = compiled.call([0i64, 5]).unwrap();
         assert_eq!(result.as_i64_unchecked(), 10);
 
         // Test: sum of range [1, 4) = 1 + 2 + 3 = 6
-        let result = compiled.call(&[ScalarValue::I64(1), ScalarValue::I64(4)]).unwrap();
+        let result = compiled.call([1i64, 4]).unwrap();
         assert_eq!(result.as_i64_unchecked(), 6);
 
         // Test: empty range [5, 5) = 0
-        let result = compiled.call(&[ScalarValue::I64(5), ScalarValue::I64(5)]).unwrap();
+        let result = compiled.call([5i64, 5]).unwrap();
         assert_eq!(result.as_i64_unchecked(), 0);
     }
 }

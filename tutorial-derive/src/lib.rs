@@ -1,7 +1,8 @@
-//! Derive macro for generating `StructDef` from `#[repr(C)]` structs.
+//! Derive macros for JIT compilation support.
 //!
-//! This crate provides the `StagedType` derive macro which automatically generates
-//! a `StructDef` that matches the memory layout of a `#[repr(C)]` struct.
+//! This crate provides:
+//! - `StagedType`: Generate `StructDef` from `#[repr(C)]` structs
+//! - `extern_fn`: Auto-derive types for external functions
 //!
 //! # Example
 //!
@@ -23,7 +24,7 @@
 
 use proc_macro::TokenStream;
 use quote::quote;
-use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
+use syn::{parse_macro_input, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnType, Type};
 
 /// Derive macro that generates a `struct_def()` method returning `Arc<StructDef>`.
 ///
@@ -123,9 +124,24 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
 
 /// Convert a Rust type to the corresponding DataType expression
 fn type_to_datatype(ty: &Type) -> proc_macro2::TokenStream {
+    type_to_datatype_impl(ty, false)
+}
+
+/// Convert a Rust type to DataType with context (for parameters vs return types)
+fn type_to_datatype_impl(ty: &Type, _is_param: bool) -> proc_macro2::TokenStream {
     match ty {
         Type::Path(type_path) => {
             let path = &type_path.path;
+
+            // Check for slice types &[T]
+            if let Some(segment) = path.segments.first() {
+                if segment.ident == "Option" || segment.ident == "Vec" {
+                    return quote! {
+                        compile_error!("Option and Vec types not supported in extern functions. Use raw pointers instead.")
+                    };
+                }
+            }
+
             if path.is_ident("u8") {
                 quote! { crate::DataType::U8 }
             } else if path.is_ident("i8") {
@@ -156,17 +172,140 @@ fn type_to_datatype(ty: &Type) -> proc_macro2::TokenStream {
                 quote! { crate::DataType::I64 }
             } else {
                 // Assume it's a nested struct that also derives StagedType
+                // At compile time, we verify it has struct_def() method
                 let type_name = path.segments.last().unwrap().ident.clone();
                 quote! {
-                    crate::DataType::Struct(#type_name::struct_def())
+                    {
+                        // This will cause a compile error if #type_name doesn't implement StagedType
+                        let _ = #type_name::struct_def;
+                        crate::DataType::Struct(#type_name::struct_def())
+                    }
                 }
             }
+        }
+        Type::Reference(type_ref) => {
+            // Handle &T and &mut T
+            let elem_ty = &*type_ref.elem;
+
+            // Check for slice &[T] or &mut [T]
+            if let Type::Slice(slice_ty) = elem_ty {
+                let elem_type = type_to_datatype_impl(&*slice_ty.elem, false);
+                if type_ref.mutability.is_some() {
+                    // &mut [T] -> mut_arr(T)
+                    quote! { crate::DataType::mut_arr(#elem_type) }
+                } else {
+                    // &[T] -> arr(T)
+                    quote! { crate::DataType::arr(#elem_type) }
+                }
+            } else {
+                // &T or &mut T -> ExtPtr
+                // For FFI, references to structs become ExtPtr
+                let type_name = quote! { #elem_ty }.to_string();
+                quote! { crate::DataType::ExtPtr(#type_name.to_string()) }
+            }
+        }
+        Type::Ptr(type_ptr) => {
+            // Handle *const T and *mut T -> ExtPtr
+            let elem_ty = &*type_ptr.elem;
+            let type_name = quote! { #elem_ty }.to_string();
+            quote! { crate::DataType::ExtPtr(#type_name.to_string()) }
         }
         _ => {
             // Fallback: generate a compile error
             quote! {
-                compile_error!("Unsupported field type for StagedType")
+                compile_error!("Unsupported type for JIT compilation. Supported types: primitives (i64, u64, etc.), &[T], &mut [T], *const T, *mut T, and #[repr(C)] structs with StagedType")
             }
         }
     }
+}
+
+/// Attribute macro for extern "C" functions that auto-generates type metadata.
+///
+/// This macro:
+/// 1. Extracts parameter and return types
+/// 2. Validates that struct types implement `StagedType`
+/// 3. Generates a const containing the function signature metadata
+///
+/// # Example
+///
+/// ```ignore
+/// #[extern_fn]
+/// pub extern "C" fn my_add(x: i64, y: i64) -> i64 {
+///     x + y
+/// }
+///
+/// // Generates:
+/// // pub const MY_ADD_SIGNATURE: ExternFnSignature = ExternFnSignature {
+/// //     name: "my_add",
+/// //     param_types: &[DataType::I64, DataType::I64],
+/// //     return_type: DataType::I64,
+/// //     fn_ptr: my_add as *const u8,
+/// // };
+/// ```
+#[proc_macro_attribute]
+pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
+    let input = parse_macro_input!(item as ItemFn);
+
+    // Verify it's extern "C"
+    let is_extern_c = input.sig.abi.as_ref()
+        .and_then(|abi| abi.name.as_ref())
+        .map(|name| name.value() == "C")
+        .unwrap_or(false);
+
+    if !is_extern_c {
+        return syn::Error::new_spanned(
+            &input.sig.abi,
+            "#[extern_fn] can only be used on extern \"C\" functions"
+        )
+        .to_compile_error()
+        .into();
+    }
+
+    let fn_name = &input.sig.ident;
+
+    // Extract parameter types
+    let mut param_types = Vec::new();
+    for input_arg in &input.sig.inputs {
+        match input_arg {
+            FnArg::Typed(pat_type) => {
+                let ty = &*pat_type.ty;
+                param_types.push(type_to_datatype_impl(ty, true));
+            }
+            FnArg::Receiver(_) => {
+                return syn::Error::new_spanned(
+                    input_arg,
+                    "extern \"C\" functions cannot have self parameters"
+                )
+                .to_compile_error()
+                .into();
+            }
+        }
+    }
+
+    // Extract return type
+    let return_type = match &input.sig.output {
+        ReturnType::Default => quote! { crate::DataType::Unit },
+        ReturnType::Type(_, ty) => type_to_datatype_impl(ty, false),
+    };
+
+    let fn_name_str = fn_name.to_string();
+    let signature_fn_name = syn::Ident::new(&format!("{}_signature", fn_name), fn_name.span());
+
+    // Generate the output
+    let expanded = quote! {
+        #input
+
+        /// Auto-generated signature metadata for this extern function
+        #[allow(non_snake_case)]
+        pub fn #signature_fn_name() -> crate::ffi::ExternFnSignature {
+            crate::ffi::ExternFnSignature {
+                name: #fn_name_str,
+                param_types: Box::leak(Box::new([#(#param_types),*])),
+                return_type: #return_type,
+                fn_ptr: #fn_name as *const u8,
+            }
+        }
+    };
+
+    TokenStream::from(expanded)
 }

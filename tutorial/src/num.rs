@@ -15,17 +15,18 @@ use std::ops::{Add, Mul, Sub};
 
 /// Primitive numeric types supported by staged compilation
 #[derive(Debug, Clone, Copy, PartialEq, Eq, Hash)]
+#[repr(u8)]
 pub enum PrimType {
-    I8,
-    U8,
-    I16,
-    U16,
-    I32,
-    U32,
-    I64,
-    U64,
-    F32,
-    F64,
+    I8 = 0,
+    U8 = 1,
+    I16 = 2,
+    U16 = 3,
+    I32 = 4,
+    U32 = 5,
+    I64 = 6,
+    U64 = 7,
+    F32 = 8,
+    F64 = 9,
 }
 
 impl PrimType {
@@ -43,6 +44,10 @@ impl PrimType {
             PrimType::F32 => types::F32,
             PrimType::F64 => types::F64,
         }
+    }
+
+    pub fn as_index(self) -> usize {
+        self as usize
     }
 
     /// Check if this is a signed integer type
@@ -398,6 +403,7 @@ pub type StagedF64 = StagedNum<f64>;
 
 // Import StagedBool and Condition for comparison operations
 use crate::bool::{Condition, StagedBool};
+use crate::{DataType, PRIM_DATA_TYPES};
 
 /// Macro to implement comparison methods using type-erased Compare variant
 ///
@@ -490,9 +496,10 @@ impl_staged_num_comparisons!(f64);
 
 use crate::staged_value::StagedValue;
 
+
 impl<T: Numeric> StagedValue for StagedNum<T> {
-    fn data_type(&self) -> crate::DataType {
-        crate::DataType::Prim(T::prim_type())
+    fn data_type(&self) -> &crate::DataType {
+        &PRIM_DATA_TYPES[T::prim_type().as_index()]
     }
 
     fn codegen(&self, builder: &mut FunctionBuilder) -> cranelift_codegen::ir::Value {

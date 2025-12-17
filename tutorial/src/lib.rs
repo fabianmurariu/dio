@@ -295,6 +295,19 @@ pub enum DataType {
     },
 }
 
+pub(crate) const PRIM_DATA_TYPES: [DataType; 10] = [
+    DataType::Prim(PrimType::I8),
+    DataType::Prim(PrimType::U8),
+    DataType::Prim(PrimType::I16),
+    DataType::Prim(PrimType::U16),
+    DataType::Prim(PrimType::I32),
+    DataType::Prim(PrimType::U32),
+    DataType::Prim(PrimType::I64),
+    DataType::Prim(PrimType::U64),
+    DataType::Prim(PrimType::F32),
+    DataType::Prim(PrimType::F64),
+];
+
 // Convenience constants for common types
 impl DataType {
     pub const I8: DataType = DataType::Prim(PrimType::I8);

@@ -29,7 +29,7 @@ use crate::DataType;
 /// by `data_type()`. Mismatches will cause undefined behavior or JIT compilation failures.
 pub trait StagedValue: Debug + Display {
     /// Get the runtime data type of this value
-    fn data_type(&self) -> DataType;
+    fn data_type(&self) -> &DataType;
 
     /// Generate Cranelift IR code for this value
     ///
