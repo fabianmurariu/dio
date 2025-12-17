@@ -1902,6 +1902,7 @@ mod tests {
                 builder.call_external(
                     "add_42",
                     vec![Expr::I64(StagedI64::variable(vars[0]))],
+                    vec![DataType::I64],
                     DataType::I64,
                 )
             },
@@ -1969,7 +1970,7 @@ mod tests {
                 // Call add(x, y)
                 let x = Expr::I64(StagedI64::variable(vars[0]));
                 let y = Expr::I64(StagedI64::variable(vars[1]));
-                builder.call_external("add", vec![x, y], DataType::I64)
+                builder.call_external("add", vec![x, y], vec![DataType::I64, DataType::I64], DataType::I64)
             },
         ).unwrap();
 

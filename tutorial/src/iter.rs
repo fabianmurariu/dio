@@ -251,7 +251,7 @@ impl StagedArrayIter {
     where
         F: Fn(&mut StagedBuilder, Var, Var) -> Expr,
     {
-        let acc_type = initial.data_type();
+        let acc_type = initial.data_type().clone();
         let array = self.array.clone();
         let len = array.len();
 
@@ -413,10 +413,12 @@ impl StagedExternIter {
         end: Expr,
     ) -> (Expr, StagedExternIterConfig) {
         // Call iter_create_range to get iterator pointer
+        let sig = crate::ffi::iter_create_range_signature();
         let create_expr = builder.call_external(
-            "iter_create_range",
+            sig.name,
             vec![start, end],
-            DataType::ExtPtr("IterBoxI64".to_string()),
+            sig.param_types.to_vec(),
+            sig.return_type,
         );
 
         let config = StagedExternIterConfig {
@@ -477,10 +479,12 @@ impl StagedExternIter {
 
                     // Simple approach: call iter_next_i64 which returns packed OptionI64
                     // Then extract has_value and value
+                    let sig = crate::ffi::iter_next_i64_signature();
                     let next_call = builder.call_external(
-                        &next_fn,
+                        sig.name,
                         vec![iter_ptr.clone().to_expr()],
-                        DataType::ExtPtr("OptionI64".to_string()),
+                        sig.param_types.to_vec(),
+                        sig.return_type,
                     );
 
                     // Bind the result to extract fields
@@ -491,9 +495,11 @@ impl StagedExternIter {
                     // helper functions: iter_option_has_value and iter_option_value
                     builder.let1(next_call, |builder, option_var| {
                         // Check if has_value using helper
+                        // TODO: This function doesn't exist - should use struct field access instead
                         let has_value_call = builder.call_external(
                             "iter_option_has_value",
                             vec![option_var.clone().to_expr()],
+                            vec![DataType::ExtPtr("OptionI64".to_string())],  // TODO: Get from signature
                             DataType::Bool,
                         );
 
@@ -502,9 +508,11 @@ impl StagedExternIter {
                                 Expr::Bool(has_value_var.to_bool()),
                                 |builder| {
                                     // Get the value
+                                    // TODO: This function doesn't exist - should use struct field access instead
                                     let value_call = builder.call_external(
                                         "iter_option_value",
                                         vec![option_var.clone().to_expr()],
+                                        vec![DataType::ExtPtr("OptionI64".to_string())],  // TODO: Get from signature
                                         element_type.clone(),
                                     );
 
@@ -525,10 +533,12 @@ impl StagedExternIter {
 
             // After loop, drop the iterator
             builder.let1(loop_expr, |builder, _| {
+                let sig = crate::ffi::iter_drop_signature();
                 builder.call_external(
-                    &drop_fn,
+                    sig.name,
                     vec![iter_ptr.clone().to_expr()],
-                    DataType::Unit,
+                    sig.param_types.to_vec(),
+                    sig.return_type,
                 )
             })
         })

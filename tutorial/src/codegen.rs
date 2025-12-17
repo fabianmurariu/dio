@@ -302,7 +302,7 @@ impl Compiler {
         }
 
         // Verify return type matches
-        if result_expr.data_type() != return_type {
+        if result_expr.data_type() != &return_type {
             return Err(StagingError::TypeMismatch {
                 expected: format!("{:?}", return_type),
                 actual: format!("{:?}", result_expr.data_type()),

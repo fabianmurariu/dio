@@ -289,7 +289,7 @@ impl Expr {
         match self {
             Expr::Staged(v) => v.codegen(builder),
             Expr::Variable(var) => builder.use_var(var.var),
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 // Declare and define all bindings
                 for (var_id, var_type, value) in bindings {
                     let var = Variable::from_u32(*var_id);
@@ -305,7 +305,7 @@ impl Expr {
                 // Evaluate the body (which can reference these variables)
                 body.codegen_with_externals(builder, external_funcs)
             }
-            Expr::LetMut { var_id, var_type, initial_value, body } => {
+            Expr::LetMut { var_id, var_type, initial_value, body, .. } => {
                 // Declare the mutable variable
                 let var = Variable::from_u32(*var_id);
                 builder.declare_var(var, var_type.to_cranelift_type());
@@ -317,7 +317,7 @@ impl Expr {
                 // Evaluate the body (which can read and update this variable)
                 body.codegen_with_externals(builder, external_funcs)
             }
-            Expr::If { condition, then_branch, else_branch, result_type } => {
+            Expr::If { condition, then_branch, else_branch, data_type } => {
                 // Evaluate the condition
                 let cond_val = condition.codegen_with_externals(builder, external_funcs);
 
@@ -327,7 +327,7 @@ impl Expr {
                 let merge_block = builder.create_block();
 
                 // Add a block parameter to merge block to receive the result
-                builder.append_block_param(merge_block, result_type.to_cranelift_type());
+                builder.append_block_param(merge_block, data_type.to_cranelift_type());
 
                 // Branch based on condition
                 builder.ins().brif(cond_val, then_block, &[], else_block, &[]);
@@ -351,7 +351,8 @@ impl Expr {
                 // The result is the block parameter (phi node)
                 builder.block_params(merge_block)[0]
             }
-            Expr::ArrayGet { array, index, element_type } => {
+            Expr::ArrayGet { array, index } => {
+                let element_type = array.element_type();
                 // Get the array pointer and index
                 let arr_ptr = builder.use_var(array.ptr_var);
                 let index_val = index.codegen_with_externals(builder, external_funcs);
@@ -410,7 +411,7 @@ impl Expr {
                 // SetVar returns unit, represented as 0
                 builder.ins().iconst(types::I64, 0)
             }
-            Expr::WhileLoop { condition, body } => {
+            Expr::WhileLoop { condition, body, .. } => {
                 // Create blocks for the loop
                 let header_block = builder.create_block();
                 let body_block = builder.create_block();
@@ -446,7 +447,7 @@ impl Expr {
                 // WhileLoop returns unit, represented as 0
                 builder.ins().iconst(types::I64, 0)
             }
-            Expr::ExternalCall { function_name, args, return_type } => {
+            Expr::ExternalCall { function_name, args, return_type, .. } => {
                 // Look up the FuncRef for this external function
                 let func_ref = external_funcs
                     .and_then(|funcs| funcs.get(function_name))
@@ -544,7 +545,7 @@ impl std::fmt::Display for Expr {
         match self {
             Expr::Staged(v) => write!(f, "{}", v),
             Expr::Variable(var) => write!(f, "v{}", var.var.as_u32()),
-            Expr::Let { bindings, body } => {
+            Expr::Let { bindings, body, .. } => {
                 writeln!(f, "{{")?;
                 for (var_id, var_type, value) in bindings {
                     writeln!(f, "  {:?} v{} = {};", var_type, var_id, value)?;
@@ -552,7 +553,7 @@ impl std::fmt::Display for Expr {
                 writeln!(f, "  {}", body)?;
                 write!(f, "}}")
             }
-            Expr::LetMut { var_id, var_type, initial_value, body } => {
+            Expr::LetMut { var_id, var_type, initial_value, body, .. } => {
                 writeln!(f, "{{")?;
                 writeln!(f, "  {:?} mut v{} = {};", var_type, var_id, initial_value)?;
                 writeln!(f, "  {}", body)?;
@@ -570,7 +571,7 @@ impl std::fmt::Display for Expr {
             Expr::SetVar { var, value } => {
                 write!(f, "v{} = {}", var.var.as_u32(), value)
             }
-            Expr::WhileLoop { condition, body } => {
+            Expr::WhileLoop { condition, body, .. } => {
                 write!(f, "while ({}) {{ {} }}", condition, body)
             }
             Expr::ExternalCall { function_name, args, .. } => {
@@ -583,7 +584,7 @@ impl std::fmt::Display for Expr {
                 }
                 write!(f, ")")
             }
-            Expr::ExtPtr { var, name } => {
+            Expr::ExtPtr { var, name, .. } => {
                 write!(f, "ptr<{}>_v{}", name, var.as_u32())
             }
             Expr::LoadField { ptr, offset, field_type } => {
@@ -644,10 +645,12 @@ impl StagedBuilder {
 
         // Build the body
         let body_expr = body(self, var);
+        let data_type = body_expr.data_type().clone();
 
         Expr::Let {
-            bindings: vec![(var_id, var_type, Box::new(value))],
+            bindings: vec![(var_id, var_type.clone(), Box::new(value))],
             body: Box::new(body_expr),
+            data_type,
         }
     }
 
@@ -685,16 +688,18 @@ impl StagedBuilder {
             let var_type = value.data_type();
             let var = Var::new(Variable::from_u32(var_id), var_type.clone());
 
-            bindings.push((var_id, var_type, Box::new(value)));
+            bindings.push((var_id, var_type.clone(), Box::new(value)));
             vars.push(var);
         }
 
         // Build the body
         let body_expr = body(self, &vars);
+        let data_type = body_expr.data_type().clone();
 
         Expr::Let {
             bindings,
             body: Box::new(body_expr),
+            data_type,
         }
     }
 
@@ -720,7 +725,7 @@ impl StagedBuilder {
         // Verify condition is Bool
         assert_eq!(
             condition.data_type(),
-            DataType::Bool,
+            &DataType::Bool,
             "If condition must be boolean, got {:?}",
             condition.data_type()
         );
@@ -728,12 +733,12 @@ impl StagedBuilder {
         let then_branch = then_fn(self);
         let else_branch = else_fn(self);
 
-        // Infer result type from then branch
-        let result_type = then_branch.data_type();
+        // Infer result type from then branch and clone it before moving
+        let result_type = then_branch.data_type().clone();
 
         // Type check: branches must match
         assert_eq!(
-            result_type,
+            &result_type,
             else_branch.data_type(),
             "If branches must have same type: then={:?}, else={:?}",
             result_type,
@@ -744,7 +749,7 @@ impl StagedBuilder {
             condition: Box::new(condition),
             then_branch: Box::new(then_branch),
             else_branch: Box::new(else_branch),
-            result_type,
+            data_type: result_type,
         }
     }
 
@@ -777,6 +782,7 @@ impl StagedBuilder {
         Expr::WhileLoop {
             condition: Box::new(condition_expr),
             body: Box::new(body_expr),
+            data_type: DataType::Unit,
         }
     }
 
@@ -787,11 +793,9 @@ impl StagedBuilder {
     /// let value = builder.array_get(array, StagedU64::constant(5));
     /// ```
     pub fn array_get(&self, array: StagedArray, index: StagedU64) -> Expr {
-        let element_type = array.element_type().clone();
         Expr::ArrayGet {
             array,
             index: Box::new(Expr::Staged(Box::new(index))),
-            element_type,
         }
     }
 
@@ -847,12 +851,14 @@ impl StagedBuilder {
 
         let var = Var::new(Variable::from_u32(var_id), var_type.clone());
         let body_expr = body(self, var);
+        let data_type = body_expr.data_type().clone();
 
         Expr::LetMut {
             var_id,
-            var_type,
+            var_type: var_type.clone(),
             initial_value: Box::new(value),
             body: Box::new(body_expr),
+            data_type,
         }
     }
 
@@ -874,11 +880,15 @@ impl StagedBuilder {
         &self,
         function_name: &str,
         args: Vec<Expr>,
+        param_types: Vec<DataType>,
         return_type: DataType,
     ) -> Expr {
+        // TODO: Validate that args.len() == param_types.len()
+        // TODO: Validate that args[i].data_type() matches param_types[i]
         Expr::ExternalCall {
             function_name: function_name.to_string(),
             args: args.into_iter().map(Box::new).collect(),
+            param_types,
             return_type,
         }
     }

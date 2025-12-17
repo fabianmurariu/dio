@@ -380,9 +380,11 @@ impl StagedStruct {
 
     /// Convert to an Expr (as ExtPtr)
     pub fn to_expr(&self) -> Expr {
+        let name = self.def.name.clone();
         Expr::ExtPtr {
             var: self.ptr_var,
-            name: self.def.name.clone(),
+            data_type: DataType::ExtPtr(name.clone()),
+            name,
         }
     }
 
