@@ -137,6 +137,35 @@ pub struct ExternFnSignature {
     pub fn_ptr: *const u8,
 }
 
+/// Trait for external function signatures
+///
+/// This trait is automatically implemented for ExternFnSignature
+/// and allows type-safe external function calls.
+pub trait Signature {
+    fn name(&self) -> &str;
+    fn param_types(&self) -> &[DataType];
+    fn return_type(&self) -> &DataType;
+    fn fn_ptr(&self) -> *const u8;
+}
+
+impl Signature for ExternFnSignature {
+    fn name(&self) -> &str {
+        self.name
+    }
+
+    fn param_types(&self) -> &[DataType] {
+        self.param_types
+    }
+
+    fn return_type(&self) -> &DataType {
+        &self.return_type
+    }
+
+    fn fn_ptr(&self) -> *const u8 {
+        self.fn_ptr
+    }
+}
+
 /// Registry of external functions with their signatures and pointers
 #[derive(Default)]
 pub struct ExternalFunctionRegistry {

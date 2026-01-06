@@ -150,7 +150,7 @@ pub enum Expr {
     /// The function must be registered in the Compiler's function registry
     ExternalCall {
         function_name: String,    // Name of the external function
-        args: Vec<Box<Expr>>,     // Arguments (types must match signature)
+        args: Vec<Expr>,          // Arguments (types must match signature)
         param_types: Vec<DataType>, // Parameter types from the function signature
         return_type: DataType,    // Return type from the function signature
         // Cached type (same as return_type)
@@ -862,34 +862,62 @@ impl StagedBuilder {
         }
     }
 
-    /// Call an external (Rust) function
+    /// Call an external (Rust) function with type-safe signature
     ///
-    /// The function must be registered in the Compiler's function registry before compilation.
-    /// Arguments and return type must match the registered signature.
+    /// The signature is typically obtained from a `#[extern_fn]` annotated function's
+    /// generated `{function_name}_signature()` helper.
     ///
     /// # Example
     /// ```ignore
-    /// // Assuming iter_next_i64 is registered as: (ExtPtr) -> (I8, I64)
+    /// use crate::ffi::iter_next_i64_signature;
+    ///
+    /// let sig = iter_next_i64_signature();
     /// let option_i64 = builder.call_external(
-    ///     "iter_next_i64",
+    ///     &sig,
     ///     vec![Expr::Variable(iter_ptr_var)],
-    ///     DataType::ExtPtr("OptionI64".to_string()),
     /// );
     /// ```
+    ///
+    /// # Panics
+    /// Panics if the number of arguments doesn't match the signature,
+    /// or if any argument type doesn't match the expected parameter type.
     pub fn call_external(
         &self,
-        function_name: &str,
-        args: Vec<Expr>,
-        param_types: Vec<DataType>,
-        return_type: DataType,
+        sig: &impl crate::ffi::Signature,
+        args: impl IntoIterator<Item = Expr>,
     ) -> Expr {
-        // TODO: Validate that args.len() == param_types.len()
-        // TODO: Validate that args[i].data_type() matches param_types[i]
+        let args: Vec<Expr> = args.into_iter().collect();
+        let param_types = sig.param_types();
+
+        // Validate argument count
+        assert_eq!(
+            args.len(),
+            param_types.len(),
+            "Function '{}' expects {} arguments, got {}",
+            sig.name(),
+            param_types.len(),
+            args.len()
+        );
+
+        // Validate argument types
+        for (i, (arg, expected_type)) in args.iter().zip(param_types.iter()).enumerate() {
+            let actual_type = arg.data_type();
+            assert_eq!(
+                actual_type,
+                expected_type,
+                "Function '{}' argument {} type mismatch: expected {:?}, got {:?}",
+                sig.name(),
+                i,
+                expected_type,
+                actual_type
+            );
+        }
+
         Expr::ExternalCall {
-            function_name: function_name.to_string(),
-            args: args.into_iter().map(Box::new).collect(),
-            param_types,
-            return_type,
+            function_name: sig.name().to_string(),
+            args,
+            param_types: param_types.to_vec(),
+            return_type: sig.return_type().clone(),
         }
     }
 }

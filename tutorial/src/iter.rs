@@ -414,12 +414,7 @@ impl StagedExternIter {
     ) -> (Expr, StagedExternIterConfig) {
         // Call iter_create_range to get iterator pointer
         let sig = crate::ffi::iter_create_range_signature();
-        let create_expr = builder.call_external(
-            sig.name,
-            vec![start, end],
-            sig.param_types.to_vec(),
-            sig.return_type,
-        );
+        let create_expr = builder.call_external(&sig, vec![start, end]);
 
         let config = StagedExternIterConfig {
             element_type: DataType::I64,
@@ -480,12 +475,7 @@ impl StagedExternIter {
                     // Simple approach: call iter_next_i64 which returns packed OptionI64
                     // Then extract has_value and value
                     let sig = crate::ffi::iter_next_i64_signature();
-                    let next_call = builder.call_external(
-                        sig.name,
-                        vec![iter_ptr.clone().to_expr()],
-                        sig.param_types.to_vec(),
-                        sig.return_type,
-                    );
+                    let next_call = builder.call_external(&sig, vec![iter_ptr.clone().to_expr()]);
 
                     // Bind the result to extract fields
                     // For OptionI64, we need to check has_value field
@@ -496,11 +486,20 @@ impl StagedExternIter {
                     builder.let1(next_call, |builder, option_var| {
                         // Check if has_value using helper
                         // TODO: This function doesn't exist - should use struct field access instead
+                        struct DummyHasValueSig {
+                            param_types: Vec<DataType>,
+                        }
+                        impl crate::ffi::Signature for DummyHasValueSig {
+                            fn name(&self) -> &str { "iter_option_has_value" }
+                            fn param_types(&self) -> &[DataType] { &self.param_types }
+                            fn return_type(&self) -> &DataType { &DataType::Bool }
+                            fn fn_ptr(&self) -> *const u8 { std::ptr::null() }
+                        }
                         let has_value_call = builder.call_external(
-                            "iter_option_has_value",
+                            &DummyHasValueSig {
+                                param_types: vec![DataType::ExtPtr("OptionI64".to_string())]
+                            },
                             vec![option_var.clone().to_expr()],
-                            vec![DataType::ExtPtr("OptionI64".to_string())],  // TODO: Get from signature
-                            DataType::Bool,
                         );
 
                         builder.let1(has_value_call, |builder, has_value_var| {
@@ -509,11 +508,22 @@ impl StagedExternIter {
                                 |builder| {
                                     // Get the value
                                     // TODO: This function doesn't exist - should use struct field access instead
+                                    struct DummyValueSig {
+                                        param_types: Vec<DataType>,
+                                        elem_type: DataType,
+                                    }
+                                    impl crate::ffi::Signature for DummyValueSig {
+                                        fn name(&self) -> &str { "iter_option_value" }
+                                        fn param_types(&self) -> &[DataType] { &self.param_types }
+                                        fn return_type(&self) -> &DataType { &self.elem_type }
+                                        fn fn_ptr(&self) -> *const u8 { std::ptr::null() }
+                                    }
                                     let value_call = builder.call_external(
-                                        "iter_option_value",
+                                        &DummyValueSig {
+                                            param_types: vec![DataType::ExtPtr("OptionI64".to_string())],
+                                            elem_type: element_type.clone(),
+                                        },
                                         vec![option_var.clone().to_expr()],
-                                        vec![DataType::ExtPtr("OptionI64".to_string())],  // TODO: Get from signature
-                                        element_type.clone(),
                                     );
 
                                     builder.let1(value_call, |builder, value_var| {
@@ -534,12 +544,7 @@ impl StagedExternIter {
             // After loop, drop the iterator
             builder.let1(loop_expr, |builder, _| {
                 let sig = crate::ffi::iter_drop_signature();
-                builder.call_external(
-                    sig.name,
-                    vec![iter_ptr.clone().to_expr()],
-                    sig.param_types.to_vec(),
-                    sig.return_type,
-                )
+                builder.call_external(&sig, vec![iter_ptr.clone().to_expr()])
             })
         })
     }

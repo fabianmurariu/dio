@@ -1899,12 +1899,15 @@ mod tests {
             vec![DataType::I64],
             DataType::I64,
             |builder, vars| {
-                builder.call_external(
-                    "add_42",
-                    vec![Expr::I64(StagedI64::variable(vars[0]))],
-                    vec![DataType::I64],
-                    DataType::I64,
-                )
+                // Dummy signature for test function
+                struct Add42Sig;
+                impl crate::ffi::Signature for Add42Sig {
+                    fn name(&self) -> &str { "add_42" }
+                    fn param_types(&self) -> &[DataType] { &[DataType::I64] }
+                    fn return_type(&self) -> &DataType { &DataType::I64 }
+                    fn fn_ptr(&self) -> *const u8 { std::ptr::null() }
+                }
+                builder.call_external(&Add42Sig, vec![Expr::I64(StagedI64::variable(vars[0]))])
             },
         );
 
@@ -1970,7 +1973,15 @@ mod tests {
                 // Call add(x, y)
                 let x = Expr::I64(StagedI64::variable(vars[0]));
                 let y = Expr::I64(StagedI64::variable(vars[1]));
-                builder.call_external("add", vec![x, y], vec![DataType::I64, DataType::I64], DataType::I64)
+                // Dummy signature for test function
+                struct AddSig;
+                impl crate::ffi::Signature for AddSig {
+                    fn name(&self) -> &str { "add" }
+                    fn param_types(&self) -> &[DataType] { &[DataType::I64, DataType::I64] }
+                    fn return_type(&self) -> &DataType { &DataType::I64 }
+                    fn fn_ptr(&self) -> *const u8 { std::ptr::null() }
+                }
+                builder.call_external(&AddSig, vec![x, y])
             },
         ).unwrap();
 

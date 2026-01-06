@@ -1,5 +1,5 @@
 [workspace]
-members = ["tutorial", "tutorial-derive"]
+members = ["tutorial", "tutorial-derive", "rust-lms"]
 resolver = "2"
 
 [workspace.dependencies]
