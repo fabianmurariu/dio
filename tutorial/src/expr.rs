@@ -291,9 +291,10 @@ impl Expr {
             Expr::Variable(var) => builder.use_var(var.var),
             Expr::Let { bindings, body, .. } => {
                 // Declare and define all bindings
-                for (var_id, var_type, value) in bindings {
-                    let var = Variable::from_u32(*var_id);
-                    builder.declare_var(var, var_type.to_cranelift_type());
+                for (_var_id, var_type, value) in bindings {
+                    // In Cranelift 0.127+, declare_var returns the Variable
+                    // Variable IDs are now assigned by Cranelift, not by us
+                    let var = builder.declare_var(var_type.to_cranelift_type());
 
                     // Evaluate the value expression
                     let val = value.codegen_with_externals(builder, external_funcs);
@@ -305,10 +306,10 @@ impl Expr {
                 // Evaluate the body (which can reference these variables)
                 body.codegen_with_externals(builder, external_funcs)
             }
-            Expr::LetMut { var_id, var_type, initial_value, body, .. } => {
-                // Declare the mutable variable
-                let var = Variable::from_u32(*var_id);
-                builder.declare_var(var, var_type.to_cranelift_type());
+            Expr::LetMut { var_id: _var_id, var_type, initial_value, body, .. } => {
+                // In Cranelift 0.127+, declare_var returns the Variable
+                // Variable IDs are now assigned by Cranelift, not by us
+                let var = builder.declare_var(var_type.to_cranelift_type());
 
                 // Evaluate and set the initial value
                 let val = initial_value.codegen_with_externals(builder, external_funcs);
@@ -318,6 +319,10 @@ impl Expr {
                 body.codegen_with_externals(builder, external_funcs)
             }
             Expr::If { condition, then_branch, else_branch, data_type } => {
+                // Cranelift 0.127+: Use a variable to pass values between blocks
+                // instead of block parameters
+                let result_var = builder.declare_var(data_type.to_cranelift_type());
+
                 // Evaluate the condition
                 let cond_val = condition.codegen_with_externals(builder, external_funcs);
 
@@ -326,9 +331,6 @@ impl Expr {
                 let else_block = builder.create_block();
                 let merge_block = builder.create_block();
 
-                // Add a block parameter to merge block to receive the result
-                builder.append_block_param(merge_block, data_type.to_cranelift_type());
-
                 // Branch based on condition
                 builder.ins().brif(cond_val, then_block, &[], else_block, &[]);
 
@@ -336,20 +338,22 @@ impl Expr {
                 builder.switch_to_block(then_block);
                 builder.seal_block(then_block);
                 let then_val = then_branch.codegen_with_externals(builder, external_funcs);
-                builder.ins().jump(merge_block, &[then_val]);
+                builder.def_var(result_var, then_val);
+                builder.ins().jump(merge_block, &[]);
 
                 // Generate else branch
                 builder.switch_to_block(else_block);
                 builder.seal_block(else_block);
                 let else_val = else_branch.codegen_with_externals(builder, external_funcs);
-                builder.ins().jump(merge_block, &[else_val]);
+                builder.def_var(result_var, else_val);
+                builder.ins().jump(merge_block, &[]);
 
                 // Continue at merge block
                 builder.switch_to_block(merge_block);
                 builder.seal_block(merge_block);
 
-                // The result is the block parameter (phi node)
-                builder.block_params(merge_block)[0]
+                // Read the result variable (this creates a phi node)
+                builder.use_var(result_var)
             }
             Expr::ArrayGet { array, index } => {
                 let element_type = array.element_type();

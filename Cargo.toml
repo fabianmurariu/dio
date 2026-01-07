@@ -11,12 +11,12 @@ thiserror = "1.0"
 ariadne = "0.4"
 
 # JIT compilation
-cranelift = "0.105"
-cranelift-jit = "0.105"
-cranelift-module = "0.105"
-cranelift-frontend = "0.105"
-cranelift-codegen = "0.105"
-cranelift-native = "0.105"
+cranelift = "0.127"
+cranelift-jit = "0.127"
+cranelift-module = "0.127"
+cranelift-frontend = "0.127"
+cranelift-codegen = "0.127"
+cranelift-native = "0.127"
 
 arrow = "53.4.1"
 

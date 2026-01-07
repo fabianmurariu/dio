@@ -103,9 +103,12 @@ pub mod num;
 pub mod staged;
 pub mod types;
 
+pub mod func;
+
 /// Commonly used types and traits
 pub mod prelude {
+    pub use crate::func::{fun1, Fun1, FunType1};
     pub use crate::num::{add, div, eq, lt, mul, sub};
-    pub use crate::staged::{BoxableStaged, Const, Staged, Var};
-    pub use crate::types::{BoolType, F64Type, I64Type, StagedType, U64Type};
+    pub use crate::staged::{BoxableStaged, CompilationContext, Const, Staged, Var};
+    pub use crate::types::{BoolType, ConstantType, F64Type, I64Type, StagedType, U64Type};
 }

@@ -1,9 +1,8 @@
 //! Operation structs for numeric staged computations.
 
 use cranelift_codegen::ir::Value;
-use cranelift_frontend::FunctionBuilder;
 
-use crate::staged::Staged;
+use crate::staged::{CompilationContext, Staged};
 use crate::types::{BoolType, StagedType};
 
 use super::traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsSub};
@@ -27,10 +26,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_add(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_add(lv, rv, ctx.builder)
     }
 }
 
@@ -49,10 +48,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_sub(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_sub(lv, rv, ctx.builder)
     }
 }
 
@@ -71,10 +70,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_mul(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_mul(lv, rv, ctx.builder)
     }
 }
 
@@ -93,10 +92,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_div(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_div(lv, rv, ctx.builder)
     }
 }
 
@@ -119,10 +118,10 @@ where
 {
     type Out = BoolType; // Always returns boolean!
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_lt(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_lt(lv, rv, ctx.builder)
     }
 }
 
@@ -141,10 +140,10 @@ where
 {
     type Out = BoolType; // Always returns boolean!
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        let lv = self.left.codegen(builder);
-        let rv = self.right.codegen(builder);
-        T::codegen_eq(lv, rv, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_eq(lv, rv, ctx.builder)
     }
 }
 

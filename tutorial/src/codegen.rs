@@ -218,20 +218,20 @@ impl Compiler {
                 DataType::Array { .. } => {
                     // Arrays take 2 slots: pointer and length
 
-                    // Load pointer
-                    let ptr_var = Variable::from_u32(var_id);
+                    // Load pointer - Cranelift 0.127+: declare_var returns the Variable
+                    // Variable IDs are now assigned by Cranelift, not by us
+                    let ptr_var = builder.declare_var(types::I64);
                     var_id += 1;
-                    builder.declare_var(ptr_var, types::I64);
                     let ptr_offset = builder.ins().iconst(types::I64, (slot_offset * 8) as i64);
                     let ptr_addr = builder.ins().iadd(params_ptr, ptr_offset);
                     let ptr_val = builder.ins().load(types::I64, MemFlags::trusted(), ptr_addr, 0);
                     builder.def_var(ptr_var, ptr_val);
                     slot_offset += 1;
 
-                    // Load length
-                    let len_var = Variable::from_u32(var_id);
+                    // Load length - Cranelift 0.127+: declare_var returns the Variable
+                    // Variable IDs are now assigned by Cranelift, not by us
+                    let len_var = builder.declare_var(types::I64);
                     var_id += 1;
-                    builder.declare_var(len_var, types::I64);
                     let len_offset = builder.ins().iconst(types::I64, (slot_offset * 8) as i64);
                     let len_addr = builder.ins().iadd(params_ptr, len_offset);
                     let len_val = builder.ins().load(types::I64, MemFlags::trusted(), len_addr, 0);
@@ -244,11 +244,11 @@ impl Compiler {
                     param_vars.push(len_var);
                 }
                 _ => {
-                    // Scalars take 1 slot
-                    let var = Variable::from_u32(var_id);
-                    var_id += 1;
+                    // Scalars take 1 slot - Cranelift 0.127+: declare_var returns the Variable
+                    // Variable IDs are now assigned by Cranelift, not by us
                     let cranelift_type = param_type.to_cranelift_type();
-                    builder.declare_var(var, cranelift_type);
+                    let var = builder.declare_var(cranelift_type);
+                    var_id += 1;
 
                     let byte_offset = slot_offset * 8;
                     let offset = builder.ins().iconst(types::I64, byte_offset as i64);

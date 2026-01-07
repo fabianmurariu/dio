@@ -1,22 +1,23 @@
 //! Type system for staged computations.
 //!
 //! This module defines:
-//! - `StagedType`: Trait for types that can participate in staged computation
+//! - `StagedType`: Base trait for all types that can participate in staged computation
+//! - `ConstantType`: Trait for types that can be compile-time constants
 //! - Concrete type markers: `I64Type`, `U64Type`, `BoolType`, etc.
 
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
 // =============================================================================
-// Core Trait: StagedType
+// Core Traits
 // =============================================================================
 
-/// Types that can participate in staged computations.
+/// Base trait for all types that can participate in staged computations.
 ///
 /// This trait associates a Rust type with:
 /// - Its runtime value representation
 /// - Its Cranelift IR type
-/// - How to generate code for constant values
+/// - How to create variables of this type
 pub trait StagedType: 'static {
     /// The actual runtime type (e.g., i64 for I64Type)
     type RuntimeValue: Clone;
@@ -24,6 +25,21 @@ pub trait StagedType: 'static {
     /// Get the Cranelift IR type representation
     fn cranelift_type() -> cranelift_codegen::ir::Type;
 
+    /// Create a new variable of this type
+    fn declare_var(builder: &mut FunctionBuilder) -> crate::staged::Var<Self>
+    where
+        Self: Sized,
+    {
+        let var = builder.declare_var(Self::cranelift_type());
+        crate::staged::Var::new(var)
+    }
+}
+
+/// Types that can be compile-time constants.
+///
+/// Not all StagedType values can be constants (e.g., function types cannot),
+/// so this is a separate trait.
+pub trait ConstantType: StagedType {
     /// Generate code for a constant value
     fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
 }
@@ -58,7 +74,9 @@ impl StagedType for I64Type {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
     }
+}
 
+impl ConstantType for I64Type {
     fn codegen_constant(value: &i64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value)
     }
@@ -70,7 +88,9 @@ impl StagedType for U64Type {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
     }
+}
 
+impl ConstantType for U64Type {
     fn codegen_constant(value: &u64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value as i64)
     }
@@ -82,7 +102,9 @@ impl StagedType for BoolType {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8
     }
+}
 
+impl ConstantType for BoolType {
     fn codegen_constant(value: &bool, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I8, if *value { 1 } else { 0 })
     }
@@ -94,7 +116,9 @@ impl StagedType for F64Type {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::F64
     }
+}
 
+impl ConstantType for F64Type {
     fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().f64const(*value)
     }

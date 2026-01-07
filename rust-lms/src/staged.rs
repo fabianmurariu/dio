@@ -8,8 +8,24 @@
 
 use cranelift_codegen::ir::Value;
 use cranelift_frontend::{FunctionBuilder, Variable};
+use cranelift_jit::JITModule;
 
-use crate::types::StagedType;
+use crate::types::{ConstantType, StagedType};
+
+// =============================================================================
+// Compilation Context
+// =============================================================================
+
+/// Context provided during code generation.
+///
+/// This gives access to both the function builder (for generating IR within
+/// the current function) and the JIT module (for creating new functions).
+pub struct CompilationContext<'a, 'b> {
+    /// The function builder for the current function
+    pub builder: &'b mut FunctionBuilder<'a>,
+    /// The JIT module for creating new functions
+    pub module: &'b mut JITModule,
+}
 
 // =============================================================================
 // Core Trait: Staged
@@ -24,7 +40,7 @@ pub trait Staged {
     type Out: StagedType;
 
     /// Generate Cranelift IR code for this computation
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value;
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value;
 }
 
 // =============================================================================
@@ -65,8 +81,8 @@ impl<T: StagedType + Copy> Copy for Var<T> where T::RuntimeValue: Copy {}
 impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        builder.use_var(self.var)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        ctx.builder.use_var(self.var)
     }
 }
 
@@ -84,11 +100,11 @@ impl<T: StagedType> Staged for Var<T> {
 /// let ten = Const::<I64Type>::new(10);
 /// ```
 #[derive(Clone)]
-pub struct Const<T: StagedType> {
+pub struct Const<T: ConstantType> {
     value: T::RuntimeValue,
 }
 
-impl<T: StagedType> Const<T> {
+impl<T: ConstantType> Const<T> {
     /// Create a new constant value
     pub fn new(value: T::RuntimeValue) -> Self {
         Const { value }
@@ -96,13 +112,13 @@ impl<T: StagedType> Const<T> {
 }
 
 // Conditionally implement Copy when T and T::RuntimeValue are Copy
-impl<T: StagedType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
+impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
 
-impl<T: StagedType> Staged for Const<T> {
+impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
-    fn codegen(&self, builder: &mut FunctionBuilder) -> Value {
-        T::codegen_constant(&self.value, builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        T::codegen_constant(&self.value, ctx.builder)
     }
 }
 

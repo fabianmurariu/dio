@@ -6,5 +6,10 @@ edition = "2021"
 [dependencies]
 cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
+cranelift-jit.workspace = true
+cranelift-module.workspace = true
 
 [dev-dependencies]
+cranelift = { workspace = true }
+cranelift-jit = { workspace = true }
+cranelift-module = { workspace = true }
