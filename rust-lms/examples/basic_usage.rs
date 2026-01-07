@@ -1,84 +1,149 @@
 //! Basic usage example of the rust-lms library.
 //!
 //! This example demonstrates:
-//! - Creating typed variables and constants
+//! - Creating typed variables and constants using the Compiler
 //! - Building type-safe expressions
 //! - Compile-time type checking
-//! - Copy semantics for Var<T> and Const<T>
+//! - Copy semantics for VarRef<T> and Const<T>
+//! - Compiling and running expressions
 
-use cranelift_frontend::Variable;
 use rust_lms::prelude::*;
 
 fn main() {
     println!("=== rust-lms: Type-Safe Staged Computation ===\n");
 
-    // Example 1: Basic arithmetic with Copy semantics
-    println!("Example 1: Copy semantics");
-    let x = Var::<I64Type>::new(Variable::from_u32(0));
-    let five = Const::<I64Type>::new(5);
-    let two = Const::<I64Type>::new(2);
+    // Example 1: Basic arithmetic with constants
+    println!("Example 1: Simple arithmetic");
+    {
+        let compiler = Compiler::new();
+        let five = Const::<I64Type>::new(5);
+        let two = Const::<I64Type>::new(2);
 
-    // x is Copy, so we can use it multiple times without cloning!
-    let expr1 = add(x, five); // (x + 5)
-    let expr2 = mul(expr1, two); // (x + 5) * 2
-    let expr3 = add(x, x); // x + x - no clone needed!
+        let expr = mul(add(five, Const::new(3)), two); // (5 + 3) * 2 = 16
 
-    println!("  Created expression: (x + 5) * 2");
-    println!("  Created expression: x + x");
-    println!("  ✓ x was used multiple times without explicit cloning\n");
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        let result = compiled.run();
+        println!("  (5 + 3) * 2 = {}", result);
+        assert_eq!(result, 16);
+        println!("  Compiled and ran successfully!\n");
+    }
 
-    // Example 2: Heterogeneous operations (type transformations)
-    println!("Example 2: Heterogeneous operations");
-    let comparison1 = lt(x, Const::new(100)); // x < 100 : BoolType
-    let comparison2 = eq(add(x, five), Const::new(10)); // (x + 5) == 10 : BoolType
+    // Example 2: Functions with VarRef
+    println!("Example 2: Function definition and calling");
+    {
+        let mut compiler = Compiler::new();
 
-    println!("  Created: x < 100 -> BoolType");
-    println!("  Created: (x + 5) == 10 -> BoolType");
-    println!("  ✓ Comparisons change output type from I64Type to BoolType\n");
+        // Define: square(x) = x * x
+        let square = compiler.fun1("square", |x: VarRef<I64Type>| mul(x, x));
 
-    // Example 3: Compile-time type safety
-    println!("Example 3: Compile-time type safety");
-    println!("  The following would NOT compile:");
-    println!("    // let bad = add(x, comparison1);");
-    println!("    // ERROR: cannot add I64Type and BoolType");
-    println!("  ✓ Type errors caught at compile time!\n");
+        // Call: square(7) = 49
+        let expr = call1(square, Const::<I64Type>::new(7));
 
-    // Example 4: Multiple numeric types
-    println!("Example 4: Multiple numeric types");
-    let u_val = Var::<U64Type>::new(Variable::from_u32(1));
-    let f_val = Var::<F64Type>::new(Variable::from_u32(2));
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        let result = compiled.run();
+        println!("  square(7) = {}", result);
+        assert_eq!(result, 49);
+        println!("  Function compiled and called successfully!\n");
+    }
 
-    let u_expr = mul(u_val, Const::<U64Type>::new(10));
-    let f_expr = div(f_val, Const::<F64Type>::new(2.0));
+    // Example 3: Nested function calls
+    println!("Example 3: Nested function calls");
+    {
+        let mut compiler = Compiler::new();
 
-    println!("  Created U64 expression: u_val * 10");
-    println!("  Created F64 expression: f_val / 2.0");
-    println!("  ✓ Different types work independently\n");
+        // Define: double(x) = x + x
+        let double = compiler.fun1("double", |x: VarRef<I64Type>| add(x, x));
 
-    // Example 5: Complex nested expressions
-    println!("Example 5: Complex nested expressions");
-    let complex = mul(
-        add(x, Const::new(3)),
-        sub(Const::new(10), x),
-    ); // (x + 3) * (10 - x)
+        // Define: add_one(x) = x + 1
+        let add_one = compiler.fun1("add_one", |x: VarRef<I64Type>| {
+            add(x, Const::new(1))
+        });
 
-    println!("  Created: (x + 3) * (10 - x)");
-    println!("  ✓ Arbitrary nesting works seamlessly\n");
+        // Compute: double(add_one(5)) = double(6) = 12
+        let expr = call1(double, call1(add_one, Const::<I64Type>::new(5)));
 
-    // Example 6: Boxing for dynamic dispatch
-    println!("Example 6: Dynamic dispatch via boxing");
-    let boxed: Box<dyn Staged<Out = I64Type>> = x.boxed();
-    println!("  Boxed Var<I64Type> as Box<dyn Staged<Out = I64Type>>");
-    println!("  ✓ Can store heterogeneous expression trees in collections\n");
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        let result = compiled.run();
+        println!("  double(add_one(5)) = {}", result);
+        assert_eq!(result, 12);
+        println!("  Nested calls work!\n");
+    }
+
+    // Example 4: VarRef is Copy
+    println!("Example 4: VarRef is Copy");
+    {
+        let mut compiler = Compiler::new();
+
+        // x is used multiple times in the body - no clone needed!
+        let cube = compiler.fun1("cube", |x: VarRef<I64Type>| {
+            mul(mul(x, x), x) // x * x * x
+        });
+
+        let expr = call1(cube, Const::<I64Type>::new(3));
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        let result = compiled.run();
+        println!("  cube(3) = {} (x used 3 times, no cloning)", result);
+        assert_eq!(result, 27);
+        println!("  Copy semantics confirmed!\n");
+    }
+
+    // Example 5: Heterogeneous operations (type transformations)
+    println!("Example 5: Heterogeneous operations");
+    {
+        let compiler = Compiler::new();
+
+        // Comparisons change type to Bool
+        let comparison = lt(Const::<I64Type>::new(5), Const::new(10)); // 5 < 10 : BoolType
+
+        // Note: We can compile and get a bool result
+        let compiled = compiler.compile(comparison).expect("compilation failed");
+        let result = compiled.run();
+        println!("  5 < 10 = {} (returns BoolType)", result);
+        assert!(result);
+        println!("  Type transformation works!\n");
+    }
+
+    // Example 6: Complex nested expressions
+    println!("Example 6: Complex nested expressions");
+    {
+        let mut compiler = Compiler::new();
+
+        // Define: f(x) = (x + 3) * (10 - x)
+        let f = compiler.fun1("f", |x: VarRef<I64Type>| {
+            mul(add(x, Const::new(3)), sub(Const::new(10), x))
+        });
+
+        // f(2) = (2 + 3) * (10 - 2) = 5 * 8 = 40
+        let expr = call1(f, Const::<I64Type>::new(2));
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        let result = compiled.run();
+        println!("  f(2) where f(x) = (x + 3) * (10 - x)");
+        println!("  = (2 + 3) * (10 - 2) = 5 * 8 = {}", result);
+        assert_eq!(result, 40);
+        println!("  Complex expressions work!\n");
+    }
+
+    // Example 7: Boxing for dynamic dispatch
+    println!("Example 7: Dynamic dispatch via boxing");
+    {
+        let c = Const::<I64Type>::new(42);
+        let _boxed: Box<dyn Staged<Out = I64Type>> = c.boxed();
+        println!("  Boxed Const<I64Type> as Box<dyn Staged<Out = I64Type>>");
+
+        let expr = add(Const::new(1), Const::new(2));
+        let _boxed_expr: Box<dyn Staged<Out = I64Type>> = expr.boxed();
+        println!("  Can box operations too");
+        println!("  Can store heterogeneous expression trees in collections\n");
+    }
 
     println!("=== Summary ===");
-    println!("✓ Type-safe: Invalid operations caught at compile time");
-    println!("✓ Ergonomic: Var<T>/Const<T> are Copy when possible");
-    println!("✓ Flexible: Supports type transformations (e.g., comparison → bool)");
-    println!("✓ Composable: Any Staged value works anywhere");
-    println!("✓ Dynamic: Boxing support when needed");
-
-    // Note: We're not actually generating code here, just demonstrating
-    // the type system and API ergonomics. In a real use case, you'd call
-    // .codegen() with a FunctionBuilder to generate actual Cranelift IR.
+    println!("All examples passed!");
+    println!("Type-safe: Invalid operations caught at compile time");
+    println!("Ergonomic: VarRef<T>/Const<T> are Copy");
+    println!("Flexible: Supports type transformations (e.g., comparison -> bool)");
+    println!("Composable: Any Staged value works anywhere");
+    println!("Dynamic: Boxing support when needed");
+    println!("JIT Compiled: Expressions compile to native code and run!");
 }

@@ -17,22 +17,12 @@ use cranelift_frontend::FunctionBuilder;
 /// This trait associates a Rust type with:
 /// - Its runtime value representation
 /// - Its Cranelift IR type
-/// - How to create variables of this type
 pub trait StagedType: 'static {
     /// The actual runtime type (e.g., i64 for I64Type)
     type RuntimeValue: Clone;
 
     /// Get the Cranelift IR type representation
     fn cranelift_type() -> cranelift_codegen::ir::Type;
-
-    /// Create a new variable of this type
-    fn declare_var(builder: &mut FunctionBuilder) -> crate::staged::Var<Self>
-    where
-        Self: Sized,
-    {
-        let var = builder.declare_var(Self::cranelift_type());
-        crate::staged::Var::new(var)
-    }
 }
 
 /// Types that can be compile-time constants.

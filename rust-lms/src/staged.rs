@@ -2,13 +2,13 @@
 //!
 //! This module defines the foundation for type-safe staged computations:
 //! - `Staged`: Trait for anything that can generate runtime code
-//! - `Var<T>`: Typed variable references (Copy-able)
+//! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
-//! - Boxing support for dynamic dispatch
 
 use cranelift_codegen::ir::Value;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
+use std::collections::HashMap;
 
 use crate::types::{ConstantType, StagedType};
 
@@ -18,13 +18,17 @@ use crate::types::{ConstantType, StagedType};
 
 /// Context provided during code generation.
 ///
-/// This gives access to both the function builder (for generating IR within
-/// the current function) and the JIT module (for creating new functions).
+/// This gives access to the function builder, JIT module, and mappings from
+/// our internal IDs to Cranelift entities.
 pub struct CompilationContext<'a, 'b> {
     /// The function builder for the current function
     pub builder: &'b mut FunctionBuilder<'a>,
     /// The JIT module for creating new functions
     pub module: &'b mut JITModule,
+    /// Mapping from our variable IDs to Cranelift Variables
+    pub var_map: &'b mut HashMap<usize, Variable>,
+    /// Mapping from our function IDs to Cranelift FuncIds
+    pub func_map: &'b HashMap<usize, cranelift_module::FuncId>,
 }
 
 // =============================================================================
@@ -44,45 +48,49 @@ pub trait Staged {
 }
 
 // =============================================================================
-// Var<T> - Lightweight, Copy-able variable reference
+// VarRef<T> - Lightweight, Copy-able variable reference
 // =============================================================================
 
 /// A lightweight reference to a staged variable.
 ///
-/// `Var<T>` is Copy when `T::RuntimeValue` is Copy, enabling easy reuse
-/// in expressions without explicit cloning.
+/// `VarRef<T>` is just an index into the Compiler's variable tracking.
+/// It's always Copy, enabling easy reuse in expressions.
 ///
 /// # Example
 /// ```ignore
-/// let x = Var::<I64Type>::new(Variable::from_u32(0));
-/// let expr1 = add(x, y);  // x used here
-/// let expr2 = add(x, x);  // x used again - no clone needed!
+/// let x: VarRef<I64Type> = compiler.var();
+/// let expr = add(x, x);  // x used twice - no problem, it's Copy!
 /// ```
-#[derive(Clone)]
-pub struct Var<T: StagedType> {
-    var: Variable,
+#[derive(Clone, Copy)]
+pub struct VarRef<T: StagedType> {
+    pub(crate) id: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 
-impl<T: StagedType> Var<T> {
-    /// Create a new typed variable reference
-    pub fn new(var: Variable) -> Self {
-        Var {
-            var,
+impl<T: StagedType> VarRef<T> {
+    /// Create a new variable reference with the given ID
+    pub(crate) fn new(id: usize) -> Self {
+        VarRef {
+            id,
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-// Conditionally implement Copy when T::RuntimeValue is Copy
-// Note: We need T: Copy because PhantomData<T> requires it for Copy
-impl<T: StagedType + Copy> Copy for Var<T> where T::RuntimeValue: Copy {}
-
-impl<T: StagedType> Staged for Var<T> {
+impl<T: StagedType> Staged for VarRef<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        ctx.builder.use_var(self.var)
+        // Look up our ID in the var_map to get the Cranelift Variable
+        let var = ctx.var_map.get(&self.id)
+            .expect(&format!("Variable {} not found in var_map", self.id));
+        ctx.builder.use_var(*var)
+    }
+}
+
+impl<T: StagedType> std::fmt::Debug for VarRef<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        write!(f, "VarRef({})", self.id)
     }
 }
 
@@ -127,12 +135,6 @@ impl<T: ConstantType> Staged for Const<T> {
 // =============================================================================
 
 /// Extension trait to enable boxing any Staged value for dynamic dispatch.
-///
-/// # Example
-/// ```ignore
-/// let x = Var::<I64Type>::new(Variable::from_u32(0));
-/// let boxed: Box<dyn Staged<Out = I64Type>> = x.boxed();
-/// ```
 pub trait BoxableStaged: Staged {
     /// Box this staged value for dynamic dispatch
     fn boxed(&self) -> Box<dyn Staged<Out = Self::Out>>
