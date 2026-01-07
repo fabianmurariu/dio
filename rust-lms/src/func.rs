@@ -63,6 +63,27 @@ impl<A: StagedType, OUT: StagedType> std::fmt::Debug for FunRef<A, OUT> {
     }
 }
 
+/// FunRef can be staged - it generates code that returns the function pointer
+impl<A: StagedType, OUT: StagedType> Staged for FunRef<A, OUT> {
+    type Out = FunType1<A, OUT>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Look up the cranelift FuncId for this function
+        let func_id = ctx
+            .func_map
+            .get(&self.id)
+            .expect(&format!("Function {} not found in func_map", self.id));
+
+        // Declare the function in the current function context
+        let func_ref = ctx
+            .module
+            .declare_func_in_func(*func_id, ctx.builder.func);
+
+        // Get the function address as an i64
+        ctx.builder.ins().func_addr(types::I64, func_ref)
+    }
+}
+
 // =============================================================================
 // Call1: Function call expression
 // =============================================================================
@@ -296,6 +317,13 @@ impl Compiler {
                     builder.finalize();
                 }
 
+                // Debug output for Cranelift IR
+                if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
+                    eprintln!("=== Function: {} ===", func_def.name);
+                    eprintln!("{}", func_ctx.func);
+                    eprintln!();
+                }
+
                 module
                     .define_function(func_id, &mut func_ctx)
                     .map_err(|e| CompileError::ModuleError(e.to_string()))?;
@@ -329,6 +357,13 @@ impl Compiler {
 
                 builder.ins().return_(&[result]);
                 builder.finalize();
+            }
+
+            // Debug output for main function IR
+            if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
+                eprintln!("=== Function: __main__ ===");
+                eprintln!("{}", func_ctx.func);
+                eprintln!();
             }
 
             module
@@ -488,5 +523,27 @@ mod tests {
         let result = compiled.run();
 
         assert_eq!(result, 14);
+    }
+
+    #[test]
+    fn test_return_function_pointer() {
+        let mut compiler = Compiler::new();
+
+        // Define: cube(x) = x * x * x
+        let cube = compiler.fun1("cube", |x: VarRef<I64Type>| {
+            mul(mul(x, x), x)
+        });
+
+        // Compile the function reference itself (not a call)
+        let compiled = compiler.compile(cube).expect("compilation failed");
+
+        // Extract the function pointer
+        let cube_fn = compiled.as_fn();
+
+        // Test the function with various inputs
+        assert_eq!(cube_fn(2), 8);
+        assert_eq!(cube_fn(3), 27);
+        assert_eq!(cube_fn(5), 125);
+        assert_eq!(cube_fn(-2), -8);
     }
 }
