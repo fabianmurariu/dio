@@ -231,6 +231,59 @@ impl Compiler {
         FunRef::new(func_id)
     }
 
+    /// Define a recursive unary function.
+    ///
+    /// Similar to `fun1`, but the body function receives a reference to itself,
+    /// allowing for recursive calls. The function reference is passed as the first
+    /// argument to the body closure.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let factorial = compiler.fun1_rec("factorial", |f, x: VarRef<I64Type>| {
+    ///     // Recursive call: f(x - 1)
+    ///     call1(f, sub(x, Const::<I64Type>::new(1)))
+    /// });
+    /// ```
+    pub fn fun1_rec<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef<A, OUT>
+    where
+        A: StagedType,
+        OUT: StagedType,
+        F: FnOnce(FunRef<A, OUT>, VarRef<A>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        // Create the parameter variable
+        let param_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param_var = VarRef::<A>::new(param_id);
+
+        // Pre-allocate the function ID and create FunRef
+        let func_id = self.functions.len();
+        let func_ref = FunRef::new(func_id);
+
+        // Push a placeholder first (None) to reserve the slot
+        self.functions.push(None);
+
+        // Now call body_fn with both the function reference and parameter
+        // This allows the body to reference itself for recursion
+        let body_expr = body_fn(func_ref, param_var);
+
+        // Create the actual function definition
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| {
+                body_expr.codegen(ctx)
+            }),
+            param_type: A::cranelift_type(),
+            return_type: OUT::cranelift_type(),
+            param_var_id: param_id,
+        };
+
+        // Replace the placeholder with the actual definition
+        self.functions[func_id] = Some(func_def);
+
+        FunRef::new(func_id)
+    }
+
     /// Compile an expression to native code.
     ///
     /// This compiles all referenced functions and the main expression,
@@ -545,5 +598,24 @@ mod tests {
         assert_eq!(cube_fn(3), 27);
         assert_eq!(cube_fn(5), 125);
         assert_eq!(cube_fn(-2), -8);
+    }
+
+    #[test]
+    fn test_recursive_function_compiles() {
+        let mut compiler = Compiler::new();
+
+        // Define a recursive function: rec(x) = x + rec(x - 1)
+        // Note: This will infinite loop if called, but we're just testing
+        // that it compiles and the function can reference itself
+        let _rec = compiler.fun1_rec("recursive", |f, x: VarRef<I64Type>| {
+            // Body references itself: call f recursively
+            add(x, call1(f, sub(x, Const::<I64Type>::new(1))))
+        });
+
+        // Just test that compilation succeeds
+        // We don't call it since it would infinite loop without conditionals
+        let expr = Const::<I64Type>::new(42);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 42);
     }
 }
