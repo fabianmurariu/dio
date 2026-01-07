@@ -5,12 +5,13 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::Value;
+use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use std::collections::HashMap;
 
-use crate::types::{ConstantType, StagedType};
+use crate::types::{ConstantType, StagedType, UnitType};
+use cranelift_codegen::ir::types;
 
 // =============================================================================
 // Compilation Context
@@ -148,3 +149,60 @@ pub trait BoxableStaged: Staged {
 
 // Blanket implementation: all Staged types can be boxed
 impl<T: Staged> BoxableStaged for T {}
+
+// =============================================================================
+// Assign<V, EXPR> - Variable assignment (side effect, returns unit)
+// =============================================================================
+
+/// Assignment expression: assigns a value to a variable.
+///
+/// This is a side-effecting operation that returns `UnitType`.
+/// Use with `Seq` to chain multiple assignments or continue with other expressions.
+///
+/// # Example
+/// ```ignore
+/// let x = compiler.var::<I64Type>();
+/// let expr = seq(assign(x, Const::<I64Type>::new(5)), x);  // assigns 5 to x, returns x
+/// ```
+#[derive(Clone)]
+pub struct Assign<V, EXPR> {
+    var: V,
+    expr: EXPR,
+}
+
+impl<T, EXPR> Staged for Assign<VarRef<T>, EXPR>
+where
+    T: StagedType,
+    EXPR: Staged<Out = T>,
+{
+    type Out = UnitType;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Generate code for the value expression
+        let value = self.expr.codegen(ctx);
+
+        // Look up the Cranelift Variable and assign to it
+        let var = ctx
+            .var_map
+            .get(&self.var.id)
+            .expect(&format!("Variable {} not found in var_map", self.var.id));
+        ctx.builder.def_var(*var, value);
+
+        // Return unit value
+        ctx.builder.ins().iconst(types::I8, 0)
+    }
+}
+
+/// Create an assignment expression
+pub fn assign<T, EXPR>(var: VarRef<T>, expr: EXPR) -> Assign<VarRef<T>, EXPR>
+where
+    T: StagedType,
+    EXPR: Staged<Out = T>,
+{
+    Assign { var, expr }
+}
+
+/// Create a unit constant
+pub fn unit() -> Const<UnitType> {
+    Const::new(())
+}

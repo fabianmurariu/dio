@@ -54,6 +54,10 @@ pub struct BoolType;
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct F64Type;
 
+/// Marker type for unit (no value) - used for side-effect-only expressions
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct UnitType;
+
 // =============================================================================
 // StagedType implementations
 // =============================================================================
@@ -111,5 +115,19 @@ impl StagedType for F64Type {
 impl ConstantType for F64Type {
     fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().f64const(*value)
+    }
+}
+
+impl StagedType for UnitType {
+    type RuntimeValue = ();
+
+    fn cranelift_type() -> cranelift_codegen::ir::Type {
+        types::I8 // Minimal representation, value is ignored
+    }
+}
+
+impl ConstantType for UnitType {
+    fn codegen_constant(_value: &(), builder: &mut FunctionBuilder) -> Value {
+        builder.ins().iconst(types::I8, 0)
     }
 }

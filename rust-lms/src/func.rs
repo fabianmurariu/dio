@@ -618,4 +618,190 @@ mod tests {
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 42);
     }
+
+    // =========================================================================
+    // Control Flow Tests
+    // =========================================================================
+
+    #[test]
+    fn test_if_then_else_true_branch() {
+        let compiler = Compiler::new();
+
+        // if true then 10 else 20 => 10
+        let expr = if_then_else(
+            Const::<BoolType>::new(true),
+            Const::<I64Type>::new(10),
+            Const::<I64Type>::new(20),
+        );
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 10);
+    }
+
+    #[test]
+    fn test_if_then_else_false_branch() {
+        let compiler = Compiler::new();
+
+        // if false then 10 else 20 => 20
+        let expr = if_then_else(
+            Const::<BoolType>::new(false),
+            Const::<I64Type>::new(10),
+            Const::<I64Type>::new(20),
+        );
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 20);
+    }
+
+    #[test]
+    fn test_if_then_else_with_comparison() {
+        let mut compiler = Compiler::new();
+
+        // Define: clamp_max(x) = if x < 10 then x else 10
+        let clamp_max = compiler.fun1("clamp_max", |x: VarRef<I64Type>| {
+            if_then_else(
+                lt(x, Const::<I64Type>::new(10)),
+                x,
+                Const::<I64Type>::new(10),
+            )
+        });
+
+        let expr = call1(clamp_max, Const::<I64Type>::new(5));
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 5); // 5 < 10, so return 5
+    }
+
+    #[test]
+    fn test_if_then_else_clamps_at_max() {
+        let mut compiler = Compiler::new();
+
+        // Define: clamp_max(x) = if x < 10 then x else 10
+        let clamp_max = compiler.fun1("clamp_max", |x: VarRef<I64Type>| {
+            if_then_else(
+                lt(x, Const::<I64Type>::new(10)),
+                x,
+                Const::<I64Type>::new(10),
+            )
+        });
+
+        let expr = call1(clamp_max, Const::<I64Type>::new(15));
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 10); // 15 >= 10, so return 10
+    }
+
+    #[test]
+    fn test_nested_if_then_else() {
+        let mut compiler = Compiler::new();
+
+        // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
+        let clamp = compiler.fun1("clamp", |x: VarRef<I64Type>| {
+            if_then_else(
+                lt(x, Const::<I64Type>::new(0)),
+                Const::<I64Type>::new(0),
+                if_then_else(
+                    lt(Const::<I64Type>::new(10), x), // x > 10
+                    Const::<I64Type>::new(10),
+                    x,
+                ),
+            )
+        });
+
+        // Test values
+        let compiled_neg = compiler.compile(call1(clamp, Const::<I64Type>::new(-5)))
+            .expect("compilation failed");
+        assert_eq!(compiled_neg.run(), 0); // Clamped at min
+    }
+
+    #[test]
+    fn test_seq_basic() {
+        let compiler = Compiler::new();
+
+        // seq(5, 10) => 10 (first value ignored, second returned)
+        let expr = seq(
+            Const::<I64Type>::new(5),
+            Const::<I64Type>::new(10),
+        );
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 10);
+    }
+
+    #[test]
+    fn test_factorial() {
+        let mut compiler = Compiler::new();
+
+        // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
+        let factorial = compiler.fun1_rec("factorial", |f, n: VarRef<I64Type>| {
+            if_then_else(
+                lt(n, Const::<I64Type>::new(2)), // n < 2 means n <= 1
+                Const::<I64Type>::new(1),
+                mul(n, call1(f, sub(n, Const::<I64Type>::new(1)))),
+            )
+        });
+
+        // Test factorial(5) = 120
+        let expr = call1(factorial, Const::<I64Type>::new(5));
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 120);
+    }
+
+    #[test]
+    fn test_factorial_various_inputs() {
+        let mut compiler = Compiler::new();
+
+        // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
+        let factorial = compiler.fun1_rec("factorial", |f, n: VarRef<I64Type>| {
+            if_then_else(
+                lt(n, Const::<I64Type>::new(2)),
+                Const::<I64Type>::new(1),
+                mul(n, call1(f, sub(n, Const::<I64Type>::new(1)))),
+            )
+        });
+
+        // Compile and get function pointer
+        let compiled = compiler.compile(factorial).expect("compilation failed");
+        let factorial_fn = compiled.as_fn();
+
+        // Test various inputs
+        assert_eq!(factorial_fn(0), 1);   // 0! = 1
+        assert_eq!(factorial_fn(1), 1);   // 1! = 1
+        assert_eq!(factorial_fn(2), 2);   // 2! = 2
+        assert_eq!(factorial_fn(3), 6);   // 3! = 6
+        assert_eq!(factorial_fn(4), 24);  // 4! = 24
+        assert_eq!(factorial_fn(5), 120); // 5! = 120
+        assert_eq!(factorial_fn(6), 720); // 6! = 720
+        assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
+    }
+
+    #[test]
+    fn test_fibonacci() {
+        let mut compiler = Compiler::new();
+
+        // fib(n) = if n < 2 then n else fib(n-1) + fib(n-2)
+        let fib = compiler.fun1_rec("fib", |f, n: VarRef<I64Type>| {
+            if_then_else(
+                lt(n, Const::<I64Type>::new(2)),
+                n, // fib(0) = 0, fib(1) = 1
+                add(
+                    call1(f, sub(n, Const::<I64Type>::new(1))),
+                    call1(f, sub(n, Const::<I64Type>::new(2))),
+                ),
+            )
+        });
+
+        // Compile and get function pointer
+        let compiled = compiler.compile(fib).expect("compilation failed");
+        let fib_fn = compiled.as_fn();
+
+        // Test Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34
+        assert_eq!(fib_fn(0), 0);
+        assert_eq!(fib_fn(1), 1);
+        assert_eq!(fib_fn(2), 1);
+        assert_eq!(fib_fn(3), 2);
+        assert_eq!(fib_fn(4), 3);
+        assert_eq!(fib_fn(5), 5);
+        assert_eq!(fib_fn(6), 8);
+        assert_eq!(fib_fn(7), 13);
+        assert_eq!(fib_fn(10), 55);
+    }
 }
