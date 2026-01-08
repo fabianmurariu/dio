@@ -103,6 +103,7 @@ pub mod control;
 pub mod func;
 pub mod num;
 pub mod staged;
+pub mod tuple;
 pub mod types;
 
 /// Commonly used types and traits
