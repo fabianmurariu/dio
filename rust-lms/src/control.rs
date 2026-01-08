@@ -4,6 +4,7 @@
 //! - `Seq<A, B>`: Execute A for side effects, then return B's value
 //! - `IfThenElse<COND, THEN, ELSE>`: Conditional expression with both branches
 //! - `IfThen<COND, BODY>`: Conditional for side effects (returns unit)
+//! - `While<COND, BODY>`: While loop (returns unit)
 
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
 
@@ -198,4 +199,90 @@ where
     BODY: Staged<Out = UnitType>,
 {
     IfThen { condition, body }
+}
+// =============================================================================
+// While<COND, BODY> - While Loop
+// =============================================================================
+
+/// While loop: execute body while condition is true.
+///
+/// Returns `UnitType`. Both condition and body are re-evaluated each iteration.
+/// The condition is checked at the start of each iteration (pre-check loop).
+///
+/// # Example
+/// ```ignore
+/// // Compute sum of 1..=n (stored in 'sum' variable)
+/// // i = 1; sum = 0;
+/// // while (i <= n) { sum = sum + i; i = i + 1; }
+/// let i = compiler.var::<I64Type>();
+/// let sum = compiler.var::<I64Type>();
+/// seq(
+///     seq(assign(i, Const::new(1)), assign(sum, Const::new(0))),
+///     seq(
+///         while_loop(
+///             lt(i, add(n, Const::new(1))),  // i <= n
+///             seq(
+///                 assign(sum, add(sum, i)),
+///                 assign(i, add(i, Const::new(1))),
+///             ),
+///         ),
+///         sum,
+///     ),
+/// )
+/// ```
+#[derive(Clone)]
+pub struct While<COND, BODY> {
+    condition: COND,
+    body: BODY,
+}
+
+impl<COND, BODY> Staged for While<COND, BODY>
+where
+    COND: Staged<Out = BoolType>,
+    BODY: Staged<Out = UnitType>,
+{
+    type Out = UnitType;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Create the blocks for the loop structure
+        let loop_header = ctx.builder.create_block();
+        let loop_body = ctx.builder.create_block();
+        let loop_exit = ctx.builder.create_block();
+
+        // Jump from current block to loop header
+        ctx.builder.ins().jump(loop_header, &[]);
+
+        // Loop header: evaluate condition and branch
+        ctx.builder.switch_to_block(loop_header);
+        // DON'T seal loop_header yet - it has two predecessors (entry and loop_body)
+        // We'll seal it after generating the back-edge from loop_body
+
+        let cond_val = self.condition.codegen(ctx);
+        ctx.builder.ins().brif(cond_val, loop_body, &[], loop_exit, &[]);
+
+        // Loop body: execute body and jump back to header
+        ctx.builder.switch_to_block(loop_body);
+        ctx.builder.seal_block(loop_body); // Single predecessor (loop_header)
+        let _ = self.body.codegen(ctx);
+        ctx.builder.ins().jump(loop_header, &[]);
+
+        // Now we can seal loop_header - both predecessors are known
+        ctx.builder.seal_block(loop_header);
+
+        // Loop exit
+        ctx.builder.switch_to_block(loop_exit);
+        ctx.builder.seal_block(loop_exit); // Single predecessor (loop_header)
+
+        // Return unit value
+        ctx.builder.ins().iconst(types::I8, 0)
+    }
+}
+
+/// Create a while loop
+pub fn while_loop<COND, BODY>(condition: COND, body: BODY) -> While<COND, BODY>
+where
+    COND: Staged<Out = BoolType>,
+    BODY: Staged<Out = UnitType>,
+{
+    While { condition, body }
 }

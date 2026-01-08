@@ -62,11 +62,22 @@ pub trait Staged {
 /// let x: VarRef<I64Type> = compiler.var();
 /// let expr = add(x, x);  // x used twice - no problem, it's Copy!
 /// ```
-#[derive(Clone, Copy)]
 pub struct VarRef<T: StagedType> {
     pub(crate) id: usize,
     _phantom: std::marker::PhantomData<T>,
 }
+
+// Manually implement Clone and Copy to avoid requiring T: Clone
+impl<T: StagedType> Clone for VarRef<T> {
+    fn clone(&self) -> Self {
+        VarRef {
+            id: self.id,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+}
+
+impl<T: StagedType> Copy for VarRef<T> {}
 
 impl<T: StagedType> VarRef<T> {
     /// Create a new variable reference with the given ID
@@ -181,12 +192,17 @@ where
         // Generate code for the value expression
         let value = self.expr.codegen(ctx);
 
-        // Look up the Cranelift Variable and assign to it
-        let var = ctx
-            .var_map
-            .get(&self.var.id)
-            .expect(&format!("Variable {} not found in var_map", self.var.id));
-        ctx.builder.def_var(*var, value);
+        // Get or declare the Cranelift Variable
+        let var = if let Some(&var) = ctx.var_map.get(&self.var.id) {
+            var
+        } else {
+            // First assignment to this variable - declare it
+            let var = ctx.builder.declare_var(T::cranelift_type());
+            ctx.var_map.insert(self.var.id, var);
+            var
+        };
+
+        ctx.builder.def_var(var, value);
 
         // Return unit value
         ctx.builder.ins().iconst(types::I8, 0)

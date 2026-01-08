@@ -184,13 +184,47 @@ impl Compiler {
         }
     }
 
-    /// Create a new variable reference of the given type.
+    /// Create an uninitialized variable reference.
     ///
-    /// The actual Cranelift Variable will be created during compilation.
-    pub fn var<T: StagedType>(&mut self) -> VarRef<T> {
+    /// # Safety
+    /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
+    /// Prefer using `let_var()` which ensures initialization.
+    ///
+    /// This is useful for variables that will be captured by function closures and
+    /// initialized within the closure body.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let i = compiler.var_unchecked::<I64Type>();
+    /// let func = compiler.fun1("example", |n| {
+    ///     seq(assign(i, Const::new(0)), i) // Must assign before use
+    /// });
+    /// ```
+    pub fn var_unchecked<T: StagedType>(&mut self) -> VarRef<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
         VarRef::new(id)
+    }
+
+    /// Create a variable with an initial value.
+    ///
+    /// Returns a tuple of (variable_reference, initialization_expression).
+    /// The initialization must be sequenced into your expression tree before using the variable.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (x, x_init) = compiler.let_var(Const::<I64Type>::new(42));
+    /// let expr = seq(x_init, add(x, Const::new(8))); // Produces 50
+    /// ```
+    pub fn let_var<T, EXPR>(&mut self, init: EXPR) -> (VarRef<T>, crate::staged::Assign<VarRef<T>, EXPR>)
+    where
+        T: StagedType,
+        EXPR: Staged<Out = T>,
+    {
+        let var = self.var_unchecked();
+        // Clone var for the assignment (VarRef implements Clone and Copy)
+        let assignment = crate::staged::assign(var.clone(), init);
+        (var, assignment)
     }
 
     /// Define a unary function.
@@ -295,12 +329,22 @@ impl Compiler {
             .map_err(|e| CompileError::JitError(e.to_string()))?;
         let mut module = JITModule::new(builder);
 
+        // Get the default calling convention for this platform
+        // This ensures proper ABI compatibility, especially important for external function calls
+        // Using SystemV on Unix-like systems, WindowsFastcall on Windows
+        let call_conv = if cfg!(target_os = "windows") {
+            cranelift_codegen::isa::CallConv::WindowsFastcall
+        } else {
+            cranelift_codegen::isa::CallConv::SystemV
+        };
+
         // First pass: declare all functions
         let mut func_map: HashMap<usize, FuncId> = HashMap::new();
 
         for (id, func_opt) in self.functions.iter().enumerate() {
             if let Some(func_def) = func_opt {
                 let mut sig = module.make_signature();
+                sig.call_conv = call_conv;
                 sig.params.push(AbiParam::new(func_def.param_type));
                 sig.returns.push(AbiParam::new(func_def.return_type));
 
@@ -314,6 +358,7 @@ impl Compiler {
 
         // Declare the main function
         let mut main_sig = module.make_signature();
+        main_sig.call_conv = call_conv;
         main_sig.returns.push(AbiParam::new(S::Out::cranelift_type()));
 
         let main_func_id = module
@@ -329,6 +374,7 @@ impl Compiler {
                 let func_id = func_map[&id];
 
                 let mut sig = module.make_signature();
+                sig.call_conv = call_conv;
                 sig.params.push(AbiParam::new(func_def.param_type));
                 sig.returns.push(AbiParam::new(func_def.return_type));
 
@@ -564,7 +610,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Create a variable first (this would break the old code that used func_id as param_id)
-        let _unused = compiler.var::<I64Type>();
+        let _unused = compiler.var_unchecked::<I64Type>();
 
         // Define: double(x) = x + x
         let double = compiler.fun1("double", |x: VarRef<I64Type>| add(x, x));
@@ -727,6 +773,21 @@ mod tests {
     }
 
     #[test]
+    fn test_let_var() {
+        let mut compiler = Compiler::new();
+
+        // Test let_var API: (x, x_init) = let_var(42)
+        let (x, x_init) = compiler.let_var(Const::<I64Type>::new(42));
+        let (y, y_init) = compiler.let_var(Const::<I64Type>::new(8));
+
+        // Sequence: init x, init y, return x + y
+        let expr = seq(x_init, seq(y_init, add(x, y)));
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 50); // 42 + 8 = 50
+    }
+
+    #[test]
     fn test_factorial() {
         let mut compiler = Compiler::new();
 
@@ -803,5 +864,188 @@ mod tests {
         assert_eq!(fib_fn(6), 8);
         assert_eq!(fib_fn(7), 13);
         assert_eq!(fib_fn(10), 55);
+    }
+
+    // =========================================================================
+    // While Loop Tests
+    // =========================================================================
+
+    #[test]
+    fn test_while_loop_zero_iterations() {
+        let mut compiler = Compiler::new();
+
+        // Create local variable
+        let result = compiler.var_unchecked::<I64Type>();
+
+        // while(false) { result = 999 } ; result = 42
+        // Loop body never executes, result should be 42
+        let expr = seq(
+            assign(result, Const::<I64Type>::new(0)),
+            seq(
+                while_loop(
+                    Const::<BoolType>::new(false), // Never true
+                    assign(result, Const::<I64Type>::new(999)),
+                ),
+                seq(
+                    assign(result, Const::<I64Type>::new(42)),
+                    result,
+                ),
+            ),
+        );
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 42);
+    }
+
+    #[test]
+    fn test_while_loop_countdown() {
+        let mut compiler = Compiler::new();
+
+        // Create local variables BEFORE fun1 (to avoid borrow issues)
+        let i = compiler.var_unchecked::<I64Type>();
+        let sum = compiler.var_unchecked::<I64Type>();
+
+        // sum_to_n(n): compute 1 + 2 + ... + n using a while loop
+        let sum_to_n = compiler.fun1("sum_to_n", |n: VarRef<I64Type>| {
+            // i = 1; sum = 0;
+            // while (i <= n) { sum = sum + i; i = i + 1; }
+            // return sum;
+            seq(
+                assign(i, Const::<I64Type>::new(1)),
+                seq(
+                    assign(sum, Const::<I64Type>::new(0)),
+                    seq(
+                        while_loop(
+                            // i <= n is equivalent to !(n < i) or (i < n+1)
+                            // Using: i < n + 1
+                            lt(i, add(n, Const::<I64Type>::new(1))),
+                            seq(
+                                assign(sum, add(sum, i)),
+                                assign(i, add(i, Const::<I64Type>::new(1))),
+                            ),
+                        ),
+                        sum,
+                    ),
+                ),
+            )
+        });
+
+        let compiled = compiler.compile(sum_to_n).expect("compilation failed");
+        let sum_fn = compiled.as_fn();
+
+        // sum(1) = 1
+        // sum(2) = 1 + 2 = 3
+        // sum(3) = 1 + 2 + 3 = 6
+        // sum(10) = 55
+        assert_eq!(sum_fn(1), 1);
+        assert_eq!(sum_fn(2), 3);
+        assert_eq!(sum_fn(3), 6);
+        assert_eq!(sum_fn(10), 55);
+        assert_eq!(sum_fn(100), 5050);
+    }
+
+    #[test]
+    fn test_while_loop_factorial() {
+        let mut compiler = Compiler::new();
+
+        // Create local variables BEFORE fun1
+        let i = compiler.var_unchecked::<I64Type>();
+        let result = compiler.var_unchecked::<I64Type>();
+
+        // Iterative factorial using while loop
+        let factorial_iter = compiler.fun1("factorial_iter", |n: VarRef<I64Type>| {
+            // i = 1; result = 1;
+            // while (i <= n) { result = result * i; i = i + 1; }
+            // return result;
+            seq(
+                assign(i, Const::<I64Type>::new(1)),
+                seq(
+                    assign(result, Const::<I64Type>::new(1)),
+                    seq(
+                        while_loop(
+                            lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
+                            seq(
+                                assign(result, mul(result, i)),
+                                assign(i, add(i, Const::<I64Type>::new(1))),
+                            ),
+                        ),
+                        result,
+                    ),
+                ),
+            )
+        });
+
+        let compiled = compiler.compile(factorial_iter).expect("compilation failed");
+        let factorial_fn = compiled.as_fn();
+
+        assert_eq!(factorial_fn(0), 1);   // 0! = 1
+        assert_eq!(factorial_fn(1), 1);   // 1! = 1
+        assert_eq!(factorial_fn(2), 2);   // 2! = 2
+        assert_eq!(factorial_fn(3), 6);   // 3! = 6
+        assert_eq!(factorial_fn(5), 120); // 5! = 120
+        assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
+    }
+
+    #[test]
+    fn test_while_loop_fibonacci_iterative() {
+        let mut compiler = Compiler::new();
+
+        // Create local variables BEFORE fun1
+        let i = compiler.var_unchecked::<I64Type>();
+        let a = compiler.var_unchecked::<I64Type>(); // fib(i-2)
+        let b = compiler.var_unchecked::<I64Type>(); // fib(i-1)
+        let temp = compiler.var_unchecked::<I64Type>();
+
+        // Iterative Fibonacci using while loop
+        // Much faster than recursive version!
+        let fib_iter = compiler.fun1("fib_iter", |n: VarRef<I64Type>| {
+            // if n < 2 return n
+            // else: a = 0; b = 1; i = 2;
+            //       while (i <= n) { temp = a + b; a = b; b = temp; i = i + 1; }
+            //       return b;
+            if_then_else(
+                lt(n, Const::<I64Type>::new(2)),
+                n,
+                seq(
+                    assign(a, Const::<I64Type>::new(0)),
+                    seq(
+                        assign(b, Const::<I64Type>::new(1)),
+                        seq(
+                            assign(i, Const::<I64Type>::new(2)),
+                            seq(
+                                while_loop(
+                                    lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
+                                    seq(
+                                        assign(temp, add(a, b)),
+                                        seq(
+                                            assign(a, b),
+                                            seq(
+                                                assign(b, temp),
+                                                assign(i, add(i, Const::<I64Type>::new(1))),
+                                            ),
+                                        ),
+                                    ),
+                                ),
+                                b,
+                            ),
+                        ),
+                    ),
+                ),
+            )
+        });
+
+        let compiled = compiler.compile(fib_iter).expect("compilation failed");
+        let fib_fn = compiled.as_fn();
+
+        // Test Fibonacci sequence
+        assert_eq!(fib_fn(0), 0);
+        assert_eq!(fib_fn(1), 1);
+        assert_eq!(fib_fn(2), 1);
+        assert_eq!(fib_fn(3), 2);
+        assert_eq!(fib_fn(4), 3);
+        assert_eq!(fib_fn(5), 5);
+        assert_eq!(fib_fn(10), 55);
+        assert_eq!(fib_fn(20), 6765);
+        assert_eq!(fib_fn(30), 832040);
     }
 }

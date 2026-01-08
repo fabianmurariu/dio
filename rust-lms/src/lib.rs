@@ -107,7 +107,7 @@ pub mod types;
 
 /// Commonly used types and traits
 pub mod prelude {
-    pub use crate::control::{if_then, if_then_else, seq, IfThen, IfThenElse, Seq};
+    pub use crate::control::{if_then, if_then_else, seq, while_loop, IfThen, IfThenElse, Seq, While};
     pub use crate::func::{call1, Compiler, Compiled, FunRef, FunType1};
     pub use crate::num::{add, div, eq, lt, mul, sub};
     pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, VarRef};
