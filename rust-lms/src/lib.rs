@@ -102,6 +102,7 @@
 pub mod control;
 pub mod func;
 pub mod num;
+pub mod ptr;
 pub mod staged;
 pub mod tuple;
 pub mod types;
@@ -111,6 +112,10 @@ pub mod prelude {
     pub use crate::control::{if_then, if_then_else, seq, while_loop, IfThen, IfThenElse, Seq, While};
     pub use crate::func::{call1, Compiler, Compiled, FunRef, FunType1};
     pub use crate::num::{add, div, eq, lt, mul, sub};
+    pub use crate::ptr::{
+        array_index, load, load_mut, ptr_offset, ptr_offset_mut, store,
+        ArrayIndex, Load, LoadMut, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, Store,
+    };
     pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, VarRef};
     pub use crate::types::{BoolType, ConstantType, F64Type, I64Type, StagedType, U64Type, UnitType};
 }
