@@ -1,8 +1,8 @@
 //! Pointer types and memory operations for staged computations.
 //!
 //! This module provides:
-//! - `SPtr<T>`: Immutable pointer type (surfaces as &T in runtime)
-//! - `SMutPtr<T>`: Mutable pointer type (surfaces as &mut T in runtime)
+//! - `SPtr<T>`: Immutable reference type (surfaces as &T in runtime)
+//! - `SMutPtr<T>`: Mutable reference type (surfaces as &mut T in runtime)
 //! - Memory operations: Load, Store, PtrOffset, ArrayIndex
 
 use crate::staged::{CompilationContext, Staged};
@@ -11,39 +11,39 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
 
 // =============================================================================
-// Pointer Types
+// reference Types
 // =============================================================================
 
-/// Immutable pointer type - the base for read-only memory access.
+/// Immutable reference type - the base for read-only memory access.
 ///
 /// In Cranelift IR, this is represented as an i64 (pointer-sized value).
 /// At runtime, this surfaces as `*const T::RuntimeValue` or `&T::RuntimeValue`
 /// when used in function signatures.
 #[derive(Clone, Copy, Debug)]
-pub struct SPtr<T: StagedType> {
+pub struct SRef<T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> StagedType for SPtr<T> {
-    type RuntimeValue<'a> = *const T::RuntimeValue<'a>;
+impl<T: StagedType> StagedType for SRef<T> {
+    type RuntimeValue<'a> = &'a T::RuntimeValue<'a>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
     }
 }
 
-/// Mutable pointer type - the base for read-write memory access.
+/// Mutable reference type - the base for read-write memory access.
 ///
-/// In Cranelift IR, this is represented as an i64 (pointer-sized value).
+/// In Cranelift IR, this is represented as an i64 (reference-sized value).
 /// At runtime, this surfaces as `*mut T::RuntimeValue` or `&mut T::RuntimeValue`
 /// when used in function signatures.
 #[derive(Clone, Copy, Debug)]
-pub struct SMutPtr<T: StagedType> {
+pub struct SMutRef<T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> StagedType for SMutPtr<T> {
-    type RuntimeValue<'a> = *mut T::RuntimeValue<'a>;
+impl<T: StagedType> StagedType for SMutRef<T> {
+    type RuntimeValue<'a> = &'a mut T::RuntimeValue<'a>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
@@ -63,13 +63,13 @@ impl<T: StagedType> StagedType for SMutPtr<T> {
 /// let ptr: VarRef<SPtr<I64Type>> = ...;
 /// let value = load(ptr); // value: impl Staged<Out = I64Type>
 /// ```
-pub struct Load<P> {
+pub struct LoadRef<P> {
     ptr: P,
 }
 
-impl<P, T> Staged for Load<P>
+impl<P, T> Staged for LoadRef<P>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     T: StagedType,
 {
     type Out = T;
@@ -87,22 +87,22 @@ where
 }
 
 /// Create a load operation from an immutable pointer
-pub fn load<P, T>(ptr: P) -> Load<P>
+pub fn load_ref<P, T>(ptr: P) -> LoadRef<P>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     T: StagedType,
 {
-    Load { ptr }
+    LoadRef { ptr }
 }
 
 /// Load from mutable pointer (same as load from immutable pointer)
-pub struct LoadMut<P> {
+pub struct LoadMutRef<P> {
     ptr: P,
 }
 
-impl<P, T> Staged for LoadMut<P>
+impl<P, T> Staged for LoadMutRef<P>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     T: StagedType,
 {
     type Out = T;
@@ -116,12 +116,12 @@ where
 }
 
 /// Create a load operation from a mutable pointer
-pub fn load_mut<P, T>(ptr: P) -> LoadMut<P>
+pub fn load_ref_mut<P, T>(ptr: P) -> LoadMutRef<P>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     T: StagedType,
 {
-    LoadMut { ptr }
+    LoadMutRef { ptr }
 }
 
 // =============================================================================
@@ -145,7 +145,7 @@ pub struct Store<P, V> {
 
 impl<P, V, T> Staged for Store<P, V>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     V: Staged<Out = T>,
     T: StagedType,
 {
@@ -169,9 +169,9 @@ where
 }
 
 /// Create a store operation
-pub fn store<P, V, T>(ptr: P, val: V) -> Store<P, V>
+pub fn store_ref<P, V, T>(ptr: P, val: V) -> Store<P, V>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     V: Staged<Out = T>,
     T: StagedType,
 {
@@ -201,11 +201,11 @@ pub struct PtrOffset<P, I> {
 
 impl<P, I, T> Staged for PtrOffset<P, I>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
-    type Out = SPtr<T>;
+    type Out = SRef<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr = self.ptr.codegen(ctx);
@@ -224,7 +224,7 @@ where
 /// Create a pointer offset operation for immutable pointers
 pub fn ptr_offset<P, I, T>(ptr: P, index: I) -> PtrOffset<P, I>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
@@ -240,11 +240,11 @@ pub struct PtrOffsetMut<P, I> {
 
 impl<P, I, T> Staged for PtrOffsetMut<P, I>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
-    type Out = SMutPtr<T>;
+    type Out = SMutRef<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr = self.ptr.codegen(ctx);
@@ -261,7 +261,7 @@ where
 /// Create a pointer offset operation for mutable pointers
 pub fn ptr_offset_mut<P, I, T>(ptr: P, index: I) -> PtrOffsetMut<P, I>
 where
-    P: Staged<Out = SMutPtr<T>>,
+    P: Staged<Out = SMutRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
@@ -290,7 +290,7 @@ pub struct ArrayIndex<P, I> {
 
 impl<P, I, T> Staged for ArrayIndex<P, I>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
@@ -319,7 +319,7 @@ where
 /// Create an array indexing operation
 pub fn array_index<P, I, T>(ptr: P, index: I) -> ArrayIndex<P, I>
 where
-    P: Staged<Out = SPtr<T>>,
+    P: Staged<Out = SRef<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
@@ -337,8 +337,8 @@ mod tests {
 
         // Create a function that takes a mutable pointer and writes to it
         // fn write_42(ptr: &mut i64) -> i64
-        let write_fn = compiler.fun1("write_42", |ptr: VarRef<SMutPtr<I64Type>>| {
-            seq(store(ptr, Const::<I64Type>::new(42)), load_mut(ptr))
+        let write_fn = compiler.fun1("write_42", |ptr: VarRef<SMutRef<I64Type>>| {
+            seq(store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
@@ -357,7 +357,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn read(ptr: &f64) -> f64
-        let read_fn = compiler.fun1("read", |ptr: VarRef<SPtr<F64Type>>| load(ptr));
+        let read_fn = compiler.fun1("read", |ptr: VarRef<SRef<F64Type>>| load_ref(ptr));
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -369,92 +369,20 @@ mod tests {
     }
 
     #[test]
-    fn test_ptr_offset() {
+    fn store_into_array_f64() {
         let mut compiler = Compiler::new();
 
-        // fn test_offset(ptr: &i64) -> i64
-        // Reads from ptr[2]
-        let test_fn = compiler.fun1("test_offset", |ptr: VarRef<SPtr<I64Type>>| {
-            // Read from ptr[2]
-            load(ptr_offset(ptr, Const::<I64Type>::new(2)))
+        // fn store_value(ptr: &mut f64) -> ()
+        let store_fn = compiler.fun1("store_value", |ptr: VarRef<SMutRef<F64Type>>| {
+            store_ref(ptr, Const::<F64Type>::new(2.71828))
         });
 
-        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let compiled = compiler.compile(store_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        let array = [10i64, 20, 30, 40, 50];
-        let result = f(array.as_ptr());
+        let mut array = [0.0f64; 3];
+        f(&mut array[1]); // Store into array[1]
 
-        assert_eq!(result, 30); // array[2]
-    }
-
-    #[test]
-    fn test_array_index() {
-        let mut compiler = Compiler::new();
-
-        // fn get_third(ptr: &i64) -> i64
-        // Returns ptr[3]
-        let get_third = compiler.fun1("get_third", |ptr: VarRef<SPtr<I64Type>>| {
-            array_index(ptr, Const::<I64Type>::new(3))
-        });
-
-        let compiled = compiler.compile(get_third).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let array = [100i64, 200, 300, 400, 500];
-        let result = f(array.as_ptr());
-
-        assert_eq!(result, 400); // array[3]
-    }
-
-    #[test]
-    fn test_store_to_array() {
-        let mut compiler = Compiler::new();
-
-        // fn write_to_index(ptr: &mut i64) -> ()
-        // Writes 999 to ptr[1]
-        let write_fn = compiler.fun1("write_to_index", |ptr: VarRef<SMutPtr<I64Type>>| {
-            store(
-                ptr_offset_mut(ptr, Const::<I64Type>::new(1)),
-                Const::<I64Type>::new(999),
-            )
-        });
-
-        let compiled = compiler.compile(write_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let mut array = [1i64, 2, 3, 4, 5];
-        f(array.as_mut_ptr());
-
-        assert_eq!(array, [1, 999, 3, 4, 5]); // array[1] was modified
-    }
-
-    #[test]
-    fn test_swap_values() {
-        let mut compiler = Compiler::new();
-
-        // Create variables for temp storage before defining function
-        let temp = compiler.var_unchecked::<I64Type>();
-
-        // fn swap(ptr: &mut i64) -> ()
-        // Swaps ptr[0] and ptr[1]
-        let swap_fn = compiler.fun1("swap", |ptr: VarRef<SMutPtr<I64Type>>| {
-            let ptr0 = ptr;
-            let ptr1 = ptr_offset_mut(ptr, Const::<I64Type>::new(1));
-
-            (
-                assign(temp, load_mut(ptr0)),
-                store(ptr0, load_mut(ptr1.clone())),
-                store(ptr1, temp),
-            )
-        });
-
-        let compiled = compiler.compile(swap_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let mut array = [10i64, 20, 30];
-        f(array.as_mut_ptr());
-
-        assert_eq!(array, [20, 10, 30]); // First two elements swapped
+        assert_eq!(array, [0.0, 2.71828, 0.0]);
     }
 }

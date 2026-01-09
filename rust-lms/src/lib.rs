@@ -103,6 +103,7 @@ pub mod control;
 pub mod func;
 pub mod num;
 pub mod ptr;
+pub mod refer;
 pub mod staged;
 pub mod tuple;
 pub mod types;

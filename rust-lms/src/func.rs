@@ -26,7 +26,7 @@ pub struct FunType1<A, OUT> {
 }
 
 impl<A: StagedType, OUT: StagedType> StagedType for FunType1<A, OUT> {
-    type RuntimeValue = fn(A::RuntimeValue) -> OUT::RuntimeValue;
+    type RuntimeValue<'a> = fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         // Function pointers are represented as i64 (pointer-sized)
@@ -162,25 +162,27 @@ struct FunDef {
 /// `Compiler` owns all function definitions and variable IDs. It provides
 /// methods to create functions and variables, and to compile expressions
 /// to native code.
-pub struct Compiler {
+pub struct Compiler<'a> {
     /// Function definitions indexed by ID
     functions: Vec<Option<FunDef>>,
     /// Next variable ID to assign
     next_var_id: usize,
+    _marker: PhantomData<&'a ()>,
 }
 
-impl Default for Compiler {
+impl <'a>Default for Compiler<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl Compiler {
+impl <'a> Compiler<'a> {
     /// Create a new compiler
     pub fn new() -> Self {
         Compiler {
             functions: Vec::new(),
             next_var_id: 0,
+            _marker: PhantomData,
         }
     }
 
@@ -323,7 +325,7 @@ impl Compiler {
     /// This compiles all referenced functions and the main expression,
     /// returning a `Compiled<T>` that owns the JIT module and can extract
     /// the computed value.
-    pub fn compile<S: Staged + 'static>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
+    pub fn compile<S: Staged + 'static>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create the JIT module
         let builder = JITBuilder::new(default_libcall_names())
             .map_err(|e| CompileError::JitError(e.to_string()))?;
@@ -514,31 +516,31 @@ impl std::error::Error for CompileError {}
 /// A compiled expression that owns its JIT module.
 ///
 /// Use `.run()` to execute the compiled code and get the result.
-pub struct Compiled<T: StagedType> {
+pub struct Compiled<'a, T: StagedType> {
     #[allow(dead_code)]
     module: JITModule,
     main_ptr: *const u8,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a T>,
 }
 
-impl<T: StagedType> Compiled<T> {
+impl<'a, T: StagedType> Compiled<'a, T> {
     /// Execute the compiled code and return the result.
     ///
     /// # Safety
     /// This is safe as long as the compilation was done correctly.
-    pub fn run(&self) -> T::RuntimeValue
+    pub fn run(&self) -> T::RuntimeValue<'a>
     where
-        T::RuntimeValue: Copy,
+        T::RuntimeValue<'a>: Copy,
     {
-        let func: fn() -> T::RuntimeValue = unsafe { std::mem::transmute(self.main_ptr) };
+        let func: fn() -> T::RuntimeValue<'a> = unsafe { std::mem::transmute(self.main_ptr) };
         func()
     }
 }
 
 // Special implementation for function types to get the function pointer
-impl<A: StagedType, OUT: StagedType> Compiled<FunType1<A, OUT>> {
+impl<'a, A: StagedType, OUT: StagedType> Compiled<'a, FunType1<A, OUT>> {
     /// Get the compiled function as a callable function pointer.
-    pub fn as_fn(&self) -> fn(A::RuntimeValue) -> OUT::RuntimeValue {
+    pub fn as_fn(&self) -> fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a> {
         // The main function returns a function pointer (as i64)
         // We need to call the main function to get that pointer
         let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };

@@ -121,18 +121,18 @@ impl<T: StagedType> std::fmt::Debug for VarRef<T> {
 /// ```
 #[derive(Clone)]
 pub struct Const<T: ConstantType> {
-    value: T::RuntimeValue,
+    value: T::RuntimeValue<'static>,
 }
 
 impl<T: ConstantType> Const<T> {
     /// Create a new constant value
-    pub fn new(value: T::RuntimeValue) -> Self {
+    pub fn new(value: T::RuntimeValue<'static>) -> Self {
         Const { value }
     }
 }
 
 // Conditionally implement Copy when T and T::RuntimeValue are Copy
-impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
+impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue<'static>: Copy {}
 
 impl<T: ConstantType> Staged for Const<T> {
     type Out = T;

@@ -19,7 +19,7 @@ use cranelift_frontend::FunctionBuilder;
 /// - Its Cranelift IR type
 pub trait StagedType: 'static {
     /// The actual runtime type (e.g., i64 for I64Type)
-    type RuntimeValue: Clone;
+    type RuntimeValue<'a>;
 
     /// Get the Cranelift IR type representation
     fn cranelift_type() -> cranelift_codegen::ir::Type;
@@ -31,7 +31,7 @@ pub trait StagedType: 'static {
 /// so this is a separate trait.
 pub trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_constant(value: &Self::RuntimeValue<'static>, builder: &mut FunctionBuilder) -> Value;
 }
 
 // =============================================================================
@@ -63,7 +63,7 @@ pub struct UnitType;
 // =============================================================================
 
 impl StagedType for I64Type {
-    type RuntimeValue = i64;
+    type RuntimeValue<'a> = i64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
@@ -77,7 +77,7 @@ impl ConstantType for I64Type {
 }
 
 impl StagedType for U64Type {
-    type RuntimeValue = u64;
+    type RuntimeValue<'a> = u64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
@@ -91,7 +91,7 @@ impl ConstantType for U64Type {
 }
 
 impl StagedType for BoolType {
-    type RuntimeValue = bool;
+    type RuntimeValue<'a> = bool;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8
@@ -105,7 +105,7 @@ impl ConstantType for BoolType {
 }
 
 impl StagedType for F64Type {
-    type RuntimeValue = f64;
+    type RuntimeValue<'a> = f64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::F64
@@ -119,7 +119,7 @@ impl ConstantType for F64Type {
 }
 
 impl StagedType for UnitType {
-    type RuntimeValue = ();
+    type RuntimeValue<'a> = ();
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8 // Minimal representation, value is ignored
