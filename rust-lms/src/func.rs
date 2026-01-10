@@ -5,15 +5,42 @@
 //! - `FunRef<A, OUT>`: A Copy-able handle to a function definition
 //! - `Call1<F, ARG>`: Function call expression
 //! - `Compiled<T>`: The result of compilation, owns the JIT module
+//!
+//! # Struct Pass-by-Value
+//!
+//! For `#[repr(C)] Copy` structs, this module implements pass-by-value semantics:
+//! - At the Rust ABI level: `fn(Point) -> Point` (value semantics)
+//! - At the Cranelift level: multiple i64 parameters, stored to stack slot
+//! - Internally: pointer to stack slot for field access
 
 use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::StagedType;
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+
+// =============================================================================
+// StructInfo: Information about struct types for ABI handling
+// =============================================================================
+
+/// Information about a struct type needed for ABI handling.
+///
+/// This captures the struct's layout so we can:
+/// 1. Pass it as multiple i64 values at the ABI boundary
+/// 2. Create a properly-sized stack slot
+/// 3. Store/load the values to/from the stack slot
+#[derive(Clone, Debug)]
+pub struct StructInfo {
+    /// Size in bytes
+    pub size: u32,
+    /// Alignment in bytes
+    pub alignment: u32,
+    /// Number of i64 values needed at ABI boundary
+    pub num_abi_values: usize,
+}
 
 // =============================================================================
 // FunType1: Type marker for unary functions
@@ -91,6 +118,11 @@ impl<A: StagedType, OUT: StagedType> Staged for FunRef<A, OUT> {
 /// A function call expression: applies a function to an argument.
 ///
 /// This implements `Staged<Out = OUT>` where OUT is the function's return type.
+///
+/// # Struct Handling
+///
+/// - For struct arguments: loads multiple i64 values from the argument pointer
+/// - For struct returns: stores multiple i64 return values to a stack slot
 #[derive(Clone)]
 pub struct Call1<F, ARG> {
     func: F,
@@ -120,9 +152,56 @@ where
         // Generate code for the argument
         let arg_value = self.arg.codegen(ctx);
 
+        // Prepare call arguments
+        let call_args: Vec<Value> = if A::is_copy_struct() {
+            // STRUCT ARGUMENT: Load multiple i64 values from the pointer
+            let num_values = A::num_abi_values();
+            let mut args = Vec::with_capacity(num_values);
+            for i in 0..num_values {
+                let offset = (i * 8) as i32;
+                let val = ctx.builder.ins().load(types::I64, MemFlags::trusted(), arg_value, offset);
+                args.push(val);
+            }
+            args
+        } else {
+            // PRIMITIVE ARGUMENT: Single value
+            vec![arg_value]
+        };
+
         // Generate the call
-        let call = ctx.builder.ins().call(func_ref, &[arg_value]);
-        ctx.builder.inst_results(call)[0]
+        let call = ctx.builder.ins().call(func_ref, &call_args);
+
+        // Handle return value
+        if OUT::is_copy_struct() {
+            // Collect results to release borrow on builder
+            let results: Vec<Value> = ctx.builder.inst_results(call).to_vec();
+
+            // STRUCT RETURN: Store multiple return values to a stack slot
+            let size = OUT::size_of() as u32;
+            let alignment = OUT::align_of() as u32;
+            // Note: StackSlotData::new takes align_shift (log2 of alignment), not alignment
+            let align_shift = alignment.trailing_zeros() as u8;
+
+            let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                size,
+                align_shift,
+            ));
+
+            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+
+            // Store each return value to the stack slot
+            for (i, &result) in results.iter().enumerate() {
+                let offset = (i * 8) as i32;
+                ctx.builder.ins().store(MemFlags::trusted(), result, slot_ptr, offset);
+            }
+
+            // Return the pointer to the stack slot
+            slot_ptr
+        } else {
+            // PRIMITIVE RETURN: Single value
+            ctx.builder.inst_results(call)[0]
+        }
     }
 }
 
@@ -145,12 +224,16 @@ struct FunDef {
     name: String,
     /// The body expression, type-erased but we know its signature
     body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
-    /// Parameter type for Cranelift
-    param_type: cranelift_codegen::ir::Type,
-    /// Return type for Cranelift
-    return_type: cranelift_codegen::ir::Type,
+    /// ABI-level parameter types (single for primitives, multiple for structs)
+    param_abi_types: Vec<cranelift_codegen::ir::Type>,
+    /// ABI-level return types (single for primitives, multiple for structs)
+    return_abi_types: Vec<cranelift_codegen::ir::Type>,
     /// The variable ID used for the parameter (for var_map lookup)
     param_var_id: usize,
+    /// Struct info for parameter (None if primitive)
+    param_struct_info: Option<StructInfo>,
+    /// Struct info for return value (None if primitive)
+    return_struct_info: Option<StructInfo>,
 }
 
 // =============================================================================
@@ -233,6 +316,12 @@ impl <'a> Compiler<'a> {
     ///
     /// The body function is called immediately to build the expression tree.
     /// No Cranelift calls happen until `compile()` is called.
+    ///
+    /// # Struct Pass-by-Value
+    ///
+    /// If `A` is a `#[repr(C)] Copy` struct, the function will accept the struct
+    /// by value at the Rust level (`fn(Point)`), but internally store it in a
+    /// stack slot for field access.
     pub fn fun1<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef<A, OUT>
     where
         A: StagedType,
@@ -249,6 +338,27 @@ impl <'a> Compiler<'a> {
         // Call body_fn immediately to build the expression tree
         let body_expr = body_fn(param_var);
 
+        // Capture struct info for parameter and return types
+        let param_struct_info = if A::is_copy_struct() {
+            Some(StructInfo {
+                size: A::size_of() as u32,
+                alignment: A::align_of() as u32,
+                num_abi_values: A::num_abi_values(),
+            })
+        } else {
+            None
+        };
+
+        let return_struct_info = if OUT::is_copy_struct() {
+            Some(StructInfo {
+                size: OUT::size_of() as u32,
+                alignment: OUT::align_of() as u32,
+                num_abi_values: OUT::num_abi_values(),
+            })
+        } else {
+            None
+        };
+
         // Store the function definition
         let func_id = self.functions.len();
         let func_def = FunDef {
@@ -257,9 +367,11 @@ impl <'a> Compiler<'a> {
                 // During codegen, the parameter variable should already be defined
                 body_expr.codegen(ctx)
             }),
-            param_type: A::cranelift_type(),
-            return_type: OUT::cranelift_type(),
+            param_abi_types: A::abi_types(),
+            return_abi_types: OUT::abi_types(),
             param_var_id: param_id,
+            param_struct_info,
+            return_struct_info,
         };
 
         self.functions.push(Some(func_def));
@@ -303,15 +415,38 @@ impl <'a> Compiler<'a> {
         // This allows the body to reference itself for recursion
         let body_expr = body_fn(func_ref, param_var);
 
+        // Capture struct info for parameter and return types
+        let param_struct_info = if A::is_copy_struct() {
+            Some(StructInfo {
+                size: A::size_of() as u32,
+                alignment: A::align_of() as u32,
+                num_abi_values: A::num_abi_values(),
+            })
+        } else {
+            None
+        };
+
+        let return_struct_info = if OUT::is_copy_struct() {
+            Some(StructInfo {
+                size: OUT::size_of() as u32,
+                alignment: OUT::align_of() as u32,
+                num_abi_values: OUT::num_abi_values(),
+            })
+        } else {
+            None
+        };
+
         // Create the actual function definition
         let func_def = FunDef {
             name: name.to_string(),
             body: Box::new(move |ctx: &mut CompilationContext| {
                 body_expr.codegen(ctx)
             }),
-            param_type: A::cranelift_type(),
-            return_type: OUT::cranelift_type(),
+            param_abi_types: A::abi_types(),
+            return_abi_types: OUT::abi_types(),
             param_var_id: param_id,
+            param_struct_info,
+            return_struct_info,
         };
 
         // Replace the placeholder with the actual definition
@@ -325,6 +460,13 @@ impl <'a> Compiler<'a> {
     /// This compiles all referenced functions and the main expression,
     /// returning a `Compiled<T>` that owns the JIT module and can extract
     /// the computed value.
+    ///
+    /// # Struct Handling
+    ///
+    /// For functions with struct parameters or returns:
+    /// - Parameters: Multiple i64 values are received, stored to a stack slot,
+    ///   and the variable holds the stack slot pointer
+    /// - Returns: The result pointer is used to load multiple i64 values for return
     pub fn compile<S: Staged + 'static>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create the JIT module
         let builder = JITBuilder::new(default_libcall_names())
@@ -347,8 +489,16 @@ impl <'a> Compiler<'a> {
             if let Some(func_def) = func_opt {
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
-                sig.params.push(AbiParam::new(func_def.param_type));
-                sig.returns.push(AbiParam::new(func_def.return_type));
+
+                // Add all ABI param types (multiple for structs)
+                for abi_type in &func_def.param_abi_types {
+                    sig.params.push(AbiParam::new(*abi_type));
+                }
+
+                // Add all ABI return types (multiple for structs)
+                for abi_type in &func_def.return_abi_types {
+                    sig.returns.push(AbiParam::new(*abi_type));
+                }
 
                 let func_id = module
                     .declare_function(&func_def.name, Linkage::Local, &sig)
@@ -361,7 +511,11 @@ impl <'a> Compiler<'a> {
         // Declare the main function
         let mut main_sig = module.make_signature();
         main_sig.call_conv = call_conv;
-        main_sig.returns.push(AbiParam::new(S::Out::cranelift_type()));
+
+        // For main function, use the expression's return type ABI types
+        for abi_type in S::Out::abi_types() {
+            main_sig.returns.push(AbiParam::new(abi_type));
+        }
 
         let main_func_id = module
             .declare_function("__main__", Linkage::Local, &main_sig)
@@ -377,8 +531,13 @@ impl <'a> Compiler<'a> {
 
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
-                sig.params.push(AbiParam::new(func_def.param_type));
-                sig.returns.push(AbiParam::new(func_def.return_type));
+
+                for abi_type in &func_def.param_abi_types {
+                    sig.params.push(AbiParam::new(*abi_type));
+                }
+                for abi_type in &func_def.return_abi_types {
+                    sig.returns.push(AbiParam::new(*abi_type));
+                }
 
                 let mut func_ctx = module.make_context();
                 func_ctx.func.signature = sig;
@@ -392,16 +551,45 @@ impl <'a> Compiler<'a> {
                     builder.switch_to_block(entry_block);
                     builder.seal_block(entry_block);
 
-                    // Get the parameter value
-                    let param_value = builder.block_params(entry_block)[0];
-
-                    // Declare the parameter variable and bind it
-                    let param_var = builder.declare_var(func_def.param_type);
-                    builder.def_var(param_var, param_value);
-
-                    // Create var_map with the parameter using the stored param_var_id
+                    // Create var_map for this function
                     let mut var_map: HashMap<usize, Variable> = HashMap::new();
-                    var_map.insert(func_def.param_var_id, param_var);
+
+                    // Handle parameter - either primitive or struct
+                    let block_params = builder.block_params(entry_block).to_vec();
+
+                    if let Some(ref struct_info) = func_def.param_struct_info {
+                        // STRUCT PARAMETER: Create stack slot, store values, use pointer
+
+                        // Create stack slot for the struct
+                        // Note: StackSlotData::new takes align_shift (log2 of alignment), not alignment
+                        let align_shift = struct_info.alignment.trailing_zeros() as u8;
+                        let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                            StackSlotKind::ExplicitSlot,
+                            struct_info.size,
+                            align_shift,
+                        ));
+
+                        // Get pointer to stack slot
+                        let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
+
+                        // Store each i64 value to the stack slot
+                        for (i, &param_value) in block_params.iter().enumerate() {
+                            let offset = (i * 8) as i32;
+                            builder.ins().store(MemFlags::trusted(), param_value, slot_ptr, offset);
+                        }
+
+                        // Declare variable to hold the stack pointer
+                        let param_var = builder.declare_var(types::I64);
+                        builder.def_var(param_var, slot_ptr);
+                        var_map.insert(func_def.param_var_id, param_var);
+                    } else {
+                        // PRIMITIVE PARAMETER: Direct binding (unchanged)
+                        let param_value = block_params[0];
+                        let param_type = func_def.param_abi_types[0];
+                        let param_var = builder.declare_var(param_type);
+                        builder.def_var(param_var, param_value);
+                        var_map.insert(func_def.param_var_id, param_var);
+                    }
 
                     // Generate the body code
                     let result = {
@@ -414,7 +602,21 @@ impl <'a> Compiler<'a> {
                         (func_def.body)(&mut ctx)
                     };
 
-                    builder.ins().return_(&[result]);
+                    // Handle return - either primitive or struct
+                    if let Some(ref struct_info) = func_def.return_struct_info {
+                        // STRUCT RETURN: Load multiple values from the result pointer
+                        let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
+                        for i in 0..struct_info.num_abi_values {
+                            let offset = (i * 8) as i32;
+                            let val = builder.ins().load(types::I64, MemFlags::trusted(), result, offset);
+                            return_values.push(val);
+                        }
+                        builder.ins().return_(&return_values);
+                    } else {
+                        // PRIMITIVE RETURN: Direct return (unchanged)
+                        builder.ins().return_(&[result]);
+                    }
+
                     builder.finalize();
                 }
 
@@ -456,7 +658,22 @@ impl <'a> Compiler<'a> {
                     expr.codegen(&mut ctx)
                 };
 
-                builder.ins().return_(&[result]);
+                // Handle return for main function
+                if S::Out::is_copy_struct() {
+                    // STRUCT RETURN: Load multiple values from the result pointer
+                    let num_values = S::Out::num_abi_values();
+                    let mut return_values = Vec::with_capacity(num_values);
+                    for i in 0..num_values {
+                        let offset = (i * 8) as i32;
+                        let val = builder.ins().load(types::I64, MemFlags::trusted(), result, offset);
+                        return_values.push(val);
+                    }
+                    builder.ins().return_(&return_values);
+                } else {
+                    // PRIMITIVE RETURN
+                    builder.ins().return_(&[result]);
+                }
+
                 builder.finalize();
             }
 
@@ -540,7 +757,11 @@ impl<'a, T: StagedType> Compiled<'a, T> {
 // Special implementation for function types to get the function pointer
 impl<'a, A: StagedType, OUT: StagedType> Compiled<'a, FunType1<A, OUT>> {
     /// Get the compiled function as a callable function pointer.
-    pub fn as_fn(&self) -> fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a> {
+    ///
+    /// Returns an `extern "C"` function pointer to match the System V calling
+    /// convention used by Cranelift. This is important for structs passed by value,
+    /// as Rust's default calling convention may differ from the C ABI.
+    pub fn as_fn(&self) -> extern "C" fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a> {
         // The main function returns a function pointer (as i64)
         // We need to call the main function to get that pointer
         let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };

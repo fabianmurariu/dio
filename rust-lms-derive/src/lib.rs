@@ -2,9 +2,19 @@
 //!
 //! This derive macro generates:
 //! - Field token types for accessing struct fields
-//! - StagedType implementation
+//! - StagedType implementation with pass-by-value semantics
 //! - CopyType implementation (if all fields are Copy)
 //! - Field accessor methods
+//!
+//! # Pass-by-Value Semantics
+//!
+//! Structs derived with `StagedType` use pass-by-value semantics at the Rust ABI level:
+//! - `Var<Point>` means `fn(Point)` - the struct is passed by value
+//! - `Var<SRef<Point>>` means `fn(&Point)` - passed by reference
+//! - `Var<SRefMut<Point>>` means `fn(&mut Point)` - passed by mutable reference
+//!
+//! Internally, structs are stored in stack slots and accessed via pointers for
+//! field access, but this is transparent to the user.
 
 use proc_macro::TokenStream;
 use quote::quote;
@@ -14,12 +24,13 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 ///
 /// Requirements:
 /// - The struct MUST be annotated with #[repr(C)]
+/// - The struct MUST implement Copy (for pass-by-value semantics)
 /// - Fields should be actual Rust types (i64, f64, etc.)
 /// - Each field should be annotated with #[staged(TypeMarker)] to indicate its staged type
 ///
 /// # Example
 /// ```ignore
-/// #[derive(StagedType)]
+/// #[derive(StagedType, Copy, Clone)]
 /// #[repr(C)]
 /// struct Point {
 ///     #[staged(I64Type)]
@@ -28,6 +39,11 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, Type};
 ///     y: f64,
 /// }
 /// ```
+///
+/// This generates:
+/// - `PointType` module with field accessors (`PointType::x`, `PointType::y`)
+/// - `StagedType` impl with `RuntimeValue<'a> = Point` (owned, not reference)
+/// - `CopyType` impl
 #[proc_macro_derive(StagedType, attributes(staged))]
 pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -156,12 +172,36 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             #(#field_tokens)*
         }
 
-        // StagedType implementation
         impl ::rust_lms::types::StagedType for #struct_name {
-            type RuntimeValue<'a> = &'a #struct_name;
+            type RuntimeValue<'a> = #struct_name;
 
             fn cranelift_type() -> ::cranelift_codegen::ir::Type {
-                ::cranelift_codegen::ir::types::I64  // Pointer to struct
+                // Internally we use I64 (pointer to stack slot)
+                ::cranelift_codegen::ir::types::I64
+            }
+
+            fn size_of() -> usize {
+                ::std::mem::size_of::<#struct_name>()
+            }
+
+            fn align_of() -> usize {
+                ::std::mem::align_of::<#struct_name>()
+            }
+
+            fn is_copy_struct() -> bool {
+                true
+            }
+
+            fn num_abi_values() -> usize {
+                // Number of i64s needed to hold this struct
+                // Round up: (size + 7) / 8
+                (::std::mem::size_of::<#struct_name>() + 7) / 8
+            }
+
+            fn abi_types() -> Vec<::cranelift_codegen::ir::Type> {
+                // Return N x I64 where N = num_abi_values
+                let n = (::std::mem::size_of::<#struct_name>() + 7) / 8;
+                vec![::cranelift_codegen::ir::types::I64; n]
             }
         }
 

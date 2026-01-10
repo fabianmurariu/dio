@@ -17,12 +17,54 @@ use cranelift_frontend::FunctionBuilder;
 /// This trait associates a Rust type with:
 /// - Its runtime value representation
 /// - Its Cranelift IR type
+/// - Size and alignment information for struct layout
 pub trait StagedType: 'static {
     /// The actual runtime type (e.g., i64 for I64Type)
     type RuntimeValue<'a>;
 
-    /// Get the Cranelift IR type representation
+    /// Get the Cranelift IR type representation.
+    /// For primitives, this is the actual type (I64, F64, etc.)
+    /// For structs, this is I64 (pointer to stack slot)
     fn cranelift_type() -> cranelift_codegen::ir::Type;
+
+    /// Size of this type in bytes (for struct layout calculations)
+    fn size_of() -> usize {
+        // Default: use Cranelift type size
+        match Self::cranelift_type() {
+            types::I8 => 1,
+            types::I16 => 2,
+            types::I32 | types::F32 => 4,
+            types::I64 | types::F64 => 8,
+            _ => 8, // Default to pointer size
+        }
+    }
+
+    /// Alignment of this type in bytes (for struct layout calculations)
+    fn align_of() -> usize {
+        // Default: alignment equals size for primitives
+        Self::size_of()
+    }
+
+    /// Returns true if this is a Copy struct that should be passed by value.
+    /// When true, the type is passed in registers at the ABI boundary but
+    /// stored to a stack slot internally for field access via pointer.
+    fn is_copy_struct() -> bool {
+        false
+    }
+
+    /// Number of primitive values this type flattens to at the ABI boundary.
+    /// For primitives: 1
+    /// For structs: number of register-sized values needed
+    fn num_abi_values() -> usize {
+        1
+    }
+
+    /// Get the Cranelift types for each ABI value.
+    /// For primitives: just the cranelift_type
+    /// For structs: sequence of I64s (or I64+F64 mix if we support floats in structs)
+    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
+        vec![Self::cranelift_type()]
+    }
 }
 
 /// Types that can be compile-time constants.
@@ -77,6 +119,14 @@ impl StagedType for I64Type {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
     }
+
+    fn size_of() -> usize {
+        8
+    }
+
+    fn align_of() -> usize {
+        8
+    }
 }
 
 impl ConstantType for I64Type {
@@ -92,6 +142,14 @@ impl StagedType for U64Type {
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
+    }
+
+    fn size_of() -> usize {
+        8
+    }
+
+    fn align_of() -> usize {
+        8
     }
 }
 
@@ -109,6 +167,14 @@ impl StagedType for BoolType {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8
     }
+
+    fn size_of() -> usize {
+        1
+    }
+
+    fn align_of() -> usize {
+        1
+    }
 }
 
 impl ConstantType for BoolType {
@@ -125,6 +191,14 @@ impl StagedType for F64Type {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::F64
     }
+
+    fn size_of() -> usize {
+        8
+    }
+
+    fn align_of() -> usize {
+        8
+    }
 }
 
 impl ConstantType for F64Type {
@@ -140,6 +214,14 @@ impl StagedType for UnitType {
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8 // Minimal representation, value is ignored
+    }
+
+    fn size_of() -> usize {
+        0
+    }
+
+    fn align_of() -> usize {
+        1
     }
 }
 
