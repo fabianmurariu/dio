@@ -34,6 +34,15 @@ pub trait ConstantType: StagedType {
     fn codegen_constant(value: &Self::RuntimeValue<'static>, builder: &mut FunctionBuilder) -> Value;
 }
 
+/// Marker trait for types that are Copy at the semantic level.
+///
+/// This trait indicates that a type can be copied by value (in Rust semantics),
+/// even though the Cranelift representation may use pointers for structs.
+///
+/// Primitive types (i64, f64, bool) are always CopyType.
+/// Structs are CopyType only if all their fields are CopyType.
+pub trait CopyType: StagedType {}
+
 // =============================================================================
 // Concrete Type Markers
 // =============================================================================
@@ -76,6 +85,8 @@ impl ConstantType for I64Type {
     }
 }
 
+impl CopyType for I64Type {}
+
 impl StagedType for U64Type {
     type RuntimeValue<'a> = u64;
 
@@ -89,6 +100,8 @@ impl ConstantType for U64Type {
         builder.ins().iconst(types::I64, *value as i64)
     }
 }
+
+impl CopyType for U64Type {}
 
 impl StagedType for BoolType {
     type RuntimeValue<'a> = bool;
@@ -104,6 +117,8 @@ impl ConstantType for BoolType {
     }
 }
 
+impl CopyType for BoolType {}
+
 impl StagedType for F64Type {
     type RuntimeValue<'a> = f64;
 
@@ -118,6 +133,8 @@ impl ConstantType for F64Type {
     }
 }
 
+impl CopyType for F64Type {}
+
 impl StagedType for UnitType {
     type RuntimeValue<'a> = ();
 
@@ -131,3 +148,5 @@ impl ConstantType for UnitType {
         builder.ins().iconst(types::I8, 0)
     }
 }
+
+impl CopyType for UnitType {}

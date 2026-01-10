@@ -8,6 +8,12 @@ cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-jit.workspace = true
 cranelift-module.workspace = true
+memoffset = "0.9"
+rust-lms-derive = { path = "../rust-lms-derive", optional = true }
+
+[features]
+default = ["derive"]
+derive = ["rust-lms-derive"]
 
 [dev-dependencies]
 cranelift = { workspace = true }

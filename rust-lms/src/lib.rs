@@ -105,8 +105,16 @@ pub mod num;
 pub mod ptr;
 pub mod refer;
 pub mod staged;
+pub mod r#struct;
 pub mod tuple;
 pub mod types;
+
+/// Internal utilities used by proc macros.
+/// Do not use directly.
+#[doc(hidden)]
+pub mod _internal {
+    pub use crate::r#struct::Field;
+}
 
 /// Commonly used types and traits
 pub mod prelude {
@@ -117,6 +125,14 @@ pub mod prelude {
         array_index, load, load_mut, ptr_offset, ptr_offset_mut, store,
         ArrayIndex, Load, LoadMut, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, Store,
     };
+    pub use crate::r#struct::{
+        field_mut_ptr, field_mut_ref, field_ptr, field_ref, load_field,
+        Field, FieldMutPtr, FieldMutRef, FieldPtr, FieldRef, LoadField, StructFieldAccess,
+    };
     pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, VarRef};
-    pub use crate::types::{BoolType, ConstantType, F64Type, I64Type, StagedType, U64Type, UnitType};
+    pub use crate::types::{BoolType, ConstantType, CopyType, F64Type, I64Type, StagedType, U64Type, UnitType};
+
+    // Re-export derive macro
+    #[cfg(feature = "derive")]
+    pub use rust_lms_derive::StagedType;
 }
