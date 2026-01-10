@@ -1,5 +1,5 @@
 [workspace]
-members = ["tutorial", "tutorial-derive", "rust-lms"]
+members = ["rust-lms", "rust-lms-derive"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -11,12 +11,12 @@ thiserror = "1.0"
 ariadne = "0.4"
 
 # JIT compilation
-cranelift = "0.127"
-cranelift-jit = "0.127"
-cranelift-module = "0.127"
-cranelift-frontend = "0.127"
-cranelift-codegen = "0.127"
-cranelift-native = "0.127"
+cranelift = "0.127.1"
+cranelift-jit = "0.127.1"
+cranelift-module = "0.127.1"
+cranelift-frontend = "0.127.1"
+cranelift-codegen = "0.127.1"
+cranelift-native = "0.127.1"
 
 arrow = "53.4.1"
 

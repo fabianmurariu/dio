@@ -6,8 +6,8 @@
 //! - Extension methods on VarRef for field access
 
 use crate::ptr::{SPtr, SMutPtr};
-use crate::refer::{SRef, SMutRef};
-use crate::staged::{CompilationContext, Staged, VarRef};
+use crate::refer::{SRef, SRefMut};
+use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
@@ -150,7 +150,7 @@ where
     P::Out: StagedType,
     F: Field,
 {
-    type Out = SMutRef<F::Out>;
+    type Out = SRefMut<F::Out>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
@@ -310,13 +310,13 @@ pub trait StructFieldAccess<T: StagedType>: Sized + Staged {
 }
 
 // Implement for VarRef<T> where T is any struct (StagedType)
-impl<T: StagedType> StructFieldAccess<T> for VarRef<T> where VarRef<T>: Staged {}
+impl<T: StagedType> StructFieldAccess<T> for Var<T> where Var<T>: Staged {}
 
 // Implement for VarRef<SRef<T>> for composability
-impl<T: StagedType> StructFieldAccess<T> for VarRef<SRef<T>> where VarRef<SRef<T>>: Staged {}
+impl<T: StagedType> StructFieldAccess<T> for Var<SRef<T>> where Var<SRef<T>>: Staged {}
 
 // Implement for VarRef<SMutRef<T>> for composability
-impl<T: StagedType> StructFieldAccess<T> for VarRef<SMutRef<T>> where VarRef<SMutRef<T>>: Staged {}
+impl<T: StagedType> StructFieldAccess<T> for Var<SRefMut<T>> where Var<SRefMut<T>>: Staged {}
 
 // Implement for FieldRef to enable chaining (e.g., outer.get_ref(field1).get(field2))
 // FieldRef<P, F> implements Staged<Out = SRef<T>> when F: Field<Out = T>
@@ -334,7 +334,7 @@ where
     P: Staged,
     F: Field<Out = T>,
     T: StagedType,
-    FieldMutRef<P, F>: Staged<Out = SMutRef<T>>,
+    FieldMutRef<P, F>: Staged<Out = SRefMut<T>>,
 {}
 
 #[cfg(test)]

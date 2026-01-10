@@ -6,7 +6,7 @@
 //! - `Call1<F, ARG>`: Function call expression
 //! - `Compiled<T>`: The result of compilation, owns the JIT module
 
-use crate::staged::{CompilationContext, Staged, VarRef};
+use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -202,10 +202,10 @@ impl <'a> Compiler<'a> {
     ///     seq(assign(i, Const::new(0)), i) // Must assign before use
     /// });
     /// ```
-    pub fn var_unchecked<T: StagedType>(&mut self) -> VarRef<T> {
+    pub fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
-        VarRef::new(id)
+        Var::new(id)
     }
 
     /// Create a variable with an initial value.
@@ -218,7 +218,7 @@ impl <'a> Compiler<'a> {
     /// let (x, x_init) = compiler.let_var(Const::<I64Type>::new(42));
     /// let expr = seq(x_init, add(x, Const::new(8))); // Produces 50
     /// ```
-    pub fn let_var<T, EXPR>(&mut self, init: EXPR) -> (VarRef<T>, crate::staged::Assign<VarRef<T>, EXPR>)
+    pub fn let_var<T, EXPR>(&mut self, init: EXPR) -> (Var<T>, crate::staged::Assign<Var<T>, EXPR>)
     where
         T: StagedType,
         EXPR: Staged<Out = T>,
@@ -237,14 +237,14 @@ impl <'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(VarRef<A>) -> BODY,
+        F: FnOnce(Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         // Create the parameter variable (ID 0 within this function's scope)
         // We use the compiler's var counter to ensure unique IDs across functions
         let param_id = self.next_var_id;
         self.next_var_id += 1;
-        let param_var = VarRef::<A>::new(param_id);
+        let param_var = Var::<A>::new(param_id);
 
         // Call body_fn immediately to build the expression tree
         let body_expr = body_fn(param_var);
@@ -284,13 +284,13 @@ impl <'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef<A, OUT>, VarRef<A>) -> BODY,
+        F: FnOnce(FunRef<A, OUT>, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         // Create the parameter variable
         let param_id = self.next_var_id;
         self.next_var_id += 1;
-        let param_var = VarRef::<A>::new(param_id);
+        let param_var = Var::<A>::new(param_id);
 
         // Pre-allocate the function ID and create FunRef
         let func_id = self.functions.len();
@@ -596,7 +596,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: square(x) = x * x
-        let square = compiler.fun1("square", |x: VarRef<I64Type>| mul(x, x));
+        let square = compiler.fun1("square", |x: Var<I64Type>| mul(x, x));
 
         // Call: square(5) = 25
         let expr = call1(square, Const::<I64Type>::new(5));
@@ -615,7 +615,7 @@ mod tests {
         let _unused = compiler.var_unchecked::<I64Type>();
 
         // Define: double(x) = x + x
-        let double = compiler.fun1("double", |x: VarRef<I64Type>| add(x, x));
+        let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
 
         // Call: double(7) = 14
         let expr = call1(double, Const::<I64Type>::new(7));
@@ -631,7 +631,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: cube(x) = x * x * x
-        let cube = compiler.fun1("cube", |x: VarRef<I64Type>| {
+        let cube = compiler.fun1("cube", |x: Var<I64Type>| {
             mul(mul(x, x), x)
         });
 
@@ -655,7 +655,7 @@ mod tests {
         // Define a recursive function: rec(x) = x + rec(x - 1)
         // Note: This will infinite loop if called, but we're just testing
         // that it compiles and the function can reference itself
-        let _rec = compiler.fun1_rec("recursive", |f, x: VarRef<I64Type>| {
+        let _rec = compiler.fun1_rec("recursive", |f, x: Var<I64Type>| {
             // Body references itself: call f recursively
             add(x, call1(f, sub(x, Const::<I64Type>::new(1))))
         });
@@ -706,7 +706,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |x: VarRef<I64Type>| {
+        let clamp_max = compiler.fun1("clamp_max", |x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(10)),
                 x,
@@ -724,7 +724,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |x: VarRef<I64Type>| {
+        let clamp_max = compiler.fun1("clamp_max", |x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(10)),
                 x,
@@ -742,7 +742,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
-        let clamp = compiler.fun1("clamp", |x: VarRef<I64Type>| {
+        let clamp = compiler.fun1("clamp", |x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(0)),
                 Const::<I64Type>::new(0),
@@ -794,7 +794,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, n: VarRef<I64Type>| {
+        let factorial = compiler.fun1_rec("factorial", |f, n: Var<I64Type>| {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)), // n < 2 means n <= 1
                 Const::<I64Type>::new(1),
@@ -813,7 +813,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, n: VarRef<I64Type>| {
+        let factorial = compiler.fun1_rec("factorial", |f, n: Var<I64Type>| {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)),
                 Const::<I64Type>::new(1),
@@ -841,7 +841,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fib(n) = if n < 2 then n else fib(n-1) + fib(n-2)
-        let fib = compiler.fun1_rec("fib", |f, n: VarRef<I64Type>| {
+        let fib = compiler.fun1_rec("fib", |f, n: Var<I64Type>| {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)),
                 n, // fib(0) = 0, fib(1) = 1
@@ -908,7 +908,7 @@ mod tests {
         let sum = compiler.var_unchecked::<I64Type>();
 
         // sum_to_n(n): compute 1 + 2 + ... + n using a while loop
-        let sum_to_n = compiler.fun1("sum_to_n", |n: VarRef<I64Type>| {
+        let sum_to_n = compiler.fun1("sum_to_n", |n: Var<I64Type>| {
             // i = 1; sum = 0;
             // while (i <= n) { sum = sum + i; i = i + 1; }
             // return sum;
@@ -955,7 +955,7 @@ mod tests {
         let result = compiler.var_unchecked::<I64Type>();
 
         // Iterative factorial using while loop
-        let factorial_iter = compiler.fun1("factorial_iter", |n: VarRef<I64Type>| {
+        let factorial_iter = compiler.fun1("factorial_iter", |n: Var<I64Type>| {
             // i = 1; result = 1;
             // while (i <= n) { result = result * i; i = i + 1; }
             // return result;
@@ -1000,7 +1000,7 @@ mod tests {
 
         // Iterative Fibonacci using while loop
         // Much faster than recursive version!
-        let fib_iter = compiler.fun1("fib_iter", |n: VarRef<I64Type>| {
+        let fib_iter = compiler.fun1("fib_iter", |n: Var<I64Type>| {
             // if n < 2 return n
             // else: a = 0; b = 1; i = 2;
             //       while (i <= n) { temp = a + b; a = b; b = temp; i = i + 1; }

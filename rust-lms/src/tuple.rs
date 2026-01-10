@@ -210,7 +210,7 @@ mod tests {
         let sum = compiler.var_unchecked::<I64Type>();
 
         // Compute sum of 1..=10 using tuple syntax instead of deeply nested seq
-        let sum_to_10 = compiler.fun1("sum_to_10", |_n: VarRef<I64Type>| {
+        let sum_to_10 = compiler.fun1("sum_to_10", |_n: Var<I64Type>| {
             (
                 assign(i, Const::<I64Type>::new(1)),
                 assign(sum, Const::<I64Type>::new(0)),

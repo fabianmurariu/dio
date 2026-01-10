@@ -62,34 +62,34 @@ pub trait Staged {
 /// let x: VarRef<I64Type> = compiler.var();
 /// let expr = add(x, x);  // x used twice - no problem, it's Copy!
 /// ```
-pub struct VarRef<T: StagedType> {
+pub struct Var<T: StagedType> {
     pub(crate) id: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 
 // Manually implement Clone and Copy to avoid requiring T: Clone
-impl<T: StagedType> Clone for VarRef<T> {
+impl<T: StagedType> Clone for Var<T> {
     fn clone(&self) -> Self {
-        VarRef {
+        Var {
             id: self.id,
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<T: StagedType> Copy for VarRef<T> {}
+impl<T: StagedType> Copy for Var<T> {}
 
-impl<T: StagedType> VarRef<T> {
+impl<T: StagedType> Var<T> {
     /// Create a new variable reference with the given ID
     pub(crate) fn new(id: usize) -> Self {
-        VarRef {
+        Var {
             id,
             _phantom: std::marker::PhantomData,
         }
     }
 }
 
-impl<T: StagedType> Staged for VarRef<T> {
+impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -100,7 +100,7 @@ impl<T: StagedType> Staged for VarRef<T> {
     }
 }
 
-impl<T: StagedType> std::fmt::Debug for VarRef<T> {
+impl<T: StagedType> std::fmt::Debug for Var<T> {
     fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
         write!(f, "VarRef({})", self.id)
     }
@@ -181,7 +181,7 @@ pub struct Assign<V, EXPR> {
     expr: EXPR,
 }
 
-impl<T, EXPR> Staged for Assign<VarRef<T>, EXPR>
+impl<T, EXPR> Staged for Assign<Var<T>, EXPR>
 where
     T: StagedType,
     EXPR: Staged<Out = T>,
@@ -210,7 +210,7 @@ where
 }
 
 /// Create an assignment expression
-pub fn assign<T, EXPR>(var: VarRef<T>, expr: EXPR) -> Assign<VarRef<T>, EXPR>
+pub fn assign<T, EXPR>(var: Var<T>, expr: EXPR) -> Assign<Var<T>, EXPR>
 where
     T: StagedType,
     EXPR: Staged<Out = T>,

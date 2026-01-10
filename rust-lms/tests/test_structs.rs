@@ -20,7 +20,7 @@ fn test_simple_struct_field_access() {
 
     // Create a function that reads the x field from a Point
     // fn get_x(pt: Point) -> i64
-    let get_x = compiler.fun1("get_x", |pt: VarRef<Point>| {
+    let get_x = compiler.fun1("get_x", |pt: Var<Point>| {
         pt.get(PointType::x)
     });
 
@@ -40,7 +40,7 @@ fn test_struct_multiple_fields() {
 
     // fn swap_fields(pt: Point) -> Point with x and y swapped conceptually
     // Actually returns x + y since we can't return structs yet
-    let sum_fields = compiler.fun1("sum_fields", |pt: VarRef<Point>| {
+    let sum_fields = compiler.fun1("sum_fields", |pt: Var<Point>| {
         let x = pt.get(PointType::x);
         let y = pt.get(PointType::y);
 
@@ -64,7 +64,7 @@ fn test_struct_with_reference() {
 
     // fn read_x_ref(pt: &Point) -> i64
     // Note: Point's RuntimeValue is already &Point, so we use VarRef<Point> directly
-    let read_x_ref = compiler.fun1("read_x_ref", |pt: VarRef<Point>| {
+    let read_x_ref = compiler.fun1("read_x_ref", |pt: Var<Point>| {
         pt.get(PointType::x)
     });
 
@@ -101,7 +101,7 @@ fn test_nested_struct_access() {
     // fn get_inner_value(outer: &Outer) -> i64
     // Access: outer.inner.value
     // Note: Outer's RuntimeValue is already &Outer
-    let get_inner_value = compiler.fun1("get_inner_value", |outer: VarRef<Outer>| {
+    let get_inner_value = compiler.fun1("get_inner_value", |outer: Var<Outer>| {
         // Get reference to inner field, then get its value
         outer.get_ref(OuterType::inner).get(InnerType::value)
     });
@@ -125,7 +125,7 @@ fn test_nested_struct_multiple_access() {
     // fn sum_outer(outer: &Outer) -> i64
     // Returns outer.inner.value + outer.extra
     // Note: Outer's RuntimeValue is already &Outer
-    let sum_outer = compiler.fun1("sum_outer", |outer: VarRef<Outer>| {
+    let sum_outer = compiler.fun1("sum_outer", |outer: Var<Outer>| {
         let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
         let extra = outer.get(OuterType::extra);
 
@@ -150,7 +150,7 @@ fn test_struct_copy_semantics() {
 
     // Test that Point is CopyType
     // fn double_x(pt: Point) -> i64
-    let double_x = compiler.fun1("double_x", |pt: VarRef<Point>| {
+    let double_x = compiler.fun1("double_x", |pt: Var<Point>| {
         let x = pt.get(PointType::x);
         mul(x, Const::<I64Type>::new(2))
     });

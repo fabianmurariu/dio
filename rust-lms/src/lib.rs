@@ -129,7 +129,7 @@ pub mod prelude {
         field_mut_ptr, field_mut_ref, field_ptr, field_ref, load_field,
         Field, FieldMutPtr, FieldMutRef, FieldPtr, FieldRef, LoadField, StructFieldAccess,
     };
-    pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, VarRef};
+    pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, Var};
     pub use crate::types::{BoolType, ConstantType, CopyType, F64Type, I64Type, StagedType, U64Type, UnitType};
 
     // Re-export derive macro

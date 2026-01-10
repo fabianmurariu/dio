@@ -38,11 +38,11 @@ impl<T: StagedType> StagedType for SRef<T> {
 /// At runtime, this surfaces as `*mut T::RuntimeValue` or `&mut T::RuntimeValue`
 /// when used in function signatures.
 #[derive(Clone, Copy, Debug)]
-pub struct SMutRef<T: StagedType> {
+pub struct SRefMut<T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> StagedType for SMutRef<T> {
+impl<T: StagedType> StagedType for SRefMut<T> {
     type RuntimeValue<'a> = &'a mut T::RuntimeValue<'a>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -102,7 +102,7 @@ pub struct LoadMutRef<P> {
 
 impl<P, T> Staged for LoadMutRef<P>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     T: StagedType,
 {
     type Out = T;
@@ -118,7 +118,7 @@ where
 /// Create a load operation from a mutable pointer
 pub fn load_ref_mut<P, T>(ptr: P) -> LoadMutRef<P>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     T: StagedType,
 {
     LoadMutRef { ptr }
@@ -145,7 +145,7 @@ pub struct Store<P, V> {
 
 impl<P, V, T> Staged for Store<P, V>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     V: Staged<Out = T>,
     T: StagedType,
 {
@@ -171,7 +171,7 @@ where
 /// Create a store operation
 pub fn store_ref<P, V, T>(ptr: P, val: V) -> Store<P, V>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     V: Staged<Out = T>,
     T: StagedType,
 {
@@ -240,11 +240,11 @@ pub struct PtrOffsetMut<P, I> {
 
 impl<P, I, T> Staged for PtrOffsetMut<P, I>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
-    type Out = SMutRef<T>;
+    type Out = SRefMut<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr = self.ptr.codegen(ctx);
@@ -261,7 +261,7 @@ where
 /// Create a pointer offset operation for mutable pointers
 pub fn ptr_offset_mut<P, I, T>(ptr: P, index: I) -> PtrOffsetMut<P, I>
 where
-    P: Staged<Out = SMutRef<T>>,
+    P: Staged<Out = SRefMut<T>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
 {
@@ -337,7 +337,7 @@ mod tests {
 
         // Create a function that takes a mutable pointer and writes to it
         // fn write_42(ptr: &mut i64) -> i64
-        let write_fn = compiler.fun1("write_42", |ptr: VarRef<SMutRef<I64Type>>| {
+        let write_fn = compiler.fun1("write_42", |ptr: Var<SRefMut<I64Type>>| {
             seq(store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
         });
 
@@ -357,7 +357,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn read(ptr: &f64) -> f64
-        let read_fn = compiler.fun1("read", |ptr: VarRef<SRef<F64Type>>| load_ref(ptr));
+        let read_fn = compiler.fun1("read", |ptr: Var<SRef<F64Type>>| load_ref(ptr));
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -373,7 +373,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn store_value(ptr: &mut f64) -> ()
-        let store_fn = compiler.fun1("store_value", |ptr: VarRef<SMutRef<F64Type>>| {
+        let store_fn = compiler.fun1("store_value", |ptr: Var<SRefMut<F64Type>>| {
             store_ref(ptr, Const::<F64Type>::new(2.71828))
         });
 
