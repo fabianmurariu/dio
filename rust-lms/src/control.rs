@@ -44,16 +44,6 @@ where
     }
 }
 
-/// Create a sequence expression
-pub fn seq<A, B, T>(first: A, second: B) -> Seq<A, B>
-where
-    A: Staged,
-    B: Staged<Out = T>,
-    T: StagedType,
-{
-    Seq { first, second }
-}
-
 // =============================================================================
 // IfThenElse<COND, THEN, ELSE> - Conditional Expression
 // =============================================================================

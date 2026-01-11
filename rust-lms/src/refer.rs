@@ -342,7 +342,7 @@ mod tests {
         // Create a function that takes a mutable pointer and writes to it
         // fn write_42(ptr: &mut i64) -> i64
         let write_fn = compiler.fun1("write_42", |ptr: Var<SRefMut<I64Type>>| {
-            seq(store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
+            (store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");

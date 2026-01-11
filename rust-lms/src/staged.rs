@@ -143,6 +143,40 @@ impl<T: ConstantType> Staged for Const<T> {
 }
 
 // =============================================================================
+// From implementations for ergonomic constant creation
+// =============================================================================
+
+impl From<i64> for Const<crate::types::I64Type> {
+    fn from(value: i64) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<u64> for Const<crate::types::U64Type> {
+    fn from(value: u64) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<f64> for Const<crate::types::F64Type> {
+    fn from(value: f64) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<bool> for Const<crate::types::BoolType> {
+    fn from(value: bool) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<()> for Const<crate::types::UnitType> {
+    fn from(value: ()) -> Self {
+        Const::new(value)
+    }
+}
+
+// =============================================================================
 // Boxing support: Enable dynamic dispatch when needed
 // =============================================================================
 
@@ -162,18 +196,82 @@ pub trait BoxableStaged: Staged {
 impl<T: Staged> BoxableStaged for T {}
 
 // =============================================================================
+// IntoStaged trait for ergonomic constant creation
+// =============================================================================
+
+/// Trait for values that can be converted into staged expressions.
+///
+/// This trait enables ergonomic APIs like `assign(var, 42i64)` instead of
+/// `assign(var, Const::<I64Type>::new(42))`.
+pub trait IntoStaged<T: StagedType> {
+    /// The staged type this converts to
+    type Staged: Staged<Out = T>;
+
+    /// Convert into a staged expression
+    fn into_staged(self) -> Self::Staged;
+}
+
+// Implement IntoStaged for primitives
+impl IntoStaged<crate::types::I64Type> for i64 {
+    type Staged = Const<crate::types::I64Type>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<crate::types::U64Type> for u64 {
+    type Staged = Const<crate::types::U64Type>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<crate::types::F64Type> for f64 {
+    type Staged = Const<crate::types::F64Type>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<crate::types::BoolType> for bool {
+    type Staged = Const<crate::types::BoolType>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<crate::types::UnitType> for () {
+    type Staged = Const<crate::types::UnitType>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+// Blanket impl for anything that's already Staged
+impl<T, S> IntoStaged<T> for S
+where
+    T: StagedType,
+    S: Staged<Out = T>,
+{
+    type Staged = S;
+    fn into_staged(self) -> Self::Staged {
+        self
+    }
+}
+
+// =============================================================================
 // Assign<V, EXPR> - Variable assignment (side effect, returns unit)
 // =============================================================================
 
 /// Assignment expression: assigns a value to a variable.
 ///
 /// This is a side-effecting operation that returns `UnitType`.
-/// Use with `Seq` to chain multiple assignments or continue with other expressions.
+/// Use with tuples to chain multiple assignments or continue with other expressions.
 ///
 /// # Example
 /// ```ignore
 /// let x = compiler.var::<I64Type>();
-/// let expr = seq(assign(x, Const::<I64Type>::new(5)), x);  // assigns 5 to x, returns x
+/// let expr = (assign(x, 5i64), x);  // assigns 5 to x, returns x
 /// ```
 #[derive(Clone)]
 pub struct Assign<V, EXPR> {
@@ -210,12 +308,16 @@ where
 }
 
 /// Create an assignment expression
-pub fn assign<T, EXPR>(var: Var<T>, expr: EXPR) -> Assign<Var<T>, EXPR>
+///
+/// Accepts any value that implements `IntoStaged<T>`.
+/// This allows ergonomic usage like `assign(var, 42i64)` instead of
+/// `assign(var, Const::<I64Type>::new(42))`.
+pub fn assign<T, E>(var: Var<T>, expr: E) -> Assign<Var<T>, E::Staged>
 where
     T: StagedType,
-    EXPR: Staged<Out = T>,
+    E: IntoStaged<T>,
 {
-    Assign { var, expr }
+    Assign { var, expr: expr.into_staged() }
 }
 
 /// Create a unit constant

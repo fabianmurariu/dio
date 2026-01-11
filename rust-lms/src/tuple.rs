@@ -127,34 +127,6 @@ mod tests {
     }
 
     #[test]
-    fn test_tuple_vs_seq_equivalence() {
-        let mut compiler1 = Compiler::new();
-        let mut compiler2 = Compiler::new();
-
-        let x1 = compiler1.var_unchecked::<I64Type>();
-        let x2 = compiler2.var_unchecked::<I64Type>();
-
-        // Using tuple
-        let expr1 = (
-            assign(x1, Const::<I64Type>::new(42)),
-            mul(x1, Const::<I64Type>::new(2)),
-        );
-
-        // Using seq (equivalent)
-        let expr2 = seq(
-            assign(x2, Const::<I64Type>::new(42)),
-            mul(x2, Const::<I64Type>::new(2)),
-        );
-
-        let result1 = compiler1.compile(expr1).expect("compilation failed").run();
-        let result2 = compiler2.compile(expr2).expect("compilation failed").run();
-
-        assert_eq!(result1, 84);
-        assert_eq!(result2, 84);
-        assert_eq!(result1, result2);
-    }
-
-    #[test]
     fn test_large_tuple() {
         let mut compiler = Compiler::new();
 

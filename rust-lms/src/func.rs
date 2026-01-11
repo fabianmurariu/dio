@@ -15,7 +15,9 @@
 
 use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::StagedType;
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
@@ -102,9 +104,7 @@ impl<A: StagedType, OUT: StagedType> Staged for FunRef<A, OUT> {
             .expect(&format!("Function {} not found in func_map", self.id));
 
         // Declare the function in the current function context
-        let func_ref = ctx
-            .module
-            .declare_func_in_func(*func_id, ctx.builder.func);
+        let func_ref = ctx.module.declare_func_in_func(*func_id, ctx.builder.func);
 
         // Get the function address as an i64
         ctx.builder.ins().func_addr(types::I64, func_ref)
@@ -145,9 +145,7 @@ where
             .expect(&format!("Function {} not found in func_map", self.func.id));
 
         // Declare the function for calling
-        let func_ref = ctx
-            .module
-            .declare_func_in_func(*func_id, ctx.builder.func);
+        let func_ref = ctx.module.declare_func_in_func(*func_id, ctx.builder.func);
 
         // Generate code for the argument
         let arg_value = self.arg.codegen(ctx);
@@ -159,7 +157,10 @@ where
             let mut args = Vec::with_capacity(num_values);
             for i in 0..num_values {
                 let offset = (i * 8) as i32;
-                let val = ctx.builder.ins().load(types::I64, MemFlags::trusted(), arg_value, offset);
+                let val =
+                    ctx.builder
+                        .ins()
+                        .load(types::I64, MemFlags::trusted(), arg_value, offset);
                 args.push(val);
             }
             args
@@ -193,7 +194,9 @@ where
             // Store each return value to the stack slot
             for (i, &result) in results.iter().enumerate() {
                 let offset = (i * 8) as i32;
-                ctx.builder.ins().store(MemFlags::trusted(), result, slot_ptr, offset);
+                ctx.builder
+                    .ins()
+                    .store(MemFlags::trusted(), result, slot_ptr, offset);
             }
 
             // Return the pointer to the stack slot
@@ -253,13 +256,13 @@ pub struct Compiler<'a> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl <'a>Default for Compiler<'a> {
+impl<'a> Default for Compiler<'a> {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl <'a> Compiler<'a> {
+impl<'a> Compiler<'a> {
     /// Create a new compiler
     pub fn new() -> Self {
         Compiler {
@@ -439,9 +442,7 @@ impl <'a> Compiler<'a> {
         // Create the actual function definition
         let func_def = FunDef {
             name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| {
-                body_expr.codegen(ctx)
-            }),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
             param_abi_types: A::abi_types(),
             return_abi_types: OUT::abi_types(),
             param_var_id: param_id,
@@ -467,7 +468,10 @@ impl <'a> Compiler<'a> {
     /// - Parameters: Multiple i64 values are received, stored to a stack slot,
     ///   and the variable holds the stack slot pointer
     /// - Returns: The result pointer is used to load multiple i64 values for return
-    pub fn compile<S: Staged + 'static>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+    pub fn compile<S: Staged + 'static>(
+        self,
+        expr: S,
+    ) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create the JIT module
         let builder = JITBuilder::new(default_libcall_names())
             .map_err(|e| CompileError::JitError(e.to_string()))?;
@@ -575,7 +579,9 @@ impl <'a> Compiler<'a> {
                         // Store each i64 value to the stack slot
                         for (i, &param_value) in block_params.iter().enumerate() {
                             let offset = (i * 8) as i32;
-                            builder.ins().store(MemFlags::trusted(), param_value, slot_ptr, offset);
+                            builder
+                                .ins()
+                                .store(MemFlags::trusted(), param_value, slot_ptr, offset);
                         }
 
                         // Declare variable to hold the stack pointer
@@ -608,7 +614,10 @@ impl <'a> Compiler<'a> {
                         let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
                         for i in 0..struct_info.num_abi_values {
                             let offset = (i * 8) as i32;
-                            let val = builder.ins().load(types::I64, MemFlags::trusted(), result, offset);
+                            let val =
+                                builder
+                                    .ins()
+                                    .load(types::I64, MemFlags::trusted(), result, offset);
                             return_values.push(val);
                         }
                         builder.ins().return_(&return_values);
@@ -665,7 +674,10 @@ impl <'a> Compiler<'a> {
                     let mut return_values = Vec::with_capacity(num_values);
                     for i in 0..num_values {
                         let offset = (i * 8) as i32;
-                        let val = builder.ins().load(types::I64, MemFlags::trusted(), result, offset);
+                        let val =
+                            builder
+                                .ins()
+                                .load(types::I64, MemFlags::trusted(), result, offset);
                         return_values.push(val);
                     }
                     builder.ins().return_(&return_values);
@@ -691,7 +703,9 @@ impl <'a> Compiler<'a> {
         }
 
         // Finalize the module
-        module.finalize_definitions().map_err(|e| CompileError::ModuleError(e.to_string()))?;
+        module
+            .finalize_definitions()
+            .map_err(|e| CompileError::ModuleError(e.to_string()))?;
 
         // Get the main function pointer
         let main_ptr = module.get_finalized_function(main_func_id);
@@ -852,9 +866,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: cube(x) = x * x * x
-        let cube = compiler.fun1("cube", |x: Var<I64Type>| {
-            mul(mul(x, x), x)
-        });
+        let cube = compiler.fun1("cube", |x: Var<I64Type>| mul(mul(x, x), x));
 
         // Compile the function reference itself (not a call)
         let compiled = compiler.compile(cube).expect("compilation failed");
@@ -976,7 +988,8 @@ mod tests {
         });
 
         // Test values
-        let compiled_neg = compiler.compile(call1(clamp, Const::<I64Type>::new(-5)))
+        let compiled_neg = compiler
+            .compile(call1(clamp, Const::<I64Type>::new(-5)))
             .expect("compilation failed");
         assert_eq!(compiled_neg.run(), 0); // Clamped at min
     }
@@ -985,11 +998,8 @@ mod tests {
     fn test_seq_basic() {
         let compiler = Compiler::new();
 
-        // seq(5, 10) => 10 (first value ignored, second returned)
-        let expr = seq(
-            Const::<I64Type>::new(5),
-            Const::<I64Type>::new(10),
-        );
+        // (5, 10) => 10 (first value ignored, second returned)
+        let expr = (Const::<I64Type>::new(5), Const::<I64Type>::new(10));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 10);
@@ -1004,10 +1014,28 @@ mod tests {
         let (y, y_init) = compiler.let_var(Const::<I64Type>::new(8));
 
         // Sequence: init x, init y, return x + y
-        let expr = seq(x_init, seq(y_init, add(x, y)));
+        let expr = (x_init, y_init, add(x, y));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 50); // 42 + 8 = 50
+    }
+
+    #[test]
+    fn test_ergonomic_assign() {
+        let mut compiler = Compiler::new();
+
+        let x = compiler.var_unchecked::<I64Type>();
+        let y = compiler.var_unchecked::<I64Type>();
+
+        // Test ergonomic assign with primitive values (no Const::new needed)
+        let expr = (
+            assign(x, 10i64),           // Instead of assign(x, Const::<I64Type>::new(10))
+            assign(y, 32i64),           // Instead of assign(y, Const::<I64Type>::new(32))
+            add(x, y)
+        );
+
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 42);
     }
 
     #[test]
@@ -1047,11 +1075,11 @@ mod tests {
         let factorial_fn = compiled.as_fn();
 
         // Test various inputs
-        assert_eq!(factorial_fn(0), 1);   // 0! = 1
-        assert_eq!(factorial_fn(1), 1);   // 1! = 1
-        assert_eq!(factorial_fn(2), 2);   // 2! = 2
-        assert_eq!(factorial_fn(3), 6);   // 3! = 6
-        assert_eq!(factorial_fn(4), 24);  // 4! = 24
+        assert_eq!(factorial_fn(0), 1); // 0! = 1
+        assert_eq!(factorial_fn(1), 1); // 1! = 1
+        assert_eq!(factorial_fn(2), 2); // 2! = 2
+        assert_eq!(factorial_fn(3), 6); // 3! = 6
+        assert_eq!(factorial_fn(4), 24); // 4! = 24
         assert_eq!(factorial_fn(5), 120); // 5! = 120
         assert_eq!(factorial_fn(6), 720); // 6! = 720
         assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
@@ -1102,18 +1130,14 @@ mod tests {
 
         // while(false) { result = 999 } ; result = 42
         // Loop body never executes, result should be 42
-        let expr = seq(
+        let expr = (
             assign(result, Const::<I64Type>::new(0)),
-            seq(
-                while_loop(
-                    Const::<BoolType>::new(false), // Never true
-                    assign(result, Const::<I64Type>::new(999)),
-                ),
-                seq(
-                    assign(result, Const::<I64Type>::new(42)),
-                    result,
-                ),
+            while_loop(
+                Const::<BoolType>::new(false), // Never true
+                assign(result, Const::<I64Type>::new(999)),
             ),
+            assign(result, Const::<I64Type>::new(42)),
+            result
         );
 
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -1133,23 +1157,19 @@ mod tests {
             // i = 1; sum = 0;
             // while (i <= n) { sum = sum + i; i = i + 1; }
             // return sum;
-            seq(
+            (
                 assign(i, Const::<I64Type>::new(1)),
-                seq(
-                    assign(sum, Const::<I64Type>::new(0)),
-                    seq(
-                        while_loop(
-                            // i <= n is equivalent to !(n < i) or (i < n+1)
-                            // Using: i < n + 1
-                            lt(i, add(n, Const::<I64Type>::new(1))),
-                            seq(
-                                assign(sum, add(sum, i)),
-                                assign(i, add(i, Const::<I64Type>::new(1))),
-                            ),
-                        ),
-                        sum,
-                    ),
+                assign(sum, Const::<I64Type>::new(0)),
+                while_loop(
+                    // i <= n is equivalent to !(n < i) or (i < n+1)
+                    // Using: i < n + 1
+                    lt(i, add(n, Const::<I64Type>::new(1))),
+                    (
+                        assign(sum, add(sum, i)),
+                        assign(i, add(i, Const::<I64Type>::new(1))),
+                    )
                 ),
+                sum
             )
         });
 
@@ -1180,31 +1200,29 @@ mod tests {
             // i = 1; result = 1;
             // while (i <= n) { result = result * i; i = i + 1; }
             // return result;
-            seq(
+            (
                 assign(i, Const::<I64Type>::new(1)),
-                seq(
-                    assign(result, Const::<I64Type>::new(1)),
-                    seq(
-                        while_loop(
-                            lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
-                            seq(
-                                assign(result, mul(result, i)),
-                                assign(i, add(i, Const::<I64Type>::new(1))),
-                            ),
-                        ),
-                        result,
+                assign(result, Const::<I64Type>::new(1)),
+                while_loop(
+                    lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
+                    (
+                        assign(result, mul(result, i)),
+                        assign(i, add(i, Const::<I64Type>::new(1))),
                     ),
                 ),
+                result,
             )
         });
 
-        let compiled = compiler.compile(factorial_iter).expect("compilation failed");
+        let compiled = compiler
+            .compile(factorial_iter)
+            .expect("compilation failed");
         let factorial_fn = compiled.as_fn();
 
-        assert_eq!(factorial_fn(0), 1);   // 0! = 1
-        assert_eq!(factorial_fn(1), 1);   // 1! = 1
-        assert_eq!(factorial_fn(2), 2);   // 2! = 2
-        assert_eq!(factorial_fn(3), 6);   // 3! = 6
+        assert_eq!(factorial_fn(0), 1); // 0! = 1
+        assert_eq!(factorial_fn(1), 1); // 1! = 1
+        assert_eq!(factorial_fn(2), 2); // 2! = 2
+        assert_eq!(factorial_fn(3), 6); // 3! = 6
         assert_eq!(factorial_fn(5), 120); // 5! = 120
         assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
     }
@@ -1229,30 +1247,20 @@ mod tests {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)),
                 n,
-                seq(
+                (
                     assign(a, Const::<I64Type>::new(0)),
-                    seq(
-                        assign(b, Const::<I64Type>::new(1)),
-                        seq(
-                            assign(i, Const::<I64Type>::new(2)),
-                            seq(
-                                while_loop(
-                                    lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
-                                    seq(
-                                        assign(temp, add(a, b)),
-                                        seq(
-                                            assign(a, b),
-                                            seq(
-                                                assign(b, temp),
-                                                assign(i, add(i, Const::<I64Type>::new(1))),
-                                            ),
-                                        ),
-                                    ),
-                                ),
-                                b,
-                            ),
+                    assign(b, Const::<I64Type>::new(1)),
+                    assign(i, Const::<I64Type>::new(2)),
+                    while_loop(
+                        lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
+                        (
+                            assign(temp, add(a, b)),
+                            assign(a, b),
+                            assign(b, temp),
+                            assign(i, add(i, Const::<I64Type>::new(1))),
                         ),
                     ),
+                    b,
                 ),
             )
         });

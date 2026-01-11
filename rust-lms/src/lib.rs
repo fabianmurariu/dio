@@ -119,7 +119,7 @@ pub mod _internal {
 
 /// Commonly used types and traits
 pub mod prelude {
-    pub use crate::control::{if_then, if_then_else, seq, while_loop, IfThen, IfThenElse, Seq, While};
+    pub use crate::control::{if_then, if_then_else, while_loop, IfThen, IfThenElse, While};
     pub use crate::func::{call1, Compiler, Compiled, FunRef, FunType1};
     pub use crate::num::{add, div, eq, lt, mul, sub};
     pub use crate::ptr::{
@@ -132,7 +132,7 @@ pub mod prelude {
         field_mut_ptr, field_mut_ref, field_ptr, field_ref, load_field,
         Field, FieldMutPtr, FieldMutRef, FieldPtr, FieldRef, LoadField, StructFieldAccess,
     };
-    pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, Staged, Var};
+    pub use crate::staged::{assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, Staged, Var};
     pub use crate::types::{BoolType, ConstantType, CopyType, F64Type, I64Type, StagedType, U64Type, UnitType};
 
     // Re-export derive macro
