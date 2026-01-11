@@ -61,7 +61,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     if !has_repr_c {
         return syn::Error::new_spanned(
             &input,
-            "StagedType can only be derived for structs with #[repr(C)]"
+            "StagedType can only be derived for structs with #[repr(C)]",
         )
         .to_compile_error()
         .into();
@@ -71,12 +71,9 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     let struct_data = match &input.data {
         Data::Struct(s) => s,
         _ => {
-            return syn::Error::new_spanned(
-                &input,
-                "StagedType can only be derived for structs"
-            )
-            .to_compile_error()
-            .into();
+            return syn::Error::new_spanned(&input, "StagedType can only be derived for structs")
+                .to_compile_error()
+                .into();
         }
     };
 
@@ -85,7 +82,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         _ => {
             return syn::Error::new_spanned(
                 &input,
-                "StagedType can only be derived for structs with named fields"
+                "StagedType can only be derived for structs with named fields",
             )
             .to_compile_error()
             .into();
@@ -96,10 +93,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     let _vis = &input.vis;
 
     // Generate field token module name
-    let field_module_name = syn::Ident::new(
-        &format!("{}Type", struct_name),
-        struct_name.span()
-    );
+    let field_module_name = syn::Ident::new(&format!("{}Type", struct_name), struct_name.span());
 
     // Collect field information
     let field_tokens: Vec<_> = named_fields
@@ -122,7 +116,10 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                         None
                     }
                 })
-                .expect(&format!("Field '{}' must have a #[staged(Type)] attribute", field_name));
+                .expect(&format!(
+                    "Field '{}' must have a #[staged(Type)] attribute",
+                    field_name
+                ));
 
             // Calculate offset
             let offset_calc = quote! {

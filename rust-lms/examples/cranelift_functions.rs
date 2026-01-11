@@ -34,7 +34,7 @@ fn main() {
 fn example1_single_function_with_params() {
     println!("Example 1: Single function with parameters");
 
-    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
     let mut module = JITModule::new(builder);
 
     // Define function signature: (i64, i64) -> i64
@@ -96,7 +96,7 @@ fn example1_single_function_with_params() {
 fn example2_multiple_functions() {
     println!("Example 2: Multiple functions in one module");
 
-    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
     let mut module = JITModule::new(builder);
 
     // Function 1: square(x) = x * x
@@ -234,7 +234,7 @@ fn example2_multiple_functions() {
 fn example3_function_calls() {
     println!("Example 3: Functions calling each other");
 
-    let mut builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
+    let builder = JITBuilder::new(cranelift_module::default_libcall_names()).unwrap();
     let mut module = JITModule::new(builder);
 
     // Helper function: add(a, b) = a + b

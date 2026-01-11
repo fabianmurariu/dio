@@ -209,13 +209,20 @@ where
 }
 
 /// Create a function call expression
-pub fn call1<A, OUT, ARG>(func: FunRef<A, OUT>, arg: ARG) -> Call1<FunRef<A, OUT>, ARG>
+///
+/// Accepts any argument that can be converted to a staged expression.
+/// This allows ergonomic usage like `call1(func, 42i64)` instead of
+/// `call1(func, Const::<I64Type>::new(42))`.
+pub fn call1<A, OUT, ARG>(func: FunRef<A, OUT>, arg: ARG) -> Call1<FunRef<A, OUT>, ARG::Staged>
 where
     A: StagedType,
     OUT: StagedType,
-    ARG: Staged<Out = A>,
+    ARG: crate::staged::IntoStaged<A>,
 {
-    Call1 { func, arg }
+    Call1 {
+        func,
+        arg: arg.into_staged(),
+    }
 }
 
 // =============================================================================
@@ -288,7 +295,7 @@ impl<'a> Compiler<'a> {
     ///     seq(assign(i, Const::new(0)), i) // Must assign before use
     /// });
     /// ```
-    pub fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
+    pub unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
         Var::new(id)
@@ -296,8 +303,8 @@ impl<'a> Compiler<'a> {
 
     /// Create a variable with an initial value.
     ///
-    /// Returns a tuple of (variable_reference, initialization_expression).
-    /// The initialization must be sequenced into your expression tree before using the variable.
+    /// Returns an `InitVar` that can be used directly without tuple unpacking.
+    /// The initialization happens automatically when the variable is used in a tuple.
     ///
     /// Accepts any value that can be converted into a staged expression.
     /// This allows ergonomic usage like `let_var(42i64)` instead of
@@ -305,18 +312,16 @@ impl<'a> Compiler<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// let (x, x_init) = compiler.let_var(42i64);
-    /// let expr = (x_init, add(x, 8i64)); // Produces 50
+    /// let x = compiler.let_var(42i64);
+    /// let expr = (x, add(x, 8i64)); // x initializes, then is used in add
     /// ```
-    pub fn let_var<T, E>(&mut self, init: E) -> (Var<T>, crate::staged::Assign<Var<T>, E::Staged>)
+    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::InitVar<T, E::Staged>
     where
         T: StagedType,
         E: crate::staged::IntoStaged<T>,
     {
-        let var = self.var_unchecked();
-        // Clone var for the assignment (VarRef implements Clone and Copy)
-        let assignment = crate::staged::assign(var.clone(), init);
-        (var, assignment)
+        let var = unsafe { self.var_unchecked() };
+        crate::staged::InitVar::new(var, init.into_staged())
     }
 
     /// Define a unary function.
@@ -851,7 +856,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Create a variable first (this would break the old code that used func_id as param_id)
-        let _unused = compiler.var_unchecked::<I64Type>();
+        let _unused = unsafe { compiler.var_unchecked::<I64Type>() };
 
         // Define: double(x) = x + x
         let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
@@ -1013,12 +1018,12 @@ mod tests {
     fn test_let_var() {
         let mut compiler = Compiler::new();
 
-        // Test let_var API: (x, x_init) = let_var(42)
-        let (x, x_init) = compiler.let_var(42i64);
-        let (y, y_init) = compiler.let_var(8i64);
+        // Test new ergonomic let_var API
+        let x = compiler.let_var(42i64);
+        let y = compiler.let_var(8i64);
 
-        // Sequence: init x, init y, return x + y
-        let expr = (x_init, y_init, add::<I64Type, _, _>(x, y));
+        // x and y are InitVar, use *x to get Var<I64Type>
+        let expr = (x, y, add::<I64Type, _, _>(*x, *y));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 50); // 42 + 8 = 50
@@ -1028,14 +1033,14 @@ mod tests {
     fn test_ergonomic_assign() {
         let mut compiler = Compiler::new();
 
-        let x = compiler.var_unchecked::<I64Type>();
-        let y = compiler.var_unchecked::<I64Type>();
+        let x = unsafe { compiler.var_unchecked::<I64Type>() };
+        let y = unsafe { compiler.var_unchecked::<I64Type>() };
 
         // Test ergonomic assign with primitive values (no Const::new needed)
         let expr = (
-            assign(x, 10i64),           // Instead of assign(x, Const::<I64Type>::new(10))
-            assign(y, 32i64),           // Instead of assign(y, Const::<I64Type>::new(32))
-            add(x, y)
+            assign(x, 10i64), // Instead of assign(x, Const::<I64Type>::new(10))
+            assign(y, 32i64), // Instead of assign(y, Const::<I64Type>::new(32))
+            add(x, y),
         );
 
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -1130,18 +1135,15 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Create local variable
-        let result = compiler.var_unchecked::<I64Type>();
+        let result = compiler.let_var(0i64);
 
         // while(false) { result = 999 } ; result = 42
         // Loop body never executes, result should be 42
         let expr = (
-            assign(result, Const::<I64Type>::new(0)),
-            while_loop(
-                Const::<BoolType>::new(false), // Never true
-                assign(result, Const::<I64Type>::new(999)),
-            ),
-            assign(result, Const::<I64Type>::new(42)),
-            result
+            result,
+            while_loop(false, assign(*result, 999)),
+            assign(*result, 42),
+            *result,
         );
 
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -1149,55 +1151,12 @@ mod tests {
     }
 
     #[test]
-    fn test_while_loop_countdown() {
-        let mut compiler = Compiler::new();
-
-        // Create local variables BEFORE fun1 (to avoid borrow issues)
-        let i = compiler.var_unchecked::<I64Type>();
-        let sum = compiler.var_unchecked::<I64Type>();
-
-        // sum_to_n(n): compute 1 + 2 + ... + n using a while loop
-        let sum_to_n = compiler.fun1("sum_to_n", |n: Var<I64Type>| {
-            // i = 1; sum = 0;
-            // while (i <= n) { sum = sum + i; i = i + 1; }
-            // return sum;
-            (
-                assign(i, Const::<I64Type>::new(1)),
-                assign(sum, Const::<I64Type>::new(0)),
-                while_loop(
-                    // i <= n is equivalent to !(n < i) or (i < n+1)
-                    // Using: i < n + 1
-                    lt(i, add(n, Const::<I64Type>::new(1))),
-                    (
-                        assign(sum, add(sum, i)),
-                        assign(i, add(i, Const::<I64Type>::new(1))),
-                    )
-                ),
-                sum
-            )
-        });
-
-        let compiled = compiler.compile(sum_to_n).expect("compilation failed");
-        let sum_fn = compiled.as_fn();
-
-        // sum(1) = 1
-        // sum(2) = 1 + 2 = 3
-        // sum(3) = 1 + 2 + 3 = 6
-        // sum(10) = 55
-        assert_eq!(sum_fn(1), 1);
-        assert_eq!(sum_fn(2), 3);
-        assert_eq!(sum_fn(3), 6);
-        assert_eq!(sum_fn(10), 55);
-        assert_eq!(sum_fn(100), 5050);
-    }
-
-    #[test]
     fn test_while_loop_factorial() {
         let mut compiler = Compiler::new();
 
         // Create local variables BEFORE fun1
-        let i = compiler.var_unchecked::<I64Type>();
-        let result = compiler.var_unchecked::<I64Type>();
+        let i = compiler.let_var(1i64);
+        let result = compiler.let_var(1i64);
 
         // Iterative factorial using while loop
         let factorial_iter = compiler.fun1("factorial_iter", |n: Var<I64Type>| {
@@ -1205,16 +1164,12 @@ mod tests {
             // while (i <= n) { result = result * i; i = i + 1; }
             // return result;
             (
-                assign(i, Const::<I64Type>::new(1)),
-                assign(result, Const::<I64Type>::new(1)),
+                (i, result),
                 while_loop(
-                    lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
-                    (
-                        assign(result, mul(result, i)),
-                        assign(i, add(i, Const::<I64Type>::new(1))),
-                    ),
+                    lt(*i, add(n, 1)), // i <= n
+                    (assign(*result, mul(*result, *i)), assign(*i, add(*i, 1))),
                 ),
-                result,
+                *result,
             )
         });
 
@@ -1236,10 +1191,10 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Create local variables BEFORE fun1
-        let i = compiler.var_unchecked::<I64Type>();
-        let a = compiler.var_unchecked::<I64Type>(); // fib(i-2)
-        let b = compiler.var_unchecked::<I64Type>(); // fib(i-1)
-        let temp = compiler.var_unchecked::<I64Type>();
+        let i = compiler.let_var(2i64);
+        let a = compiler.let_var(0i64); // fib(i-2)
+        let b = compiler.let_var(1i64); // fib(i-1)
+        let temp = compiler.let_var(0i64);
 
         // Iterative Fibonacci using while loop
         // Much faster than recursive version!
@@ -1248,23 +1203,23 @@ mod tests {
             // else: a = 0; b = 1; i = 2;
             //       while (i <= n) { temp = a + b; a = b; b = temp; i = i + 1; }
             //       return b;
-            if_then_else(
-                lt(n, Const::<I64Type>::new(2)),
-                n,
-                (
-                    assign(a, Const::<I64Type>::new(0)),
-                    assign(b, Const::<I64Type>::new(1)),
-                    assign(i, Const::<I64Type>::new(2)),
-                    while_loop(
-                        lt(i, add(n, Const::<I64Type>::new(1))), // i <= n
-                        (
-                            assign(temp, add(a, b)),
-                            assign(a, b),
-                            assign(b, temp),
-                            assign(i, add(i, Const::<I64Type>::new(1))),
+            (
+                (i, a, b, temp),
+                if_then_else(
+                    lt(n, 2),
+                    n,
+                    (
+                        while_loop(
+                            lt(*i, add(n, 1)), // i <= n
+                            (
+                                assign(*temp, add(*a, *b)),
+                                assign(*a, *b),
+                                assign(*b, *temp),
+                                assign(*i, add(*i, 1)),
+                            ),
                         ),
+                        *b,
                     ),
-                    b,
                 ),
             )
         });

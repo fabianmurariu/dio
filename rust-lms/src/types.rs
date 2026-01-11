@@ -73,7 +73,10 @@ pub trait StagedType: 'static {
 /// so this is a separate trait.
 pub trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue<'static>, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_constant(
+        value: &Self::RuntimeValue<'static>,
+        builder: &mut FunctionBuilder,
+    ) -> Value;
 }
 
 /// Marker trait for types that are Copy at the semantic level.

@@ -5,7 +5,7 @@
 //! - Field accessor operations (LoadField, FieldRef, FieldPtr, etc.)
 //! - Extension methods on VarRef for field access
 
-use crate::ptr::{SPtr, SMutPtr};
+use crate::ptr::{SMutPtr, SPtr};
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
@@ -326,7 +326,8 @@ where
     F: Field<Out = T>,
     T: StagedType,
     FieldRef<P, F>: Staged<Out = SRef<T>>,
-{}
+{
+}
 
 // Implement for FieldMutRef to enable chaining
 impl<P, F, T> StructFieldAccess<T> for FieldMutRef<P, F>
@@ -335,7 +336,8 @@ where
     F: Field<Out = T>,
     T: StagedType,
     FieldMutRef<P, F>: Staged<Out = SRefMut<T>>,
-{}
+{
+}
 
 #[cfg(test)]
 mod tests {

@@ -94,7 +94,9 @@ impl<T: StagedType> Staged for Var<T> {
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Look up our ID in the var_map to get the Cranelift Variable
-        let var = ctx.var_map.get(&self.id)
+        let var = ctx
+            .var_map
+            .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
         ctx.builder.use_var(*var)
     }
@@ -317,10 +319,105 @@ where
     T: StagedType,
     E: IntoStaged<T>,
 {
-    Assign { var, expr: expr.into_staged() }
+    Assign {
+        var,
+        expr: expr.into_staged(),
+    }
 }
 
 /// Create a unit constant
 pub fn unit() -> Const<UnitType> {
     Const::new(())
+}
+
+// =============================================================================
+// InitVar<T, EXPR> - Variable initialization wrapper
+// =============================================================================
+
+/// A variable with its initialization expression.
+///
+/// This type combines a variable reference with its initialization, providing
+/// an ergonomic API that doesn't require manual tuple unpacking.
+///
+/// When used in a tuple for sequencing, it performs the initialization.
+/// When used in operations (add, assign, etc.), it derefs to the underlying Var.
+///
+/// # Example
+/// ```ignore
+/// let i = compiler.let_var(0u64);  // Returns InitVar<U64Type, Const<U64Type>>
+/// let expr = (i, add(*i, 5i64));   // i initializes, *i gives Var<U64Type>
+/// ```
+pub struct InitVar<T: StagedType, EXPR> {
+    var: Var<T>,
+    init: EXPR,
+}
+
+impl<T: StagedType, EXPR> InitVar<T, EXPR> {
+    /// Create a new initialized variable wrapper
+    pub(crate) fn new(var: Var<T>, init: EXPR) -> Self {
+        InitVar { var, init }
+    }
+
+    /// Get the underlying variable reference
+    pub fn var(&self) -> Var<T> {
+        self.var
+    }
+}
+
+// Manually implement Clone (Var<T> is always Copy, clone the expr)
+impl<T: StagedType, EXPR: Clone> Clone for InitVar<T, EXPR> {
+    fn clone(&self) -> Self {
+        InitVar {
+            var: self.var, // Var<T> is Copy
+            init: self.init.clone(),
+        }
+    }
+}
+
+// InitVar is Copy when EXPR is Copy (like Const<T>)
+impl<T: StagedType, EXPR: Copy> Copy for InitVar<T, EXPR> {}
+
+// Deref to allow transparent access to the underlying Var
+impl<T: StagedType, EXPR> std::ops::Deref for InitVar<T, EXPR> {
+    type Target = Var<T>;
+
+    fn deref(&self) -> &Self::Target {
+        &self.var
+    }
+}
+
+// When InitVar is staged, it performs the initialization
+impl<T, EXPR> Staged for InitVar<T, EXPR>
+where
+    T: StagedType,
+    EXPR: Staged<Out = T>,
+{
+    type Out = UnitType;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Generate code for the initialization value
+        let value = self.init.codegen(ctx);
+
+        // Get or declare the Cranelift Variable
+        let var = if let Some(&var) = ctx.var_map.get(&self.var.id) {
+            var
+        } else {
+            // First assignment to this variable - declare it
+            let var = ctx.builder.declare_var(T::cranelift_type());
+            ctx.var_map.insert(self.var.id, var);
+            var
+        };
+
+        ctx.builder.def_var(var, value);
+
+        // Return unit value
+        ctx.builder.ins().iconst(types::I8, 0)
+    }
+}
+
+// Allow implicit conversion from InitVar to Var for convenience
+impl<T: StagedType, EXPR> From<InitVar<T, EXPR>> for Var<T> {
+    fn from(init_var: InitVar<T, EXPR>) -> Var<T> {
+        init_var.var
+    }
 }

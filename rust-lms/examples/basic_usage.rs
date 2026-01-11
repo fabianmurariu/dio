@@ -55,9 +55,7 @@ fn main() {
         let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
 
         // Define: add_one(x) = x + 1
-        let add_one = compiler.fun1("add_one", |x: Var<I64Type>| {
-            add(x, Const::new(1))
-        });
+        let add_one = compiler.fun1("add_one", |x: Var<I64Type>| add(x, Const::new(1)));
 
         // Compute: double(add_one(5)) = double(6) = 12
         let expr = call1(double, call1(add_one, Const::<I64Type>::new(5)));

@@ -434,7 +434,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Create variables for temp storage before defining function
-        let temp = compiler.var_unchecked::<I64Type>();
+        let temp = unsafe { compiler.var_unchecked::<I64Type>() };
 
         // fn swap(ptr: &mut i64) -> ()
         // Swaps ptr[0] and ptr[1]

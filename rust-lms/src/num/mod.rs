@@ -12,4 +12,4 @@ pub use ops::{Add, Div, Eq, Lt, Mul, Sub};
 pub use traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsSub};
 
 // Re-export helper functions
-pub use ops::{add, div, eq, lt, gt, mul, sub};
+pub use ops::{add, div, eq, gt, lt, mul, sub};

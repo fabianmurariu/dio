@@ -21,17 +21,17 @@
 //! ```ignore
 //! // Sum all elements in a slice
 //! let sum = compiler.fun1("sum", |arr: Var<SRef<Slice<I64Type>>>| {
-//!     let (i, i_init) = compiler.let_var(Const::<U64Type>::new(0));
-//!     let (total, total_init) = compiler.let_var(Const::<I64Type>::new(0));
+//!     let i = compiler.let_var(0u64);
+//!     let total = compiler.let_var(0i64);
 //!
 //!     (
-//!         i_init,
-//!         total_init,
+//!         i,
+//!         total,
 //!         while_loop(
 //!             lt(i, arr.len()),
 //!             (
 //!                 assign(total, add(total, arr.get_unchecked(i))),
-//!                 assign(i, add(i, Const::new(1u64))),
+//!                 assign(i, add(i, 1u64)),
 //!             )
 //!         ),
 //!         total
@@ -152,7 +152,9 @@ where
         // slice is a pointer to (ptr, len) pair
         let slice_ptr = self.slice.codegen(ctx);
         // Load len from offset 8
-        ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        ctx.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
     }
 }
 
@@ -171,7 +173,9 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
-        ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        ctx.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
     }
 }
 
@@ -195,7 +199,9 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
         // Load ptr from offset 0
-        ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        ctx.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
     }
 }
 
@@ -214,7 +220,9 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
-        ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        ctx.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
     }
 }
 
@@ -242,7 +250,10 @@ where
         let index = self.index.codegen(ctx);
 
         // Load data pointer from slice
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         // Compute element address: data_ptr + index * sizeof(T)
         let element_size = T::size_of() as i64;
@@ -271,7 +282,10 @@ where
         let slice_ptr = self.slice.codegen(ctx);
         let index = self.index.codegen(ctx);
 
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
@@ -304,7 +318,10 @@ where
         let index = self.index.codegen(ctx);
 
         // Load data pointer
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         // Compute element address
         let element_size = T::size_of() as i64;
@@ -313,7 +330,9 @@ where
         let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
 
         // Load the element value
-        ctx.builder.ins().load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
+        ctx.builder
+            .ins()
+            .load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
     }
 }
 
@@ -336,14 +355,19 @@ where
         let slice_ptr = self.slice.codegen(ctx);
         let index = self.index.codegen(ctx);
 
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
         let byte_offset = ctx.builder.ins().imul(index, scale);
         let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
 
-        ctx.builder.ins().load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
+        ctx.builder
+            .ins()
+            .load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
     }
 }
 
@@ -374,7 +398,10 @@ where
         let value = self.value.codegen(ctx);
 
         // Load data pointer
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         // Compute element address
         let element_size = T::size_of() as i64;
@@ -383,7 +410,9 @@ where
         let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
 
         // Store the value
-        ctx.builder.ins().store(MemFlags::trusted(), value, element_ptr, 0);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), value, element_ptr, 0);
 
         // Return unit
         ctx.builder.ins().iconst(types::I8, 0)
@@ -419,7 +448,10 @@ where
         let end = self.end.codegen(ctx);
 
         // Load original data pointer
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         // Compute new pointer: data_ptr + start * sizeof(T)
         let element_size = T::size_of() as i64;
@@ -439,8 +471,12 @@ where
         let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
 
         // Store ptr at offset 0, len at offset 8
-        ctx.builder.ins().store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), new_len, slot_ptr, 8);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), new_len, slot_ptr, 8);
 
         // Return pointer to the stack slot
         slot_ptr
@@ -469,7 +505,10 @@ where
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
 
-        let data_ptr = ctx.builder.ins().load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let data_ptr = ctx
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
@@ -485,8 +524,12 @@ where
         ));
         let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
 
-        ctx.builder.ins().store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), new_len, slot_ptr, 8);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), new_len, slot_ptr, 8);
 
         slot_ptr
     }
@@ -517,7 +560,10 @@ pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clo
     where
         I: IntoStaged<U64Type>,
     {
-        SliceGetRefUnchecked { slice: self, index: index.into_staged() }
+        SliceGetRefUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
     }
 
     /// Get an element by value without bounds checking.
@@ -528,16 +574,27 @@ pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clo
         I: IntoStaged<U64Type>,
         T: CopyType,
     {
-        SliceGetUnchecked { slice: self, index: index.into_staged() }
+        SliceGetUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
     }
 
     /// Get a sub-slice without bounds checking.
-    fn slice_unchecked<START, END>(self, start: START, end: END) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
+    fn slice_unchecked<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
         START: IntoStaged<U64Type>,
         END: IntoStaged<U64Type>,
     {
-        SliceSliceUnchecked { slice: self, start: start.into_staged(), end: end.into_staged() }
+        SliceSliceUnchecked {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
     }
 }
 
@@ -564,7 +621,10 @@ pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized + 
     where
         I: IntoStaged<U64Type>,
     {
-        SliceGetMutUnchecked { slice: self, index: index.into_staged() }
+        SliceGetMutUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
     }
 
     /// Get an element by value without bounds checking.
@@ -573,28 +633,47 @@ pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized + 
         I: IntoStaged<U64Type>,
         T: CopyType,
     {
-        SliceGetUncheckedMut { slice: self, index: index.into_staged() }
+        SliceGetUncheckedMut {
+            slice: self,
+            index: index.into_staged(),
+        }
     }
 
     /// Set an element without bounds checking.
     ///
     /// Accepts any value that can be converted into staged expressions.
     /// This allows ergonomic usage like `arr.set_unchecked(0u64, 42i64)`.
-    fn set_unchecked<I, V>(self, index: I, value: V) -> SliceSetUnchecked<Self, I::Staged, V::Staged>
+    fn set_unchecked<I, V>(
+        self,
+        index: I,
+        value: V,
+    ) -> SliceSetUnchecked<Self, I::Staged, V::Staged>
     where
         I: IntoStaged<U64Type>,
         V: IntoStaged<T>,
     {
-        SliceSetUnchecked { slice: self, index: index.into_staged(), value: value.into_staged() }
+        SliceSetUnchecked {
+            slice: self,
+            index: index.into_staged(),
+            value: value.into_staged(),
+        }
     }
 
     /// Get a mutable sub-slice without bounds checking.
-    fn slice_mut_unchecked<START, END>(self, start: START, end: END) -> SliceSliceMutUnchecked<Self, START::Staged, END::Staged>
+    fn slice_mut_unchecked<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceSliceMutUnchecked<Self, START::Staged, END::Staged>
     where
         START: IntoStaged<U64Type>,
         END: IntoStaged<U64Type>,
     {
-        SliceSliceMutUnchecked { slice: self, start: start.into_staged(), end: end.into_staged() }
+        SliceSliceMutUnchecked {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
     }
 }
 

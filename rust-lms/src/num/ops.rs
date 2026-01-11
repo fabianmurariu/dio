@@ -183,7 +183,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Add { left: left.into_staged(), right: right.into_staged() }
+    Add {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create a subtraction operation
@@ -193,7 +196,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Sub { left: left.into_staged(), right: right.into_staged() }
+    Sub {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create a multiplication operation
@@ -203,7 +209,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Mul { left: left.into_staged(), right: right.into_staged() }
+    Mul {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create a division operation
@@ -213,7 +222,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Div { left: left.into_staged(), right: right.into_staged() }
+    Div {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create a less-than comparison
@@ -227,7 +239,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Lt { left: left.into_staged(), right: right.into_staged() }
+    Lt {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create a greater-than comparison
@@ -237,7 +252,10 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Gt { left: left.into_staged(), right: right.into_staged() }
+    Gt {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }
 
 /// Create an equality comparison
@@ -247,5 +265,8 @@ where
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
-    Eq { left: left.into_staged(), right: right.into_staged() }
+    Eq {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
 }

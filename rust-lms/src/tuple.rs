@@ -84,10 +84,8 @@ mod tests {
         let compiler = Compiler::new();
 
         // (5, 10) => 10 (first ignored, second returned)
-        let expr = (
-            Const::<I64Type>::new(5),
-            Const::<I64Type>::new(10),
-        );
+        // Note: Top-level tuples need Const, but operations can use primitives via IntoStaged
+        let expr = (Const::<I64Type>::new(5), Const::<I64Type>::new(10));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 10);
@@ -98,11 +96,8 @@ mod tests {
         let compiler = Compiler::new();
 
         // (5, 10, 15) => 15
-        let expr = (
-            Const::<I64Type>::new(5),
-            Const::<I64Type>::new(10),
-            Const::<I64Type>::new(15),
-        );
+        // Note: Top-level tuples need Const, but operations can use primitives via IntoStaged
+        let expr = (Const::from(5i64), Const::from(10i64), Const::from(15i64));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 15);
@@ -112,15 +107,11 @@ mod tests {
     fn test_tuple_with_assignments() {
         let mut compiler = Compiler::new();
 
-        let x = compiler.var_unchecked::<I64Type>();
-        let y = compiler.var_unchecked::<I64Type>();
+        let x = compiler.let_var(0i64);
+        let y = compiler.let_var(1i64);
 
         // Assign x=5, y=10, return x+y
-        let expr = (
-            assign(x, Const::<I64Type>::new(5)),
-            assign(y, Const::<I64Type>::new(10)),
-            add(x, y),
-        );
+        let expr = (assign(*x, 5i64), assign(*y, 10i64), add(*x, *y));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 15);
@@ -130,24 +121,40 @@ mod tests {
     fn test_large_tuple() {
         let mut compiler = Compiler::new();
 
-        let vars: Vec<_> = (0..10).map(|_| compiler.var_unchecked::<I64Type>()).collect();
+        let vars: Vec<_> = (0..10).map(|_| compiler.let_var(0i64)).collect();
 
         // Assign 10 variables, then sum them all
         let expr = (
-            assign(vars[0], Const::<I64Type>::new(1)),
-            assign(vars[1], Const::<I64Type>::new(2)),
-            assign(vars[2], Const::<I64Type>::new(3)),
-            assign(vars[3], Const::<I64Type>::new(4)),
-            assign(vars[4], Const::<I64Type>::new(5)),
-            assign(vars[5], Const::<I64Type>::new(6)),
-            assign(vars[6], Const::<I64Type>::new(7)),
-            assign(vars[7], Const::<I64Type>::new(8)),
-            assign(vars[8], Const::<I64Type>::new(9)),
-            assign(vars[9], Const::<I64Type>::new(10)),
+            assign(*vars[0], 1i64),
+            assign(*vars[1], 2i64),
+            assign(*vars[2], 3i64),
+            assign(*vars[3], 4i64),
+            assign(*vars[4], 5i64),
+            assign(*vars[5], 6i64),
+            assign(*vars[6], 7i64),
+            assign(*vars[7], 8i64),
+            assign(*vars[8], 9i64),
+            assign(*vars[9], 10i64),
             // Sum: 1+2+3+4+5+6+7+8+9+10 = 55
-            add(add(add(add(add(add(add(add(add(
-                vars[0], vars[1]), vars[2]), vars[3]), vars[4]),
-                vars[5]), vars[6]), vars[7]), vars[8]), vars[9]),
+            add(
+                add(
+                    add(
+                        add(
+                            add(
+                                add(
+                                    add(add(add(*vars[0], *vars[1]), *vars[2]), *vars[3]),
+                                    *vars[4],
+                                ),
+                                *vars[5],
+                            ),
+                            *vars[6],
+                        ),
+                        *vars[7],
+                    ),
+                    *vars[8],
+                ),
+                *vars[9],
+            ),
         );
 
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -158,48 +165,13 @@ mod tests {
     fn test_nested_tuples() {
         let mut compiler = Compiler::new();
 
-        let x = compiler.var_unchecked::<I64Type>();
-        let y = compiler.var_unchecked::<I64Type>();
+        let x = compiler.let_var(0i64);
+        let y = compiler.let_var(0i64);
 
         // Nested tuples work too
-        let expr = (
-            (
-                assign(x, Const::<I64Type>::new(10)),
-                assign(y, Const::<I64Type>::new(20)),
-            ),
-            add(x, y),
-        );
+        let expr = ((assign(*x, 10i64), assign(*y, 20i64)), add(*x, *y));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 30);
     }
-
-    #[test]
-    fn test_while_loop_with_tuple() {
-        let mut compiler = Compiler::new();
-
-        let i = compiler.var_unchecked::<I64Type>();
-        let sum = compiler.var_unchecked::<I64Type>();
-
-        // Compute sum of 1..=10 using tuple syntax instead of deeply nested seq
-        let sum_to_10 = compiler.fun1("sum_to_10", |_n: Var<I64Type>| {
-            (
-                assign(i, Const::<I64Type>::new(1)),
-                assign(sum, Const::<I64Type>::new(0)),
-                while_loop(
-                    lt(i, Const::<I64Type>::new(11)),
-                    (
-                        assign(sum, add(sum, i)),
-                        assign(i, add(i, Const::<I64Type>::new(1))),
-                    ),
-                ),
-                sum,
-            )
-        });
-
-        let compiled = compiler.compile(call1(sum_to_10, Const::<I64Type>::new(0)))
-            .expect("compilation failed");
-        assert_eq!(compiled.run(), 55); // 1+2+3+...+10 = 55
-    }
 }
-

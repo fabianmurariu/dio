@@ -26,7 +26,7 @@ fn test_heterogeneous_operations() {
     let y = Const::<I64Type>::new(10);
 
     // Comparisons change type to Bool
-    let comparison = lt(x, y);  // 5 < 10 = true
+    let comparison = lt(x, y); // 5 < 10 = true
 
     // Verify comparison works
     let compiled = compiler.compile(comparison).expect("compilation failed");
@@ -40,13 +40,15 @@ fn test_bool_comparison() {
     let y = Const::<I64Type>::new(10);
 
     // Comparisons change type to Bool
-    let comparison = lt(x, y);  // 5 < 10 = true
-    let equality = eq(x, y);    // 5 == 10 = false
+    let comparison = lt(x, y); // 5 < 10 = true
+    let equality = eq(x, y); // 5 == 10 = false
 
     // We can compare the results (both are BoolType)
     let bool_comparison = eq(comparison, equality); // true == false = false
 
-    let compiled = compiler.compile(bool_comparison).expect("compilation failed");
+    let compiled = compiler
+        .compile(bool_comparison)
+        .expect("compilation failed");
     assert!(!compiled.run()); // true != false
 }
 

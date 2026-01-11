@@ -30,8 +30,8 @@ pub struct Seq<A, B> {
 
 impl<A, B, T> Staged for Seq<A, B>
 where
-    A: Staged,           // First can produce any type (executed for side effects)
-    B: Staged<Out = T>,  // Second determines the result type
+    A: Staged,          // First can produce any type (executed for side effects)
+    B: Staged<Out = T>, // Second determines the result type
     T: StagedType,
 {
     type Out = T;
@@ -87,19 +87,25 @@ where
         ctx.builder.append_block_param(merge_block, result_type);
 
         // Branch based on condition
-        ctx.builder.ins().brif(cond_val, then_block, &[], else_block, &[]);
+        ctx.builder
+            .ins()
+            .brif(cond_val, then_block, &[], else_block, &[]);
 
         // Generate then branch
         ctx.builder.switch_to_block(then_block);
         ctx.builder.seal_block(then_block); // Single predecessor (entry block)
         let then_val = self.then_branch.codegen(ctx);
-        ctx.builder.ins().jump(merge_block, &[BlockArg::Value(then_val)]);
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(then_val)]);
 
         // Generate else branch
         ctx.builder.switch_to_block(else_block);
         ctx.builder.seal_block(else_block); // Single predecessor (entry block)
         let else_val = self.else_branch.codegen(ctx);
-        ctx.builder.ins().jump(merge_block, &[BlockArg::Value(else_val)]);
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(else_val)]);
 
         // Continue in merge block
         ctx.builder.switch_to_block(merge_block);
@@ -169,7 +175,9 @@ where
         let merge_block = ctx.builder.create_block();
 
         // Branch: if true go to then_block, else skip to merge_block
-        ctx.builder.ins().brif(cond_val, then_block, &[], merge_block, &[]);
+        ctx.builder
+            .ins()
+            .brif(cond_val, then_block, &[], merge_block, &[]);
 
         // Generate then branch (body)
         ctx.builder.switch_to_block(then_block);
@@ -194,7 +202,10 @@ where
     C: IntoStaged<BoolType>,
     BODY: Staged<Out = UnitType>,
 {
-    IfThen { condition: condition.into_staged(), body }
+    IfThen {
+        condition: condition.into_staged(),
+        body,
+    }
 }
 // =============================================================================
 // While<COND, BODY> - While Loop
@@ -254,7 +265,9 @@ where
         // We'll seal it after generating the back-edge from loop_body
 
         let cond_val = self.condition.codegen(ctx);
-        ctx.builder.ins().brif(cond_val, loop_body, &[], loop_exit, &[]);
+        ctx.builder
+            .ins()
+            .brif(cond_val, loop_body, &[], loop_exit, &[]);
 
         // Loop body: execute body and jump back to header
         ctx.builder.switch_to_block(loop_body);
@@ -284,5 +297,8 @@ where
     C: IntoStaged<BoolType>,
     BODY: Staged<Out = UnitType>,
 {
-    While { condition: condition.into_staged(), body }
+    While {
+        condition: condition.into_staged(),
+        body,
+    }
 }
