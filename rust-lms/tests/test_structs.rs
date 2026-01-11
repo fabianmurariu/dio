@@ -48,7 +48,7 @@ fn test_struct_multiple_fields() {
         let _y = pt.get(PointType::y);  // Just to verify we can access y
 
         // Add 3 to x for testing
-        add(x, Const::<I64Type>::new(3))
+        add::<I64Type, _, _>(x, 3i64)
     });
 
     let compiled = compiler.compile(sum_fields).expect("compilation failed");
@@ -177,7 +177,7 @@ fn test_struct_copy_semantics() {
     // fn double_x(pt: Point) -> i64
     let double_x = compiler.fun1("double_x", |pt: Var<Point>| {
         let x = pt.get(PointType::x);
-        mul(x, Const::<I64Type>::new(2))
+        mul::<I64Type, _, _>(x, 2i64)
     });
 
     let compiled = compiler.compile(double_x).expect("compilation failed");

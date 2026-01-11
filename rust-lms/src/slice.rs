@@ -40,7 +40,7 @@
 //! ```
 
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{CopyType, StagedType, U64Type, UnitType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind};
 use std::marker::PhantomData;
@@ -509,31 +509,35 @@ pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clo
     }
 
     /// Get a reference to an element without bounds checking.
-    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I>
+    ///
+    /// Accepts any value that can be converted into a u64 staged expression for the index.
+    /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
+    /// `arr.get_ref_unchecked(Const::<U64Type>::new(5))`.
+    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
-        I: Staged<Out = U64Type>,
+        I: IntoStaged<U64Type>,
     {
-        SliceGetRefUnchecked { slice: self, index }
+        SliceGetRefUnchecked { slice: self, index: index.into_staged() }
     }
 
     /// Get an element by value without bounds checking.
     ///
     /// Only available for `CopyType` elements.
-    fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I>
+    fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
-        I: Staged<Out = U64Type>,
+        I: IntoStaged<U64Type>,
         T: CopyType,
     {
-        SliceGetUnchecked { slice: self, index }
+        SliceGetUnchecked { slice: self, index: index.into_staged() }
     }
 
     /// Get a sub-slice without bounds checking.
-    fn slice_unchecked<START, END>(self, start: START, end: END) -> SliceSliceUnchecked<Self, START, END>
+    fn slice_unchecked<START, END>(self, start: START, end: END) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
-        START: Staged<Out = U64Type>,
-        END: Staged<Out = U64Type>,
+        START: IntoStaged<U64Type>,
+        END: IntoStaged<U64Type>,
     {
-        SliceSliceUnchecked { slice: self, start, end }
+        SliceSliceUnchecked { slice: self, start: start.into_staged(), end: end.into_staged() }
     }
 }
 
@@ -556,38 +560,41 @@ pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized + 
     }
 
     /// Get a mutable reference to an element without bounds checking.
-    fn get_mut_unchecked<I>(self, index: I) -> SliceGetMutUnchecked<Self, I>
+    fn get_mut_unchecked<I>(self, index: I) -> SliceGetMutUnchecked<Self, I::Staged>
     where
-        I: Staged<Out = U64Type>,
+        I: IntoStaged<U64Type>,
     {
-        SliceGetMutUnchecked { slice: self, index }
+        SliceGetMutUnchecked { slice: self, index: index.into_staged() }
     }
 
     /// Get an element by value without bounds checking.
-    fn get_unchecked<I>(self, index: I) -> SliceGetUncheckedMut<Self, I>
+    fn get_unchecked<I>(self, index: I) -> SliceGetUncheckedMut<Self, I::Staged>
     where
-        I: Staged<Out = U64Type>,
+        I: IntoStaged<U64Type>,
         T: CopyType,
     {
-        SliceGetUncheckedMut { slice: self, index }
+        SliceGetUncheckedMut { slice: self, index: index.into_staged() }
     }
 
     /// Set an element without bounds checking.
-    fn set_unchecked<I, V>(self, index: I, value: V) -> SliceSetUnchecked<Self, I, V>
+    ///
+    /// Accepts any value that can be converted into staged expressions.
+    /// This allows ergonomic usage like `arr.set_unchecked(0u64, 42i64)`.
+    fn set_unchecked<I, V>(self, index: I, value: V) -> SliceSetUnchecked<Self, I::Staged, V::Staged>
     where
-        I: Staged<Out = U64Type>,
-        V: Staged<Out = T>,
+        I: IntoStaged<U64Type>,
+        V: IntoStaged<T>,
     {
-        SliceSetUnchecked { slice: self, index, value }
+        SliceSetUnchecked { slice: self, index: index.into_staged(), value: value.into_staged() }
     }
 
     /// Get a mutable sub-slice without bounds checking.
-    fn slice_mut_unchecked<START, END>(self, start: START, end: END) -> SliceSliceMutUnchecked<Self, START, END>
+    fn slice_mut_unchecked<START, END>(self, start: START, end: END) -> SliceSliceMutUnchecked<Self, START::Staged, END::Staged>
     where
-        START: Staged<Out = U64Type>,
-        END: Staged<Out = U64Type>,
+        START: IntoStaged<U64Type>,
+        END: IntoStaged<U64Type>,
     {
-        SliceSliceMutUnchecked { slice: self, start, end }
+        SliceSliceMutUnchecked { slice: self, start: start.into_staged(), end: end.into_staged() }
     }
 }
 

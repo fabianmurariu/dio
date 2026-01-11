@@ -299,15 +299,19 @@ impl<'a> Compiler<'a> {
     /// Returns a tuple of (variable_reference, initialization_expression).
     /// The initialization must be sequenced into your expression tree before using the variable.
     ///
+    /// Accepts any value that can be converted into a staged expression.
+    /// This allows ergonomic usage like `let_var(42i64)` instead of
+    /// `let_var(Const::<I64Type>::new(42))`.
+    ///
     /// # Example
     /// ```ignore
-    /// let (x, x_init) = compiler.let_var(Const::<I64Type>::new(42));
-    /// let expr = seq(x_init, add(x, Const::new(8))); // Produces 50
+    /// let (x, x_init) = compiler.let_var(42i64);
+    /// let expr = (x_init, add(x, 8i64)); // Produces 50
     /// ```
-    pub fn let_var<T, EXPR>(&mut self, init: EXPR) -> (Var<T>, crate::staged::Assign<Var<T>, EXPR>)
+    pub fn let_var<T, E>(&mut self, init: E) -> (Var<T>, crate::staged::Assign<Var<T>, E::Staged>)
     where
         T: StagedType,
-        EXPR: Staged<Out = T>,
+        E: crate::staged::IntoStaged<T>,
     {
         let var = self.var_unchecked();
         // Clone var for the assignment (VarRef implements Clone and Copy)
@@ -803,7 +807,7 @@ mod tests {
     #[test]
     fn test_simple_addition() {
         let compiler = Compiler::new();
-        let expr = add(Const::<I64Type>::new(3), Const::<I64Type>::new(4));
+        let expr = add::<I64Type, _, _>(3i64, 4i64);
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -1010,11 +1014,11 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Test let_var API: (x, x_init) = let_var(42)
-        let (x, x_init) = compiler.let_var(Const::<I64Type>::new(42));
-        let (y, y_init) = compiler.let_var(Const::<I64Type>::new(8));
+        let (x, x_init) = compiler.let_var(42i64);
+        let (y, y_init) = compiler.let_var(8i64);
 
         // Sequence: init x, init y, return x + y
-        let expr = (x_init, y_init, add(x, y));
+        let expr = (x_init, y_init, add::<I64Type, _, _>(x, y));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 50); // 42 + 8 = 50
@@ -1045,8 +1049,8 @@ mod tests {
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
         let factorial = compiler.fun1_rec("factorial", |f, n: Var<I64Type>| {
             if_then_else(
-                lt(n, Const::<I64Type>::new(2)), // n < 2 means n <= 1
-                Const::<I64Type>::new(1),
+                lt(n, 2), // n < 2 means n <= 1
+                Const::new(1),
                 mul(n, call1(f, sub(n, Const::<I64Type>::new(1)))),
             )
         });

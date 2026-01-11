@@ -8,7 +8,7 @@
 
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType, UnitType};
 
 // =============================================================================
@@ -111,19 +111,23 @@ where
 }
 
 /// Create a conditional expression
-pub fn if_then_else<COND, THEN, ELSE, T>(
-    condition: COND,
+///
+/// Accepts any value that can be converted into a bool staged expression for the condition.
+/// This allows ergonomic usage like `if_then_else(true, x, y)` instead of
+/// `if_then_else(Const::<BoolType>::new(true), x, y)`.
+pub fn if_then_else<C, THEN, ELSE, T>(
+    condition: C,
     then_branch: THEN,
     else_branch: ELSE,
-) -> IfThenElse<COND, THEN, ELSE>
+) -> IfThenElse<C::Staged, THEN, ELSE>
 where
-    COND: Staged<Out = BoolType>,
+    C: IntoStaged<BoolType>,
     THEN: Staged<Out = T>,
     ELSE: Staged<Out = T>,
     T: StagedType,
 {
     IfThenElse {
-        condition,
+        condition: condition.into_staged(),
         then_branch,
         else_branch,
     }
@@ -183,12 +187,14 @@ where
 }
 
 /// Create a conditional for side effects
-pub fn if_then<COND, BODY>(condition: COND, body: BODY) -> IfThen<COND, BODY>
+///
+/// Accepts any value that can be converted into a bool staged expression for the condition.
+pub fn if_then<C, BODY>(condition: C, body: BODY) -> IfThen<C::Staged, BODY>
 where
-    COND: Staged<Out = BoolType>,
+    C: IntoStaged<BoolType>,
     BODY: Staged<Out = UnitType>,
 {
-    IfThen { condition, body }
+    IfThen { condition: condition.into_staged(), body }
 }
 // =============================================================================
 // While<COND, BODY> - While Loop
@@ -269,10 +275,14 @@ where
 }
 
 /// Create a while loop
-pub fn while_loop<COND, BODY>(condition: COND, body: BODY) -> While<COND, BODY>
+///
+/// Accepts any value that can be converted into a bool staged expression for the condition.
+/// This allows ergonomic usage like `while_loop(true, body)` instead of
+/// `while_loop(Const::<BoolType>::new(true), body)`.
+pub fn while_loop<C, BODY>(condition: C, body: BODY) -> While<C::Staged, BODY>
 where
-    COND: Staged<Out = BoolType>,
+    C: IntoStaged<BoolType>,
     BODY: Staged<Out = UnitType>,
 {
-    While { condition, body }
+    While { condition: condition.into_staged(), body }
 }

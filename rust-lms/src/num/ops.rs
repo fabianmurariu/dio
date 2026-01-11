@@ -2,7 +2,7 @@
 
 use cranelift_codegen::ir::Value;
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType};
 
 use super::traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsSub};
@@ -173,71 +173,79 @@ where
 // =============================================================================
 
 /// Create an addition operation
-pub fn add<L, R, T>(left: L, right: R) -> Add<L, R>
+///
+/// Accepts any values that can be converted into staged expressions.
+/// This allows ergonomic usage like `add(x, 5i64)` instead of
+/// `add(x, Const::<I64Type>::new(5))`.
+pub fn add<T, L, R>(left: L, right: R) -> Add<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsAdd,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Add { left, right }
+    Add { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create a subtraction operation
-pub fn sub<L, R, T>(left: L, right: R) -> Sub<L, R>
+pub fn sub<T, L, R>(left: L, right: R) -> Sub<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsSub,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Sub { left, right }
+    Sub { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create a multiplication operation
-pub fn mul<L, R, T>(left: L, right: R) -> Mul<L, R>
+pub fn mul<T, L, R>(left: L, right: R) -> Mul<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsMul,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Mul { left, right }
+    Mul { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create a division operation
-pub fn div<L, R, T>(left: L, right: R) -> Div<L, R>
+pub fn div<T, L, R>(left: L, right: R) -> Div<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsDiv,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Div { left, right }
+    Div { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create a less-than comparison
-pub fn lt<L, R, T>(left: L, right: R) -> Lt<L, R>
+///
+/// Accepts any values that can be converted into staged expressions.
+/// This allows ergonomic usage like `lt(x, 100i64)` instead of
+/// `lt(x, Const::<I64Type>::new(100))`.
+pub fn lt<T, L, R>(left: L, right: R) -> Lt<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsComparison,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Lt { left, right }
+    Lt { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create a greater-than comparison
-pub fn gt<L, R, T>(left: L, right: R) -> Gt<L, R>
+pub fn gt<T, L, R>(left: L, right: R) -> Gt<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsComparison,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Gt { left, right }
+    Gt { left: left.into_staged(), right: right.into_staged() }
 }
 
 /// Create an equality comparison
-pub fn eq<L, R, T>(left: L, right: R) -> Eq<L, R>
+pub fn eq<T, L, R>(left: L, right: R) -> Eq<L::Staged, R::Staged>
 where
-    L: Staged<Out = T>,
-    R: Staged<Out = T>,
     T: StagedType + SupportsComparison,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
 {
-    Eq { left, right }
+    Eq { left: left.into_staged(), right: right.into_staged() }
 }
