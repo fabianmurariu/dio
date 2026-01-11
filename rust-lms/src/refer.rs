@@ -19,8 +19,12 @@ use std::marker::PhantomData;
 /// In Cranelift IR, this is represented as an i64 (pointer-sized value).
 /// At runtime, this surfaces as `*const T::RuntimeValue` or `&T::RuntimeValue`
 /// when used in function signatures.
+///
+/// Note: The `T: StagedType` bound is only required on the `StagedType` impl,
+/// not on the struct itself. This allows `SRef<Slice<T>>` to work even though
+/// `Slice<T>` doesn't implement `StagedType` (since it's a DST marker).
 #[derive(Clone, Copy, Debug)]
-pub struct SRef<T: StagedType> {
+pub struct SRef<T> {
     _phantom: PhantomData<T>,
 }
 
@@ -38,7 +42,7 @@ impl<T: StagedType> StagedType for SRef<T> {
 /// At runtime, this surfaces as `*mut T::RuntimeValue` or `&mut T::RuntimeValue`
 /// when used in function signatures.
 #[derive(Clone, Copy, Debug)]
-pub struct SRefMut<T: StagedType> {
+pub struct SRefMut<T> {
     _phantom: PhantomData<T>,
 }
 

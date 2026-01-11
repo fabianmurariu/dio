@@ -104,6 +104,7 @@ pub mod func;
 pub mod num;
 pub mod ptr;
 pub mod refer;
+pub mod slice;
 pub mod staged;
 pub mod r#struct;
 pub mod tuple;
@@ -125,6 +126,8 @@ pub mod prelude {
         array_index, load, load_mut, ptr_offset, ptr_offset_mut, store,
         ArrayIndex, Load, LoadMut, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, Store,
     };
+    pub use crate::refer::{SRef, SRefMut};
+    pub use crate::slice::{Slice, SliceMutOps, SliceRefOps, SliceLen, SliceLenMut};
     pub use crate::r#struct::{
         field_mut_ptr, field_mut_ref, field_ptr, field_ref, load_field,
         Field, FieldMutPtr, FieldMutRef, FieldPtr, FieldRef, LoadField, StructFieldAccess,

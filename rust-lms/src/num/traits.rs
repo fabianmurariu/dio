@@ -40,6 +40,9 @@ pub trait SupportsComparison: StagedType {
     /// Generate code for less-than comparison
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 
+    /// Generate code for greater-than comparison
+    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+
     /// Generate code for equality comparison
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 }
@@ -76,6 +79,11 @@ impl SupportsComparison for I64Type {
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
         builder.ins().icmp(IntCC::SignedLessThan, left, right)
+    }
+
+    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
     }
 
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
@@ -118,6 +126,11 @@ impl SupportsComparison for U64Type {
         builder.ins().icmp(IntCC::UnsignedLessThan, left, right)
     }
 
+    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right)
+    }
+
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
         builder.ins().icmp(IntCC::Equal, left, right)
@@ -158,6 +171,11 @@ impl SupportsComparison for F64Type {
         builder.ins().fcmp(FloatCC::LessThan, left, right)
     }
 
+    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        use cranelift_codegen::ir::condcodes::FloatCC;
+        builder.ins().fcmp(FloatCC::GreaterThan, left, right)
+    }
+
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::FloatCC;
         builder.ins().fcmp(FloatCC::Equal, left, right)
@@ -172,6 +190,11 @@ impl SupportsComparison for BoolType {
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
         builder.ins().icmp(IntCC::UnsignedLessThan, left, right)
+    }
+
+    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        use cranelift_codegen::ir::condcodes::IntCC;
+        builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right)
     }
 
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {

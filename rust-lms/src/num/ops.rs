@@ -125,6 +125,27 @@ where
     }
 }
 
+#[derive(Clone)]
+pub struct Gt<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for Gt<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: StagedType + SupportsComparison,
+{
+    type Out = BoolType; // Always returns boolean!
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_gt(lv, rv, ctx.builder)
+    }
+}
+
 /// Equality comparison: takes two values of same type, produces Bool
 #[derive(Clone)]
 pub struct Eq<L, R> {
@@ -199,6 +220,16 @@ where
     T: StagedType + SupportsComparison,
 {
     Lt { left, right }
+}
+
+/// Create a greater-than comparison
+pub fn gt<L, R, T>(left: L, right: R) -> Gt<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: StagedType + SupportsComparison,
+{
+    Gt { left, right }
 }
 
 /// Create an equality comparison
