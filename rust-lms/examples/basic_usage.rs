@@ -34,7 +34,7 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: square(x) = x * x
-        let square = compiler.fun1("square", |x: Var<I64Type>| mul(x, x));
+        let square = compiler.fun1("square", |_ctx, x: Var<I64Type>| mul(x, x));
 
         // Call: square(7) = 49
         let expr = call1(square, Const::<I64Type>::new(7));
@@ -52,10 +52,10 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: double(x) = x + x
-        let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
+        let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
 
         // Define: add_one(x) = x + 1
-        let add_one = compiler.fun1("add_one", |x: Var<I64Type>| add(x, Const::new(1)));
+        let add_one = compiler.fun1("add_one", |_ctx, x: Var<I64Type>| add(x, Const::new(1)));
 
         // Compute: double(add_one(5)) = double(6) = 12
         let expr = call1(double, call1(add_one, Const::<I64Type>::new(5)));
@@ -73,7 +73,7 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // x is used multiple times in the body - no clone needed!
-        let cube = compiler.fun1("cube", |x: Var<I64Type>| {
+        let cube = compiler.fun1("cube", |_ctx, x: Var<I64Type>| {
             mul(mul(x, x), x) // x * x * x
         });
 
@@ -108,7 +108,7 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: f(x) = (x + 3) * (10 - x)
-        let f = compiler.fun1("f", |x: Var<I64Type>| {
+        let f = compiler.fun1("f", |_ctx, x: Var<I64Type>| {
             mul(add(x, Const::new(3)), sub(Const::new(10), x))
         });
 

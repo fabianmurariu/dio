@@ -337,7 +337,7 @@ mod tests {
 
         // Create a function that takes a mutable pointer and writes to it
         // fn write_42(ptr: &mut i64) -> i64
-        let write_fn = compiler.fun1("write_42", |ptr: Var<SMutPtr<I64Type>>| {
+        let write_fn = compiler.fun1("write_42", |_ctx, ptr: Var<SMutPtr<I64Type>>| {
             (store(ptr, Const::<I64Type>::new(42)), load_mut(ptr))
         });
 
@@ -357,7 +357,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn read(ptr: &f64) -> f64
-        let read_fn = compiler.fun1("read", |ptr: Var<SPtr<F64Type>>| load(ptr));
+        let read_fn = compiler.fun1("read", |_ctx, ptr: Var<SPtr<F64Type>>| load(ptr));
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -374,7 +374,7 @@ mod tests {
 
         // fn test_offset(ptr: &i64) -> i64
         // Reads from ptr[2]
-        let test_fn = compiler.fun1("test_offset", |ptr: Var<SPtr<I64Type>>| {
+        let test_fn = compiler.fun1("test_offset", |_ctx, ptr: Var<SPtr<I64Type>>| {
             // Read from ptr[2]
             load(ptr_offset(ptr, Const::<I64Type>::new(2)))
         });
@@ -394,7 +394,7 @@ mod tests {
 
         // fn get_third(ptr: &i64) -> i64
         // Returns ptr[3]
-        let get_third = compiler.fun1("get_third", |ptr: Var<SPtr<I64Type>>| {
+        let get_third = compiler.fun1("get_third", |_ctx, ptr: Var<SPtr<I64Type>>| {
             array_index(ptr, Const::<I64Type>::new(3))
         });
 
@@ -413,7 +413,7 @@ mod tests {
 
         // fn write_to_index(ptr: &mut i64) -> ()
         // Writes 999 to ptr[1]
-        let write_fn = compiler.fun1("write_to_index", |ptr: Var<SMutPtr<I64Type>>| {
+        let write_fn = compiler.fun1("write_to_index", |_ctx, ptr: Var<SMutPtr<I64Type>>| {
             store(
                 ptr_offset_mut(ptr, Const::<I64Type>::new(1)),
                 Const::<I64Type>::new(999),
@@ -438,7 +438,7 @@ mod tests {
 
         // fn swap(ptr: &mut i64) -> ()
         // Swaps ptr[0] and ptr[1]
-        let swap_fn = compiler.fun1("swap", |ptr: Var<SMutPtr<I64Type>>| {
+        let swap_fn = compiler.fun1("swap", |_ctx, ptr: Var<SMutPtr<I64Type>>| {
             let ptr0 = ptr;
             let ptr1 = ptr_offset_mut(ptr, Const::<I64Type>::new(1));
 

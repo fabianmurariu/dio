@@ -57,7 +57,7 @@ fn test_varref_is_copy() {
     let mut compiler = Compiler::new();
 
     // Use x multiple times - no clone needed!
-    let f = compiler.fun1("f", |x: Var<I64Type>| {
+    let f = compiler.fun1("f", |_ctx, x: Var<I64Type>| {
         // x used 4 times in one expression
         add(add(x, x), add(x, x))
     });
@@ -87,7 +87,7 @@ fn test_nested_expressions() {
 
     // Build (x + 3) * (10 - x) where x = 2
     // = (2 + 3) * (10 - 2) = 5 * 8 = 40
-    let f = compiler.fun1("f", |x: Var<I64Type>| {
+    let f = compiler.fun1("f", |_ctx, x: Var<I64Type>| {
         let a = Const::<I64Type>::new(3);
         let b = Const::<I64Type>::new(10);
         let left = add(x, a);
@@ -139,7 +139,7 @@ fn test_function_reuse() {
     let mut compiler = Compiler::new();
 
     // Define a function and call it multiple times
-    let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
+    let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
 
     // Call double twice with different arguments and add results
     // double(3) + double(4) = 6 + 8 = 14

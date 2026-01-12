@@ -41,7 +41,7 @@ fn test_ergonomic_let_var() {
 fn test_ergonomic_comparison() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("clamp_max", |x: Var<I64Type>| {
+    let f = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
         // Ergonomic comparison and conditional
         if_then_else(
             lt::<I64Type, _, _>(x, 100i64), // Ergonomic lt
@@ -64,7 +64,7 @@ fn test_ergonomic_while_loop() {
     let i = compiler.let_var(0i64);
     let sum = compiler.let_var(0i64);
 
-    let count_to_n = compiler.fun1("count_to_n", |n: Var<I64Type>| {
+    let count_to_n = compiler.fun1("count_to_n", |_ctx, n: Var<I64Type>| {
         (
             (i, sum),
             while_loop(
@@ -91,7 +91,7 @@ fn test_ergonomic_slice_operations() {
     let mut compiler = Compiler::new();
 
     // fn get_second(arr: &[i64]) -> i64
-    let get_second = compiler.fun1("get_second", |arr: Var<SRef<Slice<I64Type>>>| {
+    let get_second = compiler.fun1("get_second", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
         arr.get_unchecked(1u64) // Ergonomic index - no Const needed!
     });
 
@@ -110,7 +110,7 @@ fn test_ergonomic_slice_set() {
     let mut compiler = Compiler::new();
 
     // fn set_first(arr: &mut [i64])
-    let set_first = compiler.fun1("set_first", |arr: Var<SRefMut<Slice<I64Type>>>| {
+    let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<I64Type>>>| {
         arr.set_unchecked(0u64, 999i64) // Both index and value are ergonomic!
     });
 
@@ -132,7 +132,7 @@ fn test_ergonomic_slice_subslice() {
     let total = compiler.let_var(0i64);
 
     // fn sum_middle(arr: &[i64]) -> i64
-    let sum_middle = compiler.fun1("sum_middle", |arr: Var<SRef<Slice<I64Type>>>| {
+    let sum_middle = compiler.fun1("sum_middle", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
         let sub = arr.slice_unchecked(1u64, 4u64); // Ergonomic slice indices!
         (
             (i, total),
@@ -184,7 +184,7 @@ fn test_ergonomic_mixed_operations() {
 fn test_ergonomic_f64_operations() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("compute", |x: Var<F64Type>| {
+    let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| {
         add::<F64Type, _, _>(
             mul::<F64Type, _, _>(x, 2.5f64),
             3.5f64, // Works directly with IntoStaged

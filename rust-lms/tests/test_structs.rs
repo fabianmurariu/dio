@@ -24,7 +24,7 @@ fn test_simple_struct_field_access() {
 
     // Create a function that reads the x field from a Point
     // fn get_x(pt: Point) -> i64  -- NOTE: Pass by VALUE!
-    let get_x = compiler.fun1("get_x", |pt: Var<Point>| pt.get(PointType::x));
+    let get_x = compiler.fun1("get_x", |_ctx, pt: Var<Point>| pt.get(PointType::x));
 
     let compiled = compiler.compile(get_x).expect("compilation failed");
     let f = compiled.as_fn();
@@ -41,7 +41,7 @@ fn test_struct_multiple_fields() {
     let mut compiler = Compiler::new();
 
     // fn sum_fields(pt: Point) -> i64
-    let sum_fields = compiler.fun1("sum_fields", |pt: Var<Point>| {
+    let sum_fields = compiler.fun1("sum_fields", |_ctx, pt: Var<Point>| {
         let x = pt.get(PointType::x);
         let _y = pt.get(PointType::y); // Just to verify we can access y
 
@@ -64,7 +64,7 @@ fn test_struct_pass_by_value_semantics() {
 
     // This test verifies that structs are truly passed by value
     // fn read_x(pt: Point) -> i64
-    let read_x = compiler.fun1("read_x", |pt: Var<Point>| pt.get(PointType::x));
+    let read_x = compiler.fun1("read_x", |_ctx, pt: Var<Point>| pt.get(PointType::x));
 
     let compiled = compiler.compile(read_x).expect("compilation failed");
     let f = compiled.as_fn();
@@ -99,7 +99,7 @@ fn test_nested_struct_access() {
     // fn get_inner_value(outer: Outer) -> i64
     // Access: outer.inner.value
     // Note: Outer is passed by VALUE
-    let get_inner_value = compiler.fun1("get_inner_value", |outer: Var<Outer>| {
+    let get_inner_value = compiler.fun1("get_inner_value", |_ctx, outer: Var<Outer>| {
         // Get reference to inner field, then get its value
         outer.get_ref(OuterType::inner).get(InnerType::value)
     });
@@ -126,7 +126,7 @@ fn test_nested_struct_by_ref_access() {
     // Access: outer.inner.value
     // Note: Outer is passed by REFERENCE
     let get_inner_value_by_ref =
-        compiler.fun1("get_inner_value_by_ref", |outer: Var<SRef<Outer>>| {
+        compiler.fun1("get_inner_value_by_ref", |_ctx, outer: Var<SRef<Outer>>| {
             // Get reference to inner field, then get its value
             outer.get_ref(OuterType::inner).get(InnerType::value)
         });
@@ -151,7 +151,7 @@ fn test_nested_struct_multiple_access() {
 
     // fn sum_outer(outer: Outer) -> i64
     // Returns outer.inner.value + outer.extra
-    let sum_outer = compiler.fun1("sum_outer", |outer: Var<Outer>| {
+    let sum_outer = compiler.fun1("sum_outer", |_ctx, outer: Var<Outer>| {
         let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
         let extra = outer.get(OuterType::extra);
 
@@ -176,7 +176,7 @@ fn test_struct_copy_semantics() {
 
     // Test that Point is CopyType and passed by value
     // fn double_x(pt: Point) -> i64
-    let double_x = compiler.fun1("double_x", |pt: Var<Point>| {
+    let double_x = compiler.fun1("double_x", |_ctx, pt: Var<Point>| {
         let x = pt.get(PointType::x);
         mul::<I64Type, _, _>(x, 2i64)
     });
@@ -196,7 +196,7 @@ fn test_outer_extra_field() {
     let mut compiler = Compiler::new();
 
     // fn get_extra(outer: Outer) -> i64  -- just get the extra field, no nesting
-    let get_extra = compiler.fun1("get_extra", |outer: Var<Outer>| outer.get(OuterType::extra));
+    let get_extra = compiler.fun1("get_extra", |_ctx, outer: Var<Outer>| outer.get(OuterType::extra));
 
     let compiled = compiler.compile(get_extra).expect("compilation failed");
     let f = compiled.as_fn();

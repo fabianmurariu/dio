@@ -247,6 +247,44 @@ struct FunDef {
 }
 
 // =============================================================================
+// VarBuilder: Context for creating local variables within functions
+// =============================================================================
+
+/// A builder context for creating variables within function bodies.
+///
+/// This is passed to closures in `fun1` and `fun1_rec` to allow local
+/// variable creation without exposing the entire Compiler.
+pub struct VarBuilder<'a> {
+    next_var_id: &'a mut usize,
+}
+
+impl<'a> VarBuilder<'a> {
+    /// Create an uninitialized variable reference.
+    ///
+    /// # Safety
+    /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
+    /// Prefer using `let_var()` which ensures initialization.
+    pub unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
+        let id = *self.next_var_id;
+        *self.next_var_id += 1;
+        Var::new(id)
+    }
+
+    /// Create a variable with an initial value.
+    ///
+    /// Returns an `InitVar` that can be used directly without tuple unpacking.
+    /// Accepts any value that can be converted into a staged expression.
+    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::InitVar<T, E::Staged>
+    where
+        T: StagedType,
+        E: crate::staged::IntoStaged<T>,
+    {
+        let var = unsafe { self.var_unchecked() };
+        crate::staged::InitVar::new(var, init.into_staged())
+    }
+}
+
+// =============================================================================
 // Compiler: Owns everything, coordinates compilation
 // =============================================================================
 
@@ -329,6 +367,9 @@ impl<'a> Compiler<'a> {
     /// The body function is called immediately to build the expression tree.
     /// No Cranelift calls happen until `compile()` is called.
     ///
+    /// The body function receives a `VarBuilder` context that allows creating
+    /// local variables within the function.
+    ///
     /// # Struct Pass-by-Value
     ///
     /// If `A` is a `#[repr(C)] Copy` struct, the function will accept the struct
@@ -338,7 +379,7 @@ impl<'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(Var<A>) -> BODY,
+        F: FnOnce(&mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         // Create the parameter variable (ID 0 within this function's scope)
@@ -347,8 +388,13 @@ impl<'a> Compiler<'a> {
         self.next_var_id += 1;
         let param_var = Var::<A>::new(param_id);
 
+        // Create a VarBuilder for local variable creation
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+
         // Call body_fn immediately to build the expression tree
-        let body_expr = body_fn(param_var);
+        let body_expr = body_fn(&mut var_builder, param_var);
 
         // Capture struct info for parameter and return types
         let param_struct_info = if A::is_copy_struct() {
@@ -395,11 +441,13 @@ impl<'a> Compiler<'a> {
     ///
     /// Similar to `fun1`, but the body function receives a reference to itself,
     /// allowing for recursive calls. The function reference is passed as the first
-    /// argument to the body closure.
+    /// argument to the body closure, followed by the VarBuilder and parameter.
     ///
     /// # Example
     /// ```ignore
-    /// let factorial = compiler.fun1_rec("factorial", |f, x: VarRef<I64Type>| {
+    /// let factorial = compiler.fun1_rec("factorial", |f, ctx, x: Var<I64Type>| {
+    ///     // Can create local variables
+    ///     let temp = ctx.let_var(0i64);
     ///     // Recursive call: f(x - 1)
     ///     call1(f, sub(x, Const::<I64Type>::new(1)))
     /// });
@@ -408,7 +456,7 @@ impl<'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef<A, OUT>, Var<A>) -> BODY,
+        F: FnOnce(FunRef<A, OUT>, &mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         // Create the parameter variable
@@ -423,9 +471,14 @@ impl<'a> Compiler<'a> {
         // Push a placeholder first (None) to reserve the slot
         self.functions.push(None);
 
-        // Now call body_fn with both the function reference and parameter
-        // This allows the body to reference itself for recursion
-        let body_expr = body_fn(func_ref, param_var);
+        // Create a VarBuilder for local variable creation
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+
+        // Now call body_fn with the function reference, VarBuilder, and parameter
+        // This allows the body to reference itself for recursion and create local variables
+        let body_expr = body_fn(func_ref, &mut var_builder, param_var);
 
         // Capture struct info for parameter and return types
         let param_struct_info = if A::is_copy_struct() {
@@ -840,7 +893,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: square(x) = x * x
-        let square = compiler.fun1("square", |x: Var<I64Type>| mul(x, x));
+        let square = compiler.fun1("square", |_ctx, x: Var<I64Type>| mul(x, x));
 
         // Call: square(5) = 25
         let expr = call1(square, Const::<I64Type>::new(5));
@@ -859,7 +912,7 @@ mod tests {
         let _unused = unsafe { compiler.var_unchecked::<I64Type>() };
 
         // Define: double(x) = x + x
-        let double = compiler.fun1("double", |x: Var<I64Type>| add(x, x));
+        let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
 
         // Call: double(7) = 14
         let expr = call1(double, Const::<I64Type>::new(7));
@@ -875,7 +928,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: cube(x) = x * x * x
-        let cube = compiler.fun1("cube", |x: Var<I64Type>| mul(mul(x, x), x));
+        let cube = compiler.fun1("cube", |_ctx, x: Var<I64Type>| mul(mul(x, x), x));
 
         // Compile the function reference itself (not a call)
         let compiled = compiler.compile(cube).expect("compilation failed");
@@ -897,7 +950,7 @@ mod tests {
         // Define a recursive function: rec(x) = x + rec(x - 1)
         // Note: This will infinite loop if called, but we're just testing
         // that it compiles and the function can reference itself
-        let _rec = compiler.fun1_rec("recursive", |f, x: Var<I64Type>| {
+        let _rec = compiler.fun1_rec("recursive", |f, _ctx, x: Var<I64Type>| {
             // Body references itself: call f recursively
             add(x, call1(f, sub(x, Const::<I64Type>::new(1))))
         });
@@ -948,7 +1001,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |x: Var<I64Type>| {
+        let clamp_max = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(10)),
                 x,
@@ -966,7 +1019,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |x: Var<I64Type>| {
+        let clamp_max = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(10)),
                 x,
@@ -984,7 +1037,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
-        let clamp = compiler.fun1("clamp", |x: Var<I64Type>| {
+        let clamp = compiler.fun1("clamp", |_ctx, x: Var<I64Type>| {
             if_then_else(
                 lt(x, Const::<I64Type>::new(0)),
                 Const::<I64Type>::new(0),
@@ -1052,7 +1105,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, n: Var<I64Type>| {
+        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<I64Type>| {
             if_then_else(
                 lt(n, 2), // n < 2 means n <= 1
                 Const::new(1),
@@ -1071,7 +1124,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, n: Var<I64Type>| {
+        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<I64Type>| {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)),
                 Const::<I64Type>::new(1),
@@ -1099,7 +1152,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fib(n) = if n < 2 then n else fib(n-1) + fib(n-2)
-        let fib = compiler.fun1_rec("fib", |f, n: Var<I64Type>| {
+        let fib = compiler.fun1_rec("fib", |f, _ctx, n: Var<I64Type>| {
             if_then_else(
                 lt(n, Const::<I64Type>::new(2)),
                 n, // fib(0) = 0, fib(1) = 1
@@ -1159,7 +1212,7 @@ mod tests {
         let result = compiler.let_var(1i64);
 
         // Iterative factorial using while loop
-        let factorial_iter = compiler.fun1("factorial_iter", |n: Var<I64Type>| {
+        let factorial_iter = compiler.fun1("factorial_iter", |_ctx, n: Var<I64Type>| {
             // i = 1; result = 1;
             // while (i <= n) { result = result * i; i = i + 1; }
             // return result;
@@ -1198,7 +1251,7 @@ mod tests {
 
         // Iterative Fibonacci using while loop
         // Much faster than recursive version!
-        let fib_iter = compiler.fun1("fib_iter", |n: Var<I64Type>| {
+        let fib_iter = compiler.fun1("fib_iter", |_ctx, n: Var<I64Type>| {
             // if n < 2 return n
             // else: a = 0; b = 1; i = 2;
             //       while (i <= n) { temp = a + b; a = b; b = temp; i = i + 1; }
@@ -1237,5 +1290,55 @@ mod tests {
         assert_eq!(fib_fn(10), 55);
         assert_eq!(fib_fn(20), 6765);
         assert_eq!(fib_fn(30), 832040);
+    }
+
+    #[test]
+    fn test_local_variables_in_fun1() {
+        use crate::refer::SRef;
+        use crate::slice::Slice;
+
+        let mut compiler = Compiler::new();
+
+        // Function that sums elements > 5 using local variables
+        // fn sum_gt_5(arr: &[i64]) -> i64
+        let sum_gt_5 = compiler.fun1("sum_gt_5", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+            // Create local variables inside the function using ctx
+            let i = ctx.let_var(0u64);
+            let sum = ctx.let_var(0i64);
+            let v = ctx.let_var(0i64);
+
+            (
+                (i, sum, v),
+                while_loop(
+                    lt(*i, arr.len()),
+                    (
+                        // v = arr.get_unchecked(i)
+                        assign(*v, arr.get_unchecked(*i)),
+                        // sum = if v > 5 then sum + v else sum
+                        assign(
+                            *sum,
+                            if_then_else(
+                                lt(5, *v), // v > 5
+                                add(*sum, *v),
+                                *sum,
+                            ),
+                        ),
+                        assign(*i, add(*i, 1u64)),
+                    ),
+                ),
+                *sum,
+            )
+        });
+
+        let compiled = compiler.compile(sum_gt_5).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        // Test with array [0, 3, 5, 7, 2, 8, 1, 9, 4, 6]
+        // Elements > 5: 7, 8, 9, 6 => sum = 30
+        let data: [i64; 10] = [0, 3, 5, 7, 2, 8, 1, 9, 4, 6];
+        let slice: &[i64] = &data;
+
+        let result = f(slice);
+        assert_eq!(result, 30); // 7 + 8 + 9 + 6 = 30
     }
 }

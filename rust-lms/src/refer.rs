@@ -341,7 +341,7 @@ mod tests {
 
         // Create a function that takes a mutable pointer and writes to it
         // fn write_42(ptr: &mut i64) -> i64
-        let write_fn = compiler.fun1("write_42", |ptr: Var<SRefMut<I64Type>>| {
+        let write_fn = compiler.fun1("write_42", |_ctx, ptr: Var<SRefMut<I64Type>>| {
             (store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
         });
 
@@ -361,7 +361,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn read(ptr: &f64) -> f64
-        let read_fn = compiler.fun1("read", |ptr: Var<SRef<F64Type>>| load_ref(ptr));
+        let read_fn = compiler.fun1("read", |_ctx, ptr: Var<SRef<F64Type>>| load_ref(ptr));
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -377,7 +377,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn store_value(ptr: &mut f64) -> ()
-        let store_fn = compiler.fun1("store_value", |ptr: Var<SRefMut<F64Type>>| {
+        let store_fn = compiler.fun1("store_value", |_ctx, ptr: Var<SRefMut<F64Type>>| {
             store_ref(ptr, Const::<F64Type>::new(2.71828))
         });
 
