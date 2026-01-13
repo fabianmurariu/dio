@@ -853,21 +853,45 @@ impl<'a, T: StagedType> Compiled<'a, T> {
     }
 }
 
-// Special implementation for function types to get the function pointer
-impl<'a, A: StagedType, OUT: StagedType> Compiled<'a, FunType1<A, OUT>> {
-    /// Get the compiled function as a callable function pointer.
-    ///
-    /// Returns an `extern "C"` function pointer to match the System V calling
-    /// convention used by Cranelift. This is important for structs passed by value,
-    /// as Rust's default calling convention may differ from the C ABI.
-    pub fn as_fn(&self) -> extern "C" fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a> {
-        // The main function returns a function pointer (as i64)
-        // We need to call the main function to get that pointer
-        let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
-        let fn_ptr = get_ptr();
-        unsafe { std::mem::transmute(fn_ptr) }
-    }
+// Macro to generate as_fn implementations for all function arities
+macro_rules! impl_compiled_as_fn {
+    // Base case: zero parameters
+    (0, $FunType:ident) => {
+        impl<'a, OUT: StagedType> Compiled<'a, $FunType<OUT>> {
+            /// Get the compiled function as a callable function pointer.
+            pub fn as_fn(&self) -> extern "C" fn() -> OUT::RuntimeValue<'a> {
+                let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
+                let fn_ptr = get_ptr();
+                unsafe { std::mem::transmute(fn_ptr) }
+            }
+        }
+    };
+    // N parameters (N >= 1)
+    ($n:tt, $FunType:ident, [$($T:ident),+]) => {
+        impl<'a, $($T: StagedType,)+ OUT: StagedType> Compiled<'a, $FunType<$($T,)+ OUT>> {
+            /// Get the compiled function as a callable function pointer.
+            ///
+            /// Returns an `extern "C"` function pointer to match the System V calling
+            /// convention used by Cranelift. This is important for structs passed by value,
+            /// as Rust's default calling convention may differ from the C ABI.
+            pub fn as_fn(&self) -> extern "C" fn($($T::RuntimeValue<'a>),+) -> OUT::RuntimeValue<'a> {
+                let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
+                let fn_ptr = get_ptr();
+                unsafe { std::mem::transmute(fn_ptr) }
+            }
+        }
+    };
 }
+
+impl_compiled_as_fn!(0, FunType0);
+impl_compiled_as_fn!(1, FunType1, [A]);
+impl_compiled_as_fn!(2, FunType2, [A, B]);
+impl_compiled_as_fn!(3, FunType3, [A, B, C]);
+impl_compiled_as_fn!(4, FunType4, [A, B, C, D]);
+impl_compiled_as_fn!(5, FunType5, [A, B, C, D, E]);
+impl_compiled_as_fn!(6, FunType6, [A, B, C, D, E, F]);
+impl_compiled_as_fn!(7, FunType7, [A, B, C, D, E, F, G]);
+impl_compiled_as_fn!(8, FunType8, [A, B, C, D, E, F, G, H]);
 
 #[cfg(test)]
 mod tests {
@@ -1485,26 +1509,26 @@ mod tests {
         assert_eq!(compiled.run(), 6);
     }
 
-    // #[test]
-    // fn test_return_fun2_pointer() {
-    //     use crate::func_impl::call2;
-    //
-    //     let mut compiler = Compiler::new();
-    //
-    //     // Define: add(a, b) = a + b
-    //     let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
-    //         add(a, b)
-    //     });
-    //
-    //     // Compile the function reference itself (not a call)
-    //     let compiled = compiler.compile(add_fn).expect("compilation failed");
-    //
-    //     // Extract the function pointer
-    //     let add_ptr = compiled.as_fn();
-    //
-    //     // Test the function with various inputs
-    //     assert_eq!(add_ptr(10, 32), 42);
-    //     assert_eq!(add_ptr(-5, 5), 0);
-    //     assert_eq!(add_ptr(100, 200), 300);
-    // }
+    #[test]
+    fn test_return_fun2_pointer() {
+        use crate::func_impl::call2;
+
+        let mut compiler = Compiler::new();
+
+        // Define: add(a, b) = a + b
+        let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
+            add(a, b)
+        });
+
+        // Compile the function reference itself (not a call)
+        let compiled = compiler.compile(add_fn).expect("compilation failed");
+
+        // Extract the function pointer
+        let add_ptr = compiled.as_fn();
+
+        // Test the function with various inputs
+        assert_eq!(add_ptr(10, 32), 42);
+        assert_eq!(add_ptr(-5, 5), 0);
+        assert_eq!(add_ptr(100, 200), 300);
+    }
 }
