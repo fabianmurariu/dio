@@ -70,8 +70,8 @@ fn test_ergonomic_while_loop() {
             while_loop(
                 lt::<I64Type, _, _>(*i, n), // Ergonomic condition
                 (
-                    assign(*sum, add::<I64Type, _, _>(*sum, *i)),
-                    assign(*i, add::<I64Type, _, _>(*i, 1i64)), // Ergonomic increment
+                    assign(*sum, add(*sum, *i)),
+                    assign(*i, add(*i, 1i64)), // Ergonomic increment
                 ),
             ),
             *sum,
@@ -137,7 +137,7 @@ fn test_ergonomic_slice_subslice() {
         (
             (i, total),
             while_loop(
-                lt::<U64Type, _, _>(*i, sub.len()),
+                lt(*i, sub.len()),
                 (
                     assign(*total, add(*total, sub.get_unchecked(*i))),
                     assign(*i, add(*i, 1u64)),
@@ -170,9 +170,9 @@ fn test_ergonomic_mixed_operations() {
         x,
         y,
         if_then_else(
-            lt::<I64Type, _, _>(*x, *y),
-            mul::<I64Type, _, _>(*x, 2i64),
-            div::<I64Type, _, _>(*y, 2i64),
+            lt(*x, *y),
+            mul(*x, 2i64),
+            div(*y, 2i64),
         ),
     );
 
@@ -185,9 +185,9 @@ fn test_ergonomic_f64_operations() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| {
-        add::<F64Type, _, _>(
-            mul::<F64Type, _, _>(x, 2.5f64),
-            3.5f64, // Works directly with IntoStaged
+        add(
+            mul(x, 2.5f64),
+            3.5f64,
         )
     });
 

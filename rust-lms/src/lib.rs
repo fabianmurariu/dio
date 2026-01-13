@@ -101,6 +101,7 @@
 
 pub mod control;
 pub mod func;
+pub(crate) mod func_impl;
 pub mod num;
 pub mod ptr;
 pub mod refer;
@@ -120,7 +121,10 @@ pub mod _internal {
 /// Commonly used types and traits
 pub mod prelude {
     pub use crate::control::{if_then, if_then_else, while_loop, IfThen, IfThenElse, While};
-    pub use crate::func::{call1, Compiled, Compiler, FunRef, FunType1};
+    pub use crate::func::{
+        call0, call1, call2, call3, Compiled, Compiler, FunRef, FunRef0, FunRef1, FunRef2, FunRef3,
+        FunType, FunType0, FunType1, FunType2, FunType3,
+    };
     pub use crate::num::{add, div, eq, lt, mul, sub};
     pub use crate::ptr::{
         array_index, load, load_mut, ptr_offset, ptr_offset_mut, store, ArrayIndex, Load, LoadMut,

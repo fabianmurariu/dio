@@ -2,9 +2,14 @@
 //!
 //! This module provides:
 //! - `Compiler`: The central coordinator that owns function and variable definitions
-//! - `FunRef<A, OUT>`: A Copy-able handle to a function definition
-//! - `Call1<F, ARG>`: Function call expression
+//! - `FunRefN<T0, ..., OUT>`: Type-safe handles to function definitions (N = 0..8)
+//! - `CallN`: Function call expressions
 //! - `Compiled<T>`: The result of compilation, owns the JIT module
+//!
+//! # Multi-Parameter Functions
+//!
+//! Functions with 0-8 parameters are supported via `fun0`, `fun1`, ..., `fun8`.
+//! Each returns a type-safe `FunRefN` that encodes the parameter and return types.
 //!
 //! # Struct Pass-by-Value
 //!
@@ -23,6 +28,8 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+
+pub use crate::func_impl::*;
 
 // =============================================================================
 // StructInfo: Information about struct types for ABI handling
@@ -44,186 +51,6 @@ pub struct StructInfo {
     pub num_abi_values: usize,
 }
 
-// =============================================================================
-// FunType1: Type marker for unary functions
-// =============================================================================
-
-/// Type marker for unary functions: A -> OUT
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct FunType1<A, OUT> {
-    _phantom: PhantomData<(A, OUT)>,
-}
-
-impl<A: StagedType, OUT: StagedType> StagedType for FunType1<A, OUT> {
-    type RuntimeValue<'a> = fn(A::RuntimeValue<'a>) -> OUT::RuntimeValue<'a>;
-
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        // Function pointers are represented as i64 (pointer-sized)
-        types::I64
-    }
-}
-
-// =============================================================================
-// FunRef: Copy-able handle to a function definition
-// =============================================================================
-
-/// A lightweight reference to a staged function.
-///
-/// `FunRef<A, OUT>` is just an index into the Compiler's function tracking.
-/// It's always Copy, enabling easy reuse in expressions.
-#[derive(Clone, Copy)]
-pub struct FunRef<A: StagedType, OUT: StagedType> {
-    pub(crate) id: usize,
-    _phantom: PhantomData<(A, OUT)>,
-}
-
-impl<A: StagedType, OUT: StagedType> FunRef<A, OUT> {
-    fn new(id: usize) -> Self {
-        FunRef {
-            id,
-            _phantom: PhantomData,
-        }
-    }
-}
-
-impl<A: StagedType, OUT: StagedType> std::fmt::Debug for FunRef<A, OUT> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        write!(f, "FunRef({})", self.id)
-    }
-}
-
-/// FunRef can be staged - it generates code that returns the function pointer
-impl<A: StagedType, OUT: StagedType> Staged for FunRef<A, OUT> {
-    type Out = FunType1<A, OUT>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Look up the cranelift FuncId for this function
-        let func_id = ctx
-            .func_map
-            .get(&self.id)
-            .expect(&format!("Function {} not found in func_map", self.id));
-
-        // Declare the function in the current function context
-        let func_ref = ctx.module.declare_func_in_func(*func_id, ctx.builder.func);
-
-        // Get the function address as an i64
-        ctx.builder.ins().func_addr(types::I64, func_ref)
-    }
-}
-
-// =============================================================================
-// Call1: Function call expression
-// =============================================================================
-
-/// A function call expression: applies a function to an argument.
-///
-/// This implements `Staged<Out = OUT>` where OUT is the function's return type.
-///
-/// # Struct Handling
-///
-/// - For struct arguments: loads multiple i64 values from the argument pointer
-/// - For struct returns: stores multiple i64 return values to a stack slot
-#[derive(Clone)]
-pub struct Call1<F, ARG> {
-    func: F,
-    arg: ARG,
-}
-
-impl<A, OUT, ARG> Staged for Call1<FunRef<A, OUT>, ARG>
-where
-    A: StagedType,
-    OUT: StagedType,
-    ARG: Staged<Out = A>,
-{
-    type Out = OUT;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Look up the function ID in our map
-        let func_id = ctx
-            .func_map
-            .get(&self.func.id)
-            .expect(&format!("Function {} not found in func_map", self.func.id));
-
-        // Declare the function for calling
-        let func_ref = ctx.module.declare_func_in_func(*func_id, ctx.builder.func);
-
-        // Generate code for the argument
-        let arg_value = self.arg.codegen(ctx);
-
-        // Prepare call arguments
-        let call_args: Vec<Value> = if A::is_copy_struct() {
-            // STRUCT ARGUMENT: Load multiple i64 values from the pointer
-            let num_values = A::num_abi_values();
-            let mut args = Vec::with_capacity(num_values);
-            for i in 0..num_values {
-                let offset = (i * 8) as i32;
-                let val =
-                    ctx.builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), arg_value, offset);
-                args.push(val);
-            }
-            args
-        } else {
-            // PRIMITIVE ARGUMENT: Single value
-            vec![arg_value]
-        };
-
-        // Generate the call
-        let call = ctx.builder.ins().call(func_ref, &call_args);
-
-        // Handle return value
-        if OUT::is_copy_struct() {
-            // Collect results to release borrow on builder
-            let results: Vec<Value> = ctx.builder.inst_results(call).to_vec();
-
-            // STRUCT RETURN: Store multiple return values to a stack slot
-            let size = OUT::size_of() as u32;
-            let alignment = OUT::align_of() as u32;
-            // Note: StackSlotData::new takes align_shift (log2 of alignment), not alignment
-            let align_shift = alignment.trailing_zeros() as u8;
-
-            let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                size,
-                align_shift,
-            ));
-
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-            // Store each return value to the stack slot
-            for (i, &result) in results.iter().enumerate() {
-                let offset = (i * 8) as i32;
-                ctx.builder
-                    .ins()
-                    .store(MemFlags::trusted(), result, slot_ptr, offset);
-            }
-
-            // Return the pointer to the stack slot
-            slot_ptr
-        } else {
-            // PRIMITIVE RETURN: Single value
-            ctx.builder.inst_results(call)[0]
-        }
-    }
-}
-
-/// Create a function call expression
-///
-/// Accepts any argument that can be converted to a staged expression.
-/// This allows ergonomic usage like `call1(func, 42i64)` instead of
-/// `call1(func, Const::<I64Type>::new(42))`.
-pub fn call1<A, OUT, ARG>(func: FunRef<A, OUT>, arg: ARG) -> Call1<FunRef<A, OUT>, ARG::Staged>
-where
-    A: StagedType,
-    OUT: StagedType,
-    ARG: crate::staged::IntoStaged<A>,
-{
-    Call1 {
-        func,
-        arg: arg.into_staged(),
-    }
-}
 
 // =============================================================================
 // Internal: FunDef - Stored function definition
@@ -234,16 +61,12 @@ struct FunDef {
     name: String,
     /// The body expression, type-erased but we know its signature
     body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
-    /// ABI-level parameter types (single for primitives, multiple for structs)
-    param_abi_types: Vec<cranelift_codegen::ir::Type>,
-    /// ABI-level return types (single for primitives, multiple for structs)
-    return_abi_types: Vec<cranelift_codegen::ir::Type>,
-    /// The variable ID used for the parameter (for var_map lookup)
-    param_var_id: usize,
-    /// Struct info for parameter (None if primitive)
-    param_struct_info: Option<StructInfo>,
-    /// Struct info for return value (None if primitive)
-    return_struct_info: Option<StructInfo>,
+    /// Type info for each parameter (supports 0..N parameters)
+    param_infos: Vec<TypeInfo>,
+    /// Return type info
+    return_info: TypeInfo,
+    /// Variable IDs for each parameter (one per logical parameter)
+    param_var_ids: Vec<usize>,
 }
 
 // =============================================================================
@@ -382,8 +205,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(&mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        // Create the parameter variable (ID 0 within this function's scope)
-        // We use the compiler's var counter to ensure unique IDs across functions
+        // Create the parameter variable
         let param_id = self.next_var_id;
         self.next_var_id += 1;
         let param_var = Var::<A>::new(param_id);
@@ -396,40 +218,14 @@ impl<'a> Compiler<'a> {
         // Call body_fn immediately to build the expression tree
         let body_expr = body_fn(&mut var_builder, param_var);
 
-        // Capture struct info for parameter and return types
-        let param_struct_info = if A::is_copy_struct() {
-            Some(StructInfo {
-                size: A::size_of() as u32,
-                alignment: A::align_of() as u32,
-                num_abi_values: A::num_abi_values(),
-            })
-        } else {
-            None
-        };
-
-        let return_struct_info = if OUT::is_copy_struct() {
-            Some(StructInfo {
-                size: OUT::size_of() as u32,
-                alignment: OUT::align_of() as u32,
-                num_abi_values: OUT::num_abi_values(),
-            })
-        } else {
-            None
-        };
-
         // Store the function definition
         let func_id = self.functions.len();
         let func_def = FunDef {
             name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| {
-                // During codegen, the parameter variable should already be defined
-                body_expr.codegen(ctx)
-            }),
-            param_abi_types: A::abi_types(),
-            return_abi_types: OUT::abi_types(),
-            param_var_id: param_id,
-            param_struct_info,
-            return_struct_info,
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![TypeInfo::from_staged_type::<A>()],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param_id],
         };
 
         self.functions.push(Some(func_def));
@@ -477,45 +273,262 @@ impl<'a> Compiler<'a> {
         };
 
         // Now call body_fn with the function reference, VarBuilder, and parameter
-        // This allows the body to reference itself for recursion and create local variables
         let body_expr = body_fn(func_ref, &mut var_builder, param_var);
-
-        // Capture struct info for parameter and return types
-        let param_struct_info = if A::is_copy_struct() {
-            Some(StructInfo {
-                size: A::size_of() as u32,
-                alignment: A::align_of() as u32,
-                num_abi_values: A::num_abi_values(),
-            })
-        } else {
-            None
-        };
-
-        let return_struct_info = if OUT::is_copy_struct() {
-            Some(StructInfo {
-                size: OUT::size_of() as u32,
-                alignment: OUT::align_of() as u32,
-                num_abi_values: OUT::num_abi_values(),
-            })
-        } else {
-            None
-        };
 
         // Create the actual function definition
         let func_def = FunDef {
             name: name.to_string(),
             body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_abi_types: A::abi_types(),
-            return_abi_types: OUT::abi_types(),
-            param_var_id: param_id,
-            param_struct_info,
-            return_struct_info,
+            param_infos: vec![TypeInfo::from_staged_type::<A>()],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param_id],
         };
 
         // Replace the placeholder with the actual definition
         self.functions[func_id] = Some(func_def);
 
         FunRef::new(func_id)
+    }
+
+    /// Define a zero-argument function.
+    pub fn fun0<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
+    where
+        OUT: StagedType,
+        F: FnOnce(&mut VarBuilder) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(&mut var_builder);
+
+        let func_id = self.functions.len();
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![],
+        };
+
+        self.functions.push(Some(func_def));
+        FunRef0::new(func_id)
+    }
+
+    /// Define a recursive zero-argument function.
+    pub fn fun0_rec<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
+    where
+        OUT: StagedType,
+        F: FnOnce(FunRef0<OUT>, &mut VarBuilder) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let func_id = self.functions.len();
+        let func_ref = FunRef0::new(func_id);
+        self.functions.push(None);
+
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(func_ref, &mut var_builder);
+
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![],
+        };
+
+        self.functions[func_id] = Some(func_def);
+        FunRef0::new(func_id)
+    }
+
+    /// Define a binary function.
+    pub fn fun2<A, B, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef2<A, B, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        OUT: StagedType,
+        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let param0_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param0_var = Var::<A>::new(param0_id);
+
+        let param1_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param1_var = Var::<B>::new(param1_id);
+
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(&mut var_builder, param0_var, param1_var);
+
+        let func_id = self.functions.len();
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![
+                TypeInfo::from_staged_type::<A>(),
+                TypeInfo::from_staged_type::<B>(),
+            ],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param0_id, param1_id],
+        };
+
+        self.functions.push(Some(func_def));
+        FunRef2::new(func_id)
+    }
+
+    /// Define a recursive binary function.
+    pub fn fun2_rec<A, B, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef2<A, B, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        OUT: StagedType,
+        F: FnOnce(FunRef2<A, B, OUT>, &mut VarBuilder, Var<A>, Var<B>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let param0_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param0_var = Var::<A>::new(param0_id);
+
+        let param1_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param1_var = Var::<B>::new(param1_id);
+
+        let func_id = self.functions.len();
+        let func_ref = FunRef2::new(func_id);
+        self.functions.push(None);
+
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(func_ref, &mut var_builder, param0_var, param1_var);
+
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![
+                TypeInfo::from_staged_type::<A>(),
+                TypeInfo::from_staged_type::<B>(),
+            ],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param0_id, param1_id],
+        };
+
+        self.functions[func_id] = Some(func_def);
+        FunRef2::new(func_id)
+    }
+
+    /// Define a ternary function.
+    pub fn fun3<A, B, C, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef3<A, B, C, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        OUT: StagedType,
+        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let param0_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param0_var = Var::<A>::new(param0_id);
+
+        let param1_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param1_var = Var::<B>::new(param1_id);
+
+        let param2_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param2_var = Var::<C>::new(param2_id);
+
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(&mut var_builder, param0_var, param1_var, param2_var);
+
+        let func_id = self.functions.len();
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![
+                TypeInfo::from_staged_type::<A>(),
+                TypeInfo::from_staged_type::<B>(),
+                TypeInfo::from_staged_type::<C>(),
+            ],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param0_id, param1_id, param2_id],
+        };
+
+        self.functions.push(Some(func_def));
+        FunRef3::new(func_id)
+    }
+
+    /// Define a recursive ternary function.
+    pub fn fun3_rec<A, B, C, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef3<A, B, C, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        OUT: StagedType,
+        F: FnOnce(FunRef3<A, B, C, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        let param0_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param0_var = Var::<A>::new(param0_id);
+
+        let param1_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param1_var = Var::<B>::new(param1_id);
+
+        let param2_id = self.next_var_id;
+        self.next_var_id += 1;
+        let param2_var = Var::<C>::new(param2_id);
+
+        let func_id = self.functions.len();
+        let func_ref = FunRef3::new(func_id);
+        self.functions.push(None);
+
+        let mut var_builder = VarBuilder {
+            next_var_id: &mut self.next_var_id,
+        };
+        let body_expr = body_fn(
+            func_ref,
+            &mut var_builder,
+            param0_var,
+            param1_var,
+            param2_var,
+        );
+
+        let func_def = FunDef {
+            name: name.to_string(),
+            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
+            param_infos: vec![
+                TypeInfo::from_staged_type::<A>(),
+                TypeInfo::from_staged_type::<B>(),
+                TypeInfo::from_staged_type::<C>(),
+            ],
+            return_info: TypeInfo::from_staged_type::<OUT>(),
+            param_var_ids: vec![param0_id, param1_id, param2_id],
+        };
+
+        self.functions[func_id] = Some(func_def);
+        FunRef3::new(func_id)
     }
 
     /// Compile an expression to native code.
@@ -556,13 +569,15 @@ impl<'a> Compiler<'a> {
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
 
-                // Add all ABI param types (multiple for structs)
-                for abi_type in &func_def.param_abi_types {
-                    sig.params.push(AbiParam::new(*abi_type));
+                // Add all ABI param types (multiple per logical param for structs)
+                for param_info in &func_def.param_infos {
+                    for abi_type in &param_info.abi_types {
+                        sig.params.push(AbiParam::new(*abi_type));
+                    }
                 }
 
                 // Add all ABI return types (multiple for structs)
-                for abi_type in &func_def.return_abi_types {
+                for abi_type in &func_def.return_info.abi_types {
                     sig.returns.push(AbiParam::new(*abi_type));
                 }
 
@@ -598,10 +613,12 @@ impl<'a> Compiler<'a> {
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
 
-                for abi_type in &func_def.param_abi_types {
-                    sig.params.push(AbiParam::new(*abi_type));
+                for param_info in &func_def.param_infos {
+                    for abi_type in &param_info.abi_types {
+                        sig.params.push(AbiParam::new(*abi_type));
+                    }
                 }
-                for abi_type in &func_def.return_abi_types {
+                for abi_type in &func_def.return_info.abi_types {
                     sig.returns.push(AbiParam::new(*abi_type));
                 }
 
@@ -620,43 +637,49 @@ impl<'a> Compiler<'a> {
                     // Create var_map for this function
                     let mut var_map: HashMap<usize, Variable> = HashMap::new();
 
-                    // Handle parameter - either primitive or struct
+                    // Handle all parameters
                     let block_params = builder.block_params(entry_block).to_vec();
+                    let mut abi_idx = 0;
 
-                    if let Some(ref struct_info) = func_def.param_struct_info {
-                        // STRUCT PARAMETER: Create stack slot, store values, use pointer
+                    for (param_idx, param_info) in func_def.param_infos.iter().enumerate() {
+                        let var_id = func_def.param_var_ids[param_idx];
 
-                        // Create stack slot for the struct
-                        // Note: StackSlotData::new takes align_shift (log2 of alignment), not alignment
-                        let align_shift = struct_info.alignment.trailing_zeros() as u8;
-                        let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                            StackSlotKind::ExplicitSlot,
-                            struct_info.size,
-                            align_shift,
-                        ));
+                        if let Some(ref struct_info) = param_info.struct_info {
+                            // STRUCT PARAMETER: Create stack slot, store values, use pointer
+                            let align_shift = struct_info.alignment.trailing_zeros() as u8;
+                            let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                StackSlotKind::ExplicitSlot,
+                                struct_info.size,
+                                align_shift,
+                            ));
 
-                        // Get pointer to stack slot
-                        let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
+                            let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
 
-                        // Store each i64 value to the stack slot
-                        for (i, &param_value) in block_params.iter().enumerate() {
-                            let offset = (i * 8) as i32;
-                            builder
-                                .ins()
-                                .store(MemFlags::trusted(), param_value, slot_ptr, offset);
+                            // Store each i64 value to the stack slot
+                            for i in 0..struct_info.num_abi_values {
+                                let offset = (i * 8) as i32;
+                                builder.ins().store(
+                                    MemFlags::trusted(),
+                                    block_params[abi_idx],
+                                    slot_ptr,
+                                    offset,
+                                );
+                                abi_idx += 1;
+                            }
+
+                            // Declare variable to hold the stack pointer
+                            let param_var = builder.declare_var(types::I64);
+                            builder.def_var(param_var, slot_ptr);
+                            var_map.insert(var_id, param_var);
+                        } else {
+                            // PRIMITIVE PARAMETER: Direct binding
+                            let param_value = block_params[abi_idx];
+                            let param_type = param_info.abi_types[0];
+                            let param_var = builder.declare_var(param_type);
+                            builder.def_var(param_var, param_value);
+                            var_map.insert(var_id, param_var);
+                            abi_idx += 1;
                         }
-
-                        // Declare variable to hold the stack pointer
-                        let param_var = builder.declare_var(types::I64);
-                        builder.def_var(param_var, slot_ptr);
-                        var_map.insert(func_def.param_var_id, param_var);
-                    } else {
-                        // PRIMITIVE PARAMETER: Direct binding (unchanged)
-                        let param_value = block_params[0];
-                        let param_type = func_def.param_abi_types[0];
-                        let param_var = builder.declare_var(param_type);
-                        builder.def_var(param_var, param_value);
-                        var_map.insert(func_def.param_var_id, param_var);
                     }
 
                     // Generate the body code
@@ -671,7 +694,7 @@ impl<'a> Compiler<'a> {
                     };
 
                     // Handle return - either primitive or struct
-                    if let Some(ref struct_info) = func_def.return_struct_info {
+                    if let Some(ref struct_info) = func_def.return_info.struct_info {
                         // STRUCT RETURN: Load multiple values from the result pointer
                         let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
                         for i in 0..struct_info.num_abi_values {
@@ -684,7 +707,7 @@ impl<'a> Compiler<'a> {
                         }
                         builder.ins().return_(&return_values);
                     } else {
-                        // PRIMITIVE RETURN: Direct return (unchanged)
+                        // PRIMITIVE RETURN: Direct return
                         builder.ins().return_(&[result]);
                     }
 
@@ -1341,4 +1364,147 @@ mod tests {
         let result = f(slice);
         assert_eq!(result, 30); // 7 + 8 + 9 + 6 = 30
     }
+
+    // =========================================================================
+    // Multi-Parameter Function Tests
+    // =========================================================================
+
+    #[test]
+    fn test_fun0_constant() {
+        use crate::func_impl::call0;
+
+        let mut compiler = Compiler::new();
+
+        // Define: get_answer() = 42
+        let get_answer = compiler.fun0("get_answer", |_ctx| Const::<I64Type>::new(42));
+
+        let expr = call0(get_answer);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 42);
+    }
+
+    #[test]
+    fn test_fun2_add() {
+        use crate::func_impl::call2;
+
+        let mut compiler = Compiler::new();
+
+        // Define: add_two(a, b) = a + b
+        let add_two = compiler.fun2("add_two", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
+            add(a, b)
+        });
+
+        let expr = call2(add_two, 10i64, 32i64);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 42);
+    }
+
+    #[test]
+    fn test_fun2_multiply_and_add() {
+        use crate::func_impl::call2;
+
+        let mut compiler = Compiler::new();
+
+        // Define: mul_add(a, b) = a * b + a
+        let mul_add = compiler.fun2("mul_add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
+            add(mul(a, b), a)
+        });
+
+        // 3 * 5 + 3 = 18
+        let expr = call2(mul_add, 3i64, 5i64);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 18);
+    }
+
+    #[test]
+    fn test_fun3_clamp() {
+        use crate::func_impl::call3;
+
+        let mut compiler = Compiler::new();
+
+        // Define: clamp(x, min, max) = if x < min then min else (if x > max then max else x)
+        let clamp_fn = compiler.fun3(
+            "clamp",
+            |_ctx, x: Var<I64Type>, min: Var<I64Type>, max: Var<I64Type>| {
+                if_then_else(
+                    lt(x, min),
+                    min,
+                    if_then_else(lt(max, x), max, x), // x > max == max < x
+                )
+            },
+        );
+
+        // Test: clamp(5, 0, 10) = 5
+        let expr1 = call3(clamp_fn, 5i64, 0i64, 10i64);
+        let compiled1 = compiler.compile(expr1).expect("compilation failed");
+        assert_eq!(compiled1.run(), 5);
+    }
+
+    #[test]
+    fn test_fun3_clamp_at_min() {
+        use crate::func_impl::call3;
+
+        let mut compiler = Compiler::new();
+
+        let clamp_fn = compiler.fun3(
+            "clamp",
+            |_ctx, x: Var<I64Type>, min: Var<I64Type>, max: Var<I64Type>| {
+                if_then_else(lt(x, min), min, if_then_else(lt(max, x), max, x))
+            },
+        );
+
+        // Test: clamp(-5, 0, 10) = 0 (clamped at min)
+        let expr = call3(clamp_fn, Const::<I64Type>::new(-5), 0i64, 10i64);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 0);
+    }
+
+    #[test]
+    fn test_fun2_rec_gcd() {
+        use crate::func_impl::call2;
+
+        let mut compiler = Compiler::new();
+
+        // Define: gcd(a, b) = if b == 0 then a else gcd(b, a % b)
+        // Note: We'll use a different implementation since we don't have modulo
+        // gcd(a, b) = if b == 0 then a else gcd(b, a - b * (a / b))
+        let gcd = compiler.fun2_rec(
+            "gcd",
+            |f, _ctx, a: Var<I64Type>, b: Var<I64Type>| {
+                if_then_else(
+                    eq(b, 0i64),
+                    a,
+                    call2(f, b, sub(a, mul(b, div(a, b)))), // a % b = a - b * (a / b)
+                )
+            },
+        );
+
+        // gcd(48, 18) = 6
+        let expr = call2(gcd, 48i64, 18i64);
+        let compiled = compiler.compile(expr).expect("compilation failed");
+        assert_eq!(compiled.run(), 6);
+    }
+
+    // #[test]
+    // fn test_return_fun2_pointer() {
+    //     use crate::func_impl::call2;
+    //
+    //     let mut compiler = Compiler::new();
+    //
+    //     // Define: add(a, b) = a + b
+    //     let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
+    //         add(a, b)
+    //     });
+    //
+    //     // Compile the function reference itself (not a call)
+    //     let compiled = compiler.compile(add_fn).expect("compilation failed");
+    //
+    //     // Extract the function pointer
+    //     let add_ptr = compiled.as_fn();
+    //
+    //     // Test the function with various inputs
+    //     assert_eq!(add_ptr(10, 32), 42);
+    //     assert_eq!(add_ptr(-5, 5), 0);
+    //     assert_eq!(add_ptr(100, 200), 300);
+    // }
 }
