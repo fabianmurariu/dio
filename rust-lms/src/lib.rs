@@ -103,6 +103,7 @@ pub mod control;
 pub mod func;
 pub(crate) mod func_impl;
 pub mod num;
+pub mod option;
 pub mod ptr;
 pub mod refer;
 pub mod slice;
@@ -126,6 +127,11 @@ pub mod prelude {
         FunType, FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::num::{add, div, eq, lt, mul, sub};
+    pub use crate::option::{
+        c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
+        is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
+        opt_ref_none, opt_ref_some, unwrap_or, COption, COptionType, OptMutRefType, OptRefType,
+    };
     pub use crate::ptr::{
         array_index, load, load_mut, ptr_offset, ptr_offset_mut, store, ArrayIndex, Load, LoadMut,
         PtrOffset, PtrOffsetMut, SMutPtr, SPtr, Store,
