@@ -209,3 +209,145 @@ fn test_outer_extra_field() {
 
     assert_eq!(result, 999);
 }
+
+// =============================================================================
+// Tests for mixed integer/float struct ABI
+// =============================================================================
+
+#[test]
+fn test_mixed_struct_read_f64_field() {
+    let mut compiler = Compiler::new();
+
+    // fn get_y(pt: Point) -> f64 -- read the f64 field from mixed struct
+    let get_y = compiler.fun1("get_y", |_ctx, pt: Var<Point>| pt.get(PointType::y));
+
+    let compiled = compiler.compile(get_y).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let point = Point { x: 42, y: 3.14 };
+    let result = f(point);
+
+    assert!((result - 3.14).abs() < 1e-10, "Expected 3.14, got {}", result);
+}
+
+#[test]
+fn test_mixed_struct_read_i64_after_f64_access() {
+    let mut compiler = Compiler::new();
+
+    // Read y (f64), then read x (i64) and return it
+    // This verifies both fields are accessible
+    let read_both = compiler.fun1("read_both", |_ctx, pt: Var<Point>| {
+        let _y = pt.get(PointType::y); // Access f64 field
+        pt.get(PointType::x) // Return i64 field
+    });
+
+    let compiled = compiler.compile(read_both).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let point = Point { x: 100, y: 3.14 };
+    let result = f(point);
+
+    assert_eq!(result, 100);
+}
+
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct MixedStruct {
+    #[staged(F64Type)]
+    a: f64,
+    #[staged(I64Type)]
+    b: i64,
+    #[staged(F64Type)]
+    c: f64,
+}
+
+// 16-byte struct with f64 first - should work on ARM64
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct FloatFirst {
+    #[staged(F64Type)]
+    x: f64,
+    #[staged(I64Type)]
+    y: i64,
+}
+
+// These tests verify that large structs (>16 bytes) are correctly passed by pointer
+#[test]
+fn test_float_first_struct() {
+    let mut compiler = Compiler::new();
+
+    // Struct with f64 as first field
+    let get_a = compiler.fun1("get_a", |_ctx, s: Var<MixedStruct>| s.get(MixedStructType::a));
+
+    let compiled = compiler.compile(get_a).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let s = MixedStruct { a: 2.71, b: 42, c: 1.41 };
+    let result = f(s);
+
+    assert!((result - 2.71).abs() < 1e-10, "Expected 2.71, got {}", result);
+}
+
+#[test]
+fn test_float_first_struct_read_int() {
+    let mut compiler = Compiler::new();
+
+    let get_b = compiler.fun1("get_b", |_ctx, s: Var<MixedStruct>| s.get(MixedStructType::b));
+
+    let compiled = compiler.compile(get_b).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let s = MixedStruct { a: 2.71, b: 42, c: 1.41 };
+    let result = f(s);
+
+    assert_eq!(result, 42);
+}
+
+// Test 16-byte struct with f64 first - should work because it fits in 2 registers
+#[test]
+fn test_16byte_float_first_struct() {
+    let mut compiler = Compiler::new();
+
+    let get_x = compiler.fun1("get_x", |_ctx, s: Var<FloatFirst>| s.get(FloatFirstType::x));
+
+    let compiled = compiler.compile(get_x).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let s = FloatFirst { x: 2.71, y: 42 };
+    let result = f(s);
+
+    assert!((result - 2.71).abs() < 1e-10, "Expected 2.71, got {}", result);
+}
+
+#[test]
+fn test_16byte_float_first_struct_read_int() {
+    let mut compiler = Compiler::new();
+
+    let get_y = compiler.fun1("get_y", |_ctx, s: Var<FloatFirst>| s.get(FloatFirstType::y));
+
+    let compiled = compiler.compile(get_y).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let s = FloatFirst { x: 2.71, y: 42 };
+    let result = f(s);
+
+    assert_eq!(result, 42);
+}
+
+#[test]
+fn test_return_mixed_struct() {
+    let mut compiler = Compiler::new();
+
+    // Function that takes two values and returns a Point struct
+    let make_point = compiler.fun2("make_point", |ctx, x: Var<I64Type>, y: Var<F64Type>| {
+        // We need to construct a Point - but we don't have struct construction yet
+        // For now, just test that we can return the input x
+        x
+    });
+
+    let compiled = compiler.compile(make_point).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let result = f(42, 3.14);
+    assert_eq!(result, 42);
+}

@@ -21,26 +21,36 @@ use std::marker::PhantomData;
 /// This captures everything needed for ABI handling without static type info.
 #[derive(Clone, Debug)]
 pub struct TypeInfo {
-    /// ABI types for this value (1 for primitives, N for structs)
+    /// ABI types for this value (1 for primitives, N for structs ≤16 bytes, 1 pointer for >16 bytes)
     pub abi_types: Vec<cranelift_codegen::ir::Type>,
     /// Struct info if this is a struct, None for primitives
     pub struct_info: Option<StructInfo>,
+    /// True if this struct should be passed by pointer (for structs >16 bytes on ARM64)
+    pub pass_by_pointer: bool,
 }
 
 impl TypeInfo {
     /// Create TypeInfo from a StagedType
     pub fn from_staged_type<T: StagedType>() -> Self {
+        let pass_by_pointer = T::should_pass_by_pointer();
+
         TypeInfo {
-            abi_types: T::abi_types(),
+            // For pass-by-pointer structs, we only need one i64 (the pointer)
+            abi_types: if pass_by_pointer {
+                vec![types::I64]
+            } else {
+                T::abi_types()
+            },
             struct_info: if T::is_copy_struct() {
                 Some(StructInfo {
                     size: T::size_of() as u32,
                     alignment: T::align_of() as u32,
-                    num_abi_values: T::num_abi_values(),
+                    num_abi_values: if pass_by_pointer { 1 } else { T::num_abi_values() },
                 })
             } else {
                 None
             },
+            pass_by_pointer,
         }
     }
 
@@ -93,19 +103,26 @@ pub fn codegen_call(
         .module
         .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
 
-    // Prepare call arguments: expand structs to multiple i64 values
+    // Prepare call arguments: expand small structs to multiple i64 values,
+    // pass large structs by pointer
     let mut call_args: Vec<Value> = Vec::new();
 
     for (arg_value, param_info) in arg_values.iter().zip(param_infos.iter()) {
         if let Some(ref struct_info) = param_info.struct_info {
-            // STRUCT ARGUMENT: Load multiple i64 values from the pointer
-            for i in 0..struct_info.num_abi_values {
-                let offset = (i * 8) as i32;
-                let val =
-                    ctx.builder
-                        .ins()
-                        .load(types::I64, MemFlags::trusted(), *arg_value, offset);
-                call_args.push(val);
+            if param_info.pass_by_pointer {
+                // LARGE STRUCT (>16 bytes): Pass pointer directly
+                // The caller already has the struct in memory, just pass the pointer
+                call_args.push(*arg_value);
+            } else {
+                // SMALL STRUCT (≤16 bytes): Load multiple i64 values from the pointer
+                for i in 0..struct_info.num_abi_values {
+                    let offset = (i * 8) as i32;
+                    let val =
+                        ctx.builder
+                            .ins()
+                            .load(types::I64, MemFlags::trusted(), *arg_value, offset);
+                    call_args.push(val);
+                }
             }
         } else {
             // PRIMITIVE ARGUMENT: Single value
@@ -118,30 +135,36 @@ pub fn codegen_call(
 
     // Handle return value
     if let Some(ref struct_info) = return_info.struct_info {
-        // Collect results to release borrow on builder
-        let results: Vec<Value> = ctx.builder.inst_results(call).to_vec();
+        if return_info.pass_by_pointer {
+            // LARGE STRUCT RETURN (>16 bytes): Function returns a pointer
+            // Just return the pointer directly
+            ctx.builder.inst_results(call)[0]
+        } else {
+            // SMALL STRUCT RETURN (≤16 bytes): Collect multiple return values
+            let results: Vec<Value> = ctx.builder.inst_results(call).to_vec();
 
-        // STRUCT RETURN: Store multiple return values to a stack slot
-        let align_shift = struct_info.alignment.trailing_zeros() as u8;
+            // Store multiple return values to a stack slot
+            let align_shift = struct_info.alignment.trailing_zeros() as u8;
 
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            struct_info.size,
-            align_shift,
-        ));
+            let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                struct_info.size,
+                align_shift,
+            ));
 
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
 
-        // Store each return value to the stack slot
-        for (i, &result) in results.iter().enumerate() {
-            let offset = (i * 8) as i32;
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), result, slot_ptr, offset);
+            // Store each return value to the stack slot
+            for (i, &result) in results.iter().enumerate() {
+                let offset = (i * 8) as i32;
+                ctx.builder
+                    .ins()
+                    .store(MemFlags::trusted(), result, slot_ptr, offset);
+            }
+
+            // Return the pointer to the stack slot
+            slot_ptr
         }
-
-        // Return the pointer to the stack slot
-        slot_ptr
     } else {
         // PRIMITIVE RETURN: Single value
         ctx.builder.inst_results(call)[0]

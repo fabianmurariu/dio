@@ -52,9 +52,23 @@ pub trait StagedType: 'static {
         false
     }
 
+    /// Returns true if this struct should be passed by pointer at the ABI level.
+    ///
+    /// On ARM64, structs larger than 16 bytes are passed by pointer according
+    /// to the C ABI (caller allocates memory, passes pointer). This method
+    /// detects that case to generate correct calling convention code.
+    ///
+    /// For structs ≤16 bytes, returns false (pass in registers).
+    /// For structs >16 bytes, returns true (pass by pointer).
+    fn should_pass_by_pointer() -> bool {
+        // Only applies to copy structs larger than 16 bytes
+        Self::is_copy_struct() && Self::size_of() > 16
+    }
+
     /// Number of primitive values this type flattens to at the ABI boundary.
     /// For primitives: 1
-    /// For structs: number of register-sized values needed
+    /// For structs ≤16 bytes: number of register-sized values needed
+    /// For structs >16 bytes: 1 (pointer)
     fn num_abi_values() -> usize {
         1
     }

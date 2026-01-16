@@ -645,32 +645,44 @@ impl<'a> Compiler<'a> {
                         let var_id = func_def.param_var_ids[param_idx];
 
                         if let Some(ref struct_info) = param_info.struct_info {
-                            // STRUCT PARAMETER: Create stack slot, store values, use pointer
-                            let align_shift = struct_info.alignment.trailing_zeros() as u8;
-                            let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                                StackSlotKind::ExplicitSlot,
-                                struct_info.size,
-                                align_shift,
-                            ));
-
-                            let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-                            // Store each i64 value to the stack slot
-                            for i in 0..struct_info.num_abi_values {
-                                let offset = (i * 8) as i32;
-                                builder.ins().store(
-                                    MemFlags::trusted(),
-                                    block_params[abi_idx],
-                                    slot_ptr,
-                                    offset,
-                                );
+                            if param_info.pass_by_pointer {
+                                // LARGE STRUCT (>16 bytes): Passed by pointer
+                                // The caller already has the struct in memory and passes a pointer.
+                                // We use that pointer directly without copying.
+                                let ptr_value = block_params[abi_idx];
+                                let param_var = builder.declare_var(types::I64);
+                                builder.def_var(param_var, ptr_value);
+                                var_map.insert(var_id, param_var);
                                 abi_idx += 1;
-                            }
+                            } else {
+                                // SMALL STRUCT (≤16 bytes): Passed by value in registers
+                                // Create stack slot, store values, use pointer
+                                let align_shift = struct_info.alignment.trailing_zeros() as u8;
+                                let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
+                                    StackSlotKind::ExplicitSlot,
+                                    struct_info.size,
+                                    align_shift,
+                                ));
 
-                            // Declare variable to hold the stack pointer
-                            let param_var = builder.declare_var(types::I64);
-                            builder.def_var(param_var, slot_ptr);
-                            var_map.insert(var_id, param_var);
+                                let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
+
+                                // Store each i64 value to the stack slot
+                                for i in 0..struct_info.num_abi_values {
+                                    let offset = (i * 8) as i32;
+                                    builder.ins().store(
+                                        MemFlags::trusted(),
+                                        block_params[abi_idx],
+                                        slot_ptr,
+                                        offset,
+                                    );
+                                    abi_idx += 1;
+                                }
+
+                                // Declare variable to hold the stack pointer
+                                let param_var = builder.declare_var(types::I64);
+                                builder.def_var(param_var, slot_ptr);
+                                var_map.insert(var_id, param_var);
+                            }
                         } else {
                             // PRIMITIVE PARAMETER: Direct binding
                             let param_value = block_params[abi_idx];
@@ -695,17 +707,22 @@ impl<'a> Compiler<'a> {
 
                     // Handle return - either primitive or struct
                     if let Some(ref struct_info) = func_def.return_info.struct_info {
-                        // STRUCT RETURN: Load multiple values from the result pointer
-                        let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
-                        for i in 0..struct_info.num_abi_values {
-                            let offset = (i * 8) as i32;
-                            let val =
-                                builder
-                                    .ins()
-                                    .load(types::I64, MemFlags::trusted(), result, offset);
-                            return_values.push(val);
+                        if func_def.return_info.pass_by_pointer {
+                            // LARGE STRUCT RETURN (>16 bytes): Return pointer directly
+                            builder.ins().return_(&[result]);
+                        } else {
+                            // SMALL STRUCT RETURN (≤16 bytes): Load multiple values from the result pointer
+                            let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
+                            for i in 0..struct_info.num_abi_values {
+                                let offset = (i * 8) as i32;
+                                let val =
+                                    builder
+                                        .ins()
+                                        .load(types::I64, MemFlags::trusted(), result, offset);
+                                return_values.push(val);
+                            }
+                            builder.ins().return_(&return_values);
                         }
-                        builder.ins().return_(&return_values);
                     } else {
                         // PRIMITIVE RETURN: Direct return
                         builder.ins().return_(&[result]);
