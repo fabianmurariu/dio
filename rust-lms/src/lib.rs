@@ -104,7 +104,6 @@ pub mod func;
 pub(crate) mod func_impl;
 pub mod num;
 pub mod option;
-pub mod ptr;
 pub mod refer;
 pub mod slice;
 pub mod staged;
@@ -132,15 +131,15 @@ pub mod prelude {
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
         opt_ref_none, opt_ref_some, unwrap_or, COption, COptionType, OptMutRefType, OptRefType,
     };
-    pub use crate::ptr::{
-        array_index, load, load_mut, ptr_offset, ptr_offset_mut, store, ArrayIndex, Load, LoadMut,
-        PtrOffset, PtrOffsetMut, SMutPtr, SPtr, Store,
-    };
     pub use crate::r#struct::{
         field_mut_ptr, field_mut_ref, field_ptr, field_ref, load_field, Field, FieldMutPtr,
         FieldMutRef, FieldPtr, FieldRef, LoadField, StructFieldAccess,
     };
-    pub use crate::refer::{SRef, SRefMut};
+    pub use crate::refer::{
+        array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut, store,
+        store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset, PtrOffsetMut, RustPtr, RustRef,
+        SMutPtr, SPtr, SRef, SRefMut, Store,
+    };
     pub use crate::slice::{Slice, SliceLen, SliceLenMut, SliceMutOps, SliceRefOps};
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, InitVar, IntoStaged,

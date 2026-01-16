@@ -631,26 +631,26 @@ pub fn unwrap_or<T: StagedType, E: Staged<Out = COptionType<T>>, D: IntoStaged<T
 /// Expression for pattern matching on `COption` with variable binding.
 ///
 /// Similar to Rust's `match opt { Some(x) => ..., None => ... }`.
-pub struct MatchOpt<T, OUT, OPT, SOME_BODY, NONE_BODY>
+pub struct MatchOpt<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
 {
     opt: OPT,
-    some_body: SOME_BODY,
-    none_body: NONE_BODY,
+    some_body: SomeBody,
+    none_body: NoneBody,
     /// Variable ID for the bound value in some_body
     bound_var_id: usize,
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<T, OUT, OPT, SOME_BODY, NONE_BODY> Staged for MatchOpt<T, OUT, OPT, SOME_BODY, NONE_BODY>
+impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOpt<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = COptionType<T>>,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     type Out = OUT;
 
@@ -732,19 +732,19 @@ where
 ///     Const::<I64Type>::new(0),   // None => 0
 /// );
 /// ```
-pub fn match_opt<T, OUT, OPT, SOME_FN, SOME_BODY, NONE_BODY>(
+pub fn match_opt<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
     var_builder: &mut VarBuilder,
     opt: OPT,
-    some_fn: SOME_FN,
-    none_body: NONE_BODY,
-) -> MatchOpt<T, OUT, OPT, SOME_BODY, NONE_BODY>
+    some_fn: SomeFn,
+    none_body: NoneBody,
+) -> MatchOpt<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = COptionType<T>>,
-    SOME_FN: FnOnce(&mut VarBuilder, Var<T>) -> SOME_BODY,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeFn: FnOnce(&mut VarBuilder, Var<T>) -> SomeBody,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     // Allocate variable for bound value
     let bound_var: Var<T> = unsafe { var_builder.var_unchecked() };
@@ -767,25 +767,25 @@ where
 // =============================================================================
 
 /// Pattern match on an `Option<&T>` (niche-optimized).
-pub struct MatchOptRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+pub struct MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
 {
     opt: OPT,
-    some_body: SOME_BODY,
-    none_body: NONE_BODY,
+    some_body: SomeBody,
+    none_body: NoneBody,
     bound_var_id: usize,
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<T, OUT, OPT, SOME_BODY, NONE_BODY> Staged for MatchOptRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptRefType<T>>,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     type Out = OUT;
 
@@ -837,19 +837,19 @@ where
 }
 
 /// Pattern match on an `Option<&T>`.
-pub fn match_opt_ref<T, OUT, OPT, SOME_FN, SOME_BODY, NONE_BODY>(
+pub fn match_opt_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
     var_builder: &mut VarBuilder,
     opt: OPT,
-    some_fn: SOME_FN,
-    none_body: NONE_BODY,
-) -> MatchOptRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+    some_fn: SomeFn,
+    none_body: NoneBody,
+) -> MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptRefType<T>>,
-    SOME_FN: FnOnce(&mut VarBuilder, Var<SRef<T>>) -> SOME_BODY,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeFn: FnOnce(&mut VarBuilder, Var<SRef<T>>) -> SomeBody,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     let bound_var: Var<SRef<T>> = unsafe { var_builder.var_unchecked() };
     let bound_var_id = bound_var.id;
@@ -865,26 +865,26 @@ where
 }
 
 /// Pattern match on an `Option<&mut T>`.
-pub struct MatchOptMutRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+pub struct MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
 {
     opt: OPT,
-    some_body: SOME_BODY,
-    none_body: NONE_BODY,
+    some_body: SomeBody,
+    none_body: NoneBody,
     bound_var_id: usize,
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<T, OUT, OPT, SOME_BODY, NONE_BODY> Staged
-    for MatchOptMutRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+impl<T, OUT, OPT, SomeBody, NoneBody> Staged
+    for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptMutRefType<T>>,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     type Out = OUT;
 
@@ -931,19 +931,19 @@ where
 }
 
 /// Pattern match on an `Option<&mut T>`.
-pub fn match_opt_mut_ref<T, OUT, OPT, SOME_FN, SOME_BODY, NONE_BODY>(
+pub fn match_opt_mut_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
     var_builder: &mut VarBuilder,
     opt: OPT,
-    some_fn: SOME_FN,
-    none_body: NONE_BODY,
-) -> MatchOptMutRef<T, OUT, OPT, SOME_BODY, NONE_BODY>
+    some_fn: SomeFn,
+    none_body: NoneBody,
+) -> MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptMutRefType<T>>,
-    SOME_FN: FnOnce(&mut VarBuilder, Var<SRefMut<T>>) -> SOME_BODY,
-    SOME_BODY: Staged<Out = OUT>,
-    NONE_BODY: Staged<Out = OUT>,
+    SomeFn: FnOnce(&mut VarBuilder, Var<SRefMut<T>>) -> SomeBody,
+    SomeBody: Staged<Out = OUT>,
+    NoneBody: Staged<Out = OUT>,
 {
     let bound_var: Var<SRefMut<T>> = unsafe { var_builder.var_unchecked() };
     let bound_var_id = bound_var.id;

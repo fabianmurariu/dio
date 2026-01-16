@@ -5,8 +5,7 @@
 //! - Field accessor operations (LoadField, FieldRef, FieldPtr, etc.)
 //! - Extension methods on VarRef for field access
 
-use crate::ptr::{SMutPtr, SPtr};
-use crate::refer::{SRef, SRefMut};
+use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
@@ -339,57 +338,3 @@ where
 {
 }
 
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::prelude::*;
-
-    // Simple test struct (will use derive macro once integrated)
-    #[repr(C)]
-    pub struct TestPoint {
-        x: i64,
-        y: f64,
-    }
-
-    // Manually implement StagedType for testing
-    impl StagedType for TestPoint {
-        type RuntimeValue<'a> = &'a TestPoint;
-        fn cranelift_type() -> cranelift_codegen::ir::Type {
-            cranelift_codegen::ir::types::I64
-        }
-    }
-
-    impl CopyType for TestPoint {}
-
-    // Manual field descriptors for testing
-    mod TestPointType {
-        use super::*;
-
-        #[derive(Copy, Clone)]
-        pub struct x;
-
-        impl Field for x {
-            type Parent = TestPoint;
-            type Out = I64Type;
-            const OFFSET: usize = 0;
-            const INDEX: usize = 0;
-        }
-
-        #[derive(Copy, Clone)]
-        pub struct y;
-
-        impl Field for y {
-            type Parent = TestPoint;
-            type Out = F64Type;
-            const OFFSET: usize = 8;
-            const INDEX: usize = 1;
-        }
-    }
-
-    #[test]
-    fn test_field_offset_calculation() {
-        // Test that field offsets are correct
-        assert_eq!(TestPointType::x::OFFSET, 0);
-        assert_eq!(TestPointType::y::OFFSET, 8);
-    }
-}

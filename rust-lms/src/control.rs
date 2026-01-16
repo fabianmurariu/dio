@@ -1,48 +1,16 @@
 //! Control flow constructs for staged computations.
 //!
 //! This module provides:
-//! - `Seq<A, B>`: Execute A for side effects, then return B's value
 //! - `IfThenElse<COND, THEN, ELSE>`: Conditional expression with both branches
 //! - `IfThen<COND, BODY>`: Conditional for side effects (returns unit)
 //! - `While<COND, BODY>`: While loop (returns unit)
+//!
+//! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
 use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType, UnitType};
-
-// =============================================================================
-// Seq<A, B> - Statement Sequencing
-// =============================================================================
-
-/// Sequence two expressions: execute first for side effects, return second's value.
-///
-/// # Example
-/// ```ignore
-/// let x = compiler.var::<I64Type>();
-/// let expr = seq(assign(x, Const::new(5)), x);  // Assigns 5 to x, then returns x
-/// ```
-#[derive(Clone)]
-pub struct Seq<A, B> {
-    first: A,
-    second: B,
-}
-
-impl<A, B, T> Staged for Seq<A, B>
-where
-    A: Staged,          // First can produce any type (executed for side effects)
-    B: Staged<Out = T>, // Second determines the result type
-    T: StagedType,
-{
-    type Out = T;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Execute first expression, discard its value
-        let _ = self.first.codegen(ctx);
-        // Execute second expression and return its value
-        self.second.codegen(ctx)
-    }
-}
 
 // =============================================================================
 // IfThenElse<COND, THEN, ELSE> - Conditional Expression

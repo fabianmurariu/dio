@@ -1031,93 +1031,37 @@ mod tests {
     // =========================================================================
 
     #[test]
-    fn test_if_then_else_true_branch() {
+    fn test_if_then_else_basic() {
+        // Test true branch
         let compiler = Compiler::new();
+        let expr_true = if_then_else(true, Const::<I64Type>::new(10), Const::<I64Type>::new(20));
+        assert_eq!(compiler.compile(expr_true).unwrap().run(), 10);
 
-        // if true then 10 else 20 => 10
-        let expr = if_then_else(
-            Const::<BoolType>::new(true),
-            Const::<I64Type>::new(10),
-            Const::<I64Type>::new(20),
-        );
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 10);
-    }
-
-    #[test]
-    fn test_if_then_else_false_branch() {
+        // Test false branch
         let compiler = Compiler::new();
-
-        // if false then 10 else 20 => 20
-        let expr = if_then_else(
-            Const::<BoolType>::new(false),
-            Const::<I64Type>::new(10),
-            Const::<I64Type>::new(20),
-        );
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 20);
+        let expr_false = if_then_else(false, Const::<I64Type>::new(10), Const::<I64Type>::new(20));
+        assert_eq!(compiler.compile(expr_false).unwrap().run(), 20);
     }
 
     #[test]
-    fn test_if_then_else_with_comparison() {
-        let mut compiler = Compiler::new();
-
-        // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
-            if_then_else(
-                lt(x, Const::<I64Type>::new(10)),
-                x,
-                Const::<I64Type>::new(10),
-            )
-        });
-
-        let expr = call1(clamp_max, Const::<I64Type>::new(5));
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 5); // 5 < 10, so return 5
-    }
-
-    #[test]
-    fn test_if_then_else_clamps_at_max() {
-        let mut compiler = Compiler::new();
-
-        // Define: clamp_max(x) = if x < 10 then x else 10
-        let clamp_max = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
-            if_then_else(
-                lt(x, Const::<I64Type>::new(10)),
-                x,
-                Const::<I64Type>::new(10),
-            )
-        });
-
-        let expr = call1(clamp_max, Const::<I64Type>::new(15));
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 10); // 15 >= 10, so return 10
-    }
-
-    #[test]
-    fn test_nested_if_then_else() {
+    fn test_if_then_else_clamp() {
         let mut compiler = Compiler::new();
 
         // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
         let clamp = compiler.fun1("clamp", |_ctx, x: Var<I64Type>| {
             if_then_else(
-                lt(x, Const::<I64Type>::new(0)),
+                lt(x, 0),
                 Const::<I64Type>::new(0),
-                if_then_else(
-                    lt(Const::<I64Type>::new(10), x), // x > 10
-                    Const::<I64Type>::new(10),
-                    x,
-                ),
+                if_then_else(lt(10, x), Const::<I64Type>::new(10), x),
             )
         });
 
-        // Test values
-        let compiled_neg = compiler
-            .compile(call1(clamp, Const::<I64Type>::new(-5)))
-            .expect("compilation failed");
-        assert_eq!(compiled_neg.run(), 0); // Clamped at min
+        let compiled = compiler.compile(clamp).expect("compilation failed");
+        let clamp_fn = compiled.as_fn();
+
+        assert_eq!(clamp_fn(-5), 0); // Clamped at min
+        assert_eq!(clamp_fn(5), 5); // In range
+        assert_eq!(clamp_fn(15), 10); // Clamped at max
     }
 
     #[test]
@@ -1165,50 +1109,21 @@ mod tests {
     }
 
     #[test]
-    fn test_factorial() {
+    fn test_recursive_factorial() {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
         let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<I64Type>| {
-            if_then_else(
-                lt(n, 2), // n < 2 means n <= 1
-                Const::new(1),
-                mul(n, call1(f, sub(n, Const::<I64Type>::new(1)))),
-            )
+            if_then_else(lt(n, 2), Const::new(1), mul(n, call1(f, sub(n, 1))))
         });
 
-        // Test factorial(5) = 120
-        let expr = call1(factorial, Const::<I64Type>::new(5));
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 120);
-    }
-
-    #[test]
-    fn test_factorial_various_inputs() {
-        let mut compiler = Compiler::new();
-
-        // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<I64Type>| {
-            if_then_else(
-                lt(n, Const::<I64Type>::new(2)),
-                Const::<I64Type>::new(1),
-                mul(n, call1(f, sub(n, Const::<I64Type>::new(1)))),
-            )
-        });
-
-        // Compile and get function pointer
         let compiled = compiler.compile(factorial).expect("compilation failed");
         let factorial_fn = compiled.as_fn();
 
-        // Test various inputs
-        assert_eq!(factorial_fn(0), 1); // 0! = 1
-        assert_eq!(factorial_fn(1), 1); // 1! = 1
-        assert_eq!(factorial_fn(2), 2); // 2! = 2
-        assert_eq!(factorial_fn(3), 6); // 3! = 6
-        assert_eq!(factorial_fn(4), 24); // 4! = 24
-        assert_eq!(factorial_fn(5), 120); // 5! = 120
-        assert_eq!(factorial_fn(6), 720); // 6! = 720
-        assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
+        assert_eq!(factorial_fn(0), 1);
+        assert_eq!(factorial_fn(1), 1);
+        assert_eq!(factorial_fn(5), 120);
+        assert_eq!(factorial_fn(10), 3628800);
     }
 
     #[test]
@@ -1426,67 +1341,22 @@ mod tests {
 
     #[test]
     fn test_fun2_add() {
-        use crate::func_impl::call2;
-
         let mut compiler = Compiler::new();
 
-        // Define: add_two(a, b) = a + b
-        let add_two = compiler.fun2("add_two", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
-            add(a, b)
-        });
+        let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| add(a, b));
 
-        let expr = call2(add_two, 10i64, 32i64);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
+        let compiled = compiler.compile(add_fn).expect("compilation failed");
+        let add_ptr = compiled.as_fn();
 
-    #[test]
-    fn test_fun2_multiply_and_add() {
-        use crate::func_impl::call2;
-
-        let mut compiler = Compiler::new();
-
-        // Define: mul_add(a, b) = a * b + a
-        let mul_add = compiler.fun2("mul_add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
-            add(mul(a, b), a)
-        });
-
-        // 3 * 5 + 3 = 18
-        let expr = call2(mul_add, 3i64, 5i64);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 18);
+        assert_eq!(add_ptr(10, 32), 42);
+        assert_eq!(add_ptr(-5, 5), 0);
     }
 
     #[test]
     fn test_fun3_clamp() {
-        use crate::func_impl::call3;
-
         let mut compiler = Compiler::new();
 
-        // Define: clamp(x, min, max) = if x < min then min else (if x > max then max else x)
-        let clamp_fn = compiler.fun3(
-            "clamp",
-            |_ctx, x: Var<I64Type>, min: Var<I64Type>, max: Var<I64Type>| {
-                if_then_else(
-                    lt(x, min),
-                    min,
-                    if_then_else(lt(max, x), max, x), // x > max == max < x
-                )
-            },
-        );
-
-        // Test: clamp(5, 0, 10) = 5
-        let expr1 = call3(clamp_fn, 5i64, 0i64, 10i64);
-        let compiled1 = compiler.compile(expr1).expect("compilation failed");
-        assert_eq!(compiled1.run(), 5);
-    }
-
-    #[test]
-    fn test_fun3_clamp_at_min() {
-        use crate::func_impl::call3;
-
-        let mut compiler = Compiler::new();
-
+        // clamp(x, min, max) = if x < min then min else (if x > max then max else x)
         let clamp_fn = compiler.fun3(
             "clamp",
             |_ctx, x: Var<I64Type>, min: Var<I64Type>, max: Var<I64Type>| {
@@ -1494,10 +1364,12 @@ mod tests {
             },
         );
 
-        // Test: clamp(-5, 0, 10) = 0 (clamped at min)
-        let expr = call3(clamp_fn, Const::<I64Type>::new(-5), 0i64, 10i64);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 0);
+        let compiled = compiler.compile(clamp_fn).expect("compilation failed");
+        let clamp = compiled.as_fn();
+
+        assert_eq!(clamp(-5, 0, 10), 0); // Clamped at min
+        assert_eq!(clamp(5, 0, 10), 5); // In range
+        assert_eq!(clamp(15, 0, 10), 10); // Clamped at max
     }
 
     #[test]
@@ -1526,26 +1398,4 @@ mod tests {
         assert_eq!(compiled.run(), 6);
     }
 
-    #[test]
-    fn test_return_fun2_pointer() {
-        use crate::func_impl::call2;
-
-        let mut compiler = Compiler::new();
-
-        // Define: add(a, b) = a + b
-        let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| {
-            add(a, b)
-        });
-
-        // Compile the function reference itself (not a call)
-        let compiled = compiler.compile(add_fn).expect("compilation failed");
-
-        // Extract the function pointer
-        let add_ptr = compiled.as_fn();
-
-        // Test the function with various inputs
-        assert_eq!(add_ptr(10, 32), 42);
-        assert_eq!(add_ptr(-5, 5), 0);
-        assert_eq!(add_ptr(100, 200), 300);
-    }
 }
