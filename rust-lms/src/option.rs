@@ -32,50 +32,36 @@ use std::marker::PhantomData;
 // COption: FFI-safe Option type
 // =============================================================================
 
-/// FFI-safe Option with explicit discriminant for cross-language compatibility.
+/// FFI-safe Option with explicit u64 discriminant for cross-language compatibility.
 ///
-/// Uses `#[repr(C)]` struct for predictable ABI:
-/// - Offset 0: tag (u64) - 0 = None, 1 = Some
-/// - Offset 8: value (T) - only valid when tag == 1
+/// Uses `#[repr(C, u64)]` enum:
+/// - Discriminant: u64 at offset 0 (0 = None, 1 = Some)
+/// - Value: T at offset 8 (only valid for Some variant)
 ///
-/// This struct-based representation has more predictable ABI behavior
-/// across FFI boundaries compared to Rust enums.
-#[repr(C)]
-#[derive(Clone, Copy)]
-pub struct COption<T> {
-    /// Tag: 0 = None, 1 = Some
-    tag: u64,
-    /// Value - only valid when tag == 1
-    value: T,
+/// This has identical memory layout to `struct { tag: u64, value: T }`.
+#[repr(C, u64)]
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum COption<T> {
+    None = 0,
+    Some(T),
 }
 
 impl<T: Copy> COption<T> {
-    /// Create a Some variant
-    pub fn some(value: T) -> Self {
-        COption { tag: 1, value }
-    }
-
-    /// Create a None variant (requires a dummy value for the uninitialized field)
-    pub fn none_with(dummy: T) -> Self {
-        COption { tag: 0, value: dummy }
-    }
-
     /// Returns `true` if the option is a `Some` value.
     pub fn is_some(&self) -> bool {
-        self.tag != 0
+        matches!(self, COption::Some(_))
     }
 
     /// Returns `true` if the option is a `None` value.
     pub fn is_none(&self) -> bool {
-        self.tag == 0
+        matches!(self, COption::None)
     }
 
     /// Returns the contained value if Some, or the provided default.
     pub fn unwrap_or(self, default: T) -> T {
-        if self.tag != 0 {
-            self.value
-        } else {
-            default
+        match self {
+            COption::Some(v) => v,
+            COption::None => default,
         }
     }
 
@@ -83,57 +69,27 @@ impl<T: Copy> COption<T> {
     /// # Safety
     /// Caller must ensure this is a Some variant.
     pub unsafe fn unwrap_unchecked(self) -> T {
-        self.value
-    }
-}
-
-impl<T: Copy + Default> COption<T> {
-    /// Create a None variant using T::default() for the dummy value
-    pub fn none() -> Self {
-        COption {
-            tag: 0,
-            value: T::default(),
+        match self {
+            COption::Some(v) => v,
+            COption::None => std::hint::unreachable_unchecked(),
         }
     }
 }
 
-impl<T: Copy + Default> From<Option<T>> for COption<T> {
+impl<T: Copy> From<Option<T>> for COption<T> {
     fn from(opt: Option<T>) -> Self {
         match opt {
-            Some(v) => COption::some(v),
-            None => COption::none(),
+            Some(v) => COption::Some(v),
+            None => COption::None,
         }
     }
 }
 
 impl<T: Copy> From<COption<T>> for Option<T> {
     fn from(opt: COption<T>) -> Self {
-        if opt.tag != 0 {
-            Some(opt.value)
-        } else {
-            None
-        }
-    }
-}
-
-impl<T: Copy + PartialEq> PartialEq for COption<T> {
-    fn eq(&self, other: &Self) -> bool {
-        match (self.tag, other.tag) {
-            (0, 0) => true, // Both None
-            (1, 1) => self.value == other.value, // Both Some, compare values
-            _ => false, // One None, one Some
-        }
-    }
-}
-
-impl<T: Copy + Eq> Eq for COption<T> {}
-
-impl<T: Copy + std::fmt::Debug> std::fmt::Debug for COption<T> {
-    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
-        if self.tag != 0 {
-            f.debug_tuple("Some").field(&self.value).finish()
-        } else {
-            write!(f, "None")
+        match opt {
+            COption::Some(v) => Some(v),
+            COption::None => None,
         }
     }
 }
@@ -226,7 +182,7 @@ impl<T: StagedType> StagedType for OptMutRefType<T> {
 // Creating COption values
 // =============================================================================
 
-/// Expression to create `COption::some(value)`.
+/// Expression to create `COption::Some(value)`.
 #[derive(Clone)]
 pub struct CSome<T: StagedType, E> {
     value: E,
@@ -277,7 +233,7 @@ impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     }
 }
 
-/// Create a `COption::some(value)` expression.
+/// Create a `COption::Some(value)` expression.
 pub fn c_some<T: StagedType, E: IntoStaged<T>>(value: E) -> CSome<T, E::Staged> {
     CSome {
         value: value.into_staged(),
@@ -285,7 +241,7 @@ pub fn c_some<T: StagedType, E: IntoStaged<T>>(value: E) -> CSome<T, E::Staged> 
     }
 }
 
-/// Expression to create `COption::none()`.
+/// Expression to create `COption::None`.
 #[derive(Clone, Copy)]
 pub struct CNone<T: StagedType> {
     _phantom: PhantomData<T>,
@@ -312,7 +268,7 @@ impl<T: StagedType> Staged for CNone<T> {
     }
 }
 
-/// Create a `COption::none()` expression.
+/// Create a `COption::None` expression.
 pub fn c_none<T: StagedType>() -> CNone<T> {
     CNone {
         _phantom: PhantomData,
@@ -1016,8 +972,8 @@ mod tests {
         assert_eq!(std::mem::align_of::<COption<i64>>(), 8);
 
         // Verify discriminant values
-        let none: COption<i64> = COption::none();
-        let some: COption<i64> = COption::some(42);
+        let none: COption<i64> = COption::None;
+        let some: COption<i64> = COption::Some(42);
 
         // Check that discriminant is at offset 0
         let none_ptr = &none as *const COption<i64> as *const u64;
@@ -1033,7 +989,7 @@ mod tests {
     fn test_c_some_i64() {
         let compiler = Compiler::new();
 
-        // Create COption::some(42)
+        // Create COption::Some(42)
         let expr = c_some::<I64Type, _>(42i64);
         let wrapped = unwrap_or(expr, 0i64);
 
@@ -1045,7 +1001,7 @@ mod tests {
     fn test_c_none_i64() {
         let compiler = Compiler::new();
 
-        // Create COption::none(), unwrap_or should return default
+        // Create COption::None, unwrap_or should return default
         let expr = c_none::<I64Type>();
         let wrapped = unwrap_or(expr, 99i64);
 
@@ -1106,18 +1062,18 @@ mod tests {
     #[test]
     fn test_coption_from_option() {
         let some: COption<i64> = Some(42).into();
-        assert_eq!(some, COption::some(42));
+        assert_eq!(some, COption::Some(42));
 
         let none: COption<i64> = None.into();
-        assert_eq!(none, COption::none());
+        assert_eq!(none, COption::None);
     }
 
     #[test]
     fn test_option_from_coption() {
-        let some: Option<i64> = COption::some(42).into();
+        let some: Option<i64> = COption::Some(42).into();
         assert_eq!(some, Some(42));
 
-        let none: Option<i64> = COption::<i64>::none().into();
+        let none: Option<i64> = COption::<i64>::None.into();
         assert_eq!(none, None);
     }
 
@@ -1138,12 +1094,12 @@ mod tests {
         let f = compiled.as_fn();
 
         // Test with Some
-        assert_eq!(f(COption::some(42)), 42);
-        assert_eq!(f(COption::some(0)), 0);
-        assert_eq!(f(COption::some(-100)), -100);
+        assert_eq!(f(COption::Some(42)), 42);
+        assert_eq!(f(COption::Some(0)), 0);
+        assert_eq!(f(COption::Some(-100)), -100);
 
         // Test with None
-        assert_eq!(f(COption::none()), -1);
+        assert_eq!(f(COption::None), -1);
     }
 
     #[test]
@@ -1167,10 +1123,10 @@ mod tests {
         let compiled = compiler.compile(maybe_double).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(5), COption::some(10));
-        assert_eq!(f(1), COption::some(2));
-        assert_eq!(f(0), COption::none());
-        assert_eq!(f(-5), COption::none());
+        assert_eq!(f(5), COption::Some(10));
+        assert_eq!(f(1), COption::Some(2));
+        assert_eq!(f(0), COption::None);
+        assert_eq!(f(-5), COption::None);
     }
 
     #[test]
@@ -1190,9 +1146,9 @@ mod tests {
         let compiled = compiler.compile(add_one).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::some(10)), COption::some(11));
-        assert_eq!(f(COption::some(-1)), COption::some(0));
-        assert_eq!(f(COption::none()), COption::none());
+        assert_eq!(f(COption::Some(10)), COption::Some(11));
+        assert_eq!(f(COption::Some(-1)), COption::Some(0));
+        assert_eq!(f(COption::None), COption::None);
     }
 
     // =========================================================================
@@ -1205,7 +1161,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<COption<f64>>(), 16);
         assert_eq!(std::mem::align_of::<COption<f64>>(), 8);
 
-        let some: COption<f64> = COption::some(3.14);
+        let some: COption<f64> = COption::Some(3.14);
         let ptr = &some as *const COption<f64> as *const u8;
         unsafe {
             // Discriminant at offset 0
@@ -1229,9 +1185,9 @@ mod tests {
         let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::some(3.14)), 3.14);
-        assert_eq!(f(COption::some(-2.5)), -2.5);
-        assert_eq!(f(COption::none()), 0.0);
+        assert_eq!(f(COption::Some(3.14)), 3.14);
+        assert_eq!(f(COption::Some(-2.5)), -2.5);
+        assert_eq!(f(COption::None), 0.0);
     }
 
     #[test]
@@ -1247,9 +1203,9 @@ mod tests {
         let compiled = compiler.compile(wrap).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(3.14), COption::some(3.14));
-        assert_eq!(f(0.0), COption::some(0.0));
-        assert_eq!(f(-1.5), COption::some(-1.5));
+        assert_eq!(f(3.14), COption::Some(3.14));
+        assert_eq!(f(0.0), COption::Some(0.0));
+        assert_eq!(f(-1.5), COption::Some(-1.5));
     }
 
     // =========================================================================
@@ -1452,9 +1408,9 @@ mod tests {
         let compiled = compiler.compile(square_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::some(3.0)), COption::some(9.0));
-        assert_eq!(f(COption::some(-2.0)), COption::some(4.0));
-        assert_eq!(f(COption::none()), COption::none());
+        assert_eq!(f(COption::Some(3.0)), COption::Some(9.0));
+        assert_eq!(f(COption::Some(-2.0)), COption::Some(4.0));
+        assert_eq!(f(COption::None), COption::None);
     }
 
     // =========================================================================
@@ -1489,10 +1445,10 @@ mod tests {
         let compiled = compiler.compile(add_opts).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::some(10), COption::some(20)), COption::some(30));
-        assert_eq!(f(COption::some(5), COption::none()), COption::none());
-        assert_eq!(f(COption::none(), COption::some(5)), COption::none());
-        assert_eq!(f(COption::none(), COption::none()), COption::none());
+        assert_eq!(f(COption::Some(10), COption::Some(20)), COption::Some(30));
+        assert_eq!(f(COption::Some(5), COption::None), COption::None);
+        assert_eq!(f(COption::None, COption::Some(5)), COption::None);
+        assert_eq!(f(COption::None, COption::None), COption::None);
     }
 
     #[test]
@@ -1510,8 +1466,8 @@ mod tests {
         let compiled = compiler.compile(unwrap_add).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::some(42), 0), 42);
-        assert_eq!(f(COption::none(), 99), 99);
-        assert_eq!(f(COption::some(10), 99), 10);
+        assert_eq!(f(COption::Some(42), 0), 42);
+        assert_eq!(f(COption::None, 99), 99);
+        assert_eq!(f(COption::Some(10), 99), 10);
     }
 }
