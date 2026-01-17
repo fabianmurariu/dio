@@ -8,6 +8,7 @@
 use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
+use cranelift_module::Module;
 use std::collections::HashMap;
 
 use crate::types::{ConstantType, StagedType, UnitType};
@@ -30,6 +31,28 @@ pub struct CompilationContext<'a, 'b> {
     pub var_map: &'b mut HashMap<usize, Variable>,
     /// Mapping from our function IDs to Cranelift FuncIds
     pub func_map: &'b HashMap<usize, cranelift_module::FuncId>,
+    /// Mapping from extern function IDs to Cranelift FuncRefs (per-function)
+    pub extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
+    /// Mapping from extern function IDs to module FuncIds
+    pub extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
+}
+
+impl<'a, 'b> CompilationContext<'a, 'b> {
+    /// Get or create a FuncRef for an external function.
+    ///
+    /// FuncRefs are per-function, so we cache them in extern_func_refs.
+    pub fn get_extern_func_ref(&mut self, extern_id: usize) -> cranelift_codegen::ir::FuncRef {
+        if let Some(&func_ref) = self.extern_func_refs.get(&extern_id) {
+            return func_ref;
+        }
+
+        let func_id = self.extern_func_ids.get(&extern_id)
+            .expect(&format!("Extern function {} not found", extern_id));
+
+        let func_ref = self.module.declare_func_in_func(*func_id, self.builder.func);
+        self.extern_func_refs.insert(extern_id, func_ref);
+        func_ref
+    }
 }
 
 // =============================================================================
