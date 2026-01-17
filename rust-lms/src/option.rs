@@ -109,7 +109,7 @@ pub struct COptionType<T: StagedType> {
 }
 
 impl<T: StagedType> StagedType for COptionType<T> {
-    type RuntimeValue<'a> = COption<T::RuntimeValue<'a>>;
+    type RuntimeValue<'a> = COption<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer to stack slot
@@ -150,12 +150,12 @@ impl<T: StagedType> StagedType for COptionType<T> {
 ///
 /// Single i64 value: null = None, non-null = Some(&T)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OptRefType<T: StagedType> {
-    _phantom: PhantomData<T>,
+pub struct OptRefType<'a, T: StagedType> {
+    _phantom: PhantomData<&'a T>,
 }
 
-impl<T: StagedType> StagedType for OptRefType<T> {
-    type RuntimeValue<'a> = Option<&'a T::RuntimeValue<'a>>;
+impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
+    type RuntimeValue = Option<&'a T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Single pointer, null = None
@@ -166,12 +166,12 @@ impl<T: StagedType> StagedType for OptRefType<T> {
 ///
 /// Single i64 value: null = None, non-null = Some(&mut T)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OptMutRefType<T: StagedType> {
-    _phantom: PhantomData<T>,
+pub struct OptMutRefType<'a, T: StagedType> {
+    _phantom: PhantomData<&'a mut T>,
 }
 
-impl<T: StagedType> StagedType for OptMutRefType<T> {
-    type RuntimeValue<'a> = Option<&'a mut T::RuntimeValue<'a>>;
+impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
+    type RuntimeValue = Option<&'a mut T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Single pointer, null = None
@@ -281,13 +281,13 @@ pub fn c_none<T: StagedType>() -> CNone<T> {
 
 /// Expression to create `Some(&value)` for niche-optimized reference option.
 #[derive(Clone)]
-pub struct OptRefSome<T: StagedType, E> {
+pub struct OptRefSome<'a, T: StagedType, E> {
     reference: E,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a T>,
 }
 
-impl<T: StagedType, E: Staged<Out = SRef<T>>> Staged for OptRefSome<T, E> {
-    type Out = OptRefType<T>;
+impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
+    type Out = OptRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // The reference is the pointer - just pass it through
@@ -296,7 +296,9 @@ impl<T: StagedType, E: Staged<Out = SRef<T>>> Staged for OptRefSome<T, E> {
 }
 
 /// Create an `Option<&T>::Some(ref)` expression.
-pub fn opt_ref_some<T: StagedType, E: Staged<Out = SRef<T>>>(reference: E) -> OptRefSome<T, E> {
+pub fn opt_ref_some<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>>(
+    reference: E,
+) -> OptRefSome<'a, T, E> {
     OptRefSome {
         reference,
         _phantom: PhantomData,
@@ -305,12 +307,12 @@ pub fn opt_ref_some<T: StagedType, E: Staged<Out = SRef<T>>>(reference: E) -> Op
 
 /// Expression to create `None` for niche-optimized reference option.
 #[derive(Clone, Copy)]
-pub struct OptRefNone<T: StagedType> {
-    _phantom: PhantomData<T>,
+pub struct OptRefNone<'a, T: StagedType> {
+    _phantom: PhantomData<&'a T>,
 }
 
-impl<T: StagedType> Staged for OptRefNone<T> {
-    type Out = OptRefType<T>;
+impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
+    type Out = OptRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // None is represented as null pointer
@@ -327,12 +329,12 @@ pub fn opt_ref_none<T: StagedType>() -> OptRefNone<T> {
 
 /// Expression to create `Some(&mut value)` for niche-optimized mutable reference option.
 #[derive(Clone)]
-pub struct OptMutRefSome<T: StagedType, E> {
+pub struct OptMutRefSome<'a, T: StagedType, E> {
     reference: E,
-    _phantom: PhantomData<T>,
+    _phantom: PhantomData<&'a mut T>,
 }
 
-impl<T: StagedType, E: Staged<Out = SRefMut<T>>> Staged for OptMutRefSome<T, E> {
+impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -450,11 +452,9 @@ impl<T: StagedType, E: Staged<Out = OptRefType<T>>> Staged for IsRefSome<E> {
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.builder.ins().icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-            ptr,
-            0,
-        )
+        ctx.builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
     }
 }
 
@@ -498,11 +498,9 @@ impl<T: StagedType, E: Staged<Out = OptMutRefType<T>>> Staged for IsMutRefSome<E
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.builder.ins().icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-            ptr,
-            0,
-        )
+        ctx.builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
     }
 }
 
@@ -573,13 +571,9 @@ impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> Staged
         ctx.builder.append_block_param(merge_block, result_type);
 
         // Branch: if discriminant != 0, go to some_block, else none_block
-        ctx.builder.ins().brif(
-            discriminant,
-            some_block,
-            &[],
-            none_block,
-            &[],
-        );
+        ctx.builder
+            .ins()
+            .brif(discriminant, some_block, &[], none_block, &[]);
 
         // Some block: load value from offset 8
         ctx.builder.switch_to_block(some_block);
@@ -877,8 +871,7 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<T, OUT, OPT, SomeBody, NoneBody> Staged
-    for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
+impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
@@ -1038,10 +1031,17 @@ mod tests {
         // match Some(10) { Some(x) => x + 5, None => 0 }
         let func = compiler.fun1("test", |ctx, _dummy: Var<I64Type>| {
             let opt = c_some::<I64Type, _>(10i64);
-            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<I64Type>::new(0))
+            match_opt(
+                ctx,
+                opt,
+                |_ctx, val| add(val, 5i64),
+                Const::<I64Type>::new(0),
+            )
         });
 
-        let compiled = compiler.compile(call1(func, 0i64)).expect("compilation failed");
+        let compiled = compiler
+            .compile(call1(func, 0i64))
+            .expect("compilation failed");
         assert_eq!(compiled.run(), 15);
     }
 
@@ -1052,10 +1052,17 @@ mod tests {
         // match None { Some(x) => x + 5, None => 99 }
         let func = compiler.fun1("test", |ctx, _dummy: Var<I64Type>| {
             let opt = c_none::<I64Type>();
-            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<I64Type>::new(99))
+            match_opt(
+                ctx,
+                opt,
+                |_ctx, val| add(val, 5i64),
+                Const::<I64Type>::new(99),
+            )
         });
 
-        let compiled = compiler.compile(call1(func, 0i64)).expect("compilation failed");
+        let compiled = compiler
+            .compile(call1(func, 0i64))
+            .expect("compilation failed");
         assert_eq!(compiled.run(), 99);
     }
 
@@ -1086,9 +1093,10 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn unwrap_or_default(opt: COption<i64>) -> i64
-        let unwrap_fn = compiler.fun1("unwrap_or_default", |_ctx, opt: Var<COptionType<I64Type>>| {
-            unwrap_or(opt, -1i64)
-        });
+        let unwrap_fn = compiler.fun1(
+            "unwrap_or_default",
+            |_ctx, opt: Var<COptionType<I64Type>>| unwrap_or(opt, -1i64),
+        );
 
         let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1196,9 +1204,7 @@ mod tests {
 
         // fn wrap_f64(x: f64) -> COption<f64>
         // Always returns Some(x)
-        let wrap = compiler.fun1("wrap_f64", |_ctx, x: Var<F64Type>| {
-            c_some::<F64Type, _>(x)
-        });
+        let wrap = compiler.fun1("wrap_f64", |_ctx, x: Var<F64Type>| c_some::<F64Type, _>(x));
 
         let compiled = compiler.compile(wrap).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1297,15 +1303,18 @@ mod tests {
 
         // fn read_and_double(opt: Option<&mut i64>) -> i64
         // If Some, reads the value and returns it doubled (without mutating); else returns -1
-        let read_fn = compiler.fun1("read_and_double", |ctx, opt: Var<OptMutRefType<I64Type>>| {
-            use crate::refer::load_ref_mut;
-            match_opt_mut_ref(
-                ctx,
-                opt,
-                |_ctx, ptr| mul(load_ref_mut(ptr), 2i64),
-                Const::<I64Type>::new(-1),
-            )
-        });
+        let read_fn = compiler.fun1(
+            "read_and_double",
+            |ctx, opt: Var<OptMutRefType<I64Type>>| {
+                use crate::refer::load_ref_mut;
+                match_opt_mut_ref(
+                    ctx,
+                    opt,
+                    |_ctx, ptr| mul(load_ref_mut(ptr), 2i64),
+                    Const::<I64Type>::new(-1),
+                )
+            },
+        );
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1327,28 +1336,31 @@ mod tests {
 
         // fn increment_in_place(opt: Option<&mut i64>) -> i64
         // If Some, increments the value in place and returns new value; else returns -1
-        let incr_fn = compiler.fun1("increment_in_place", |ctx, opt: Var<OptMutRefType<I64Type>>| {
-            use crate::refer::{load_ref_mut, store_ref};
-            // Use a local variable to hold the new value
-            let result = ctx.let_var(0i64);
-            (
-                result,
-                match_opt_mut_ref(
-                    ctx,
-                    opt,
-                    |_ctx, ptr| {
-                        // Load current value, add 1, store back, and assign to result
-                        let incremented = add(load_ref_mut(ptr), 1i64);
-                        (
-                            store_ref(ptr, incremented),
-                            assign(*result, load_ref_mut(ptr)),
-                        )
-                    },
-                    assign(*result, -1i64),
-                ),
-                *result,
-            )
-        });
+        let incr_fn = compiler.fun1(
+            "increment_in_place",
+            |ctx, opt: Var<OptMutRefType<I64Type>>| {
+                use crate::refer::{load_ref_mut, store_ref};
+                // Use a local variable to hold the new value
+                let result = ctx.let_var(0i64);
+                (
+                    result,
+                    match_opt_mut_ref(
+                        ctx,
+                        opt,
+                        |_ctx, ptr| {
+                            // Load current value, add 1, store back, and assign to result
+                            let incremented = add(load_ref_mut(ptr), 1i64);
+                            (
+                                store_ref(ptr, incremented),
+                                assign(*result, load_ref_mut(ptr)),
+                            )
+                        },
+                        assign(*result, -1i64),
+                    ),
+                    *result,
+                )
+            },
+        );
 
         let compiled = compiler.compile(incr_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1458,9 +1470,7 @@ mod tests {
         // fn unwrap_or_add(opt: COption<i64>, default: i64) -> i64
         let unwrap_add = compiler.fun2(
             "unwrap_or_add",
-            |_ctx, opt: Var<COptionType<I64Type>>, default: Var<I64Type>| {
-                unwrap_or(opt, default)
-            },
+            |_ctx, opt: Var<COptionType<I64Type>>, default: Var<I64Type>| unwrap_or(opt, default),
         );
 
         let compiled = compiler.compile(unwrap_add).expect("compilation failed");

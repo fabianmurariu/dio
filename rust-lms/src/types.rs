@@ -18,9 +18,9 @@ use cranelift_frontend::FunctionBuilder;
 /// - Its runtime value representation
 /// - Its Cranelift IR type
 /// - Size and alignment information for struct layout
-pub trait StagedType: 'static {
+pub trait StagedType {
     /// The actual runtime type (e.g., i64 for I64Type)
-    type RuntimeValue<'a>;
+    type RuntimeValue;
 
     /// Get the Cranelift IR type representation.
     /// For primitives, this is the actual type (I64, F64, etc.)

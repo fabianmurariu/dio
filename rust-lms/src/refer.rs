@@ -44,20 +44,20 @@ pub struct RustPtr;
 /// not on the struct itself. This allows `SRef<Slice<T>>` to work even though
 /// `Slice<T>` doesn't implement `StagedType` (since it's a DST marker).
 #[derive(Clone, Copy, Debug)]
-pub struct SRef<T, Tag = RustRef> {
-    _phantom: PhantomData<(T, Tag)>,
+pub struct SRef<'a, T, Tag = RustRef> {
+    _phantom: PhantomData<&'a (T, Tag)>,
 }
 
-impl<T: StagedType> StagedType for SRef<T, RustRef> {
-    type RuntimeValue<'a> = &'a T::RuntimeValue<'a>;
+impl<'a, T: StagedType> StagedType for SRef<'a, T, RustRef> {
+    type RuntimeValue = &'a T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
     }
 }
 
-impl<T: StagedType> StagedType for SRef<T, RustPtr> {
-    type RuntimeValue<'a> = *const T::RuntimeValue<'a>;
+impl<'a, T: StagedType> StagedType for SRef<'a, T, RustPtr> {
+    type RuntimeValue = *const T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
@@ -75,20 +75,20 @@ impl<T: StagedType> StagedType for SRef<T, RustPtr> {
 /// - `RustRef` (default): surfaces as `&mut T::RuntimeValue`
 /// - `RustPtr`: surfaces as `*mut T::RuntimeValue`
 #[derive(Clone, Copy, Debug)]
-pub struct SRefMut<T, Tag = RustRef> {
-    _phantom: PhantomData<(T, Tag)>,
+pub struct SRefMut<'a, T, Tag = RustRef> {
+    _phantom: PhantomData<&'a mut (T, Tag)>,
 }
 
-impl<T: StagedType> StagedType for SRefMut<T, RustRef> {
-    type RuntimeValue<'a> = &'a mut T::RuntimeValue<'a>;
+impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustRef> {
+    type RuntimeValue = &'a mut T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
     }
 }
 
-impl<T: StagedType> StagedType for SRefMut<T, RustPtr> {
-    type RuntimeValue<'a> = *mut T::RuntimeValue<'a>;
+impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustPtr> {
+    type RuntimeValue = *mut T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
@@ -101,66 +101,74 @@ impl<T: StagedType> StagedType for SRefMut<T, RustPtr> {
 
 /// Immutable raw pointer type (`*const T` at runtime).
 /// Alias for `SRef<T, RustPtr>`.
-pub type SPtr<T> = SRef<T, RustPtr>;
+pub type SPtr<T> = SRef<'static, T, RustPtr>;
 
 /// Mutable raw pointer type (`*mut T` at runtime).
 /// Alias for `SRefMut<T, RustPtr>`.
-pub type SMutPtr<T> = SRefMut<T, RustPtr>;
+pub type SMutPtr<T> = SRefMut<'static, T, RustPtr>;
 
 // =============================================================================
 // Load: Dereference to read a value
 // =============================================================================
 
 /// Load value from immutable reference/pointer: `*ptr`
-pub struct LoadRef<P> {
+pub struct LoadRef<'a, P> {
     ptr: P,
+    _marker: PhantomData<&'a ()>,
 }
 
-impl<P, T, Tag> Staged for LoadRef<P>
+impl<'a, P, T, Tag> Staged for LoadRef<'a, P>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     T: StagedType,
+    Tag: 'a,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder.ins().load(
-            T::cranelift_type(),
-            MemFlags::trusted(),
-            ptr_val,
-            0,
-        )
+        ctx.builder
+            .ins()
+            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
     }
 }
 
 /// Create a load operation from an immutable reference/pointer
-pub fn load_ref<P, T, Tag>(ptr: P) -> LoadRef<P>
+pub fn load_ref<'a, P, T, Tag>(ptr: P) -> LoadRef<'a, P>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     T: StagedType,
+    Tag: 'a,
 {
-    LoadRef { ptr }
+    LoadRef {
+        ptr,
+        _marker: PhantomData,
+    }
 }
 
 /// Alias for `load_ref` for raw pointer semantics
-pub fn load<P, T>(ptr: P) -> LoadRef<P>
+pub fn load<'a, P, T>(ptr: P) -> LoadRef<'a, P>
 where
     P: Staged<Out = SPtr<T>>,
     T: StagedType,
 {
-    LoadRef { ptr }
+    LoadRef {
+        ptr,
+        _marker: PhantomData,
+    }
 }
 
 /// Load from mutable reference/pointer
-pub struct LoadMutRef<P> {
+pub struct LoadMutRef<'a, P> {
     ptr: P,
+    _marker: PhantomData<&'a mut ()>,
 }
 
-impl<P, T, Tag> Staged for LoadMutRef<P>
+impl<'a, P, T, Tag> Staged for LoadMutRef<'a, P>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     T: StagedType,
+    Tag: 'a,
 {
     type Out = T;
 
@@ -173,21 +181,28 @@ where
 }
 
 /// Create a load operation from a mutable reference/pointer
-pub fn load_ref_mut<P, T, Tag>(ptr: P) -> LoadMutRef<P>
+pub fn load_ref_mut<'a, P, T, Tag>(ptr: P) -> LoadMutRef<'a, P>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     T: StagedType,
+    Tag: 'a,
 {
-    LoadMutRef { ptr }
+    LoadMutRef {
+        ptr,
+        _marker: PhantomData,
+    }
 }
 
 /// Alias for `load_ref_mut` for raw pointer semantics
-pub fn load_mut<P, T>(ptr: P) -> LoadMutRef<P>
+pub fn load_mut<'a, P, T>(ptr: P) -> LoadMutRef<'a, P>
 where
     P: Staged<Out = SMutPtr<T>>,
     T: StagedType,
 {
-    LoadMutRef { ptr }
+    LoadMutRef {
+        ptr,
+        _marker: PhantomData,
+    }
 }
 
 // =============================================================================
@@ -195,16 +210,18 @@ where
 // =============================================================================
 
 /// Store value to mutable reference/pointer: `*ptr = val`
-pub struct Store<P, V> {
+pub struct Store<'a, P, V> {
     ptr: P,
     val: V,
+    _marker: PhantomData<&'a mut ()>,
 }
 
-impl<P, V, T, Tag> Staged for Store<P, V>
+impl<'a, P, V, T, Tag> Staged for Store<'a, P, V>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     V: Staged<Out = T>,
     T: StagedType,
+    Tag: 'a,
 {
     type Out = crate::types::UnitType;
 
@@ -212,35 +229,41 @@ where
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
-        ctx.builder.ins().store(
-            MemFlags::trusted(),
-            value,
-            ptr_val,
-            0,
-        );
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), value, ptr_val, 0);
 
         ctx.builder.ins().iconst(types::I8, 0)
     }
 }
 
 /// Create a store operation (for references)
-pub fn store_ref<P, V, T, Tag>(ptr: P, val: V) -> Store<P, V>
+pub fn store_ref<'a, P, V, T, Tag>(ptr: P, val: V) -> Store<'a, P, V>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     V: Staged<Out = T>,
     T: StagedType,
+    Tag: 'a,
 {
-    Store { ptr, val }
+    Store {
+        ptr,
+        val,
+        _marker: PhantomData,
+    }
 }
 
 /// Create a store operation (for raw pointers)
-pub fn store<P, V, T>(ptr: P, val: V) -> Store<P, V>
+pub fn store<'a, P, V, T>(ptr: P, val: V) -> Store<'a, P, V>
 where
     P: Staged<Out = SMutPtr<T>>,
     V: Staged<Out = T>,
     T: StagedType,
 {
-    Store { ptr, val }
+    Store {
+        ptr,
+        val,
+        _marker: PhantomData,
+    }
 }
 
 // =============================================================================
@@ -249,25 +272,26 @@ where
 
 /// Pointer offset for immutable reference/pointer
 #[derive(Clone)]
-pub struct PtrOffset<P, I> {
+pub struct PtrOffset<'a, P, I> {
     ptr: P,
     index: I,
+    _marker: PhantomData<&'a ()>,
 }
 
-impl<P, I, T, Tag> Staged for PtrOffset<P, I>
+impl<'a, P, I, T, Tag> Staged for PtrOffset<'a, P, I>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
-    SRef<T, Tag>: StagedType,
+    SRef<'a, T, Tag>: StagedType,
 {
-    type Out = SRef<T, Tag>;
+    type Out = SRef<'a, T, Tag>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
-        let element_size = std::mem::size_of::<T::RuntimeValue<'static>>() as i64;
+        let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
         let byte_offset = ctx.builder.ins().imul(idx, scale);
 
@@ -276,36 +300,38 @@ where
 }
 
 /// Create a pointer offset operation for immutable reference/pointer
-pub fn ptr_offset<P, I, T, Tag>(ptr: P, index: I) -> PtrOffset<P, I>
+pub fn ptr_offset<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffset<'a, P, I>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
+    Tag: 'a,
 {
-    PtrOffset { ptr, index }
+    PtrOffset { ptr, index , _marker: PhantomData }
 }
 
 /// Pointer offset for mutable reference/pointer
 #[derive(Clone)]
-pub struct PtrOffsetMut<P, I> {
+pub struct PtrOffsetMut<'a, P, I> {
     ptr: P,
     index: I,
+    _marker: PhantomData<&'a mut ()>,
 }
 
-impl<P, I, T, Tag> Staged for PtrOffsetMut<P, I>
+impl<'a, P, I, T, Tag> Staged for PtrOffsetMut<'a, P, I>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
-    SRefMut<T, Tag>: StagedType,
+    SRefMut<'a, T, Tag>: StagedType,
 {
-    type Out = SRefMut<T, Tag>;
+    type Out = SRefMut<'a, T, Tag>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
-        let element_size = std::mem::size_of::<T::RuntimeValue<'static>>() as i64;
+        let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
         let byte_offset = ctx.builder.ins().imul(idx, scale);
 
@@ -314,13 +340,14 @@ where
 }
 
 /// Create a pointer offset operation for mutable reference/pointer
-pub fn ptr_offset_mut<P, I, T, Tag>(ptr: P, index: I) -> PtrOffsetMut<P, I>
+pub fn ptr_offset_mut<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffsetMut<'a, P, I>
 where
-    P: Staged<Out = SRefMut<T, Tag>>,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
+    Tag: 'a,
 {
-    PtrOffsetMut { ptr, index }
+    PtrOffsetMut { ptr, index, _marker: PhantomData }
 }
 
 // =============================================================================
@@ -328,16 +355,18 @@ where
 // =============================================================================
 
 /// Array indexing: `ptr[index]`
-pub struct ArrayIndex<P, I> {
+pub struct ArrayIndex<'a, P, I> {
     ptr: P,
     index: I,
+    _marker: PhantomData<&'a ()>,
 }
 
-impl<P, I, T, Tag> Staged for ArrayIndex<P, I>
+impl<'a, P, I, T, Tag> Staged for ArrayIndex<'a, P, I>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
+    Tag: 'a,
 {
     type Out = T;
 
@@ -345,7 +374,7 @@ where
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
-        let element_size = std::mem::size_of::<T::RuntimeValue<'static>>() as i64;
+        let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
         let byte_offset = ctx.builder.ins().imul(idx, scale);
 
@@ -358,13 +387,14 @@ where
 }
 
 /// Create an array indexing operation
-pub fn array_index<P, I, T, Tag>(ptr: P, index: I) -> ArrayIndex<P, I>
+pub fn array_index<'a, P, I, T, Tag>(ptr: P, index: I) -> ArrayIndex<'a, P, I>
 where
-    P: Staged<Out = SRef<T, Tag>>,
+    P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType,
+    Tag: 'a,
 {
-    ArrayIndex { ptr, index }
+    ArrayIndex { ptr, index, _marker: PhantomData }
 }
 
 #[cfg(test)]

@@ -68,9 +68,9 @@ pub struct Slice<T: StagedType> {
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================
 
-impl<T: StagedType> StagedType for SRef<Slice<T>> {
+impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     /// Runtime type is `&[T::RuntimeValue]`
-    type RuntimeValue<'a> = &'a [T::RuntimeValue<'static>];
+    type RuntimeValue = &'a [T::RuntimeValue];
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         // Internally represented as pointer to (ptr, len) pair
@@ -102,9 +102,9 @@ impl<T: StagedType> StagedType for SRef<Slice<T>> {
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
 
-impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
+impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     /// Runtime type is `&mut [T::RuntimeValue]`
-    type RuntimeValue<'a> = &'a mut [T::RuntimeValue<'static>];
+    type RuntimeValue = &'a mut [T::RuntimeValue];
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
@@ -185,16 +185,18 @@ where
 
 /// Get the raw data pointer from an immutable slice.
 #[derive(Clone, Copy)]
-pub struct SliceAsPtr<S> {
+pub struct SliceAsPtr<'a, S> {
     slice: S,
+    _phantom: PhantomData<&'a ()>,
 }
 
-impl<S, T> Staged for SliceAsPtr<S>
+impl<'a, S, T> Staged for SliceAsPtr<'a, S>
 where
-    S: Staged<Out = SRef<Slice<T>>>,
+    S: Staged<Out = SRef<'a, Slice<T>>>,
     T: StagedType,
+    T: 'a
 {
-    type Out = SRef<T>;
+    type Out = SRef<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
