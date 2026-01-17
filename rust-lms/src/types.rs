@@ -88,7 +88,7 @@ pub trait StagedType {
 pub trait ConstantType: StagedType {
     /// Generate code for a constant value
     fn codegen_constant(
-        value: &Self::RuntimeValue<'static>,
+        value: &Self::RuntimeValue,
         builder: &mut FunctionBuilder,
     ) -> Value;
 }
@@ -131,7 +131,7 @@ pub struct UnitType;
 // =============================================================================
 
 impl StagedType for I64Type {
-    type RuntimeValue<'a> = i64;
+    type RuntimeValue = i64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
@@ -155,7 +155,7 @@ impl ConstantType for I64Type {
 impl CopyType for I64Type {}
 
 impl StagedType for U64Type {
-    type RuntimeValue<'a> = u64;
+    type RuntimeValue = u64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
@@ -179,7 +179,7 @@ impl ConstantType for U64Type {
 impl CopyType for U64Type {}
 
 impl StagedType for BoolType {
-    type RuntimeValue<'a> = bool;
+    type RuntimeValue = bool;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8
@@ -203,7 +203,7 @@ impl ConstantType for BoolType {
 impl CopyType for BoolType {}
 
 impl StagedType for F64Type {
-    type RuntimeValue<'a> = f64;
+    type RuntimeValue = f64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::F64
@@ -227,7 +227,7 @@ impl ConstantType for F64Type {
 impl CopyType for F64Type {}
 
 impl StagedType for UnitType {
-    type RuntimeValue<'a> = ();
+    type RuntimeValue = ();
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8 // Minimal representation, value is ignored

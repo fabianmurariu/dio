@@ -944,11 +944,11 @@ impl<'a, T: StagedType> Compiled<'a, T> {
     ///
     /// # Safety
     /// This is safe as long as the compilation was done correctly.
-    pub fn run(&self) -> T::RuntimeValue<'a>
+    pub fn run(&self) -> T::RuntimeValue
     where
-        T::RuntimeValue<'a>: Copy,
+        T::RuntimeValue: Copy,
     {
-        let func: fn() -> T::RuntimeValue<'a> = unsafe { std::mem::transmute(self.main_ptr) };
+        let func: fn() -> T::RuntimeValue = unsafe { std::mem::transmute(self.main_ptr) };
         func()
     }
 }
@@ -959,7 +959,7 @@ macro_rules! impl_compiled_as_fn {
     (0, $FunType:ident) => {
         impl<'a, OUT: StagedType> Compiled<'a, $FunType<OUT>> {
             /// Get the compiled function as a callable function pointer.
-            pub fn as_fn(&self) -> extern "C" fn() -> OUT::RuntimeValue<'a> {
+            pub fn as_fn(&self) -> extern "C" fn() -> OUT::RuntimeValue {
                 let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
                 let fn_ptr = get_ptr();
                 unsafe { std::mem::transmute(fn_ptr) }
@@ -974,7 +974,7 @@ macro_rules! impl_compiled_as_fn {
             /// Returns an `extern "C"` function pointer to match the System V calling
             /// convention used by Cranelift. This is important for structs passed by value,
             /// as Rust's default calling convention may differ from the C ABI.
-            pub fn as_fn(&self) -> extern "C" fn($($T::RuntimeValue<'a>),+) -> OUT::RuntimeValue<'a> {
+            pub fn as_fn(&self) -> extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue {
                 let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
                 let fn_ptr = get_ptr();
                 unsafe { std::mem::transmute(fn_ptr) }

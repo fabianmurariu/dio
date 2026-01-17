@@ -205,7 +205,7 @@ macro_rules! impl_fun_n {
         }
 
         impl<OUT: StagedType> StagedType for $FunType<OUT> {
-            type RuntimeValue<'a> = extern "C" fn() -> OUT::RuntimeValue<'a>;
+            type RuntimeValue = extern "C" fn() -> OUT::RuntimeValue;
 
             fn cranelift_type() -> cranelift_codegen::ir::Type {
                 types::I64
@@ -278,7 +278,7 @@ macro_rules! impl_fun_n {
         }
 
         impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
-            type RuntimeValue<'a> = extern "C" fn($($T::RuntimeValue<'a>,)+) -> OUT::RuntimeValue<'a>;
+            type RuntimeValue = extern "C" fn($($T::RuntimeValue,)+) -> OUT::RuntimeValue;
 
             fn cranelift_type() -> cranelift_codegen::ir::Type {
                 types::I64

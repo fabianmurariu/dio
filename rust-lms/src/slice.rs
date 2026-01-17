@@ -141,10 +141,10 @@ pub struct SliceLen<S> {
     slice: S,
 }
 
-impl<S, T> Staged for SliceLen<S>
+impl<'a, S, T> Staged for SliceLen<S>
 where
-    S: Staged<Out = SRef<Slice<T>>>,
-    T: StagedType,
+    S: Staged<Out = SRef<'a, Slice<T>>>,
+    T: StagedType + 'a,
 {
     type Out = U64Type;
 
@@ -164,10 +164,10 @@ pub struct SliceLenMut<S> {
     slice: S,
 }
 
-impl<S, T> Staged for SliceLenMut<S>
+impl<'a, S, T> Staged for SliceLenMut<S>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
-    T: StagedType,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
+    T: StagedType + 'a,
 {
     type Out = U64Type;
 
@@ -209,16 +209,17 @@ where
 
 /// Get the raw mutable data pointer from a mutable slice.
 #[derive(Clone, Copy)]
-pub struct SliceAsMutPtr<S> {
+pub struct SliceAsMutPtr<'a, S> {
     slice: S,
+    _phantom: PhantomData<&'a mut ()>,
 }
 
-impl<S, T> Staged for SliceAsMutPtr<S>
+impl<'a, S, T> Staged for SliceAsMutPtr<'a, S>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
-    T: StagedType,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
+    T: StagedType + 'a,
 {
-    type Out = SRefMut<T>;
+    type Out = SRefMut<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
@@ -234,18 +235,19 @@ where
 
 /// Get an immutable reference to an element without bounds checking.
 #[derive(Clone, Copy)]
-pub struct SliceGetRefUnchecked<S, I> {
+pub struct SliceGetRefUnchecked<'a, S, I> {
     slice: S,
     index: I,
+    _phantom: PhantomData<&'a ()>,
 }
 
-impl<S, I, T> Staged for SliceGetRefUnchecked<S, I>
+impl<'a, S, I, T> Staged for SliceGetRefUnchecked<'a, S, I>
 where
-    S: Staged<Out = SRef<Slice<T>>>,
+    S: Staged<Out = SRef<'a, Slice<T>>>,
     I: Staged<Out = U64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
 {
-    type Out = SRef<T>;
+    type Out = SRef<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
@@ -267,18 +269,19 @@ where
 
 /// Get a mutable reference to an element without bounds checking.
 #[derive(Clone, Copy)]
-pub struct SliceGetMutUnchecked<S, I> {
+pub struct SliceGetMutUnchecked<'a, S, I> {
     slice: S,
     index: I,
+    _phantom: PhantomData<&'a mut ()>,
 }
 
-impl<S, I, T> Staged for SliceGetMutUnchecked<S, I>
+impl<'a, S, I, T> Staged for SliceGetMutUnchecked<'a, S, I>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
     I: Staged<Out = U64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
 {
-    type Out = SRefMut<T>;
+    type Out = SRefMut<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
@@ -307,11 +310,11 @@ pub struct SliceGetUnchecked<S, I> {
     index: I,
 }
 
-impl<S, I, T> Staged for SliceGetUnchecked<S, I>
+impl<'a, S, I, T> Staged for SliceGetUnchecked<S, I>
 where
-    S: Staged<Out = SRef<Slice<T>>>,
+    S: Staged<Out = SRef<'a, Slice<T>>>,
     I: Staged<Out = U64Type>,
-    T: StagedType + CopyType,
+    T: StagedType + CopyType + 'a,
 {
     type Out = T;
 
@@ -345,11 +348,11 @@ pub struct SliceGetUncheckedMut<S, I> {
     index: I,
 }
 
-impl<S, I, T> Staged for SliceGetUncheckedMut<S, I>
+impl<'a, S, I, T> Staged for SliceGetUncheckedMut<S, I>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
     I: Staged<Out = U64Type>,
-    T: StagedType + CopyType,
+    T: StagedType + CopyType + 'a,
 {
     type Out = T;
 
@@ -385,12 +388,12 @@ pub struct SliceSetUnchecked<S, I, V> {
     value: V,
 }
 
-impl<S, I, V, T> Staged for SliceSetUnchecked<S, I, V>
+impl<'a, S, I, V, T> Staged for SliceSetUnchecked<S, I, V>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
     I: Staged<Out = U64Type>,
     V: Staged<Out = T>,
-    T: StagedType,
+    T: StagedType + 'a,
 {
     type Out = UnitType;
 
@@ -435,14 +438,14 @@ pub struct SliceSliceUnchecked<S, START, END> {
     end: END,
 }
 
-impl<S, START, END, T> Staged for SliceSliceUnchecked<S, START, END>
+impl<'a, S, START, END, T> Staged for SliceSliceUnchecked<S, START, END>
 where
-    S: Staged<Out = SRef<Slice<T>>>,
+    S: Staged<Out = SRef<'a, Slice<T>>>,
     START: Staged<Out = U64Type>,
     END: Staged<Out = U64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
 {
-    type Out = SRef<Slice<T>>;
+    type Out = SRef<'a, Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
@@ -493,14 +496,14 @@ pub struct SliceSliceMutUnchecked<S, START, END> {
     end: END,
 }
 
-impl<S, START, END, T> Staged for SliceSliceMutUnchecked<S, START, END>
+impl<'a, S, START, END, T> Staged for SliceSliceMutUnchecked<S, START, END>
 where
-    S: Staged<Out = SRefMut<Slice<T>>>,
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
     START: Staged<Out = U64Type>,
     END: Staged<Out = U64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
 {
-    type Out = SRefMut<Slice<T>>;
+    type Out = SRefMut<'a, Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let slice_ptr = self.slice.codegen(ctx);
@@ -542,15 +545,15 @@ where
 // =============================================================================
 
 /// Extension trait for immutable slice operations.
-pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clone {
+pub trait SliceRefOps<'a, T: StagedType + 'a>: Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone {
     /// Get the length of the slice.
     fn len(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
     /// Get the raw data pointer.
-    fn as_ptr(self) -> SliceAsPtr<Self> {
-        SliceAsPtr { slice: self }
+    fn as_ptr(self) -> SliceAsPtr<'a, Self> {
+        SliceAsPtr { slice: self, _phantom: PhantomData }
     }
 
     /// Get a reference to an element without bounds checking.
@@ -558,13 +561,14 @@ pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clo
     /// Accepts any value that can be converted into a u64 staged expression for the index.
     /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
     /// `arr.get_ref_unchecked(Const::<U64Type>::new(5))`.
-    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
+    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<'a, Self, I::Staged>
     where
         I: IntoStaged<U64Type>,
     {
         SliceGetRefUnchecked {
             slice: self,
             index: index.into_staged(),
+            _phantom: PhantomData,
         }
     }
 
@@ -600,32 +604,33 @@ pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clo
     }
 }
 
-impl<T: StagedType, S> SliceRefOps<T> for S where S: Staged<Out = SRef<Slice<T>>> + Clone {}
+impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where S: Staged<Out = SRef<'a, Slice<T>>> + Clone {}
 
 // =============================================================================
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
 // =============================================================================
 
 /// Extension trait for mutable slice operations.
-pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized + Clone {
+pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized + Clone {
     /// Get the length of the slice.
     fn len(self) -> SliceLenMut<Self> {
         SliceLenMut { slice: self }
     }
 
     /// Get the raw mutable data pointer.
-    fn as_mut_ptr(self) -> SliceAsMutPtr<Self> {
-        SliceAsMutPtr { slice: self }
+    fn as_mut_ptr(self) -> SliceAsMutPtr<'a, Self> {
+        SliceAsMutPtr { slice: self, _phantom: PhantomData }
     }
 
     /// Get a mutable reference to an element without bounds checking.
-    fn get_mut_unchecked<I>(self, index: I) -> SliceGetMutUnchecked<Self, I::Staged>
+    fn get_mut_unchecked<I>(self, index: I) -> SliceGetMutUnchecked<'a, Self, I::Staged>
     where
         I: IntoStaged<U64Type>,
     {
         SliceGetMutUnchecked {
             slice: self,
             index: index.into_staged(),
+            _phantom: PhantomData,
         }
     }
 
@@ -679,7 +684,7 @@ pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized + 
     }
 }
 
-impl<T: StagedType, S> SliceMutOps<T> for S where S: Staged<Out = SRefMut<Slice<T>>> + Clone {}
+impl<'a, T: StagedType + 'a, S> SliceMutOps<'a, T> for S where S: Staged<Out = SRefMut<'a, Slice<T>>> + Clone {}
 
 #[cfg(test)]
 mod tests {

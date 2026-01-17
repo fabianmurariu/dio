@@ -120,7 +120,7 @@ pub struct LoadRef<'a, P> {
 impl<'a, P, T, Tag> Staged for LoadRef<'a, P>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     type Out = T;
@@ -137,7 +137,7 @@ where
 pub fn load_ref<'a, P, T, Tag>(ptr: P) -> LoadRef<'a, P>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     LoadRef {
@@ -147,10 +147,10 @@ where
 }
 
 /// Alias for `load_ref` for raw pointer semantics
-pub fn load<'a, P, T>(ptr: P) -> LoadRef<'a, P>
+pub fn load<P, T>(ptr: P) -> LoadRef<'static, P>
 where
     P: Staged<Out = SPtr<T>>,
-    T: StagedType,
+    T: StagedType + 'static,
 {
     LoadRef {
         ptr,
@@ -167,7 +167,7 @@ pub struct LoadMutRef<'a, P> {
 impl<'a, P, T, Tag> Staged for LoadMutRef<'a, P>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     type Out = T;
@@ -184,7 +184,7 @@ where
 pub fn load_ref_mut<'a, P, T, Tag>(ptr: P) -> LoadMutRef<'a, P>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     LoadMutRef {
@@ -194,10 +194,10 @@ where
 }
 
 /// Alias for `load_ref_mut` for raw pointer semantics
-pub fn load_mut<'a, P, T>(ptr: P) -> LoadMutRef<'a, P>
+pub fn load_mut<P, T>(ptr: P) -> LoadMutRef<'static, P>
 where
     P: Staged<Out = SMutPtr<T>>,
-    T: StagedType,
+    T: StagedType + 'static,
 {
     LoadMutRef {
         ptr,
@@ -220,7 +220,7 @@ impl<'a, P, V, T, Tag> Staged for Store<'a, P, V>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     V: Staged<Out = T>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     type Out = crate::types::UnitType;
@@ -242,7 +242,7 @@ pub fn store_ref<'a, P, V, T, Tag>(ptr: P, val: V) -> Store<'a, P, V>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     V: Staged<Out = T>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     Store {
@@ -253,11 +253,11 @@ where
 }
 
 /// Create a store operation (for raw pointers)
-pub fn store<'a, P, V, T>(ptr: P, val: V) -> Store<'a, P, V>
+pub fn store<P, V, T>(ptr: P, val: V) -> Store<'static, P, V>
 where
     P: Staged<Out = SMutPtr<T>>,
     V: Staged<Out = T>,
-    T: StagedType,
+    T: StagedType + 'static,
 {
     Store {
         ptr,
@@ -278,11 +278,11 @@ pub struct PtrOffset<'a, P, I> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, P, I, T, Tag> Staged for PtrOffset<'a, P, I>
+impl<'a, P, I, T, Tag: 'a> Staged for PtrOffset<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
     SRef<'a, T, Tag>: StagedType,
 {
     type Out = SRef<'a, T, Tag>;
@@ -304,7 +304,7 @@ pub fn ptr_offset<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffset<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     PtrOffset { ptr, index , _marker: PhantomData }
@@ -318,11 +318,11 @@ pub struct PtrOffsetMut<'a, P, I> {
     _marker: PhantomData<&'a mut ()>,
 }
 
-impl<'a, P, I, T, Tag> Staged for PtrOffsetMut<'a, P, I>
+impl<'a, P, I, T, Tag: 'a> Staged for PtrOffsetMut<'a, P, I>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
     SRefMut<'a, T, Tag>: StagedType,
 {
     type Out = SRefMut<'a, T, Tag>;
@@ -344,7 +344,7 @@ pub fn ptr_offset_mut<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffsetMut<'a, P,
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
+    T: StagedType + 'a,
     Tag: 'a,
 {
     PtrOffsetMut { ptr, index, _marker: PhantomData }
@@ -361,12 +361,11 @@ pub struct ArrayIndex<'a, P, I> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, P, I, T, Tag> Staged for ArrayIndex<'a, P, I>
+impl<'a, P, I, T, Tag: 'a> Staged for ArrayIndex<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
-    Tag: 'a,
+    T: StagedType + 'a,
 {
     type Out = T;
 
@@ -387,12 +386,11 @@ where
 }
 
 /// Create an array indexing operation
-pub fn array_index<'a, P, I, T, Tag>(ptr: P, index: I) -> ArrayIndex<'a, P, I>
+pub fn array_index<'a, P, I, T, Tag: 'a>(ptr: P, index: I) -> ArrayIndex<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = crate::types::I64Type>,
-    T: StagedType,
-    Tag: 'a,
+    T: StagedType + 'a,
 {
     ArrayIndex { ptr, index, _marker: PhantomData }
 }

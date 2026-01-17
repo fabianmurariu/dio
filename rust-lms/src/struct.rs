@@ -110,7 +110,7 @@ where
     P::Out: StagedType,
     F: Field,
 {
-    type Out = SRef<F::Out>;
+    type Out = SRef<'static, F::Out>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
@@ -149,7 +149,7 @@ where
     P::Out: StagedType,
     F: Field,
 {
-    type Out = SRefMut<F::Out>;
+    type Out = SRefMut<'static, F::Out>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
@@ -312,10 +312,10 @@ pub trait StructFieldAccess<T: StagedType>: Sized + Staged {
 impl<T: StagedType> StructFieldAccess<T> for Var<T> where Var<T>: Staged {}
 
 // Implement for VarRef<SRef<T>> for composability
-impl<T: StagedType> StructFieldAccess<T> for Var<SRef<T>> where Var<SRef<T>>: Staged {}
+impl<'a, T: StagedType> StructFieldAccess<T> for Var<SRef<'a, T>> where Var<SRef<'a, T>>: Staged {}
 
 // Implement for VarRef<SMutRef<T>> for composability
-impl<T: StagedType> StructFieldAccess<T> for Var<SRefMut<T>> where Var<SRefMut<T>>: Staged {}
+impl<'a, T: StagedType> StructFieldAccess<T> for Var<SRefMut<'a, T>> where Var<SRefMut<'a, T>>: Staged {}
 
 // Implement for FieldRef to enable chaining (e.g., outer.get_ref(field1).get(field2))
 // FieldRef<P, F> implements Staged<Out = SRef<T>> when F: Field<Out = T>
@@ -323,8 +323,8 @@ impl<P, F, T> StructFieldAccess<T> for FieldRef<P, F>
 where
     P: Staged,
     F: Field<Out = T>,
-    T: StagedType,
-    FieldRef<P, F>: Staged<Out = SRef<T>>,
+    T: StagedType + 'static,
+    FieldRef<P, F>: Staged<Out = SRef<'static, T>>,
 {
 }
 
@@ -333,8 +333,8 @@ impl<P, F, T> StructFieldAccess<T> for FieldMutRef<P, F>
 where
     P: Staged,
     F: Field<Out = T>,
-    T: StagedType,
-    FieldMutRef<P, F>: Staged<Out = SRefMut<T>>,
+    T: StagedType + 'static,
+    FieldMutRef<P, F>: Staged<Out = SRefMut<'static, T>>,
 {
 }
 

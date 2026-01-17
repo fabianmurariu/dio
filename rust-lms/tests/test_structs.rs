@@ -128,7 +128,7 @@ fn test_nested_struct_by_ref_access() {
     let get_inner_value_by_ref =
         compiler.fun1("get_inner_value_by_ref", |_ctx, outer: Var<SRef<Outer>>| {
             // Get reference to inner field, then get its value
-            outer.get_ref(OuterType::inner).get(InnerType::value)
+            outer.get_ref_mut(OuterType::inner).get(InnerType::value)
         });
 
     let compiled = compiler

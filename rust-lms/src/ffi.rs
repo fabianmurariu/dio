@@ -166,7 +166,7 @@ pub struct FatSliceType<T> {
 }
 
 impl<T: StagedType> StagedType for FatSliceType<T> {
-    type RuntimeValue<'a> = FatSlice<T::RuntimeValue<'a>>;
+    type RuntimeValue = FatSlice<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         // FatSlice is 16 bytes (ptr + len), represented as pointer to stack slot
@@ -201,7 +201,7 @@ pub struct FatSliceMutType<T> {
 }
 
 impl<T: StagedType> StagedType for FatSliceMutType<T> {
-    type RuntimeValue<'a> = FatSliceMut<T::RuntimeValue<'a>>;
+    type RuntimeValue = FatSliceMut<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64

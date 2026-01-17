@@ -170,7 +170,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         }
 
         impl ::rust_lms::types::StagedType for #struct_name {
-            type RuntimeValue<'a> = #struct_name;
+            type RuntimeValue = #struct_name;
 
             fn cranelift_type() -> ::cranelift_codegen::ir::Type {
                 // Internally we use I64 (pointer to stack slot)
