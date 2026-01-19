@@ -98,10 +98,10 @@ fn test_nested_struct_access() {
 
     // fn get_inner_value(outer: Outer) -> i64
     // Access: outer.inner.value
-    // Note: Outer is passed by VALUE
+    // Note: Outer is passed by VALUE, so we use .field() (not .get_ref())
     let get_inner_value = compiler.fun1("get_inner_value", |_ctx, outer: Var<Outer>| {
-        // Get reference to inner field, then get its value
-        outer.get_ref(OuterType::inner).get(InnerType::value)
+        // Navigate to inner field, then load its value
+        outer.field(OuterType::inner).get(InnerType::value)
     });
 
     let compiled = compiler
@@ -128,7 +128,8 @@ fn test_nested_struct_by_ref_access() {
     let get_inner_value_by_ref =
         compiler.fun1("get_inner_value_by_ref", |_ctx, outer: Var<SRef<Outer>>| {
             // Get reference to inner field, then get its value
-            outer.get_ref_mut(OuterType::inner).get(InnerType::value)
+            // Note: Using get_ref (not get_ref_mut) since we have an immutable reference
+            outer.get_ref(OuterType::inner).get(InnerType::value)
         });
 
     let compiled = compiler
@@ -151,8 +152,10 @@ fn test_nested_struct_multiple_access() {
 
     // fn sum_outer(outer: Outer) -> i64
     // Returns outer.inner.value + outer.extra
+    // Note: Using .field() instead of .get_ref() since outer is by-value
+    // (can't return references from by-value parameters)
     let sum_outer = compiler.fun1("sum_outer", |_ctx, outer: Var<Outer>| {
-        let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
+        let inner_val = outer.field(OuterType::inner).get(InnerType::value);
         let extra = outer.get(OuterType::extra);
 
         add(inner_val, extra)
@@ -166,6 +169,30 @@ fn test_nested_struct_multiple_access() {
         extra: 50,
     };
     let result = f(test_struct); // Pass by value
+
+    assert_eq!(result, 150); // 100 + 50
+}
+#[test]
+fn test_nested_struct_multiple_access_ref() {
+    let mut compiler = Compiler::new();
+
+    // fn sum_outer(outer: Outer) -> i64
+    // Returns outer.inner.value + outer.extra
+    let sum_outer = compiler.fun1("sum_outer", |_ctx, outer: Var<SRef<Outer>>| {
+        let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
+        let extra = outer.get(OuterType::extra);
+
+        add(inner_val, extra)
+    });
+
+    let compiled = compiler.compile(sum_outer).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    let test_struct = Outer {
+        inner: Inner { value: 100 },
+        extra: 50,
+    };
+    let result = f(&test_struct); // Pass by value
 
     assert_eq!(result, 150); // 100 + 50
 }

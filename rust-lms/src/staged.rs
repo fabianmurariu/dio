@@ -46,10 +46,14 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             return func_ref;
         }
 
-        let func_id = self.extern_func_ids.get(&extern_id)
+        let func_id = self
+            .extern_func_ids
+            .get(&extern_id)
             .expect(&format!("Extern function {} not found", extern_id));
 
-        let func_ref = self.module.declare_func_in_func(*func_id, self.builder.func);
+        let func_ref = self
+            .module
+            .declare_func_in_func(*func_id, self.builder.func);
         self.extern_func_refs.insert(extern_id, func_ref);
         func_ref
     }
@@ -91,7 +95,7 @@ pub struct Var<T: StagedType> {
 }
 
 // Manually implement Clone and Copy to avoid requiring T: Clone
-impl<T: StagedType> Clone for Var<T> {
+impl<T: StagedType + Copy> Clone for Var<T> {
     fn clone(&self) -> Self {
         Var {
             id: self.id,
@@ -100,7 +104,7 @@ impl<T: StagedType> Clone for Var<T> {
     }
 }
 
-impl<T: StagedType> Copy for Var<T> {}
+impl<T: StagedType + Copy> Copy for Var<T> {}
 
 impl<T: StagedType> Var<T> {
     /// Create a new variable reference with the given ID
@@ -382,23 +386,26 @@ impl<T: StagedType, EXPR> InitVar<T, EXPR> {
     }
 
     /// Get the underlying variable reference
-    pub fn var(&self) -> Var<T> {
+    pub fn var(&self) -> Var<T>
+    where
+        T: Copy,
+    {
         self.var
     }
 }
 
 // Manually implement Clone (Var<T> is always Copy, clone the expr)
-impl<T: StagedType, EXPR: Clone> Clone for InitVar<T, EXPR> {
+impl<T: StagedType + Copy, EXPR: Clone> Clone for InitVar<T, EXPR> {
     fn clone(&self) -> Self {
         InitVar {
-            var: self.var, // Var<T> is Copy
+            var: self.var.clone(), // Var<T> is Copy
             init: self.init.clone(),
         }
     }
 }
 
 // InitVar is Copy when EXPR is Copy (like Const<T>)
-impl<T: StagedType, EXPR: Copy> Copy for InitVar<T, EXPR> {}
+impl<T: StagedType + Copy, EXPR: Copy> Copy for InitVar<T, EXPR> {}
 
 // Deref to allow transparent access to the underlying Var
 impl<T: StagedType, EXPR> std::ops::Deref for InitVar<T, EXPR> {

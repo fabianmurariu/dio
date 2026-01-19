@@ -587,7 +587,7 @@ impl<'a> Compiler<'a> {
     /// - Parameters: Multiple i64 values are received, stored to a stack slot,
     ///   and the variable holds the stack slot pointer
     /// - Returns: The result pointer is used to load multiple i64 values for return
-    pub fn compile<S: Staged + 'static>(
+    pub fn compile<S: Staged>(
         self,
         expr: S,
     ) -> Result<Compiled<'a, S::Out>, CompileError> {
