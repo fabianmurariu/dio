@@ -57,16 +57,16 @@ pub struct StructInfo {
 // =============================================================================
 
 /// Internal storage for a function definition (type-erased body)
-struct FunDef {
-    name: String,
+pub(crate) struct FunDef {
+    pub name: String,
     /// The body expression, type-erased but we know its signature
-    body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
+    pub body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
     /// Type info for each parameter (supports 0..N parameters)
-    param_infos: Vec<TypeInfo>,
+    pub param_infos: Vec<TypeInfo>,
     /// Return type info
-    return_info: TypeInfo,
+    pub return_info: TypeInfo,
     /// Variable IDs for each parameter (one per logical parameter)
-    param_var_ids: Vec<usize>,
+    pub param_var_ids: Vec<usize>,
 }
 
 // =============================================================================
@@ -78,7 +78,7 @@ struct FunDef {
 /// This is passed to closures in `fun1` and `fun1_rec` to allow local
 /// variable creation without exposing the entire Compiler.
 pub struct VarBuilder<'a> {
-    next_var_id: &'a mut usize,
+    pub(crate) next_var_id: &'a mut usize,
 }
 
 impl<'a> VarBuilder<'a> {
@@ -249,32 +249,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(&mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        // Create the parameter variable
-        let param_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param_var = Var::<A>::new(param_id);
-
-        // Create a VarBuilder for local variable creation
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-
-        // Call body_fn immediately to build the expression tree
-        let body_expr = body_fn(&mut var_builder, param_var);
-
-        // Store the function definition
-        let func_id = self.functions.len();
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![TypeInfo::from_staged_type::<A>()],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param_id],
-        };
-
-        self.functions.push(Some(func_def));
-
-        FunRef::new(func_id)
+        FunDef::make_fun1(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a recursive unary function.
@@ -299,39 +274,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(FunRef<A, OUT>, &mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        // Create the parameter variable
-        let param_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param_var = Var::<A>::new(param_id);
-
-        // Pre-allocate the function ID and create FunRef
-        let func_id = self.functions.len();
-        let func_ref = FunRef::new(func_id);
-
-        // Push a placeholder first (None) to reserve the slot
-        self.functions.push(None);
-
-        // Create a VarBuilder for local variable creation
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-
-        // Now call body_fn with the function reference, VarBuilder, and parameter
-        let body_expr = body_fn(func_ref, &mut var_builder, param_var);
-
-        // Create the actual function definition
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![TypeInfo::from_staged_type::<A>()],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param_id],
-        };
-
-        // Replace the placeholder with the actual definition
-        self.functions[func_id] = Some(func_def);
-
-        FunRef::new(func_id)
+        FunDef::make_fun1_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a zero-argument function.
@@ -341,22 +284,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(&mut VarBuilder) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(&mut var_builder);
-
-        let func_id = self.functions.len();
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![],
-        };
-
-        self.functions.push(Some(func_def));
-        FunRef0::new(func_id)
+        FunDef::make_fun0(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a recursive zero-argument function.
@@ -366,25 +294,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(FunRef0<OUT>, &mut VarBuilder) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let func_id = self.functions.len();
-        let func_ref = FunRef0::new(func_id);
-        self.functions.push(None);
-
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(func_ref, &mut var_builder);
-
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![],
-        };
-
-        self.functions[func_id] = Some(func_def);
-        FunRef0::new(func_id)
+        FunDef::make_fun0_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a binary function.
@@ -396,33 +306,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(&mut VarBuilder, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let param0_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param0_var = Var::<A>::new(param0_id);
-
-        let param1_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param1_var = Var::<B>::new(param1_id);
-
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(&mut var_builder, param0_var, param1_var);
-
-        let func_id = self.functions.len();
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![
-                TypeInfo::from_staged_type::<A>(),
-                TypeInfo::from_staged_type::<B>(),
-            ],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param0_id, param1_id],
-        };
-
-        self.functions.push(Some(func_def));
-        FunRef2::new(func_id)
+        FunDef::make_fun2(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a recursive binary function.
@@ -438,36 +322,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(FunRef2<A, B, OUT>, &mut VarBuilder, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let param0_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param0_var = Var::<A>::new(param0_id);
-
-        let param1_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param1_var = Var::<B>::new(param1_id);
-
-        let func_id = self.functions.len();
-        let func_ref = FunRef2::new(func_id);
-        self.functions.push(None);
-
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(func_ref, &mut var_builder, param0_var, param1_var);
-
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![
-                TypeInfo::from_staged_type::<A>(),
-                TypeInfo::from_staged_type::<B>(),
-            ],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param0_id, param1_id],
-        };
-
-        self.functions[func_id] = Some(func_def);
-        FunRef2::new(func_id)
+        FunDef::make_fun2_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a ternary function.
@@ -484,38 +339,7 @@ impl<'a> Compiler<'a> {
         F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let param0_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param0_var = Var::<A>::new(param0_id);
-
-        let param1_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param1_var = Var::<B>::new(param1_id);
-
-        let param2_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param2_var = Var::<C>::new(param2_id);
-
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(&mut var_builder, param0_var, param1_var, param2_var);
-
-        let func_id = self.functions.len();
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![
-                TypeInfo::from_staged_type::<A>(),
-                TypeInfo::from_staged_type::<B>(),
-                TypeInfo::from_staged_type::<C>(),
-            ],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param0_id, param1_id, param2_id],
-        };
-
-        self.functions.push(Some(func_def));
-        FunRef3::new(func_id)
+        FunDef::make_fun3(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Define a recursive ternary function.
@@ -532,47 +356,207 @@ impl<'a> Compiler<'a> {
         F: FnOnce(FunRef3<A, B, C, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        let param0_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param0_var = Var::<A>::new(param0_id);
+        FunDef::make_fun3_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        let param1_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param1_var = Var::<B>::new(param1_id);
+    /// Define a 4-parameter function.
+    pub fn fun4<A, B, C, D, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef4<A, B, C, D, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        OUT: StagedType,
+        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun4(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        let param2_id = self.next_var_id;
-        self.next_var_id += 1;
-        let param2_var = Var::<C>::new(param2_id);
+    /// Define a recursive 4-parameter function.
+    pub fn fun4_rec<A, B, C, D, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef4<A, B, C, D, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        OUT: StagedType,
+        F: FnOnce(FunRef4<A, B, C, D, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun4_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        let func_id = self.functions.len();
-        let func_ref = FunRef3::new(func_id);
-        self.functions.push(None);
+    /// Define a 5-parameter function.
+    pub fn fun5<A, B, C, D, E, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef5<A, B, C, D, E, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        OUT: StagedType,
+        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun5(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        let mut var_builder = VarBuilder {
-            next_var_id: &mut self.next_var_id,
-        };
-        let body_expr = body_fn(
-            func_ref,
-            &mut var_builder,
-            param0_var,
-            param1_var,
-            param2_var,
-        );
+    /// Define a recursive 5-parameter function.
+    pub fn fun5_rec<A, B, C, D, E, OUT, F, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: F,
+    ) -> FunRef5<A, B, C, D, E, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        OUT: StagedType,
+        F: FnOnce(FunRef5<A, B, C, D, E, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun5_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        let func_def = FunDef {
-            name: name.to_string(),
-            body: Box::new(move |ctx: &mut CompilationContext| body_expr.codegen(ctx)),
-            param_infos: vec![
-                TypeInfo::from_staged_type::<A>(),
-                TypeInfo::from_staged_type::<B>(),
-                TypeInfo::from_staged_type::<C>(),
-            ],
-            return_info: TypeInfo::from_staged_type::<OUT>(),
-            param_var_ids: vec![param0_id, param1_id, param2_id],
-        };
+    /// Define a 6-parameter function.
+    pub fn fun6<A, B, C, D, E, FF, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef6<A, B, C, D, E, FF, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun6(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
 
-        self.functions[func_id] = Some(func_def);
-        FunRef3::new(func_id)
+    /// Define a recursive 6-parameter function.
+    pub fn fun6_rec<A, B, C, D, E, FF, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef6<A, B, C, D, E, FF, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(FunRef6<A, B, C, D, E, FF, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun6_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
+
+    /// Define a 7-parameter function.
+    pub fn fun7<A, B, C, D, E, FF, G, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef7<A, B, C, D, E, FF, G, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        G: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun7(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
+
+    /// Define a recursive 7-parameter function.
+    pub fn fun7_rec<A, B, C, D, E, FF, G, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef7<A, B, C, D, E, FF, G, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        G: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(FunRef7<A, B, C, D, E, FF, G, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun7_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
+
+    /// Define an 8-parameter function.
+    pub fn fun8<A, B, C, D, E, FF, G, H, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef8<A, B, C, D, E, FF, G, H, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        G: StagedType,
+        H: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun8(&mut self.next_var_id, &mut self.functions, name, body_fn)
+    }
+
+    /// Define a recursive 8-parameter function.
+    pub fn fun8_rec<A, B, C, D, E, FF, G, H, OUT, FN, BODY>(
+        &mut self,
+        name: &str,
+        body_fn: FN,
+    ) -> FunRef8<A, B, C, D, E, FF, G, H, OUT>
+    where
+        A: StagedType,
+        B: StagedType,
+        C: StagedType,
+        D: StagedType,
+        E: StagedType,
+        FF: StagedType,
+        G: StagedType,
+        H: StagedType,
+        OUT: StagedType,
+        FN: FnOnce(FunRef8<A, B, C, D, E, FF, G, H, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
+        BODY: Staged<Out = OUT> + 'static,
+    {
+        FunDef::make_fun8_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
     }
 
     /// Compile an expression to native code.

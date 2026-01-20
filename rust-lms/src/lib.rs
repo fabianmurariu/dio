@@ -102,6 +102,7 @@
 pub mod control;
 pub mod ffi;
 pub mod func;
+pub(crate) mod func_def;
 pub(crate) mod func_impl;
 pub mod num;
 pub mod option;
