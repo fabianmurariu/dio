@@ -4,71 +4,516 @@
 
 This document provides a concrete implementation plan for building a SQL query execution engine that:
 - Reads Parquet files using the `parquet` and `arrow` crates
-- Parses SQL queries using `sqlparser`
-- Compiles query execution pipelines using `rust-lms` (Cranelift JIT)
+- Parses SQL using `datafusion-sql` and `datafusion-expr` (logical plan + expressions)
+- Compiles query pipelines using `rust-lms` (Cranelift JIT)
+- Operates **zero-copy** on Arrow RecordBatches via staged array wrappers
 - Fuses operators until pipeline breakers (join/group by)
-- Processes data in chunks (Arrow RecordBatches)
+- Uses **runtime Rust code** for complex operations (hash tables)
 
-The approach follows the **First Futamura Projection**: we write a query *interpreter* using rust-lms staged types, and through specialization, it becomes a query *compiler* that generates optimized native code.
+**Key Principles:**
+1. **Zero-copy**: Staged arrays wrap pointers directly into Arrow buffers - no data copying
+2. **Hybrid execution**: Simple operations (scan, filter, project) are JIT-compiled; complex operations (hash tables) remain in Rust and are called via external functions
+3. **Pipeline segments**: Each segment compiles to one function; Rust orchestrates between segments
 
 ---
 
 ## Architecture
 
 ```
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│  SQL Query  │────▶│   Parser    │────▶│  Logical    │────▶│  Physical   │
-│   String    │     │ (sqlparser) │     │    Plan     │     │    Plan     │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
-                                                                   │
-                                                                   ▼
-┌─────────────┐     ┌─────────────┐     ┌─────────────┐     ┌─────────────┐
-│   Result    │◀────│   Execute   │◀────│  Compiled   │◀────│  rust-lms   │
-│  (Arrow)    │     │   (JIT)     │     │   Code      │     │  Compiler   │
-└─────────────┘     └─────────────┘     └─────────────┘     └─────────────┘
+┌─────────────┐     ┌─────────────────┐     ┌─────────────┐
+│  SQL Query  │────▶│  datafusion-sql │────▶│  LogicalPlan│
+│   String    │     │    + expr       │     │  (from DF)  │
+└─────────────┘     └─────────────────┘     └─────────────┘
+                                                   │
+                                                   ▼
+┌─────────────┐     ┌─────────────┐     ┌─────────────────┐
+│   Result    │◀────│   Pipeline  │◀────│ Physical Plan   │
+│  (Arrow)    │     │ Orchestrator│     │ (our pipelines) │
+└─────────────┘     └─────────────┘     └─────────────────┘
+                          │
+           ┌──────────────┼──────────────┐
+           ▼              ▼              ▼
+    ┌────────────┐ ┌────────────┐ ┌────────────┐
+    │ Pipeline 1 │ │ Pipeline 2 │ │ Pipeline N │
+    │  (JIT fn)  │ │  (JIT fn)  │ │  (JIT fn)  │
+    └────────────┘ └────────────┘ └────────────┘
+           │              │              │
+           └──────────────┼──────────────┘
+                          ▼
+                 ┌─────────────────┐
+                 │  Runtime Rust   │
+                 │  (hash tables,  │
+                 │   allocators)   │
+                 └─────────────────┘
+```
+
+### Execution Model
+
+1. **Pipeline 1** (build side): `scan → filter → project → hash_table_insert()`
+   - JIT-compiled loop over input RecordBatch
+   - Calls external Rust function to insert into hash table
+
+2. **Pipeline 2** (probe side): `scan → filter → hash_table_probe() → project → output`
+   - JIT-compiled loop over input RecordBatch
+   - Calls external Rust function to probe hash table
+   - Continues JIT-compiled processing of matches
+
+---
+
+## Phase 1: Staged Array Types (Zero-Copy Arrow Integration)
+
+This is the foundation. Staged arrays wrap Arrow array buffers with zero copying.
+
+### 1.1 Core Staged Array Traits
+
+```rust
+// src/staged_arrays/mod.rs
+
+use rust_lms::prelude::*;
+
+/// Marker trait for types that can be elements of staged arrays
+pub trait StagedElement: StagedType {
+    /// The Rust type this represents
+    type Native;
+}
+
+impl StagedElement for I64Type {
+    type Native = i64;
+}
+
+impl StagedElement for F64Type {
+    type Native = f64;
+}
+
+impl StagedElement for BoolType {
+    type Native = bool;
+}
+
+// StringView is represented as i128 (16 bytes)
+impl StagedElement for I128Type {
+    type Native = i128;
+}
+```
+
+### 1.2 Primitive Staged Array (Int64, Float64)
+
+For primitive arrays, Arrow stores values contiguously.
+
+```rust
+// src/staged_arrays/primitive.rs
+
+use rust_lms::prelude::*;
+
+/// A staged primitive array - wraps Arrow PrimitiveArray<T> zero-copy
+///
+/// Arrow layout for PrimitiveArray<Int64>:
+/// - data_ptr: *const i64 (values buffer)
+/// - length: usize
+/// - validity_ptr: *const u8 (null bitmap, optional)
+///
+/// All pointers come directly from Arrow buffers - NO COPYING
+#[derive(Clone)]
+pub struct StagedPrimitiveArray<T: StagedElement> {
+    /// Pointer to values buffer (from Arrow)
+    pub data_ptr: Var<SPtr<T>>,
+    /// Number of elements
+    pub len: Var<U64Type>,
+    /// Pointer to validity bitmap (null = bit is 0)
+    /// If all values are valid, this can be null pointer
+    pub validity_ptr: Var<SPtr<U8Type>>,
+    /// Whether validity bitmap is present
+    pub has_validity: bool,  // Static - known at compile time
+}
+
+impl<T: StagedElement> StagedPrimitiveArray<T> {
+    /// Create from Arrow array pointers (called at staging time)
+    ///
+    /// The pointers are passed as function arguments at runtime,
+    /// but the structure (which pointers exist) is known at staging time
+    pub fn from_arrow_ptrs(
+        data_ptr: Var<SPtr<T>>,
+        len: Var<U64Type>,
+        validity_ptr: Var<SPtr<U8Type>>,
+        has_validity: bool,
+    ) -> Self {
+        Self { data_ptr, len, validity_ptr, has_validity }
+    }
+
+    /// Get element at index (unchecked)
+    /// Returns: Var<T> - the value at position idx
+    pub fn get(&self, idx: Var<U64Type>) -> Var<T> {
+        // Generated code: *(data_ptr + idx)
+        ptr_index(self.data_ptr, idx)
+    }
+
+    /// Check if element at index is valid (not null)
+    /// Returns: Var<BoolType>
+    pub fn is_valid(&self, idx: Var<U64Type>) -> Var<BoolType> {
+        if !self.has_validity {
+            // No validity bitmap = all values valid
+            Const::new(true).into()
+        } else {
+            // Bitmap check: validity_ptr[idx / 8] & (1 << (idx % 8)) != 0
+            let byte_idx = div(idx, Const::new(8u64));
+            let bit_idx = rem(idx, Const::new(8u64));
+            let byte = ptr_index(self.validity_ptr, byte_idx);
+            let mask = shl(Const::new(1u8), bit_idx.cast::<U8Type>());
+            ne(and(byte, mask), Const::new(0u8))
+        }
+    }
+
+    /// Length of the array
+    pub fn length(&self) -> Var<U64Type> {
+        self.len
+    }
+}
+```
+
+### 1.3 Boolean Staged Array
+
+Booleans in Arrow are bit-packed (8 values per byte).
+
+```rust
+// src/staged_arrays/boolean.rs
+
+/// A staged boolean array - wraps Arrow BooleanArray zero-copy
+///
+/// Arrow layout for BooleanArray:
+/// - data_ptr: *const u8 (bit-packed values, 8 bools per byte)
+/// - length: usize
+/// - validity_ptr: *const u8 (null bitmap)
+#[derive(Clone)]
+pub struct StagedBooleanArray {
+    /// Pointer to bit-packed values buffer
+    pub data_ptr: Var<SPtr<U8Type>>,
+    /// Number of elements (not bytes!)
+    pub len: Var<U64Type>,
+    /// Pointer to validity bitmap
+    pub validity_ptr: Var<SPtr<U8Type>>,
+    pub has_validity: bool,
+}
+
+impl StagedBooleanArray {
+    /// Get boolean at index
+    pub fn get(&self, idx: Var<U64Type>) -> Var<BoolType> {
+        // data_ptr[idx / 8] & (1 << (idx % 8)) != 0
+        let byte_idx = div(idx, Const::new(8u64));
+        let bit_idx = rem(idx, Const::new(8u64));
+        let byte = ptr_index(self.data_ptr, byte_idx);
+        let mask = shl(Const::new(1u8), bit_idx.cast::<U8Type>());
+        ne(and(byte, mask), Const::new(0u8))
+    }
+
+    /// Check validity (same as primitive)
+    pub fn is_valid(&self, idx: Var<U64Type>) -> Var<BoolType> {
+        if !self.has_validity {
+            Const::new(true).into()
+        } else {
+            let byte_idx = div(idx, Const::new(8u64));
+            let bit_idx = rem(idx, Const::new(8u64));
+            let byte = ptr_index(self.validity_ptr, byte_idx);
+            let mask = shl(Const::new(1u8), bit_idx.cast::<U8Type>());
+            ne(and(byte, mask), Const::new(0u8))
+        }
+    }
+
+    pub fn length(&self) -> Var<U64Type> {
+        self.len
+    }
+}
+```
+
+### 1.4 StringView Staged Array
+
+StringView uses a 16-byte (i128) view per element. Small strings (≤12 bytes) are inlined; larger strings reference external buffers.
+
+```rust
+// src/staged_arrays/string_view.rs
+
+/// StringView encoding (16 bytes / i128):
+///
+/// For strings ≤ 12 bytes (inlined):
+/// ┌──────────┬────────────────────────────┐
+/// │ length   │  string data (padded)      │
+/// │ (4 bytes)│  (12 bytes)                │
+/// └──────────┴────────────────────────────┘
+///   bits 0-31   bits 32-127
+///
+/// For strings > 12 bytes (external):
+/// ┌──────────┬──────────┬───────────┬──────────┐
+/// │ length   │ prefix   │ buf_index │  offset  │
+/// │ (4 bytes)│ (4 bytes)│ (4 bytes) │ (4 bytes)│
+/// └──────────┴──────────┴───────────┴──────────┘
+///   bits 0-31  bits 32-63  bits 64-95  bits 96-127
+
+/// A staged StringView array - wraps Arrow StringViewArray zero-copy
+#[derive(Clone)]
+pub struct StagedStringViewArray {
+    /// Pointer to views buffer (array of i128)
+    pub views_ptr: Var<SPtr<I128Type>>,
+    /// Number of strings
+    pub len: Var<U64Type>,
+    /// Pointers to variadic data buffers (for non-inlined strings)
+    /// At staging time, we know how many buffers there are
+    pub data_buffers: Vec<Var<SPtr<U8Type>>>,
+    /// Validity bitmap
+    pub validity_ptr: Var<SPtr<U8Type>>,
+    pub has_validity: bool,
+}
+
+/// A single StringView value (the i128 view)
+#[derive(Clone)]
+pub struct StagedStringView {
+    pub view: Var<I128Type>,
+}
+
+impl StagedStringViewArray {
+    /// Get the view (i128) at index
+    pub fn get_view(&self, idx: Var<U64Type>) -> StagedStringView {
+        let view = ptr_index(self.views_ptr, idx);
+        StagedStringView { view }
+    }
+
+    /// Check validity
+    pub fn is_valid(&self, idx: Var<U64Type>) -> Var<BoolType> {
+        if !self.has_validity {
+            Const::new(true).into()
+        } else {
+            let byte_idx = div(idx, Const::new(8u64));
+            let bit_idx = rem(idx, Const::new(8u64));
+            let byte = ptr_index(self.validity_ptr, byte_idx);
+            let mask = shl(Const::new(1u8), bit_idx.cast::<U8Type>());
+            ne(and(byte, mask), Const::new(0u8))
+        }
+    }
+
+    pub fn length(&self) -> Var<U64Type> {
+        self.len
+    }
+}
+
+impl StagedStringView {
+    /// Extract length from view (first 4 bytes)
+    pub fn len(&self) -> Var<U32Type> {
+        // length is in bits 0-31
+        self.view.cast::<U32Type>()
+    }
+
+    /// Check if string is inlined (length <= 12)
+    pub fn is_inlined(&self) -> Var<BoolType> {
+        le(self.len(), Const::new(12u32))
+    }
+
+    /// Get pointer to string data and length
+    /// For inlined: returns pointer to bytes 4-15 of the view
+    /// For external: returns pointer into data buffer at offset
+    ///
+    /// This requires the data_buffers from the parent array
+    pub fn get_data_ptr(
+        &self,
+        view_addr: Var<SPtr<I128Type>>,  // Address of this view in memory
+        data_buffers: &[Var<SPtr<U8Type>>],
+    ) -> (Var<SPtr<U8Type>>, Var<U32Type>) {
+        let length = self.len();
+
+        // We need if_then_else to handle inlined vs external
+        // For now, return the components and let caller decide
+        //
+        // Inlined: data starts at view_addr + 4 bytes
+        // External:
+        //   buf_index = (view >> 64) & 0xFFFFFFFF
+        //   offset = (view >> 96) & 0xFFFFFFFF
+        //   data_ptr = data_buffers[buf_index] + offset
+
+        // This is complex - see detailed implementation below
+        todo!("Implement with if_then_else for inlined vs external")
+    }
+
+    /// For string comparisons, extract the 4-byte prefix (for fast rejection)
+    /// Prefix is in bits 32-63 for external strings
+    pub fn prefix(&self) -> Var<U32Type> {
+        // (view >> 32) as u32
+        shr(self.view, Const::new(32i128)).cast::<U32Type>()
+    }
+}
+```
+
+### 1.5 Unified StagedColumn Enum
+
+```rust
+// src/staged_arrays/column.rs
+
+/// A staged column - union of all supported array types
+pub enum StagedColumn {
+    Int64(StagedPrimitiveArray<I64Type>),
+    Float64(StagedPrimitiveArray<F64Type>),
+    Boolean(StagedBooleanArray),
+    StringView(StagedStringViewArray),
+}
+
+/// A staged scalar value extracted from a column
+pub enum StagedValue {
+    Int64(Var<I64Type>),
+    Float64(Var<F64Type>),
+    Boolean(Var<BoolType>),
+    StringView(StagedStringView),
+}
+
+impl StagedColumn {
+    /// Get value at index (returns appropriate StagedValue variant)
+    pub fn get(&self, idx: Var<U64Type>) -> StagedValue {
+        match self {
+            StagedColumn::Int64(arr) => StagedValue::Int64(arr.get(idx)),
+            StagedColumn::Float64(arr) => StagedValue::Float64(arr.get(idx)),
+            StagedColumn::Boolean(arr) => StagedValue::Boolean(arr.get(idx)),
+            StagedColumn::StringView(arr) => StagedValue::StringView(arr.get_view(idx)),
+        }
+    }
+
+    /// Check validity at index
+    pub fn is_valid(&self, idx: Var<U64Type>) -> Var<BoolType> {
+        match self {
+            StagedColumn::Int64(arr) => arr.is_valid(idx),
+            StagedColumn::Float64(arr) => arr.is_valid(idx),
+            StagedColumn::Boolean(arr) => arr.is_valid(idx),
+            StagedColumn::StringView(arr) => arr.is_valid(idx),
+        }
+    }
+
+    pub fn length(&self) -> Var<U64Type> {
+        match self {
+            StagedColumn::Int64(arr) => arr.length(),
+            StagedColumn::Float64(arr) => arr.length(),
+            StagedColumn::Boolean(arr) => arr.length(),
+            StagedColumn::StringView(arr) => arr.length(),
+        }
+    }
+}
+```
+
+### 1.6 Creating Staged Arrays from Arrow (Runtime Bridge)
+
+```rust
+// src/staged_arrays/from_arrow.rs
+
+use arrow::array::*;
+use arrow::buffer::Buffer;
+
+/// Descriptor for passing Arrow array to JIT code
+/// This is a plain Rust struct that holds the raw pointers
+#[repr(C)]
+pub struct ArrayDescriptor {
+    pub data_ptr: *const u8,
+    pub len: u64,
+    pub validity_ptr: *const u8,  // null if no validity bitmap
+}
+
+/// For StringViewArray, we need additional buffer pointers
+#[repr(C)]
+pub struct StringViewDescriptor {
+    pub views_ptr: *const u8,      // Pointer to i128 views
+    pub len: u64,
+    pub validity_ptr: *const u8,
+    pub num_buffers: u32,
+    pub buffer_ptrs: [*const u8; 8],  // Up to 8 data buffers (can extend)
+}
+
+/// Extract descriptor from Arrow Int64Array
+pub fn int64_array_to_descriptor(arr: &Int64Array) -> ArrayDescriptor {
+    ArrayDescriptor {
+        data_ptr: arr.values().as_ptr() as *const u8,
+        len: arr.len() as u64,
+        validity_ptr: arr.nulls()
+            .map(|n| n.buffer().as_ptr())
+            .unwrap_or(std::ptr::null()),
+    }
+}
+
+/// Extract descriptor from Arrow Float64Array
+pub fn float64_array_to_descriptor(arr: &Float64Array) -> ArrayDescriptor {
+    ArrayDescriptor {
+        data_ptr: arr.values().as_ptr() as *const u8,
+        len: arr.len() as u64,
+        validity_ptr: arr.nulls()
+            .map(|n| n.buffer().as_ptr())
+            .unwrap_or(std::ptr::null()),
+    }
+}
+
+/// Extract descriptor from Arrow BooleanArray
+pub fn boolean_array_to_descriptor(arr: &BooleanArray) -> ArrayDescriptor {
+    ArrayDescriptor {
+        data_ptr: arr.values().as_ptr(),
+        len: arr.len() as u64,
+        validity_ptr: arr.nulls()
+            .map(|n| n.buffer().as_ptr())
+            .unwrap_or(std::ptr::null()),
+    }
+}
+
+/// Extract descriptor from Arrow StringViewArray
+pub fn string_view_array_to_descriptor(arr: &StringViewArray) -> StringViewDescriptor {
+    let views = arr.views();
+    let data_buffers = arr.data_buffers();
+
+    let mut buffer_ptrs = [std::ptr::null(); 8];
+    for (i, buf) in data_buffers.iter().enumerate().take(8) {
+        buffer_ptrs[i] = buf.as_ptr();
+    }
+
+    StringViewDescriptor {
+        views_ptr: views.as_ptr() as *const u8,
+        len: arr.len() as u64,
+        validity_ptr: arr.nulls()
+            .map(|n| n.buffer().as_ptr())
+            .unwrap_or(std::ptr::null()),
+        num_buffers: data_buffers.len() as u32,
+        buffer_ptrs,
+    }
+}
 ```
 
 ---
 
-## Phase 1: Project Setup and Dependencies
+## Phase 2: Project Setup and Dependencies
 
-### 1.1 Create Project Structure
+### 2.1 Project Structure
 
 ```
 dio-sql/
 ├── Cargo.toml
 ├── src/
 │   ├── lib.rs
-│   ├── parser/
+│   ├── staged_arrays/
 │   │   ├── mod.rs
-│   │   └── sql_to_plan.rs
+│   │   ├── primitive.rs
+│   │   ├── boolean.rs
+│   │   ├── string_view.rs
+│   │   ├── column.rs
+│   │   └── from_arrow.rs
 │   ├── plan/
 │   │   ├── mod.rs
-│   │   ├── logical.rs
-│   │   └── physical.rs
-│   ├── types/
-│   │   ├── mod.rs
-│   │   ├── schema.rs
-│   │   └── value.rs
-│   ├── operators/
-│   │   ├── mod.rs
-│   │   ├── scan.rs
-│   │   ├── filter.rs
-│   │   ├── project.rs
-│   │   ├── hash_join.rs
-│   │   └── aggregate.rs
+│   │   ├── physical.rs         # Our physical plan
+│   │   └── pipeline.rs         # Pipeline representation
 │   ├── compile/
 │   │   ├── mod.rs
 │   │   ├── context.rs
-│   │   └── codegen.rs
-│   └── execution/
+│   │   ├── operators.rs        # Staged operators
+│   │   └── expr.rs             # Expression compilation
+│   ├── runtime/
+│   │   ├── mod.rs
+│   │   ├── hash_table.rs       # Runtime hash table (Rust)
+│   │   ├── extern_fns.rs       # External functions for JIT
+│   │   └── orchestrator.rs     # Pipeline orchestration
+│   └── catalog/
 │       ├── mod.rs
-│       └── runtime.rs
-└── examples/
-    └── simple_query.rs
+│       └── schema_provider.rs  # For datafusion-sql
+└── tests/
+    ├── staged_arrays.rs
+    └── integration.rs
 ```
 
-### 1.2 Dependencies (Cargo.toml)
+### 2.2 Dependencies (Cargo.toml)
 
 ```toml
 [package]
@@ -77,1099 +522,940 @@ version = "0.1.0"
 edition = "2021"
 
 [dependencies]
-# rust-lms for staged computation
+# rust-lms for staged computation / JIT
 rust-lms = { path = "../rust-lms" }
 
-# SQL parsing
-sqlparser = "0.40"
+# SQL parsing and logical plan (NOT full datafusion!)
+datafusion-sql = "44"
+datafusion-expr = "44"
+datafusion-common = "44"
 
 # Arrow/Parquet for data
-arrow = { version = "50", features = ["ffi"] }
-parquet = { version = "50", features = ["arrow"] }
+arrow = { version = "53", features = ["ffi"] }
+parquet = { version = "53", features = ["arrow"] }
 
 # Error handling
 thiserror = "1.0"
 anyhow = "1.0"
+
+# Hash table (we might use hashbrown or std)
+hashbrown = "0.15"
 ```
 
 ---
 
-## Phase 2: Type System and Schema
+## Phase 3: SQL Parsing with datafusion-sql
 
-### 2.1 SQL Type Representation
+We use `datafusion-sql` to parse SQL and get a `LogicalPlan`, then convert to our physical plan.
 
-Create types that bridge SQL types to rust-lms staged types:
-
-```rust
-// src/types/schema.rs
-
-use rust_lms::prelude::*;
-
-/// SQL column types we support
-#[derive(Debug, Clone, PartialEq)]
-pub enum SqlType {
-    Int64,
-    Float64,
-    Utf8,      // String
-    Boolean,
-    Date32,    // Days since epoch
-}
-
-/// A column in a schema
-#[derive(Debug, Clone)]
-pub struct Column {
-    pub name: String,
-    pub data_type: SqlType,
-    pub nullable: bool,
-}
-
-/// Table schema - known at compile time (static)
-#[derive(Debug, Clone)]
-pub struct Schema {
-    pub columns: Vec<Column>,
-}
-
-impl Schema {
-    pub fn field_index(&self, name: &str) -> Option<usize> {
-        self.columns.iter().position(|c| c.name == name)
-    }
-
-    pub fn field_type(&self, name: &str) -> Option<&SqlType> {
-        self.columns.iter()
-            .find(|c| c.name == name)
-            .map(|c| &c.data_type)
-    }
-}
-```
-
-### 2.2 Mixed-Stage Record Type
-
-The key insight from the papers: **schema is static (compile-time), field values are dynamic (runtime)**.
+### 3.1 Schema Provider for datafusion-sql
 
 ```rust
-// src/types/value.rs
+// src/catalog/schema_provider.rs
 
-use rust_lms::prelude::*;
+use datafusion_sql::planner::ContextProvider;
+use datafusion_sql::TableReference;
+use datafusion_expr::{TableSource, Expr};
+use datafusion_common::{DataFusionError, Result};
+use arrow::datatypes::SchemaRef;
+use std::sync::Arc;
+use std::collections::HashMap;
 
-/// A staged value - the actual data is dynamic (Rep[T] / Var<T>)
-/// but the type is known statically
-pub enum StagedValue {
-    Int64(Var<I64Type>),
-    Float64(Var<F64Type>),
-    // For strings, we store pointer + length
-    Utf8 { ptr: Var<SPtr<U8Type>>, len: Var<U64Type> },
-    Boolean(Var<BoolType>),
+/// Our simple catalog - maps table names to schemas and file paths
+pub struct SimpleCatalog {
+    tables: HashMap<String, TableInfo>,
 }
 
-/// A record with static schema but dynamic field values
-/// This is the "mixed-stage data structure" from the paper
-pub struct StagedRecord {
-    /// Schema is known at staging time (compile time)
-    pub schema: Schema,
-    /// Field values are Var<T> - they become variables in generated code
-    pub fields: Vec<StagedValue>,
+pub struct TableInfo {
+    pub schema: SchemaRef,
+    pub file_path: String,
 }
 
-impl StagedRecord {
-    /// Field lookup - index computed at staging time, value is dynamic
-    pub fn get(&self, field_name: &str) -> Option<&StagedValue> {
-        let idx = self.schema.field_index(field_name)?;
-        self.fields.get(idx)
-    }
-
-    /// Get field by index (faster, no string lookup at staging time)
-    pub fn get_idx(&self, idx: usize) -> Option<&StagedValue> {
-        self.fields.get(idx)
-    }
-}
-```
-
----
-
-## Phase 3: Query Plan Representation
-
-### 3.1 Logical Plan (SQL-level)
-
-```rust
-// src/plan/logical.rs
-
-/// Expression in a query
-#[derive(Debug, Clone)]
-pub enum Expr {
-    /// Column reference: "column_name"
-    Column(String),
-    /// Literal value
-    Literal(LiteralValue),
-    /// Binary operation: expr op expr
-    BinaryOp {
-        left: Box<Expr>,
-        op: BinaryOperator,
-        right: Box<Expr>,
-    },
-    /// Function call: func(args...)
-    Function {
-        name: String,
-        args: Vec<Expr>,
-    },
-    /// Aggregate function: SUM, COUNT, etc.
-    Aggregate {
-        func: AggregateFunc,
-        arg: Box<Expr>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum LiteralValue {
-    Int64(i64),
-    Float64(f64),
-    Utf8(String),
-    Boolean(bool),
-    Null,
-}
-
-#[derive(Debug, Clone)]
-pub enum BinaryOperator {
-    Eq, Ne, Lt, Le, Gt, Ge,
-    Add, Sub, Mul, Div,
-    And, Or,
-}
-
-#[derive(Debug, Clone)]
-pub enum AggregateFunc {
-    Count,
-    Sum,
-    Avg,
-    Min,
-    Max,
-}
-
-/// Logical query plan - tree of relational operators
-#[derive(Debug, Clone)]
-pub enum LogicalPlan {
-    /// Scan a table from a Parquet file
-    Scan {
-        table_name: String,
-        file_path: String,
-        schema: Schema,
-        projection: Option<Vec<String>>, // columns to read
-    },
-    /// Filter rows: WHERE clause
-    Filter {
-        predicate: Expr,
-        input: Box<LogicalPlan>,
-    },
-    /// Project columns: SELECT clause
-    Project {
-        exprs: Vec<(Expr, String)>, // (expression, alias)
-        input: Box<LogicalPlan>,
-    },
-    /// Hash join two inputs
-    HashJoin {
-        left: Box<LogicalPlan>,
-        right: Box<LogicalPlan>,
-        left_keys: Vec<String>,
-        right_keys: Vec<String>,
-        join_type: JoinType,
-    },
-    /// Aggregate with grouping
-    Aggregate {
-        input: Box<LogicalPlan>,
-        group_by: Vec<Expr>,
-        aggregates: Vec<(AggregateFunc, Expr, String)>, // (func, arg, alias)
-    },
-    /// Sort results
-    Sort {
-        input: Box<LogicalPlan>,
-        order_by: Vec<(Expr, bool)>, // (expr, ascending)
-    },
-    /// Limit results
-    Limit {
-        input: Box<LogicalPlan>,
-        limit: usize,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub enum JoinType {
-    Inner,
-    Left,
-    Right,
-    Full,
-}
-```
-
-### 3.2 Physical Plan (Execution-level)
-
-The physical plan is closer to execution - it specifies HOW to execute:
-
-```rust
-// src/plan/physical.rs
-
-/// Physical operators - these map to actual code generation
-#[derive(Debug, Clone)]
-pub enum PhysicalPlan {
-    /// Read chunks from Parquet file
-    ParquetScan {
-        file_path: String,
-        schema: Schema,
-        projection: Vec<usize>, // column indices to read
-    },
-    /// Fused pipeline: filter + project operations
-    /// These are fused into a single loop
-    Pipeline {
-        input: Box<PhysicalPlan>,
-        operations: Vec<PipelineOp>,
-        output_schema: Schema,
-    },
-    /// Hash join - pipeline breaker
-    HashJoin {
-        build_side: Box<PhysicalPlan>,  // smaller table
-        probe_side: Box<PhysicalPlan>,  // larger table
-        build_keys: Vec<usize>,
-        probe_keys: Vec<usize>,
-        output_schema: Schema,
-    },
-    /// Hash aggregate - pipeline breaker
-    HashAggregate {
-        input: Box<PhysicalPlan>,
-        group_by_indices: Vec<usize>,
-        aggregates: Vec<PhysicalAggregate>,
-        output_schema: Schema,
-    },
-}
-
-/// Operations that can be fused into a pipeline
-#[derive(Debug, Clone)]
-pub enum PipelineOp {
-    Filter(CompiledExpr),
-    Project(Vec<CompiledExpr>),
-}
-
-/// Compiled expression ready for code generation
-#[derive(Debug, Clone)]
-pub enum CompiledExpr {
-    ColumnRef(usize),  // index into input record
-    Literal(LiteralValue),
-    BinaryOp {
-        left: Box<CompiledExpr>,
-        op: BinaryOperator,
-        right: Box<CompiledExpr>,
-    },
-}
-
-#[derive(Debug, Clone)]
-pub struct PhysicalAggregate {
-    pub func: AggregateFunc,
-    pub input_idx: usize,  // column index for input
-    pub output_type: SqlType,
-}
-```
-
----
-
-## Phase 4: SQL Parser Integration
-
-### 4.1 Parse SQL to Logical Plan
-
-```rust
-// src/parser/sql_to_plan.rs
-
-use sqlparser::ast::*;
-use sqlparser::dialect::GenericDialect;
-use sqlparser::parser::Parser;
-
-pub struct QueryPlanner {
-    /// Known table schemas (loaded from Parquet metadata)
-    pub table_schemas: HashMap<String, (String, Schema)>, // name -> (path, schema)
-}
-
-impl QueryPlanner {
+impl SimpleCatalog {
     pub fn new() -> Self {
-        Self {
-            table_schemas: HashMap::new(),
-        }
+        Self { tables: HashMap::new() }
     }
 
     /// Register a Parquet file as a table
     pub fn register_parquet(&mut self, name: &str, path: &str) -> Result<()> {
-        let schema = Self::read_parquet_schema(path)?;
-        self.table_schemas.insert(
-            name.to_string(),
-            (path.to_string(), schema)
-        );
+        let schema = read_parquet_schema(path)?;
+        self.tables.insert(name.to_string(), TableInfo {
+            schema: Arc::new(schema),
+            file_path: path.to_string(),
+        });
         Ok(())
     }
+}
 
-    /// Read schema from Parquet file metadata
-    fn read_parquet_schema(path: &str) -> Result<Schema> {
-        use parquet::file::reader::{FileReader, SerializedFileReader};
-        use std::fs::File;
+/// Implement ContextProvider for datafusion-sql
+impl ContextProvider for SimpleCatalog {
+    fn get_table_source(&self, name: TableReference) -> Result<Arc<dyn TableSource>> {
+        let table_name = name.table();
+        let info = self.tables.get(table_name)
+            .ok_or_else(|| DataFusionError::Plan(format!("Table not found: {}", table_name)))?;
 
-        let file = File::open(path)?;
-        let reader = SerializedFileReader::new(file)?;
-        let parquet_schema = reader.metadata().file_metadata().schema();
-
-        // Convert Parquet schema to our Schema type
-        let columns = parquet_schema.get_fields().iter().map(|field| {
-            Column {
-                name: field.name().to_string(),
-                data_type: parquet_type_to_sql_type(field),
-                nullable: !field.is_required(),
-            }
-        }).collect();
-
-        Ok(Schema { columns })
+        Ok(Arc::new(SimpleTableSource {
+            schema: info.schema.clone(),
+            file_path: info.file_path.clone(),
+        }))
     }
 
-    /// Parse SQL and create logical plan
-    pub fn plan_sql(&self, sql: &str) -> Result<LogicalPlan> {
-        let dialect = GenericDialect {};
-        let statements = Parser::parse_sql(&dialect, sql)?;
+    // ... other required methods with default implementations
+}
 
-        if statements.len() != 1 {
-            return Err(anyhow!("Expected exactly one statement"));
-        }
+/// Simple table source that just holds schema and path
+struct SimpleTableSource {
+    schema: SchemaRef,
+    file_path: String,
+}
 
-        match &statements[0] {
-            Statement::Query(query) => self.plan_query(query),
-            _ => Err(anyhow!("Only SELECT queries are supported")),
-        }
+impl TableSource for SimpleTableSource {
+    fn schema(&self) -> SchemaRef {
+        self.schema.clone()
     }
 
-    fn plan_query(&self, query: &Query) -> Result<LogicalPlan> {
-        // Start with FROM clause
-        let mut plan = self.plan_from(&query.body)?;
+    fn as_any(&self) -> &dyn std::any::Any {
+        self
+    }
+}
 
-        // Add WHERE clause if present
-        if let SetExpr::Select(select) = &*query.body {
-            if let Some(selection) = &select.selection {
-                let predicate = self.plan_expr(selection, plan.output_schema())?;
-                plan = LogicalPlan::Filter {
-                    predicate,
-                    input: Box::new(plan),
-                };
-            }
+/// Read schema from Parquet file
+fn read_parquet_schema(path: &str) -> Result<arrow::datatypes::Schema> {
+    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
+    use std::fs::File;
 
-            // Add GROUP BY if present
-            if !select.group_by.is_empty() {
-                plan = self.plan_group_by(plan, select)?;
-            }
+    let file = File::open(path)?;
+    let builder = ParquetRecordBatchReaderBuilder::try_new(file)?;
+    Ok(builder.schema().as_ref().clone())
+}
+```
 
-            // Add projection (SELECT clause)
-            plan = self.plan_projection(plan, select)?;
-        }
+### 3.2 Parsing SQL to LogicalPlan
 
-        // Add ORDER BY if present
-        if !query.order_by.is_empty() {
-            plan = self.plan_order_by(plan, &query.order_by)?;
-        }
+```rust
+// src/plan/mod.rs
 
-        // Add LIMIT if present
-        if let Some(limit) = &query.limit {
-            plan = self.plan_limit(plan, limit)?;
-        }
+use datafusion_sql::planner::SqlToRel;
+use datafusion_sql::parser::DFParser;
+use datafusion_expr::LogicalPlan;
+use crate::catalog::SimpleCatalog;
 
-        Ok(plan)
+pub fn parse_sql(sql: &str, catalog: &SimpleCatalog) -> Result<LogicalPlan> {
+    // Parse SQL to AST
+    let dialect = datafusion_sql::parser::DFParser::new_with_dialect(
+        sql,
+        &sqlparser::dialect::GenericDialect {}
+    )?;
+    let statements = dialect.parse_statements()?;
+
+    if statements.len() != 1 {
+        return Err(anyhow!("Expected exactly one statement"));
     }
 
-    // ... additional helper methods for each clause type
+    // Convert AST to LogicalPlan
+    let planner = SqlToRel::new(catalog);
+    let plan = planner.statement_to_plan(statements[0].clone())?;
+
+    Ok(plan)
 }
 ```
 
 ---
 
-## Phase 5: Core Compilation - The Staged Interpreter
+## Phase 4: Physical Plan and Pipelines
 
-This is the heart of the system. Following the **First Futamura Projection**, we write an interpreter using staged types. When executed on a concrete query, it generates specialized code.
+We convert datafusion's LogicalPlan to our own physical representation with explicit pipelines.
 
-### 5.1 Compilation Context
+### 4.1 Pipeline Representation
+
+```rust
+// src/plan/pipeline.rs
+
+use datafusion_expr::Expr as DFExpr;
+use arrow::datatypes::SchemaRef;
+
+/// A pipeline is a sequence of operators that can be fused into one JIT function
+/// Pipelines are separated by "pipeline breakers" (hash table operations)
+#[derive(Debug, Clone)]
+pub struct Pipeline {
+    pub id: usize,
+    pub source: PipelineSource,
+    pub operators: Vec<PipelineOp>,
+    pub sink: PipelineSink,
+    pub input_schema: SchemaRef,
+    pub output_schema: SchemaRef,
+}
+
+/// Where a pipeline reads from
+#[derive(Debug, Clone)]
+pub enum PipelineSource {
+    /// Scan a Parquet file
+    TableScan {
+        table_name: String,
+        file_path: String,
+        projection: Vec<usize>,  // Column indices to read
+    },
+    /// Probe a hash table (from previous pipeline)
+    HashTableProbe {
+        hash_table_id: usize,
+        probe_keys: Vec<usize>,
+    },
+}
+
+/// Operations within a pipeline (all fused)
+#[derive(Debug, Clone)]
+pub enum PipelineOp {
+    /// Filter rows
+    Filter { predicate: DFExpr },
+    /// Project/compute columns
+    Project { exprs: Vec<(DFExpr, String)> },
+}
+
+/// Where a pipeline writes to
+#[derive(Debug, Clone)]
+pub enum PipelineSink {
+    /// Output results (terminal)
+    Output,
+    /// Build a hash table (for join build side)
+    HashTableBuild {
+        hash_table_id: usize,
+        key_indices: Vec<usize>,
+    },
+    /// Insert into aggregate hash table
+    HashAggregateBuild {
+        hash_table_id: usize,
+        group_by_indices: Vec<usize>,
+        aggregates: Vec<AggregateExpr>,
+    },
+}
+
+#[derive(Debug, Clone)]
+pub struct AggregateExpr {
+    pub func: AggregateFunc,
+    pub input_idx: usize,
+}
+
+#[derive(Debug, Clone, Copy)]
+pub enum AggregateFunc {
+    Count,
+    Sum,
+    Min,
+    Max,
+    Avg,
+}
+```
+
+### 4.2 Converting LogicalPlan to Pipelines
+
+```rust
+// src/plan/physical.rs
+
+use datafusion_expr::LogicalPlan;
+use crate::plan::pipeline::*;
+
+/// The complete physical plan - a DAG of pipelines
+pub struct PhysicalPlan {
+    pub pipelines: Vec<Pipeline>,
+    /// Hash tables shared between pipelines
+    pub hash_tables: Vec<HashTableDef>,
+}
+
+pub struct HashTableDef {
+    pub id: usize,
+    pub key_schema: SchemaRef,
+    pub value_schema: SchemaRef,
+}
+
+/// Convert datafusion LogicalPlan to our pipelines
+pub fn logical_to_physical(plan: &LogicalPlan) -> Result<PhysicalPlan> {
+    let mut converter = PlanConverter::new();
+    converter.convert(plan)?;
+    Ok(PhysicalPlan {
+        pipelines: converter.pipelines,
+        hash_tables: converter.hash_tables,
+    })
+}
+
+struct PlanConverter {
+    pipelines: Vec<Pipeline>,
+    hash_tables: Vec<HashTableDef>,
+    next_pipeline_id: usize,
+    next_ht_id: usize,
+}
+
+impl PlanConverter {
+    fn new() -> Self {
+        Self {
+            pipelines: Vec::new(),
+            hash_tables: Vec::new(),
+            next_pipeline_id: 0,
+            next_ht_id: 0,
+        }
+    }
+
+    fn convert(&mut self, plan: &LogicalPlan) -> Result<()> {
+        match plan {
+            LogicalPlan::TableScan(scan) => {
+                // Simple scan - one pipeline
+                self.create_scan_pipeline(scan)
+            }
+            LogicalPlan::Filter(filter) => {
+                // Add filter op to current pipeline
+                self.convert(&filter.input)?;
+                self.add_filter(&filter.predicate)
+            }
+            LogicalPlan::Projection(proj) => {
+                // Add project op to current pipeline
+                self.convert(&proj.input)?;
+                self.add_projection(&proj.expr)
+            }
+            LogicalPlan::Join(join) => {
+                // Pipeline breaker!
+                // 1. Build side pipeline -> hash table
+                // 2. Probe side pipeline reads from hash table
+                self.handle_join(join)
+            }
+            LogicalPlan::Aggregate(agg) => {
+                // Pipeline breaker!
+                // 1. Input pipeline -> aggregate hash table
+                // 2. New pipeline reads aggregate results
+                self.handle_aggregate(agg)
+            }
+            _ => Err(anyhow!("Unsupported plan node: {:?}", plan))
+        }
+    }
+
+    fn handle_join(&mut self, join: &datafusion_expr::Join) -> Result<()> {
+        // Create hash table for build side
+        let ht_id = self.next_ht_id;
+        self.next_ht_id += 1;
+
+        // Pipeline 1: Build side -> hash table
+        self.convert(&join.left)?;
+        let build_pipeline_idx = self.pipelines.len() - 1;
+        self.pipelines[build_pipeline_idx].sink = PipelineSink::HashTableBuild {
+            hash_table_id: ht_id,
+            key_indices: extract_join_keys(&join.on, true),
+        };
+
+        // Pipeline 2: Probe side, reading from hash table
+        self.convert(&join.right)?;
+        let probe_pipeline_idx = self.pipelines.len() - 1;
+
+        // Insert hash table probe at the start of probe pipeline ops
+        // (After source, before other ops)
+        let probe_source = PipelineSource::HashTableProbe {
+            hash_table_id: ht_id,
+            probe_keys: extract_join_keys(&join.on, false),
+        };
+
+        // Merge the probe with existing pipeline...
+        // (Complex logic to restructure pipeline)
+
+        Ok(())
+    }
+
+    // ... other conversion methods
+}
+```
+
+---
+
+## Phase 5: Runtime Hash Tables (Rust, not JIT)
+
+Hash tables are implemented in Rust and called via external functions.
+
+### 5.1 Runtime Hash Table
+
+```rust
+// src/runtime/hash_table.rs
+
+use hashbrown::raw::RawTable;
+use std::alloc::{alloc, dealloc, Layout};
+
+/// A runtime hash table for join operations
+/// Key and value are stored as raw bytes for flexibility
+pub struct RuntimeHashTable {
+    /// The underlying hash table
+    table: RawTable<Entry>,
+    /// Schema info for key/value interpretation
+    key_size: usize,
+    value_size: usize,
+}
+
+struct Entry {
+    hash: u64,
+    key_value: Box<[u8]>,  // key bytes followed by value bytes
+}
+
+impl RuntimeHashTable {
+    pub fn new(key_size: usize, value_size: usize) -> Self {
+        Self {
+            table: RawTable::new(),
+            key_size,
+            value_size,
+        }
+    }
+
+    /// Insert a key-value pair
+    /// Called from JIT code via external function
+    pub fn insert(&mut self, hash: u64, key: &[u8], value: &[u8]) {
+        debug_assert_eq!(key.len(), self.key_size);
+        debug_assert_eq!(value.len(), self.value_size);
+
+        let mut kv = vec![0u8; self.key_size + self.value_size].into_boxed_slice();
+        kv[..self.key_size].copy_from_slice(key);
+        kv[self.key_size..].copy_from_slice(value);
+
+        let entry = Entry { hash, key_value: kv };
+
+        self.table.insert(hash, entry, |e| e.hash);
+    }
+
+    /// Probe for a key, returns iterator over matching values
+    pub fn probe<'a>(&'a self, hash: u64, key: &'a [u8]) -> impl Iterator<Item = &'a [u8]> + 'a {
+        self.table
+            .iter()
+            .filter(move |entry| {
+                entry.hash == hash && &entry.key_value[..self.key_size] == key
+            })
+            .map(move |entry| &entry.key_value[self.key_size..])
+    }
+}
+
+/// Handle for hash table, passed to JIT code
+pub type HashTableHandle = *mut RuntimeHashTable;
+```
+
+### 5.2 External Functions for JIT
+
+```rust
+// src/runtime/extern_fns.rs
+
+use rust_lms::extern_fn;
+use crate::runtime::hash_table::{RuntimeHashTable, HashTableHandle};
+
+/// Create a new hash table
+/// Returns handle (pointer) to the hash table
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ht_create(key_size: u64, value_size: u64) -> HashTableHandle {
+    let ht = Box::new(RuntimeHashTable::new(key_size as usize, value_size as usize));
+    Box::into_raw(ht)
+}
+
+/// Insert into hash table
+/// key_ptr and value_ptr point to the key/value bytes
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ht_insert(
+    ht: HashTableHandle,
+    hash: u64,
+    key_ptr: *const u8,
+    key_size: u64,
+    value_ptr: *const u8,
+    value_size: u64,
+) {
+    let ht = unsafe { &mut *ht };
+    let key = unsafe { std::slice::from_raw_parts(key_ptr, key_size as usize) };
+    let value = unsafe { std::slice::from_raw_parts(value_ptr, value_size as usize) };
+    ht.insert(hash, key, value);
+}
+
+/// Probe hash table - returns iterator handle
+/// The iterator is used with ht_probe_next
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ht_probe_start(
+    ht: HashTableHandle,
+    hash: u64,
+    key_ptr: *const u8,
+    key_size: u64,
+) -> ProbeIterHandle {
+    // Create iterator state and return handle
+    // ... implementation details
+    todo!()
+}
+
+/// Get next match from probe iterator
+/// Returns 0 if no more matches, 1 if match found (value written to out_ptr)
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ht_probe_next(
+    iter: ProbeIterHandle,
+    out_value_ptr: *mut u8,
+) -> u64 {
+    // Get next value from iterator
+    // ... implementation details
+    todo!()
+}
+
+/// Destroy hash table
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ht_destroy(ht: HashTableHandle) {
+    unsafe {
+        drop(Box::from_raw(ht));
+    }
+}
+
+pub type ProbeIterHandle = *mut ProbeIterator;
+
+pub struct ProbeIterator {
+    // Internal state for iteration
+    // ...
+}
+```
+
+---
+
+## Phase 6: Pipeline Compilation
+
+Each pipeline compiles to a single JIT function.
+
+### 6.1 Compilation Context
 
 ```rust
 // src/compile/context.rs
 
 use rust_lms::prelude::*;
+use crate::staged_arrays::*;
+use crate::runtime::extern_fns::*;
 
-/// Context for code generation
-/// Tracks the rust-lms Compiler and current variables
-pub struct CompileContext<'a> {
-    pub compiler: &'a mut Compiler<'a>,
-    /// Maps table names to their buffer references
-    pub table_buffers: HashMap<String, Var<SRef<'a, Slice<U8Type>>>>,
+/// Context for compiling a single pipeline
+pub struct PipelineCompileContext<'a> {
+    pub compiler: &'a mut Compiler,
+    /// Registered external functions
+    pub ht_create: ExternRef<HtCreateExtern>,
+    pub ht_insert: ExternRef<HtInsertExtern>,
+    pub ht_probe_start: ExternRef<HtProbeStartExtern>,
+    pub ht_probe_next: ExternRef<HtProbeNextExtern>,
+    pub ht_destroy: ExternRef<HtDestroyExtern>,
 }
 
-impl<'a> CompileContext<'a> {
-    pub fn new(compiler: &'a mut Compiler<'a>) -> Self {
+impl<'a> PipelineCompileContext<'a> {
+    pub fn new(compiler: &'a mut Compiler) -> Self {
         Self {
+            ht_create: compiler.extern_fn::<HtCreateExtern>(),
+            ht_insert: compiler.extern_fn::<HtInsertExtern>(),
+            ht_probe_start: compiler.extern_fn::<HtProbeStartExtern>(),
+            ht_probe_next: compiler.extern_fn::<HtProbeNextExtern>(),
+            ht_destroy: compiler.extern_fn::<HtDestroyExtern>(),
             compiler,
-            table_buffers: HashMap::new(),
         }
     }
 }
 ```
 
-### 5.2 The Callback-Based Operator Interface
-
-The key pattern from the papers: each operator has an `exec` method that takes a callback. This enables operator fusion.
+### 6.2 Compiling a Pipeline
 
 ```rust
-// src/operators/mod.rs
+// src/compile/operators.rs
 
 use rust_lms::prelude::*;
+use crate::plan::pipeline::*;
+use crate::staged_arrays::*;
+use crate::compile::context::*;
+use crate::compile::expr::compile_expr;
 
-/// The callback type - receives a record, produces staged code
-/// This is the "yld" function from the paper
-pub type RecordCallback<'a> = Box<dyn FnOnce(StagedRecord) -> Box<dyn Staged<Out = UnitType>> + 'a>;
-
-/// Trait for all operators - the staged interpreter interface
+/// Compile a pipeline to a JIT function
 ///
-/// Key insight: `exec` doesn't return records directly.
-/// Instead, it takes a callback that it invokes for each record.
-/// This enables fusion: the callback can contain the next operator's logic.
-pub trait Operator {
-    /// Execute this operator, calling `callback` for each output record
-    ///
-    /// Returns staged code that, when compiled and run, will:
-    /// 1. Iterate over input data
-    /// 2. Apply this operator's logic
-    /// 3. Call the callback for each result record
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>>;
+/// The generated function signature depends on the pipeline:
+/// - Scan pipeline: fn(columns: &[ArrayDescriptor], output: &mut OutputBuffer)
+/// - Probe pipeline: fn(columns: &[ArrayDescriptor], ht: HashTableHandle, output: &mut OutputBuffer)
+pub fn compile_pipeline(
+    ctx: &mut PipelineCompileContext,
+    pipeline: &Pipeline,
+) -> CompiledFunction {
+    // For a scan + filter + project + hash_build pipeline:
+    //
+    // fn pipeline(col0_ptr, col0_len, col0_validity, col1_ptr, ..., ht_handle) {
+    //     for i in 0..col0_len {
+    //         // Load values from columns
+    //         let val0 = col0_ptr[i];
+    //         let val1 = col1_ptr[i];
+    //         ...
+    //
+    //         // Apply filter
+    //         if predicate(val0, val1, ...) {
+    //             // Apply projection
+    //             let out0 = expr0(val0, val1, ...);
+    //             let out1 = expr1(val0, val1, ...);
+    //
+    //             // Sink: insert into hash table
+    //             let key = serialize_key(out0);
+    //             let value = serialize_value(out0, out1, ...);
+    //             let hash = compute_hash(key);
+    //             ht_insert(ht_handle, hash, key_ptr, key_size, value_ptr, value_size);
+    //         }
+    //     }
+    // }
 
-    /// Output schema of this operator
-    fn output_schema(&self) -> &Schema;
+    let schema = &pipeline.input_schema;
+    let num_columns = schema.fields().len();
+
+    // Build function with column parameters
+    // Each column needs: data_ptr, len, validity_ptr
+    // Plus any hash table handles
+
+    ctx.compiler.fun_n("pipeline", num_columns * 3 + 1, |vctx, params| {
+        // Parse parameters into StagedColumns
+        let columns: Vec<StagedColumn> = build_staged_columns(schema, params);
+
+        // Get length from first column
+        let len = columns[0].length();
+
+        // Loop variable
+        let i = vctx.let_var(0u64);
+
+        // Main loop
+        while_loop(
+            lt(*i, len),
+            {
+                // Load current row values
+                let row_values: Vec<StagedValue> = columns.iter()
+                    .map(|col| col.get(*i))
+                    .collect();
+
+                // Apply operators (filter, project, etc.)
+                let body = compile_operators(
+                    vctx,
+                    ctx,
+                    &pipeline.operators,
+                    &row_values,
+                    &pipeline.sink,
+                );
+
+                // Increment and continue
+                seq(body, assign(i, add(*i, Const::new(1u64))))
+            }
+        )
+    })
+}
+
+/// Compile the operator chain for one row
+fn compile_operators(
+    vctx: &mut VarContext,
+    ctx: &PipelineCompileContext,
+    operators: &[PipelineOp],
+    values: &[StagedValue],
+    sink: &PipelineSink,
+) -> impl Staged<Out = UnitType> {
+    // Start with sink as innermost callback
+    let mut callback: Box<dyn FnOnce(&[StagedValue]) -> _> = Box::new(|vals| {
+        compile_sink(vctx, ctx, sink, vals)
+    });
+
+    // Wrap with operators from inside out (reverse order)
+    for op in operators.iter().rev() {
+        match op {
+            PipelineOp::Filter { predicate } => {
+                let pred = predicate.clone();
+                let inner = callback;
+                callback = Box::new(move |vals| {
+                    let cond = compile_expr(&pred, vals);
+                    if_then(cond, inner(vals))
+                });
+            }
+            PipelineOp::Project { exprs } => {
+                let exprs = exprs.clone();
+                let inner = callback;
+                callback = Box::new(move |vals| {
+                    let projected: Vec<StagedValue> = exprs.iter()
+                        .map(|(e, _)| compile_expr(e, vals))
+                        .collect();
+                    inner(&projected)
+                });
+            }
+        }
+    }
+
+    callback(values)
+}
+
+/// Compile the sink (output or hash table insert)
+fn compile_sink(
+    vctx: &mut VarContext,
+    ctx: &PipelineCompileContext,
+    sink: &PipelineSink,
+    values: &[StagedValue],
+) -> impl Staged<Out = UnitType> {
+    match sink {
+        PipelineSink::Output => {
+            // Write to output buffer
+            // ... output buffer writing logic
+            unit()
+        }
+        PipelineSink::HashTableBuild { hash_table_id, key_indices } => {
+            // Serialize key and value
+            // Call ht_insert external function
+            let ht_handle = vctx.get_param::<HashTableHandle>("ht_handle");
+
+            // Compute hash of key columns
+            let hash = compute_hash(values, key_indices);
+
+            // Serialize key bytes
+            let (key_ptr, key_size) = serialize_to_bytes(values, key_indices);
+
+            // Serialize all values
+            let (value_ptr, value_size) = serialize_all_to_bytes(values);
+
+            // Call external insert function
+            call_extern6(
+                ctx.ht_insert,
+                ht_handle,
+                hash,
+                key_ptr,
+                key_size,
+                value_ptr,
+                value_size,
+            )
+        }
+        PipelineSink::HashAggregateBuild { .. } => {
+            // Similar but with aggregate update logic
+            todo!()
+        }
+    }
 }
 ```
 
-### 5.3 Scan Operator (Parquet/Arrow)
+### 6.3 Expression Compilation
 
 ```rust
-// src/operators/scan.rs
+// src/compile/expr.rs
 
+use datafusion_expr::Expr as DFExpr;
+use datafusion_expr::Operator as DFOp;
 use rust_lms::prelude::*;
-use arrow::array::*;
-use arrow::datatypes::*;
+use crate::staged_arrays::StagedValue;
 
-/// Scans data from a Parquet file chunk by chunk
-///
-/// At compile time: generates a loop over chunks
-/// At runtime: the compiled loop iterates over actual data
-pub struct ScanOperator {
-    pub file_path: String,
-    pub schema: Schema,
-    pub projection: Vec<usize>,
+/// Compile a datafusion expression to staged code
+pub fn compile_expr(expr: &DFExpr, row: &[StagedValue]) -> StagedValue {
+    match expr {
+        DFExpr::Column(col) => {
+            // Column reference by index
+            let idx = col.index.unwrap_or(0);  // Should have index from planning
+            row[idx].clone()
+        }
+
+        DFExpr::Literal(lit) => {
+            use datafusion_expr::ScalarValue;
+            match lit {
+                ScalarValue::Int64(Some(v)) => StagedValue::Int64(Const::new(*v).into()),
+                ScalarValue::Float64(Some(v)) => StagedValue::Float64(Const::new(*v).into()),
+                ScalarValue::Boolean(Some(v)) => StagedValue::Boolean(Const::new(*v).into()),
+                // ... other literals
+                _ => todo!("Unsupported literal: {:?}", lit),
+            }
+        }
+
+        DFExpr::BinaryExpr(binary) => {
+            let left = compile_expr(&binary.left, row);
+            let right = compile_expr(&binary.right, row);
+
+            compile_binary_op(&left, &binary.op, &right)
+        }
+
+        DFExpr::Not(inner) => {
+            let val = compile_expr(inner, row);
+            match val {
+                StagedValue::Boolean(b) => StagedValue::Boolean(not(b)),
+                _ => panic!("NOT requires boolean"),
+            }
+        }
+
+        // ... other expression types
+        _ => todo!("Unsupported expression: {:?}", expr),
+    }
 }
 
-impl Operator for ScanOperator {
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>> {
-        // The schema is static - known at compile time
-        let schema = self.schema.clone();
-        let projection = self.projection.clone();
+fn compile_binary_op(left: &StagedValue, op: &DFOp, right: &StagedValue) -> StagedValue {
+    match (left, right, op) {
+        // Integer arithmetic
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Plus) => {
+            StagedValue::Int64(add(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Minus) => {
+            StagedValue::Int64(sub(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Multiply) => {
+            StagedValue::Int64(mul(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Divide) => {
+            StagedValue::Int64(div(*l, *r))
+        }
 
-        // At compile time, we generate code that:
-        // 1. Gets a pointer to the data buffer (passed at runtime)
-        // 2. Loops over each row
-        // 3. Extracts fields and calls the callback
+        // Integer comparisons
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Lt) => {
+            StagedValue::Boolean(lt(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::LtEq) => {
+            StagedValue::Boolean(le(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Gt) => {
+            StagedValue::Boolean(gt(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::GtEq) => {
+            StagedValue::Boolean(ge(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::Eq) => {
+            StagedValue::Boolean(eq(*l, *r))
+        }
+        (StagedValue::Int64(l), StagedValue::Int64(r), DFOp::NotEq) => {
+            StagedValue::Boolean(ne(*l, *r))
+        }
 
-        ctx.compiler.fun1("scan", move |vctx, data_ptr: Var<SRef<Slice<U8Type>>>| {
-            // Get the number of rows (stored at start of buffer)
-            let num_rows = vctx.let_var(/* load row count from buffer */);
+        // Float arithmetic (similar pattern)
+        (StagedValue::Float64(l), StagedValue::Float64(r), DFOp::Plus) => {
+            StagedValue::Float64(add(*l, *r))
+        }
+        // ... more float ops
 
-            // Loop counter
-            let i = vctx.let_var(0u64);
+        // Boolean logic
+        (StagedValue::Boolean(l), StagedValue::Boolean(r), DFOp::And) => {
+            StagedValue::Boolean(and(*l, *r))
+        }
+        (StagedValue::Boolean(l), StagedValue::Boolean(r), DFOp::Or) => {
+            StagedValue::Boolean(or(*l, *r))
+        }
 
-            // Main scan loop
-            let loop_body = while_loop(
-                lt(*i, *num_rows),
-                {
-                    // Build a StagedRecord for row i
-                    // Each field is a Var<T> loaded from the appropriate offset
-                    let fields: Vec<StagedValue> = projection.iter().map(|&col_idx| {
-                        let col = &schema.columns[col_idx];
-                        match col.data_type {
-                            SqlType::Int64 => {
-                                // Calculate offset and load i64 value
-                                let offset = /* compute offset for column col_idx, row i */;
-                                let val = array_index(data_ptr, offset);
-                                StagedValue::Int64(vctx.let_var(val))
-                            }
-                            SqlType::Float64 => {
-                                // Similar for f64
-                                StagedValue::Float64(vctx.let_var(/* load f64 */))
-                            }
-                            // ... other types
+        _ => todo!("Unsupported binary op: {:?} {:?} {:?}", left, op, right),
+    }
+}
+```
+
+---
+
+## Phase 7: Pipeline Orchestrator
+
+Rust code orchestrates execution of multiple pipelines.
+
+### 7.1 Orchestrator
+
+```rust
+// src/runtime/orchestrator.rs
+
+use arrow::record_batch::RecordBatch;
+use crate::plan::physical::PhysicalPlan;
+use crate::plan::pipeline::*;
+use crate::compile::compile_pipeline;
+use crate::staged_arrays::from_arrow::*;
+use crate::runtime::hash_table::RuntimeHashTable;
+
+/// Executes a physical plan by orchestrating pipelines
+pub struct PipelineOrchestrator {
+    /// Compiled pipeline functions
+    compiled_pipelines: Vec<CompiledPipeline>,
+    /// Runtime hash tables
+    hash_tables: Vec<RuntimeHashTable>,
+}
+
+struct CompiledPipeline {
+    /// The JIT-compiled function
+    func: CompiledFunction,
+    /// Pipeline metadata
+    pipeline: Pipeline,
+}
+
+impl PipelineOrchestrator {
+    pub fn new(plan: &PhysicalPlan) -> Result<Self> {
+        let mut compiler = Compiler::new();
+        let mut ctx = PipelineCompileContext::new(&mut compiler);
+
+        // Compile all pipelines
+        let compiled_pipelines: Vec<_> = plan.pipelines.iter()
+            .map(|p| {
+                let func = compile_pipeline(&mut ctx, p);
+                CompiledPipeline { func, pipeline: p.clone() }
+            })
+            .collect();
+
+        // Create hash tables
+        let hash_tables: Vec<_> = plan.hash_tables.iter()
+            .map(|def| RuntimeHashTable::new(
+                compute_key_size(&def.key_schema),
+                compute_value_size(&def.value_schema),
+            ))
+            .collect();
+
+        Ok(Self { compiled_pipelines, hash_tables })
+    }
+
+    /// Execute the plan on input data
+    pub fn execute(&mut self, tables: &HashMap<String, Vec<RecordBatch>>) -> Result<Vec<RecordBatch>> {
+        let mut output = OutputBuffer::new();
+
+        // Execute pipelines in order
+        // (Topologically sorted by dependencies)
+        for compiled in &self.compiled_pipelines {
+            self.execute_pipeline(compiled, tables, &mut output)?;
+        }
+
+        output.to_record_batches()
+    }
+
+    fn execute_pipeline(
+        &mut self,
+        compiled: &CompiledPipeline,
+        tables: &HashMap<String, Vec<RecordBatch>>,
+        output: &mut OutputBuffer,
+    ) -> Result<()> {
+        let pipeline = &compiled.pipeline;
+
+        match &pipeline.source {
+            PipelineSource::TableScan { table_name, file_path, projection } => {
+                // Get RecordBatches for this table
+                let batches = tables.get(table_name)
+                    .ok_or_else(|| anyhow!("Table not found: {}", table_name))?;
+
+                // Process each batch
+                for batch in batches {
+                    // Extract array descriptors (zero-copy pointers)
+                    let descriptors: Vec<ArrayDescriptor> = projection.iter()
+                        .map(|&idx| array_to_descriptor(batch.column(idx)))
+                        .collect();
+
+                    // Get hash table handle if needed
+                    let ht_handle = match &pipeline.sink {
+                        PipelineSink::HashTableBuild { hash_table_id, .. } => {
+                            &mut self.hash_tables[*hash_table_id] as *mut _
                         }
-                    }).collect();
-
-                    let record = StagedRecord {
-                        schema: schema.clone(),
-                        fields,
+                        _ => std::ptr::null_mut(),
                     };
 
-                    // CRITICAL: Call the callback with this record
-                    // This is where operator fusion happens!
-                    // The callback contains the next operator's code
-                    let callback_result = callback(record);
-
-                    // Increment loop counter
-                    (callback_result, assign(*i, add(*i, 1u64)))
+                    // Call compiled function
+                    // The function signature varies - use appropriate calling convention
+                    unsafe {
+                        compiled.func.call(&descriptors, ht_handle, output);
+                    }
                 }
-            );
+            }
 
-            loop_body
-        })
-    }
-
-    fn output_schema(&self) -> &Schema {
-        &self.schema
-    }
-}
-```
-
-### 5.4 Filter Operator (Fused)
-
-```rust
-// src/operators/filter.rs
-
-/// Filter operator - selects rows matching a predicate
-///
-/// This operator FUSES with its parent: instead of materializing
-/// intermediate results, it just wraps the callback in a conditional.
-pub struct FilterOperator {
-    pub input: Box<dyn Operator>,
-    pub predicate: CompiledExpr,
-    pub output_schema: Schema,
-}
-
-impl Operator for FilterOperator {
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>> {
-        let predicate = self.predicate.clone();
-
-        // Create a new callback that:
-        // 1. Evaluates the predicate
-        // 2. If true, calls the original callback
-        // 3. If false, does nothing
-        let filter_callback: RecordCallback<'a> = Box::new(move |record: StagedRecord| {
-            // Evaluate predicate on this record - returns Var<BoolType>
-            let pred_result: Var<BoolType> = compile_expr(&predicate, &record);
-
-            // Generate: if (predicate) { callback(record) }
-            let then_branch = callback(record);
-
-            if_then(pred_result, then_branch).boxed()
-        });
-
-        // Execute input operator with our wrapped callback
-        // The filter logic is now FUSED into the scan loop!
-        self.input.exec(ctx, filter_callback)
-    }
-
-    fn output_schema(&self) -> &Schema {
-        &self.output_schema
-    }
-}
-```
-
-### 5.5 Project Operator (Fused)
-
-```rust
-// src/operators/project.rs
-
-/// Project operator - computes new columns from expressions
-/// Also fuses with its input - no intermediate materialization
-pub struct ProjectOperator {
-    pub input: Box<dyn Operator>,
-    pub expressions: Vec<CompiledExpr>,
-    pub output_schema: Schema,
-}
-
-impl Operator for ProjectOperator {
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>> {
-        let expressions = self.expressions.clone();
-        let output_schema = self.output_schema.clone();
-
-        let project_callback: RecordCallback<'a> = Box::new(move |input_record: StagedRecord| {
-            // Compute each output expression
-            let output_fields: Vec<StagedValue> = expressions.iter().map(|expr| {
-                compile_expr(expr, &input_record)
-            }).collect();
-
-            // Create output record with new fields
-            let output_record = StagedRecord {
-                schema: output_schema.clone(),
-                fields: output_fields,
-            };
-
-            // Pass to next operator
-            callback(output_record)
-        });
-
-        self.input.exec(ctx, project_callback)
-    }
-
-    fn output_schema(&self) -> &Schema {
-        &self.output_schema
-    }
-}
-```
-
-### 5.6 Expression Compilation
-
-```rust
-// src/compile/codegen.rs
-
-/// Compile an expression to staged code
-///
-/// Takes a CompiledExpr (known at compile time) and a StagedRecord
-/// (with dynamic Var<T> fields), returns a StagedValue
-pub fn compile_expr(expr: &CompiledExpr, record: &StagedRecord) -> StagedValue {
-    match expr {
-        CompiledExpr::ColumnRef(idx) => {
-            // Column reference - just get the field from the record
-            record.get_idx(*idx).unwrap().clone()
-        }
-
-        CompiledExpr::Literal(lit) => {
-            match lit {
-                LiteralValue::Int64(v) => StagedValue::Int64(Const::new(*v).into()),
-                LiteralValue::Float64(v) => StagedValue::Float64(Const::new(*v).into()),
-                LiteralValue::Boolean(v) => StagedValue::Boolean(Const::new(*v).into()),
-                // ...
+            PipelineSource::HashTableProbe { hash_table_id, probe_keys } => {
+                // Probe pipeline - reads from hash table
+                // Process input batches while probing
+                // ... similar pattern with hash table as input
+                todo!()
             }
         }
 
-        CompiledExpr::BinaryOp { left, op, right } => {
-            let left_val = compile_expr(left, record);
-            let right_val = compile_expr(right, record);
-
-            match (left_val, right_val, op) {
-                // Integer operations
-                (StagedValue::Int64(l), StagedValue::Int64(r), BinaryOperator::Add) => {
-                    StagedValue::Int64(add(l, r))
-                }
-                (StagedValue::Int64(l), StagedValue::Int64(r), BinaryOperator::Lt) => {
-                    StagedValue::Boolean(lt(l, r))
-                }
-                // Float operations
-                (StagedValue::Float64(l), StagedValue::Float64(r), BinaryOperator::Mul) => {
-                    StagedValue::Float64(mul(l, r))
-                }
-                // Comparison generates boolean
-                (StagedValue::Int64(l), StagedValue::Int64(r), BinaryOperator::Eq) => {
-                    StagedValue::Boolean(eq(l, r))
-                }
-                // ... more combinations
-            }
-        }
+        Ok(())
     }
 }
 
-/// Compile a predicate to a boolean Var
-pub fn compile_predicate(expr: &CompiledExpr, record: &StagedRecord) -> Var<BoolType> {
-    match compile_expr(expr, record) {
-        StagedValue::Boolean(b) => b,
-        _ => panic!("Predicate must evaluate to boolean"),
-    }
-}
-```
-
----
-
-## Phase 6: Pipeline Breakers
-
-Pipeline breakers (join, group by) require materializing intermediate results. They use specialized hash tables.
-
-### 6.1 Staged Hash Table
-
-```rust
-// src/compile/hash_table.rs
-
-/// A compile-time hash table abstraction
-/// Schema is static, entries are dynamic Var<T> values
-///
-/// Following the paper: this is a generation-time abstraction
-/// that produces specialized array operations in generated code
-pub struct StagedHashTable {
-    /// Schema of keys
-    pub key_schema: Schema,
-    /// Schema of values
-    pub value_schema: Schema,
-    /// Size (power of 2 for fast modulo)
-    pub size: usize,
+/// Buffer for collecting output rows
+pub struct OutputBuffer {
+    // Column builders for output
+    // ...
 }
 
-impl StagedHashTable {
-    /// Generate hash table allocation code
-    pub fn allocate<'a>(&self, ctx: &mut VarBuilder<'a>) -> HashTableVars<'a> {
-        // Allocate arrays for each key column
-        let key_arrays: Vec<_> = self.key_schema.columns.iter().map(|col| {
-            match col.data_type {
-                SqlType::Int64 => {
-                    let arr = /* allocate i64 array of self.size */;
-                    ctx.let_var(arr)
-                }
-                // ... other types
-            }
-        }).collect();
-
-        // Allocate arrays for each value column
-        let value_arrays: Vec<_> = self.value_schema.columns.iter().map(|col| {
-            // ... similar
-        }).collect();
-
-        // Track which slots are used
-        let used = ctx.let_var(/* allocate bool array */);
-        let next_slot = ctx.let_var(0u64);
-
-        HashTableVars {
-            key_arrays,
-            value_arrays,
-            used,
-            next_slot,
-            size: self.size,
-        }
-    }
-
-    /// Generate code to insert a key-value pair
-    pub fn insert<'a>(
-        &self,
-        ht: &HashTableVars<'a>,
-        key: &StagedRecord,
-        value: &StagedRecord,
-    ) -> impl Staged<Out = UnitType> {
-        // Compute hash of key
-        let hash = self.compute_hash(key);
-        let slot = mod_op(hash, ht.size as u64);
-
-        // Linear probing to find empty slot
-        // ... generate probing loop
-
-        // Store key and value in slot
-        // ... generate store operations
-    }
-
-    /// Generate code to probe for a key
-    pub fn probe<'a, F>(
-        &self,
-        ht: &HashTableVars<'a>,
-        key: &StagedRecord,
-        on_match: F,
-    ) -> impl Staged<Out = UnitType>
-    where
-        F: FnOnce(StagedRecord) -> Box<dyn Staged<Out = UnitType>>,
-    {
-        // Compute hash, probe, call on_match for each matching entry
-        // ... generate probing loop with callback
-    }
-}
-```
-
-### 6.2 Hash Join Operator
-
-```rust
-// src/operators/hash_join.rs
-
-/// Hash join - a pipeline breaker
-///
-/// Build phase: materialize the build side into a hash table
-/// Probe phase: scan probe side, look up matches in hash table
-pub struct HashJoinOperator {
-    pub build_input: Box<dyn Operator>,
-    pub probe_input: Box<dyn Operator>,
-    pub build_keys: Vec<usize>,
-    pub probe_keys: Vec<usize>,
-    pub output_schema: Schema,
-}
-
-impl Operator for HashJoinOperator {
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>> {
-        let build_keys = self.build_keys.clone();
-        let probe_keys = self.probe_keys.clone();
-        let output_schema = self.output_schema.clone();
-
-        // === BUILD PHASE ===
-        // Create hash table for build side
-        let ht = StagedHashTable {
-            key_schema: extract_key_schema(&self.build_input.output_schema(), &build_keys),
-            value_schema: self.build_input.output_schema().clone(),
-            size: DEFAULT_HT_SIZE,
-        };
-
-        let ht_vars = ht.allocate(&mut ctx.compiler.var_builder());
-
-        // Build side callback: insert each record into hash table
-        let build_callback: RecordCallback<'a> = Box::new(|record: StagedRecord| {
-            let key_record = extract_key(&record, &build_keys);
-            ht.insert(&ht_vars, &key_record, &record).boxed()
-        });
-
-        // Execute build side
-        let build_code = self.build_input.exec(ctx, build_callback);
-
-        // === PROBE PHASE ===
-        // Probe side callback: look up each record in hash table
-        let probe_callback: RecordCallback<'a> = Box::new(move |probe_record: StagedRecord| {
-            let key_record = extract_key(&probe_record, &probe_keys);
-
-            // Probe returns all matches via callback
-            ht.probe(&ht_vars, &key_record, |build_record| {
-                // Merge build and probe records
-                let joined = merge_records(&build_record, &probe_record, &output_schema);
-                callback(joined)
-            }).boxed()
-        });
-
-        // Execute probe side
-        let probe_code = self.probe_input.exec(ctx, probe_callback);
-
-        // Sequence: build first, then probe
-        (build_code, probe_code).boxed()
-    }
-
-    fn output_schema(&self) -> &Schema {
-        &self.output_schema
-    }
-}
-```
-
-### 6.3 Hash Aggregate Operator
-
-```rust
-// src/operators/aggregate.rs
-
-/// Hash aggregate - groups rows and computes aggregates
-/// Another pipeline breaker
-pub struct HashAggregateOperator {
-    pub input: Box<dyn Operator>,
-    pub group_by_indices: Vec<usize>,
-    pub aggregates: Vec<PhysicalAggregate>,
-    pub output_schema: Schema,
-}
-
-impl Operator for HashAggregateOperator {
-    fn exec<'a>(
-        &self,
-        ctx: &mut CompileContext<'a>,
-        callback: RecordCallback<'a>,
-    ) -> Box<dyn Staged<Out = UnitType>> {
-        let group_indices = self.group_by_indices.clone();
-        let aggregates = self.aggregates.clone();
-        let output_schema = self.output_schema.clone();
-
-        // Hash table: key = group by columns, value = aggregate accumulators
-        let ht = StagedHashTable {
-            key_schema: extract_key_schema(&self.input.output_schema(), &group_indices),
-            value_schema: make_accumulator_schema(&aggregates),
-            size: DEFAULT_HT_SIZE,
-        };
-
-        let ht_vars = ht.allocate(&mut ctx.compiler.var_builder());
-
-        // === ACCUMULATE PHASE ===
-        let accum_callback: RecordCallback<'a> = Box::new(move |record: StagedRecord| {
-            let key = extract_key(&record, &group_indices);
-
-            // Update or insert aggregate accumulators
-            ht.update_or_insert(&ht_vars, &key,
-                // Init function for new group
-                |_| init_accumulators(&aggregates),
-                // Update function for existing group
-                |accums| update_accumulators(&aggregates, &record, accums)
-            ).boxed()
-        });
-
-        let accum_code = self.input.exec(ctx, accum_callback);
-
-        // === OUTPUT PHASE ===
-        // Iterate over hash table and emit final results
-        let output_code = ht.foreach(&ht_vars, |key, accums| {
-            let final_values = finalize_accumulators(&aggregates, accums);
-            let output_record = merge_records(&key, &final_values, &output_schema);
-            callback(output_record)
-        });
-
-        (accum_code, output_code).boxed()
-    }
-
-    fn output_schema(&self) -> &Schema {
-        &self.output_schema
-    }
-}
-```
-
----
-
-## Phase 7: Runtime Interface
-
-### 7.1 Data Buffer Format
-
-Define how Arrow RecordBatches are passed to compiled code:
-
-```rust
-// src/execution/runtime.rs
-
-use arrow::array::*;
-use arrow::record_batch::RecordBatch;
-
-/// Convert Arrow RecordBatch to flat buffer for compiled code
-///
-/// Layout: [num_rows: u64] [col0_data...] [col1_data...] ...
-/// Each column is stored contiguously
-pub fn record_batch_to_buffer(batch: &RecordBatch) -> Vec<u8> {
-    let mut buffer = Vec::new();
-
-    // Write row count
-    buffer.extend_from_slice(&(batch.num_rows() as u64).to_le_bytes());
-
-    // Write each column
-    for col in batch.columns() {
-        match col.data_type() {
-            DataType::Int64 => {
-                let arr = col.as_any().downcast_ref::<Int64Array>().unwrap();
-                for i in 0..arr.len() {
-                    buffer.extend_from_slice(&arr.value(i).to_le_bytes());
-                }
-            }
-            DataType::Float64 => {
-                let arr = col.as_any().downcast_ref::<Float64Array>().unwrap();
-                for i in 0..arr.len() {
-                    buffer.extend_from_slice(&arr.value(i).to_le_bytes());
-                }
-            }
-            // ... other types
-        }
-    }
-
-    buffer
-}
-
-/// Read Parquet file and get RecordBatches
-pub fn read_parquet_batches(path: &str) -> impl Iterator<Item = RecordBatch> {
-    use parquet::arrow::arrow_reader::ParquetRecordBatchReaderBuilder;
-    use std::fs::File;
-
-    let file = File::open(path).unwrap();
-    let builder = ParquetRecordBatchReaderBuilder::try_new(file).unwrap();
-    let reader = builder.with_batch_size(8192).build().unwrap();
-
-    reader.map(|r| r.unwrap())
-}
-```
-
-### 7.2 Query Executor
-
-```rust
-// src/execution/mod.rs
-
-use rust_lms::prelude::*;
-
-/// Main query execution entry point
-pub struct QueryExecutor {
-    planner: QueryPlanner,
-}
-
-impl QueryExecutor {
+impl OutputBuffer {
     pub fn new() -> Self {
-        Self {
-            planner: QueryPlanner::new(),
-        }
+        todo!()
     }
 
-    /// Register a Parquet file as a table
-    pub fn register_table(&mut self, name: &str, path: &str) -> Result<()> {
-        self.planner.register_parquet(name, path)
-    }
-
-    /// Execute a SQL query and return results
-    pub fn execute(&self, sql: &str) -> Result<Vec<RecordBatch>> {
-        // 1. Parse SQL to logical plan
-        let logical_plan = self.planner.plan_sql(sql)?;
-
-        // 2. Optimize and convert to physical plan
-        let physical_plan = optimize_and_physicalize(logical_plan)?;
-
-        // 3. Compile the plan
-        let compiled = self.compile_plan(&physical_plan)?;
-
-        // 4. Execute compiled code on data
-        let results = self.execute_compiled(&compiled, &physical_plan)?;
-
-        Ok(results)
-    }
-
-    fn compile_plan(&self, plan: &PhysicalPlan) -> Result<CompiledQuery> {
-        let mut compiler = Compiler::new();
-        let mut ctx = CompileContext::new(&mut compiler);
-
-        // Create the root operator
-        let root_op = build_operator_tree(plan);
-
-        // Collect results callback - stores output records
-        let results_buffer = /* allocate output buffer */;
-        let collect_callback: RecordCallback = Box::new(move |record| {
-            // Store record in results buffer
-            store_record_to_buffer(&results_buffer, &record).boxed()
-        });
-
-        // Generate code by executing the staged interpreter
-        let query_code = root_op.exec(&mut ctx, collect_callback);
-
-        // Compile to native code
-        let compiled = compiler.compile(query_code)?;
-
-        Ok(CompiledQuery {
-            module: compiled,
-            // ... metadata
-        })
-    }
-
-    fn execute_compiled(
-        &self,
-        compiled: &CompiledQuery,
-        plan: &PhysicalPlan,
-    ) -> Result<Vec<RecordBatch>> {
-        let mut results = Vec::new();
-
-        // Get the compiled function
-        let query_fn = compiled.module.as_fn();
-
-        // Read data and execute
-        match plan {
-            PhysicalPlan::ParquetScan { file_path, .. } => {
-                for batch in read_parquet_batches(file_path) {
-                    let buffer = record_batch_to_buffer(&batch);
-
-                    // Call compiled code with data buffer
-                    let output = query_fn(&buffer);
-
-                    // Convert output to RecordBatch
-                    let result_batch = buffer_to_record_batch(output, plan.output_schema());
-                    results.push(result_batch);
-                }
-            }
-            // Handle other plan types (joins need multiple inputs)
-            _ => { /* ... */ }
-        }
-
-        Ok(results)
+    pub fn to_record_batches(self) -> Result<Vec<RecordBatch>> {
+        todo!()
     }
 }
 ```
@@ -1178,41 +1464,101 @@ impl QueryExecutor {
 
 ## Phase 8: Integration and Testing
 
-### 8.1 Example Usage
+### 8.1 Main API
+
+```rust
+// src/lib.rs
+
+pub mod staged_arrays;
+pub mod plan;
+pub mod compile;
+pub mod runtime;
+pub mod catalog;
+
+use arrow::record_batch::RecordBatch;
+use crate::catalog::SimpleCatalog;
+use crate::plan::{parse_sql, logical_to_physical};
+use crate::runtime::orchestrator::PipelineOrchestrator;
+
+/// Main entry point for SQL query execution
+pub struct QueryEngine {
+    catalog: SimpleCatalog,
+}
+
+impl QueryEngine {
+    pub fn new() -> Self {
+        Self {
+            catalog: SimpleCatalog::new(),
+        }
+    }
+
+    /// Register a Parquet file as a table
+    pub fn register_parquet(&mut self, name: &str, path: &str) -> Result<()> {
+        self.catalog.register_parquet(name, path)
+    }
+
+    /// Execute a SQL query
+    pub fn execute(&self, sql: &str) -> Result<Vec<RecordBatch>> {
+        // 1. Parse SQL to LogicalPlan (using datafusion-sql)
+        let logical_plan = parse_sql(sql, &self.catalog)?;
+
+        // 2. Convert to physical plan with pipelines
+        let physical_plan = logical_to_physical(&logical_plan)?;
+
+        // 3. Create orchestrator (compiles pipelines)
+        let mut orchestrator = PipelineOrchestrator::new(&physical_plan)?;
+
+        // 4. Load data and execute
+        let tables = self.load_tables(&physical_plan)?;
+        let results = orchestrator.execute(&tables)?;
+
+        Ok(results)
+    }
+
+    fn load_tables(&self, plan: &PhysicalPlan) -> Result<HashMap<String, Vec<RecordBatch>>> {
+        // Load Parquet files into RecordBatches
+        // (The actual data stays in Arrow buffers - zero copy!)
+        todo!()
+    }
+}
+```
+
+### 8.2 Example Usage
 
 ```rust
 // examples/simple_query.rs
 
-use dio_sql::QueryExecutor;
+use dio_sql::QueryEngine;
 
 fn main() -> Result<()> {
-    let mut executor = QueryExecutor::new();
+    let mut engine = QueryEngine::new();
 
     // Register tables
-    executor.register_table("orders", "data/orders.parquet")?;
-    executor.register_table("customers", "data/customers.parquet")?;
+    engine.register_parquet("orders", "data/orders.parquet")?;
+    engine.register_parquet("customers", "data/customers.parquet")?;
 
-    // Simple filter query
-    let results = executor.execute(
-        "SELECT order_id, amount FROM orders WHERE amount > 100"
+    // Simple filter + project (single pipeline, fully JIT)
+    let results = engine.execute(
+        "SELECT order_id, amount * 1.1 as with_tax
+         FROM orders
+         WHERE amount > 100"
     )?;
 
-    // Join query
-    let results = executor.execute(
+    // Join query (two pipelines: build + probe)
+    let results = engine.execute(
         "SELECT c.name, o.amount
          FROM orders o
          JOIN customers c ON o.customer_id = c.id
          WHERE o.amount > 100"
     )?;
 
-    // Aggregate query
-    let results = executor.execute(
+    // Aggregate query (two pipelines: aggregate + output)
+    let results = engine.execute(
         "SELECT customer_id, SUM(amount) as total
          FROM orders
          GROUP BY customer_id"
     )?;
 
-    // Print results
     for batch in &results {
         println!("{:?}", batch);
     }
@@ -1221,54 +1567,58 @@ fn main() -> Result<()> {
 }
 ```
 
-### 8.2 Test Cases
+### 8.3 Test Cases
 
 ```rust
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::array::*;
 
     #[test]
-    fn test_simple_scan() {
-        // Generate test parquet file
-        let path = create_test_parquet(&[
-            ("id", vec![1i64, 2, 3]),
-            ("value", vec![10i64, 20, 30]),
-        ]);
+    fn test_staged_primitive_array() {
+        // Test that StagedPrimitiveArray correctly wraps Arrow arrays
+        let arr = Int64Array::from(vec![1, 2, 3, 4, 5]);
+        let desc = int64_array_to_descriptor(&arr);
 
-        let mut executor = QueryExecutor::new();
-        executor.register_table("test", &path).unwrap();
+        // Create staged array and compile a simple loop
+        let mut compiler = Compiler::new();
+        let sum_fn = compiler.fun3("sum", |vctx, data_ptr, len, _validity| {
+            let staged_arr = StagedPrimitiveArray::<I64Type>::from_arrow_ptrs(
+                data_ptr, len, Const::new(std::ptr::null()).into(), false
+            );
 
-        let results = executor.execute("SELECT * FROM test").unwrap();
-        assert_eq!(results[0].num_rows(), 3);
+            let sum = vctx.let_var(0i64);
+            let i = vctx.let_var(0u64);
+
+            while_loop(
+                lt(*i, staged_arr.length()),
+                seq(
+                    assign(sum, add(*sum, staged_arr.get(*i))),
+                    assign(i, add(*i, Const::new(1u64)))
+                )
+            );
+
+            *sum
+        });
+
+        let compiled = compiler.compile(sum_fn).unwrap();
+        let f = compiled.as_fn();
+
+        let result = f(desc.data_ptr as *const i64, desc.len, desc.validity_ptr);
+        assert_eq!(result, 15);  // 1+2+3+4+5
     }
 
     #[test]
-    fn test_filter() {
-        let path = create_test_parquet(&[
-            ("id", vec![1i64, 2, 3, 4, 5]),
-            ("value", vec![10i64, 20, 30, 40, 50]),
-        ]);
-
-        let mut executor = QueryExecutor::new();
-        executor.register_table("test", &path).unwrap();
-
-        let results = executor.execute(
-            "SELECT id FROM test WHERE value > 25"
-        ).unwrap();
-
-        // Should return rows 3, 4, 5
-        assert_eq!(results[0].num_rows(), 3);
+    fn test_filter_pipeline() {
+        // Test a simple scan + filter pipeline
+        // ...
     }
 
     #[test]
-    fn test_join() {
-        // ... test hash join
-    }
-
-    #[test]
-    fn test_aggregate() {
-        // ... test group by and aggregations
+    fn test_hash_join() {
+        // Test hash join with two pipelines
+        // ...
     }
 }
 ```
@@ -1277,36 +1627,46 @@ mod tests {
 
 ## Implementation Order
 
-Follow this order to build incrementally:
+1. **Phase 1: Staged Arrays** (Foundation)
+   - Implement `StagedPrimitiveArray<I64Type>` and `<F64Type>`
+   - Implement `StagedBooleanArray`
+   - Implement `StagedStringViewArray`
+   - Write tests for each array type
+   - Implement `from_arrow` descriptors
 
-1. **Week 1-2: Foundation**
-   - Set up project structure
-   - Implement type system (Schema, SqlType, StagedValue, StagedRecord)
-   - Create basic logical/physical plan structures
-   - Write Parquet schema reader
+2. **Phase 2: Project Setup**
+   - Create project structure
+   - Set up Cargo.toml with dependencies
+   - Verify rust-lms integration works
 
-2. **Week 3-4: Core Operators**
-   - Implement Scan operator (Parquet → staged record loop)
-   - Implement Filter operator (with fusion)
-   - Implement Project operator (with fusion)
-   - Test fused scan-filter-project pipeline
+3. **Phase 3: Basic Pipeline Compilation**
+   - Implement simple scan pipeline (no filter/project)
+   - Test end-to-end: RecordBatch → JIT code → loop over values
 
-3. **Week 5-6: SQL Parser**
-   - Integrate sqlparser crate
-   - Implement SQL → LogicalPlan conversion
-   - Add expression compilation
+4. **Phase 4: Operators**
+   - Add filter operator
+   - Add project operator
+   - Test fused scan + filter + project
 
-4. **Week 7-8: Pipeline Breakers**
-   - Implement StagedHashTable
-   - Implement Hash Join operator
-   - Implement Hash Aggregate operator
-   - Test multi-stage queries
+5. **Phase 5: SQL Integration**
+   - Implement SimpleCatalog
+   - Integrate datafusion-sql parsing
+   - Convert LogicalPlan to physical Pipeline
 
-5. **Week 9-10: Integration**
-   - Build QueryExecutor
-   - Handle chunk-based execution
-   - Add error handling
-   - Write comprehensive tests
+6. **Phase 6: Hash Tables**
+   - Implement RuntimeHashTable
+   - Implement external functions
+   - Add hash table sink to pipelines
+
+7. **Phase 7: Join Support**
+   - Implement build pipeline
+   - Implement probe pipeline
+   - Test hash join end-to-end
+
+8. **Phase 8: Aggregates**
+   - Implement aggregate hash table
+   - Add aggregate functions
+   - Test GROUP BY queries
 
 ---
 
@@ -1314,40 +1674,30 @@ Follow this order to build incrementally:
 
 | Decision | Choice | Rationale |
 |----------|--------|-----------|
-| Execution Model | Push-based (callbacks) | Better for compilation; enables operator fusion |
-| Schema Treatment | Static (compile-time) | Enables type specialization; no runtime dispatch |
-| Field Values | Staged (Var<T>) | Generates optimized native access code |
-| Hash Tables | Generation-time abstraction | Compiles to flat arrays; no library calls |
-| Data Format | Arrow RecordBatch | Industry standard; efficient columnar layout |
-| JIT Backend | Cranelift (via rust-lms) | Fast compilation; good code quality |
+| Data Access | Zero-copy via staged array wrappers | No copying = maximum performance |
+| SQL Parsing | datafusion-sql + datafusion-expr | Mature SQL parser, avoid reinventing |
+| Hash Tables | Runtime Rust (not JIT) | Complex dynamic structures; external function calls |
+| Compilation Unit | One JIT function per pipeline | Clear boundaries at pipeline breakers |
+| String Encoding | StringView (i128) | Modern Arrow format, efficient comparisons |
+| Null Handling | Validity bitmaps | Standard Arrow approach |
 
 ---
 
-## Questions for Clarification
+## Open Questions
 
-Before proceeding, I'd like to clarify:
+1. **Output buffer format**: Should output be written to pre-allocated Arrow arrays, or to a dynamic buffer that's converted to Arrow after?
 
-1. **String handling**: Should strings be handled as:
-   - Direct pointers into Arrow buffers (zero-copy but requires careful lifetime management)
-   - Copied to temporary buffers (simpler but more overhead)
-   - Dictionary-encoded for common values (as in the LB2 paper)
+2. **String comparison in JIT**: For filter predicates on strings, should we:
+   - Call external Rust function for comparison
+   - Generate inline comparison code (complex for variable-length)
+   - Use prefix comparison for fast rejection, then external call
 
-2. **Null handling**: How should NULL values be handled?
-   - Generate explicit null checks in compiled code
-   - Use Arrow's validity bitmaps
-   - Ignore nulls initially (simplest)
+3. **Memory management for hash tables**: Who owns the memory?
+   - Hash tables live in Rust heap
+   - JIT code only holds handles (pointers)
+   - Orchestrator manages lifecycle
 
-3. **Memory management**: For pipeline breakers (hash tables):
-   - Pre-allocate fixed size and fail if exceeded
-   - Dynamically grow (requires external function calls)
-   - Estimate size from statistics
-
-4. **Chunk processing**: Should we:
-   - Compile once and reuse for all chunks (current plan)
-   - Compile per-chunk with potentially different optimizations
-   - Support both modes
-
-5. **Error handling**: What should happen on:
-   - Runtime errors (division by zero, overflow)
-   - Data errors (malformed parquet file)
-   - Type mismatches at parse time
+4. **Error handling in JIT code**: How to handle runtime errors (null dereference, division by zero)?
+   - Trap and return error code
+   - Check before operation (overhead)
+   - Ignore (undefined behavior)
