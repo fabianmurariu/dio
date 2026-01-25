@@ -18,6 +18,14 @@ use cranelift_codegen::ir::types;
 // Compilation Context
 // =============================================================================
 
+/// Optimized storage for slice parameters (ptr and len as separate variables).
+/// This avoids the need for stack slot loads in tight loops.
+#[derive(Clone, Copy)]
+pub struct SliceVars {
+    pub ptr_var: Variable,
+    pub len_var: Variable,
+}
+
 /// Context provided during code generation.
 ///
 /// This gives access to the function builder, JIT module, and mappings from
@@ -35,6 +43,9 @@ pub struct CompilationContext<'a, 'b> {
     pub extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
     /// Mapping from extern function IDs to module FuncIds
     pub extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
+    /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
+    /// For slice parameters, this allows direct register access instead of stack loads
+    pub slice_vars: &'b mut HashMap<usize, SliceVars>,
 }
 
 impl<'a, 'b> CompilationContext<'a, 'b> {
@@ -73,6 +84,12 @@ pub trait Staged {
 
     /// Generate Cranelift IR code for this computation
     fn codegen(&self, ctx: &mut CompilationContext) -> Value;
+
+    /// Return the variable ID if this is a direct Var reference.
+    /// Used for optimized slice access to bypass stack loads.
+    fn var_id(&self) -> Option<usize> {
+        None
+    }
 }
 
 // =============================================================================
@@ -126,6 +143,10 @@ impl<T: StagedType> Staged for Var<T> {
             .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
         ctx.builder.use_var(*var)
+    }
+
+    fn var_id(&self) -> Option<usize> {
+        Some(self.id)
     }
 }
 

@@ -1,6 +1,6 @@
 //! Operation structs for numeric staged computations.
 
-use cranelift_codegen::ir::Value;
+use cranelift_codegen::ir::{InstBuilder, Value};
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType};
@@ -268,5 +268,95 @@ where
     Eq {
         left: left.into_staged(),
         right: right.into_staged(),
+    }
+}
+
+// =============================================================================
+// Conditional Select Operation (branchless)
+// =============================================================================
+
+/// Select operation: if condition is true, return if_true, else return if_false
+/// This compiles to a branchless cmov instruction on x86-64.
+#[derive(Clone)]
+pub struct Select<C, T, F> {
+    condition: C,
+    if_true: T,
+    if_false: F,
+}
+
+impl<C, T, F, Out> Staged for Select<C, T, F>
+where
+    C: Staged<Out = BoolType>,
+    T: Staged<Out = Out>,
+    F: Staged<Out = Out>,
+    Out: StagedType,
+{
+    type Out = Out;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        let cond = self.condition.codegen(ctx);
+        let true_val = self.if_true.codegen(ctx);
+        let false_val = self.if_false.codegen(ctx);
+        ctx.builder.ins().select(cond, true_val, false_val)
+    }
+}
+
+/// Create a conditional select operation (branchless)
+///
+/// Returns `if_true` if `condition` is true, otherwise returns `if_false`.
+/// This compiles to a branchless cmov instruction.
+///
+/// # Example
+/// ```ignore
+/// // Branchless min
+/// let new_min = select(lt(*val, *min), *val, *min);
+/// ```
+pub fn select<C, T, F, Out>(condition: C, if_true: T, if_false: F) -> Select<C::Staged, T::Staged, F::Staged>
+where
+    C: IntoStaged<BoolType>,
+    T: IntoStaged<Out>,
+    F: IntoStaged<Out>,
+    Out: StagedType,
+{
+    Select {
+        condition: condition.into_staged(),
+        if_true: if_true.into_staged(),
+        if_false: if_false.into_staged(),
+    }
+}
+
+/// Branchless minimum of two values
+pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
+where
+    T: StagedType + SupportsComparison,
+    L: IntoStaged<T> + Clone,
+    R: IntoStaged<T> + Clone,
+    L::Staged: Clone,
+    R::Staged: Clone,
+{
+    let left_s = left.into_staged();
+    let right_s = right.into_staged();
+    Select {
+        condition: Lt { left: left_s.clone(), right: right_s.clone() },
+        if_true: left_s,
+        if_false: right_s,
+    }
+}
+
+/// Branchless maximum of two values
+pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
+where
+    T: StagedType + SupportsComparison,
+    L: IntoStaged<T> + Clone,
+    R: IntoStaged<T> + Clone,
+    L::Staged: Clone,
+    R::Staged: Clone,
+{
+    let left_s = left.into_staged();
+    let right_s = right.into_staged();
+    Select {
+        condition: Gt { left: left_s.clone(), right: right_s.clone() },
+        if_true: left_s,
+        if_false: right_s,
     }
 }

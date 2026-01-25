@@ -27,6 +27,8 @@ pub struct TypeInfo {
     pub struct_info: Option<StructInfo>,
     /// True if this struct should be passed by pointer (for structs >16 bytes on ARM64)
     pub pass_by_pointer: bool,
+    /// True if this is a fat pointer (slice reference) that can be stored in separate registers
+    pub is_fat_pointer: bool,
 }
 
 impl TypeInfo {
@@ -51,6 +53,7 @@ impl TypeInfo {
                 None
             },
             pass_by_pointer,
+            is_fat_pointer: T::is_fat_pointer(),
         }
     }
 

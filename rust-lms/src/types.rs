@@ -73,6 +73,13 @@ pub trait StagedType {
         1
     }
 
+    /// Returns true if this is a fat pointer (e.g., slice reference).
+    /// Fat pointers are 2 x i64 (ptr, len) that can be stored in separate
+    /// registers instead of a stack slot for better performance.
+    fn is_fat_pointer() -> bool {
+        false
+    }
+
     /// Get the Cranelift types for each ABI value.
     /// For primitives: just the cranelift_type
     /// For structs: sequence of I64s (or I64+F64 mix if we support floats in structs)
@@ -113,6 +120,14 @@ pub struct I64Type;
 /// Marker type for u64 values
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct U64Type;
+
+/// Marker type for i32 values
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct I32Type;
+
+/// Marker type for u32 values
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub struct U32Type;
 
 /// Marker type for boolean values
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -177,6 +192,54 @@ impl ConstantType for U64Type {
 }
 
 impl CopyType for U64Type {}
+
+impl StagedType for I32Type {
+    type RuntimeValue = i32;
+
+    fn cranelift_type() -> cranelift_codegen::ir::Type {
+        types::I32
+    }
+
+    fn size_of() -> usize {
+        4
+    }
+
+    fn align_of() -> usize {
+        4
+    }
+}
+
+impl ConstantType for I32Type {
+    fn codegen_constant(value: &i32, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().iconst(types::I32, *value as i64)
+    }
+}
+
+impl CopyType for I32Type {}
+
+impl StagedType for U32Type {
+    type RuntimeValue = u32;
+
+    fn cranelift_type() -> cranelift_codegen::ir::Type {
+        types::I32
+    }
+
+    fn size_of() -> usize {
+        4
+    }
+
+    fn align_of() -> usize {
+        4
+    }
+}
+
+impl ConstantType for U32Type {
+    fn codegen_constant(value: &u32, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().iconst(types::I32, *value as i64)
+    }
+}
+
+impl CopyType for U32Type {}
 
 impl StagedType for BoolType {
     type RuntimeValue = bool;

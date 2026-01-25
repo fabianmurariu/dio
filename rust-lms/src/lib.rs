@@ -153,7 +153,8 @@ pub mod prelude {
         Staged, Var,
     };
     pub use crate::types::{
-        BoolType, ConstantType, CopyType, F64Type, I64Type, Owned, StagedType, U64Type, UnitType,
+        BoolType, ConstantType, CopyType, F64Type, I32Type, I64Type, Owned, StagedType, U32Type,
+        U64Type, UnitType,
     };
 
     // Re-export derive macro

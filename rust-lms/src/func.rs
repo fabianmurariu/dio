@@ -23,6 +23,7 @@ use crate::types::StagedType;
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
 };
+use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
@@ -575,9 +576,22 @@ impl<'a> Compiler<'a> {
         self,
         expr: S,
     ) -> Result<Compiled<'a, S::Out>, CompileError> {
-        // Create the JIT module
-        let mut builder = JITBuilder::new(default_libcall_names())
+        // Create ISA with optimization level "speed" and other performance settings
+        let mut flag_builder = settings::builder();
+        flag_builder
+            .set("opt_level", "speed")
             .map_err(|e| CompileError::JitError(e.to_string()))?;
+        flag_builder
+            .set("use_colocated_libcalls", "true")
+            .map_err(|e| CompileError::JitError(e.to_string()))?;
+        let isa_builder = cranelift_native::builder()
+            .map_err(|e| CompileError::JitError(e.to_string()))?;
+        let isa = isa_builder
+            .finish(settings::Flags::new(flag_builder))
+            .map_err(|e| CompileError::JitError(e.to_string()))?;
+
+        // Create the JIT module with optimized ISA
+        let mut builder = JITBuilder::with_isa(isa, default_libcall_names());
 
         // Register external function symbols
         for extern_def in &self.extern_functions {
@@ -697,6 +711,8 @@ impl<'a> Compiler<'a> {
 
                     // Create var_map for this function
                     let mut var_map: HashMap<usize, Variable> = HashMap::new();
+                    // Optimized slice storage: var_id -> (ptr_var, len_var)
+                    let mut slice_vars = HashMap::new();
 
                     // Handle all parameters
                     let block_params = builder.block_params(entry_block).to_vec();
@@ -715,6 +731,27 @@ impl<'a> Compiler<'a> {
                                 builder.def_var(param_var, ptr_value);
                                 var_map.insert(var_id, param_var);
                                 abi_idx += 1;
+                            } else if param_info.is_fat_pointer {
+                                // FAT POINTER (slice): Store ptr and len in separate variables
+                                // This avoids stack slot loads in tight loops
+                                let ptr_value = block_params[abi_idx];
+                                let len_value = block_params[abi_idx + 1];
+
+                                // Create separate Cranelift variables for ptr and len
+                                let ptr_var = builder.declare_var(types::I64);
+                                let len_var = builder.declare_var(types::I64);
+                                builder.def_var(ptr_var, ptr_value);
+                                builder.def_var(len_var, len_value);
+
+                                // Store in slice_vars for optimized access
+                                slice_vars.insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+
+                                // Store ptr_var in var_map - slice operations should use slice_vars
+                                // for the optimized path. The fallback path (loading from stack)
+                                // is not supported for parameter slices.
+                                var_map.insert(var_id, ptr_var);
+
+                                abi_idx += 2;
                             } else {
                                 // SMALL STRUCT (≤16 bytes): Passed by value in registers
                                 // Create stack slot, store values, use pointer
@@ -765,6 +802,7 @@ impl<'a> Compiler<'a> {
                             func_map: &func_map,
                             extern_func_refs: &mut extern_func_refs,
                             extern_func_ids: &extern_func_ids,
+                            slice_vars: &mut slice_vars,
                         };
                         (func_def.body)(&mut ctx)
                     };
@@ -825,6 +863,7 @@ impl<'a> Compiler<'a> {
 
                 let result = {
                     let mut extern_func_refs = HashMap::new();
+                    let mut slice_vars = HashMap::new();
                     let mut ctx = CompilationContext {
                         builder: &mut builder,
                         module: &mut module,
@@ -832,6 +871,7 @@ impl<'a> Compiler<'a> {
                         func_map: &func_map,
                         extern_func_refs: &mut extern_func_refs,
                         extern_func_ids: &extern_func_ids,
+                        slice_vars: &mut slice_vars,
                     };
                     expr.codegen(&mut ctx)
                 };

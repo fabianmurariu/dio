@@ -8,14 +8,41 @@ cranelift-codegen = { workspace = true }
 cranelift-frontend = { workspace = true }
 cranelift-jit.workspace = true
 cranelift-module.workspace = true
+cranelift-native.workspace = true
 memoffset = "0.9"
 rust-lms-derive = { path = "../rust-lms-derive", optional = true }
+# Optional benchmark dependencies (enable via features)
+mlua = { version = "0.9", features = ["luajit"], optional = true }
+wasmtime = { version = "25", optional = true }
+rhai = { version = "1.19", optional = true }
 
 [features]
 default = ["derive"]
 derive = ["rust-lms-derive"]
+bench-luajit = ["mlua"]
+bench-wasm = ["wasmtime"]
+bench-rhai = ["rhai"]
 
 [dev-dependencies]
 cranelift = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-module = { workspace = true }
+criterion = { version = "0.5", features = ["html_reports"] }
+rand = "0.8"
+
+[[bench]]
+name = "jit_comparison"
+harness = false
+required-features = []
+
+[[bench]]
+name = "jit_comparison_simple"
+harness = false
+
+[[bench]]
+name = "copy_overhead"
+harness = false
+
+[[bench]]
+name = "minimal_comparison"
+harness = false
