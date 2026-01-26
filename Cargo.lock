@@ -2045,6 +2045,7 @@ dependencies = [
  "cranelift-jit",
  "cranelift-module",
  "cranelift-native 0.127.1",
+ "cranelift-wasm",
  "criterion",
  "memoffset",
  "mlua",

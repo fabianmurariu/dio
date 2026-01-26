@@ -27,6 +27,7 @@ bench-rhai = ["rhai"]
 cranelift = { workspace = true }
 cranelift-jit = { workspace = true }
 cranelift-module = { workspace = true }
+cranelift-wasm = "0.112"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
 

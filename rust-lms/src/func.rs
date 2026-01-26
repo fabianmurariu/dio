@@ -803,6 +803,7 @@ impl<'a> Compiler<'a> {
                             extern_func_refs: &mut extern_func_refs,
                             extern_func_ids: &extern_func_ids,
                             slice_vars: &mut slice_vars,
+                            unit_value: None,
                         };
                         (func_def.body)(&mut ctx)
                     };
@@ -872,6 +873,7 @@ impl<'a> Compiler<'a> {
                         extern_func_refs: &mut extern_func_refs,
                         extern_func_ids: &extern_func_ids,
                         slice_vars: &mut slice_vars,
+                        unit_value: None,
                     };
                     expr.codegen(&mut ctx)
                 };

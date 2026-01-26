@@ -46,6 +46,8 @@ pub struct CompilationContext<'a, 'b> {
     /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
     /// For slice parameters, this allows direct register access instead of stack loads
     pub slice_vars: &'b mut HashMap<usize, SliceVars>,
+    /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
+    pub unit_value: Option<Value>,
 }
 
 impl<'a, 'b> CompilationContext<'a, 'b> {
@@ -67,6 +69,20 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             .declare_func_in_func(*func_id, self.builder.func);
         self.extern_func_refs.insert(extern_id, func_ref);
         func_ref
+    }
+
+    /// Get or create the cached unit value (iconst.i8 0).
+    ///
+    /// This avoids creating duplicate dead values when sequencing side-effecting
+    /// operations like `Assign` and `InitVar`.
+    pub fn get_unit_value(&mut self) -> Value {
+        if let Some(val) = self.unit_value {
+            val
+        } else {
+            let val = self.builder.ins().iconst(types::I8, 0);
+            self.unit_value = Some(val);
+            val
+        }
     }
 }
 
@@ -352,8 +368,8 @@ where
 
         ctx.builder.def_var(var, value);
 
-        // Return unit value
-        ctx.builder.ins().iconst(types::I8, 0)
+        // Return cached unit value
+        ctx.get_unit_value()
     }
 }
 
@@ -461,8 +477,8 @@ where
 
         ctx.builder.def_var(var, value);
 
-        // Return unit value
-        ctx.builder.ins().iconst(types::I8, 0)
+        // Return cached unit value
+        ctx.get_unit_value()
     }
 }
 

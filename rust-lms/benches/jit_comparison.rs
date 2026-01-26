@@ -104,27 +104,19 @@ fn compile_and_run_rust_lms(
             // Main loop - all operations on local variables (registers)
             let loop_body = while_loop(lt(*i, data.len()), {
                 // Load value into local variable ONCE per iteration
-                let load_val = assign(*val, data.get_unchecked(*i));
-
-                // Check if value > v
-                let process = if_then(gt(*val, v), {
-                    // Increment count (register operation)
-                    let inc_count = assign(*count, add(*count, 1u64));
-
-                    // Add to sum (register operation)
-                    let add_sum = assign(*sum, add(*sum, *val));
-
-                    // Update min (register operation)
-                    let update_min = if_then(lt(*val, *min), assign(*min, *val));
-
-                    // Update max (register operation)
-                    let update_max = if_then(gt(*val, *max), assign(*max, *val));
-
-                    (inc_count, add_sum, update_min, update_max)
-                });
-
-                // Increment loop counter
-                (load_val, process, assign(*i, add(*i, 1u64)))
+                (
+                    assign(*val, data.get_unchecked(*i)),
+                    // Check if value > v
+                    if_then(gt(*val, v), {
+                        (
+                            assign(*count, add(*count, 1u64)),
+                            assign(*sum, add(*sum, *val)),
+                            if_then(lt(*val, *min), assign(*min, *val)),
+                            if_then(gt(*val, *max), assign(*max, *val)),
+                        )
+                    }),
+                    assign(*i, add(*i, 1u64)),
+                )
             });
 
             // Store final results to output pointers (only ONCE after loop)

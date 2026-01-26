@@ -530,7 +530,7 @@ where
             .store(MemFlags::trusted(), value, element_ptr, 0);
 
         // Return unit
-        ctx.builder.ins().iconst(types::I8, 0)
+        ctx.get_unit_value()
     }
 }
 

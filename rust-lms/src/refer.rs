@@ -233,7 +233,7 @@ where
             .ins()
             .store(MemFlags::trusted(), value, ptr_val, 0);
 
-        ctx.builder.ins().iconst(types::I8, 0)
+        ctx.get_unit_value()
     }
 }
 

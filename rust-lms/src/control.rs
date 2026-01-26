@@ -7,7 +7,7 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType, UnitType};
@@ -158,7 +158,7 @@ where
         ctx.builder.seal_block(merge_block); // Two predecessors now known
 
         // Return unit value
-        ctx.builder.ins().iconst(types::I8, 0)
+        ctx.get_unit_value()
     }
 }
 
@@ -251,7 +251,7 @@ where
         ctx.builder.seal_block(loop_exit); // Single predecessor (loop_header)
 
         // Return unit value
-        ctx.builder.ins().iconst(types::I8, 0)
+        ctx.get_unit_value()
     }
 }
 
