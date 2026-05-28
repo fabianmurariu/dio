@@ -1,51 +1,73 @@
 //! Core traits for staged iteration.
 
+use crate::control::if_then;
 use crate::func::VarBuilder;
-use crate::staged::{LetVar, Staged, Var};
-use crate::types::{BoolType, StagedType, U64Type, UnitType};
+use crate::num::{add, gt, lt};
+use crate::num::{SupportsAdd, SupportsComparison};
+use crate::staged::{assign, Const, LetVar, Staged, Var};
+use crate::types::{BoolType, ConstantType, CopyType, StagedType, U64Type, UnitType};
 
-use super::{Filter, Map};
+use super::accumulator::{Accumulator, FoldExpr, IntoAccumulatorUpdate};
+use super::{Filter, Map, Zip};
 
-/// A staged iterator that generates loop code when consumed.
-///
-/// This is a push-based (internal) iterator. The iterator controls the loop
-/// structure, and consumers provide what to do with each element via callbacks.
-///
-/// Callbacks are Rust closures that manipulate staged expressions. They are
-/// called at **staging time** to build the computation graph, not at runtime.
+// =============================================================================
+// MinMax helper — initial values for min/max reductions
+// =============================================================================
+
+pub trait MinMax: Copy {
+    fn min_sentinel() -> Self; // starting value for max-reduction (smallest possible)
+    fn max_sentinel() -> Self; // starting value for min-reduction (largest possible)
+}
+
+impl MinMax for i64 {
+    fn min_sentinel() -> Self { i64::MIN }
+    fn max_sentinel() -> Self { i64::MAX }
+}
+impl MinMax for u64 {
+    fn min_sentinel() -> Self { u64::MIN }
+    fn max_sentinel() -> Self { u64::MAX }
+}
+impl MinMax for f64 {
+    fn min_sentinel() -> Self { f64::NEG_INFINITY }
+    fn max_sentinel() -> Self { f64::INFINITY }
+}
+impl MinMax for i32 {
+    fn min_sentinel() -> Self { i32::MIN }
+    fn max_sentinel() -> Self { i32::MAX }
+}
+impl MinMax for u32 {
+    fn min_sentinel() -> Self { u32::MIN }
+    fn max_sentinel() -> Self { u32::MAX }
+}
+
+// =============================================================================
+// StagedIterator
+// =============================================================================
+
+/// A push-based staged iterator. The iterator controls the loop structure;
+/// consumers provide a callback that is called at staging time to build the
+/// per-iteration body expression.
 pub trait StagedIterator: Sized {
-    /// The staged type of elements produced by this iterator.
     type Item: StagedType;
 
-    /// Consume this iterator, generating a loop that processes each element.
+    /// Drive a loop over all elements, calling `consumer` once at staging time
+    /// to build the per-element body expression.
     ///
-    /// The `consumer` closure receives a `Var<Self::Item>` representing the
-    /// current element. It returns a staged expression for the loop body.
-    ///
-    /// # Implementation Note
-    /// - Source iterators implement this to generate the actual loop structure.
-    /// - Combinator iterators delegate to inner iterator with a wrapped consumer.
+    /// `Body: Clone` is required because the loop codegen clones the body each
+    /// time it needs to emit it into a Cranelift block.
     fn consume<F, Body>(
         self,
         builder: &mut VarBuilder,
         consumer: F,
-    ) -> impl Staged<Out = UnitType>
+    ) -> impl Staged<Out = UnitType> + use<Self, F, Body>
     where
         F: FnOnce(Var<Self::Item>) -> Body,
         Body: Staged<Out = UnitType> + Clone;
 
     // =========================================================================
-    // Combinators - Transform the iterator, return a new iterator
+    // Combinators
     // =========================================================================
 
-    /// Transform each element using the given function.
-    ///
-    /// # Example
-    /// ```ignore
-    /// slice.staged_iter()
-    ///     .map(|x| add(*x, 2.0))
-    ///     .sum(builder)
-    /// ```
     fn map<F, U, MapOut>(self, f: F) -> Map<Self, F, U>
     where
         F: Fn(Var<Self::Item>) -> MapOut,
@@ -55,16 +77,6 @@ pub trait StagedIterator: Sized {
         Map::new(self, f)
     }
 
-    /// Keep only elements that satisfy the predicate.
-    ///
-    /// **Note:** Filter breaks index correspondence - cannot be zipped.
-    ///
-    /// # Example
-    /// ```ignore
-    /// slice.staged_iter()
-    ///     .filter(|x| gt(*x, 0.0))
-    ///     .sum(builder)
-    /// ```
     fn filter<P, Cond>(self, predicate: P) -> Filter<Self, P>
     where
         P: Fn(Var<Self::Item>) -> Cond,
@@ -74,11 +86,11 @@ pub trait StagedIterator: Sized {
     }
 
     // =========================================================================
-    // Terminal Operations - Consume the iterator, return results
+    // Terminal operations
     // =========================================================================
 
     /// Execute a side-effecting operation for each element.
-    fn for_each<F, Body>(self, builder: &mut VarBuilder, f: F) -> impl Staged<Out = UnitType>
+    fn for_each<F, Body>(self, builder: &mut VarBuilder, f: F) -> impl Staged<Out = UnitType> + use<Self, F, Body>
     where
         F: FnOnce(Var<Self::Item>) -> Body,
         Body: Staged<Out = UnitType> + Clone,
@@ -86,128 +98,162 @@ pub trait StagedIterator: Sized {
         self.consume(builder, f)
     }
 
-    // TODO: fold-based methods disabled pending Clone bound fix for apply_update return type
-    // The issue is that apply_update returns `impl Staged<Out = UnitType>` which doesn't
-    // prove Clone, but consume requires Body: Clone.
-    //
-    // /// Reduce elements to accumulator value(s).
-    // fn fold<Acc, F, Update>(...) -> Acc::Vars
-    //
-    // /// Sum all elements.
-    // fn sum(self, builder: &mut VarBuilder) -> Var<Self::Item>
-    //
-    // /// Count the number of elements.
-    // fn count(self, builder: &mut VarBuilder) -> Var<U64Type>
-    //
-    // /// Find the minimum element.
-    // fn min(self, builder: &mut VarBuilder) -> Var<Self::Item>
-    //
-    // /// Find the maximum element.
-    // fn max(self, builder: &mut VarBuilder) -> Var<Self::Item>
+    /// Reduce elements with a fold function.
+    ///
+    /// Returns a Rust tuple `(loop_expr, result_vars)`. Include `loop_expr` in
+    /// the staged sequence (as a statement) and read from `result_vars` after.
+    ///
+    /// # Example
+    /// ```ignore
+    /// let (fold_loop, (count_var, sum_var)) = slice
+    ///     .staged_iter()
+    ///     .fold(ctx, (0u64, 0.0f64), |(count, sum), elem| {
+    ///         (add(count, 1u64), add(sum, elem))
+    ///     });
+    /// staged_block! {
+    ///     fold_loop;
+    ///     sum_var
+    /// }
+    /// ```
+    fn fold<Acc, FoldFn, Update>(
+        self,
+        builder: &mut VarBuilder,
+        init: Acc,
+        fold_fn: FoldFn,
+    ) -> (impl Staged<Out = UnitType> + use<Self, Acc, FoldFn, Update>, Acc::Vars)
+    where
+        Acc: Accumulator,
+        Acc::Vars: Clone,
+        FoldFn: FnOnce(Acc::Refs, Var<Self::Item>) -> Update,
+        Update: IntoAccumulatorUpdate<Acc>,
+        Update::Update: Clone,
+    {
+        let (acc_init, vars) = Acc::create_vars(builder, init);
+        let vars_clone = vars.clone();
+        let loop_expr = self.consume(builder, move |elem| {
+            let refs = Acc::as_refs(&vars_clone);
+            let update = fold_fn(refs, elem);
+            update.apply_update(vars_clone.clone())
+        });
+        ((acc_init, loop_expr), vars)
+    }
+
+    /// Sum all elements. Initializes accumulator to `T::RuntimeValue::default()` (zero).
+    ///
+    /// Returns a staged expression that evaluates to the final sum.
+    fn sum(self, builder: &mut VarBuilder) -> impl Staged<Out = Self::Item> + use<Self>
+    where
+        Self::Item: StagedType + ConstantType + CopyType + SupportsAdd,
+        <Self::Item as StagedType>::RuntimeValue: Default,
+    {
+        let init_lv = builder.let_var(Const::<Self::Item>::new(Default::default()));
+        let acc = init_lv.var();
+        let loop_expr = self.consume(builder, move |elem| {
+            assign(acc, add::<Self::Item, _, _>(acc, elem))
+        });
+        FoldExpr { init: init_lv, loop_expr, result_var: acc }
+    }
+
+    /// Count the number of elements that pass through (including filtered ones
+    /// if a filter is upstream).
+    fn count(self, builder: &mut VarBuilder) -> impl Staged<Out = U64Type> + use<Self> {
+        let init_lv = builder.let_var(0u64);
+        let acc = init_lv.var();
+        let loop_expr = self.consume(builder, move |_elem| {
+            assign(acc, add::<U64Type, _, _>(acc, 1u64))
+        });
+        FoldExpr { init: init_lv, loop_expr, result_var: acc }
+    }
+
+    /// Find the minimum element. Initializes to the type's maximum sentinel value.
+    fn min(self, builder: &mut VarBuilder) -> impl Staged<Out = Self::Item> + use<Self>
+    where
+        Self::Item: StagedType + ConstantType + CopyType + SupportsComparison,
+        <Self::Item as StagedType>::RuntimeValue: MinMax,
+    {
+        let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
+        let init_lv = builder.let_var(Const::<Self::Item>::new(sentinel));
+        let acc = init_lv.var();
+        let loop_expr = self.consume(builder, move |elem| {
+            if_then(lt::<Self::Item, _, _>(elem, acc), assign(acc, elem))
+        });
+        FoldExpr { init: init_lv, loop_expr, result_var: acc }
+    }
+
+    /// Find the maximum element. Initializes to the type's minimum sentinel value.
+    fn max(self, builder: &mut VarBuilder) -> impl Staged<Out = Self::Item> + use<Self>
+    where
+        Self::Item: StagedType + ConstantType + CopyType + SupportsComparison,
+        <Self::Item as StagedType>::RuntimeValue: MinMax,
+    {
+        let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
+        let init_lv = builder.let_var(Const::<Self::Item>::new(sentinel));
+        let acc = init_lv.var();
+        let loop_expr = self.consume(builder, move |elem| {
+            if_then(gt::<Self::Item, _, _>(elem, acc), assign(acc, elem))
+        });
+        FoldExpr { init: init_lv, loop_expr, result_var: acc }
+    }
 }
 
-/// Helper trait for min/max bounds.
-pub trait MinMax: Copy {
-    fn min_value() -> Self;
-    fn max_value() -> Self;
-}
+// =============================================================================
+// IndexedStagedIterator
+// =============================================================================
 
-impl MinMax for i64 {
-    fn min_value() -> Self { i64::MIN }
-    fn max_value() -> Self { i64::MAX }
-}
-
-impl MinMax for u64 {
-    fn min_value() -> Self { u64::MIN }
-    fn max_value() -> Self { u64::MAX }
-}
-
-impl MinMax for f64 {
-    fn min_value() -> Self { f64::NEG_INFINITY }
-    fn max_value() -> Self { f64::INFINITY }
-}
-
-impl MinMax for i32 {
-    fn min_value() -> Self { i32::MIN }
-    fn max_value() -> Self { i32::MAX }
-}
-
-impl MinMax for u32 {
-    fn min_value() -> Self { u32::MIN }
-    fn max_value() -> Self { u32::MAX }
-}
-
-/// A staged iterator that maintains index correspondence with its source.
+/// A staged iterator that tracks element position, enabling `zip`.
 ///
-/// Indexed iterators support operations that require knowing the current
-/// position: `zip`, `enumerate`, `take`, `skip`, `unroll`.
-///
-/// # Index Correspondence
-/// Element N in output corresponds to element N in input. Operations that break this:
-/// - `filter` - skipped elements shift indices
-/// - `flat_map` - one input produces multiple outputs
-///
-/// # Like Rayon's IndexedParallelIterator
-/// This is analogous to Rayon's `IndexedParallelIterator` - only indexed
-/// iterators can be zipped.
+/// All slice and range iterators implement this. `filter` breaks the index
+/// correspondence so filtered iterators do NOT implement this.
 pub trait IndexedStagedIterator: StagedIterator {
-    /// The concrete type returned by len().
-    /// This allows implementations to return their specific LetVar type.
     type LenExpr: Staged<Out = U64Type>;
 
-    /// Get the length of this iterator as a variable.
-    ///
-    /// Returns a LetVar that materializes the length into a variable.
-    /// The returned LetVar derefs to Var<U64Type> which is Copy.
     fn len(&self, builder: &mut VarBuilder) -> LetVar<U64Type, Self::LenExpr>;
 
-    /// Consume with access to the current index.
     fn consume_indexed<F, Body>(
         self,
         builder: &mut VarBuilder,
         consumer: F,
-    ) -> impl Staged<Out = UnitType>
+    ) -> impl Staged<Out = UnitType> + use<Self, F, Body>
     where
         F: FnOnce(Var<U64Type>, Var<Self::Item>) -> Body,
         Body: Staged<Out = UnitType> + Clone;
 
-    // TODO: zip method disabled pending Zip implementation fix
-    // /// Zip with another indexed source.
-    // fn zip<S>(self, other: S) -> super::Zip<Self, S>
-    // where
-    //     S: IndexedSource,
-    // {
-    //     super::Zip::new(self, other)
-    // }
+    /// Zip this iterator with a secondary random-access source.
+    ///
+    /// Both sources are accessed at the same index on each iteration. The
+    /// primary iterator's length drives the loop; the caller must ensure the
+    /// secondary source has at least that many elements.
+    fn zip<S>(self, other: S) -> Zip<Self, S>
+    where
+        S: IndexedSource,
+    {
+        Zip::new(self, other)
+    }
 }
 
-/// A data source that supports random access by index.
+// =============================================================================
+// IndexedSource
+// =============================================================================
+
+/// A random-access data source usable as the secondary input to `zip`.
 ///
-/// Used by `zip` to access elements from a secondary source using the
-/// primary iterator's index.
+/// Implemented by `Var<SRef<Slice<T>>>`.
 pub trait IndexedSource: Clone {
     type Item: StagedType;
-
-    /// The concrete type returned by len().
     type LenExpr: Staged<Out = U64Type>;
-
-    /// The concrete type returned by get_unchecked().
-    /// Clone is required because the body expression is cloned in while loops.
+    /// The expression type returned by `get_unchecked`. Must be Clone because
+    /// the body containing it is cloned by loop codegen.
     type GetExpr: Staged<Out = Self::Item> + Clone;
 
-    /// Get the number of elements as a variable.
     fn len(&self, builder: &mut VarBuilder) -> LetVar<U64Type, Self::LenExpr>;
-
-    /// Get element at index without bounds checking.
-    /// Takes self by value since IndexedSource is Clone.
-    /// Returns the staged expression directly (no LetVar) since this is used
-    /// inside loop bodies where we don't have access to builder.
-    fn get_unchecked(self, index: Var<U64Type>) -> Self::GetExpr;
+    fn get_at(self, index: Var<U64Type>) -> Self::GetExpr;
 }
 
-/// Extension trait for ergonomic `.staged_iter()` call.
+// =============================================================================
+// IntoStagedIterator
+// =============================================================================
+
 pub trait IntoStagedIterator {
     type Iter: StagedIterator;
-
     fn staged_iter(self) -> Self::Iter;
 }

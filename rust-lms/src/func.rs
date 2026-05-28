@@ -78,19 +78,27 @@ pub(crate) struct FunDef {
 ///
 /// This is passed to closures in `fun1` and `fun1_rec` to allow local
 /// variable creation without exposing the entire Compiler.
-pub struct VarBuilder<'a> {
-    pub(crate) next_var_id: &'a mut usize,
+pub struct VarBuilder {
+    pub(crate) next_var_id: usize,
 }
 
-impl<'a> VarBuilder<'a> {
+impl VarBuilder {
+    pub(crate) fn new(start: usize) -> Self {
+        VarBuilder { next_var_id: start }
+    }
+
+    pub(crate) fn final_id(&self) -> usize {
+        self.next_var_id
+    }
+
     /// Create an uninitialized variable reference.
     ///
     /// # Safety
     /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
     /// Prefer using `let_var()` which ensures initialization.
     pub(crate) unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
-        let id = *self.next_var_id;
-        *self.next_var_id += 1;
+        let id = self.next_var_id;
+        self.next_var_id += 1;
         Var::new(id)
     }
 

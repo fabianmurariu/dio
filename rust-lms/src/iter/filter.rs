@@ -34,7 +34,7 @@ where
         self,
         builder: &mut VarBuilder,
         consumer: F,
-    ) -> impl Staged<Out = UnitType>
+    ) -> impl Staged<Out = UnitType> + use<I, P, Cond, F, Body>
     where
         F: FnOnce(Var<Self::Item>) -> Body,
         Body: Staged<Out = UnitType> + Clone,

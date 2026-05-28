@@ -42,7 +42,7 @@ where
         self,
         builder: &mut VarBuilder,
         consumer: G,
-    ) -> impl Staged<Out = UnitType>
+    ) -> impl Staged<Out = UnitType> + use<I, F, U, MapOut, G, Body>
     where
         G: FnOnce(Var<U>) -> Body,
         Body: Staged<Out = UnitType> + Clone,
@@ -86,7 +86,7 @@ where
         self,
         builder: &mut VarBuilder,
         consumer: G,
-    ) -> impl Staged<Out = UnitType>
+    ) -> impl Staged<Out = UnitType> + use<I, F, U, MapOut, G, Body>
     where
         G: FnOnce(Var<U64Type>, Var<U>) -> Body,
         Body: Staged<Out = UnitType> + Clone,

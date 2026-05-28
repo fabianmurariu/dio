@@ -27,8 +27,8 @@ mod map;
 mod filter;
 mod zip;
 
-pub use traits::{StagedIterator, IndexedStagedIterator, IndexedSource, IntoStagedIterator};
-pub use accumulator::{Accumulator, IntoAccumulatorUpdate};
+pub use traits::{StagedIterator, IndexedStagedIterator, IndexedSource, IntoStagedIterator, MinMax};
+pub use accumulator::{Accumulator, FoldExpr, IntoAccumulatorUpdate};
 pub use slice_iter::SliceIter;
 pub use range_iter::{RangeIter, range};
 pub use map::Map;

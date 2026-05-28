@@ -1,0 +1,283 @@
+//! Integration tests for the staged iterator API: fold, sum, count, min, max, zip.
+
+use rust_lms::prelude::*;
+
+// =============================================================================
+// sum
+// =============================================================================
+
+#[test]
+fn test_iter_sum_i64() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("sum_i64", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter().sum(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let sum = compiled.as_fn();
+
+    let data: [i64; 5] = [10, 20, 30, 40, 50];
+    assert_eq!(sum(&data[..]), 150);
+}
+
+#[test]
+fn test_iter_sum_f64() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+        arr.staged_iter().sum(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let sum = compiled.as_fn();
+
+    let data: [f64; 4] = [1.5, 2.5, 3.0, 4.0];
+    assert!((sum(&data[..]) - 11.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_iter_sum_with_map() {
+    let mut compiler = Compiler::new();
+
+    // sum of (x * 2) for each element
+    let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter()
+            .map(|x| mul::<I64Type, _, _>(x, 2i64))
+            .sum(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 4] = [1, 2, 3, 4]; // sum of doubles = 2+4+6+8 = 20
+    assert_eq!(f(&data[..]), 20);
+}
+
+#[test]
+fn test_iter_sum_with_filter() {
+    let mut compiler = Compiler::new();
+
+    // sum of positive elements
+    let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter()
+            .filter(|x| lt::<I64Type, _, _>(0i64, x))
+            .sum(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 6] = [-3, 5, -1, 8, 0, 2];
+    assert_eq!(f(&data[..]), 15); // 5 + 8 + 2
+}
+
+// =============================================================================
+// count
+// =============================================================================
+
+#[test]
+fn test_iter_count_all() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("count_all", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter().count(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 7] = [1, 2, 3, 4, 5, 6, 7];
+    assert_eq!(f(&data[..]), 7u64);
+}
+
+#[test]
+fn test_iter_count_filtered() {
+    let mut compiler = Compiler::new();
+
+    // count elements > 3
+    let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter()
+            .filter(|x| lt::<I64Type, _, _>(3i64, x))
+            .count(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 5] = [1, 4, 5, 2, 6];
+    assert_eq!(f(&data[..]), 3u64); // 4, 5, 6
+}
+
+// =============================================================================
+// min / max
+// =============================================================================
+
+#[test]
+fn test_iter_min_i64() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("min_i64", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter().min(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 5] = [30, 10, 50, 20, 40];
+    assert_eq!(f(&data[..]), 10);
+}
+
+#[test]
+fn test_iter_max_f64() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("max_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+        arr.staged_iter().max(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [f64; 5] = [1.5, 9.9, 3.3, 7.7, 2.2];
+    assert!((f(&data[..]) - 9.9).abs() < 1e-9);
+}
+
+#[test]
+fn test_iter_min_max_filtered() {
+    let mut compiler = Compiler::new();
+
+    // min of positive elements
+    let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        arr.staged_iter()
+            .filter(|x| lt::<I64Type, _, _>(0i64, x))
+            .min(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [i64; 6] = [-5, 3, -1, 7, 2, 9];
+    assert_eq!(f(&data[..]), 2); // min of {3, 7, 2, 9}
+}
+
+// =============================================================================
+// fold (multi-accumulator)
+// =============================================================================
+
+#[test]
+fn test_iter_fold_count_and_sum() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1(
+        "count_and_sum",
+        |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+            let (fold_loop, (count_var, sum_var)) = arr
+                .staged_iter()
+                .fold(ctx, (0u64, 0.0f64), |(count, sum), elem| {
+                    (add::<U64Type, _, _>(count, 1u64), add::<F64Type, _, _>(sum, elem))
+                });
+            staged_block! {
+                fold_loop;
+                count_var
+            }
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let data: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+    assert_eq!(f(&data[..]), 4u64);
+}
+
+// =============================================================================
+// zip
+// =============================================================================
+
+#[test]
+fn test_iter_zip_dot_product() {
+    let mut compiler = Compiler::new();
+
+    // Dot product: sum of a[i] * b[i]
+    let f = compiler.fun2(
+        "dot_product",
+        |ctx, a: Var<SRef<Slice<F64Type>>>, b: Var<SRef<Slice<F64Type>>>| {
+            let acc_lv = ctx.let_var(0.0f64);
+            let acc = acc_lv.var();
+
+            // acc is Var<F64Type> (Copy) — use move to capture by value
+            let zip_loop = a.staged_iter().zip(b).for_each(ctx, move |ai, bi| {
+                assign(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)))
+            });
+
+            staged_block! {
+                acc_lv;
+                zip_loop;
+                acc
+            }
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let dot = compiled.as_fn();
+
+    let a: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
+    let b: [f64; 4] = [4.0, 3.0, 2.0, 1.0];
+    // dot = 1*4 + 2*3 + 3*2 + 4*1 = 4+6+6+4 = 20
+    assert!((dot(&a[..], &b[..]) - 20.0).abs() < 1e-9);
+}
+
+#[test]
+fn test_iter_zip_element_wise_sum() {
+    let mut compiler = Compiler::new();
+
+    // sum of (a[i] + b[i]) for all i
+    // Variables must be declared outside the consumer closure since ctx can't be
+    // called inside for_each (it's already borrowed by the outer fun2 closure).
+    let f = compiler.fun2(
+        "zip_sum",
+        |ctx, a: Var<SRef<Slice<I64Type>>>, b: Var<SRef<Slice<I64Type>>>| {
+            let total_lv = ctx.let_var(0i64);
+            let total = total_lv.var();
+
+            let zip_loop = a.staged_iter().zip(b).for_each(ctx, move |ai, bi| {
+                assign(total, add::<I64Type, _, _>(total, add::<I64Type, _, _>(ai, bi)))
+            });
+
+            staged_block! {
+                total_lv;
+                zip_loop;
+                total
+            }
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let b: [i64; 4] = [10, 20, 30, 40];
+    // sum of (1+10)+(2+20)+(3+30)+(4+40) = 11+22+33+44 = 110
+    assert_eq!(f(&a[..], &b[..]), 110);
+}
+
+// =============================================================================
+// range iterator with sum
+// =============================================================================
+
+#[test]
+fn test_range_sum() {
+    let mut compiler = Compiler::new();
+
+    // Sum of range [0, n)
+    let f = compiler.fun1("range_sum", |ctx, n: Var<U64Type>| {
+        range(0u64, n).sum(ctx)
+    });
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    assert_eq!(f(10u64), 45u64); // 0+1+...+9 = 45
+    assert_eq!(f(5u64), 10u64);  // 0+1+2+3+4 = 10
+}

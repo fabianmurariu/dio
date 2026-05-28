@@ -1,7 +1,4 @@
 //! FunDef construction helpers for function definitions.
-//!
-//! This module provides `FunDef::make_funN` and `FunDef::make_funN_rec` methods
-//! for arities 0-8, used by `Compiler::funN` and `Compiler::funN_rec`.
 
 use crate::func::{FunDef, VarBuilder};
 use crate::func_impl::{TypeInfo, FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8};
@@ -23,19 +20,18 @@ macro_rules! impl_make_fun {
                 F: FnOnce(&mut VarBuilder) -> BODY,
                 BODY: Staged<Out = OUT> + 'static,
             {
-                let mut var_builder = VarBuilder { next_var_id };
-                let body_expr = body_fn(&mut var_builder);
+                let mut vb = VarBuilder::new(*next_var_id);
+                let body_expr = body_fn(&mut vb);
+                *next_var_id = vb.final_id();
 
                 let func_id = functions.len();
-                let func_def = FunDef {
+                functions.push(Some(FunDef {
                     name: name.to_string(),
                     body: Box::new(move |ctx| body_expr.codegen(ctx)),
                     param_infos: vec![],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids: vec![],
-                };
-
-                functions.push(Some(func_def));
+                }));
                 $FunRef::new(func_id)
             }
 
@@ -52,20 +48,19 @@ macro_rules! impl_make_fun {
             {
                 let func_id = functions.len();
                 let func_ref = $FunRef::new(func_id);
-                functions.push(None); // placeholder
+                functions.push(None);
 
-                let mut var_builder = VarBuilder { next_var_id };
-                let body_expr = body_fn(func_ref, &mut var_builder);
+                let mut vb = VarBuilder::new(*next_var_id);
+                let body_expr = body_fn(func_ref, &mut vb);
+                *next_var_id = vb.final_id();
 
-                let func_def = FunDef {
+                functions[func_id] = Some(FunDef {
                     name: name.to_string(),
                     body: Box::new(move |ctx| body_expr.codegen(ctx)),
                     param_infos: vec![],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids: vec![],
-                };
-
-                functions[func_id] = Some(func_def);
+                });
                 $FunRef::new(func_id)
             }
         }
@@ -86,7 +81,6 @@ macro_rules! impl_make_fun {
                 FN: FnOnce(&mut VarBuilder, $(Var<$T>),+) -> BODY,
                 BODY: Staged<Out = OUT> + 'static,
             {
-                // Create parameter variables
                 $(
                     let $var = {
                         let id = *next_var_id;
@@ -94,22 +88,20 @@ macro_rules! impl_make_fun {
                         Var::<$T>::new(id)
                     };
                 )+
-
                 let param_var_ids = vec![$($var.id),+];
 
-                let mut var_builder = VarBuilder { next_var_id };
-                let body_expr = body_fn(&mut var_builder, $($var),+);
+                let mut vb = VarBuilder::new(*next_var_id);
+                let body_expr = body_fn(&mut vb, $($var),+);
+                *next_var_id = vb.final_id();
 
                 let func_id = functions.len();
-                let func_def = FunDef {
+                functions.push(Some(FunDef {
                     name: name.to_string(),
                     body: Box::new(move |ctx| body_expr.codegen(ctx)),
                     param_infos: vec![$(TypeInfo::from_staged_type::<$T>()),+],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids,
-                };
-
-                functions.push(Some(func_def));
+                }));
                 $FunRef::new(func_id)
             }
 
@@ -125,7 +117,6 @@ macro_rules! impl_make_fun {
                 FN: FnOnce($FunRef<$($T,)+ OUT>, &mut VarBuilder, $(Var<$T>),+) -> BODY,
                 BODY: Staged<Out = OUT> + 'static,
             {
-                // Create parameter variables
                 $(
                     let $var = {
                         let id = *next_var_id;
@@ -133,33 +124,29 @@ macro_rules! impl_make_fun {
                         Var::<$T>::new(id)
                     };
                 )+
-
                 let param_var_ids = vec![$($var.id),+];
 
-                // Pre-allocate func_id and create FunRef for recursion
                 let func_id = functions.len();
                 let func_ref = $FunRef::new(func_id);
-                functions.push(None); // placeholder
+                functions.push(None);
 
-                let mut var_builder = VarBuilder { next_var_id };
-                let body_expr = body_fn(func_ref, &mut var_builder, $($var),+);
+                let mut vb = VarBuilder::new(*next_var_id);
+                let body_expr = body_fn(func_ref, &mut vb, $($var),+);
+                *next_var_id = vb.final_id();
 
-                let func_def = FunDef {
+                functions[func_id] = Some(FunDef {
                     name: name.to_string(),
                     body: Box::new(move |ctx| body_expr.codegen(ctx)),
                     param_infos: vec![$(TypeInfo::from_staged_type::<$T>()),+],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids,
-                };
-
-                functions[func_id] = Some(func_def);
+                });
                 $FunRef::new(func_id)
             }
         }
     };
 }
 
-// Generate make_fun0..make_fun8 and make_fun0_rec..make_fun8_rec
 impl_make_fun!(0, make_fun0, make_fun0_rec, FunRef0);
 impl_make_fun!(1, make_fun1, make_fun1_rec, FunRef1, [A], [a]);
 impl_make_fun!(2, make_fun2, make_fun2_rec, FunRef2, [A, B], [a, b]);
