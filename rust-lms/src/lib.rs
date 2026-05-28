@@ -130,7 +130,7 @@ pub mod prelude {
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, FunRef0, FunRef1, FunRef2, FunRef3,
-        FunType0, FunType1, FunType2, FunType3,
+        FunType0, FunType1, FunType2, FunType3, VarBuilder,
     };
     pub use crate::iter::{
         range, Filter, IntoStagedIterator, Map, RangeIter, SliceIter, StagedIterator, Zip,
@@ -156,6 +156,7 @@ pub mod prelude {
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, LetVar, IntoStaged,
         Staged, Var,
     };
+    pub use rust_lms_macros::staged_block;
     pub use crate::types::{
         BoolType, ConstantType, CopyType, F64Type, I32Type, I64Type, Owned, StagedType, U32Type,
         U64Type, UnitType,

@@ -96,8 +96,8 @@ impl<'a> VarBuilder<'a> {
 
     /// Create a variable with an initial value.
     ///
-    /// Returns an `InitVar` that can be used directly without tuple unpacking.
-    /// Accepts any value that can be converted into a staged expression.
+    /// Returns a `LetVar` that sequences the initialization when staged.
+    /// Deref with `*` to get the underlying `Var<T>` for use in expressions.
     pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
     where
         T: StagedType,
@@ -105,6 +105,20 @@ impl<'a> VarBuilder<'a> {
     {
         let var = unsafe { self.var_unchecked() };
         crate::staged::LetVar::new(var, init.into_staged())
+    }
+
+    /// Evaluate a staged expression once and bind the result to a new variable.
+    ///
+    /// Use this instead of reusing a complex expression directly when you need
+    /// the result in multiple places — avoids cloning the expression tree.
+    /// Deref with `*` to get the underlying `Var<T>`.
+    pub fn bind<T, E>(&mut self, expr: E) -> crate::staged::LetVar<T, E::Staged>
+    where
+        T: StagedType,
+        E: crate::staged::IntoStaged<T>,
+    {
+        let var = unsafe { self.var_unchecked() };
+        crate::staged::LetVar::new(var, expr.into_staged())
     }
 }
 

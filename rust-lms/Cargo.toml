@@ -11,6 +11,7 @@ cranelift-module.workspace = true
 cranelift-native.workspace = true
 memoffset = "0.9"
 rust-lms-derive = { path = "../rust-lms-derive", optional = true }
+rust-lms-macros = { path = "../rust-lms-macros" }
 # Optional benchmark dependencies (enable via features)
 mlua = { version = "0.9", features = ["luajit"], optional = true }
 wasmtime = { version = "25", optional = true }

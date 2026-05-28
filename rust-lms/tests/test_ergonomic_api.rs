@@ -181,3 +181,109 @@ fn test_ergonomic_f64_operations() {
 
     assert!((compute(2.0) - 8.5).abs() < 0.0001); // 2.0 * 2.5 + 3.5 = 8.5
 }
+
+// =============================================================================
+// staged_block! macro tests
+// =============================================================================
+
+#[test]
+fn test_staged_block_basic_let_var() {
+    let mut compiler = Compiler::new();
+
+    // staged_block! sequences let-bindings automatically.
+    // Variables declared with let become Var<T> (no * needed in expressions).
+    let f = compiler.fun0("sb_basic", |ctx| {
+        staged_block! {
+            let x = ctx.let_var(42i64);
+            let y = ctx.let_var(8i64);
+            add::<I64Type, _, _>(x, y)
+        }
+    });
+
+    let compiled = compiler.compile(call0(f)).expect("compilation failed");
+    assert_eq!(compiled.run(), 50);
+}
+
+#[test]
+fn test_staged_block_while_loop() {
+    let mut compiler = Compiler::new();
+
+    // Variables from staged_block! let-bindings are Var<T> — use directly, no *.
+    let count_to_n = compiler.fun1("count_to_n_sb", |ctx, n: Var<I64Type>| {
+        staged_block! {
+            let i   = ctx.let_var(0i64);
+            let sum = ctx.let_var(0i64);
+            while_loop(
+                lt::<I64Type, _, _>(i, n),
+                staged_block! {
+                    assign(sum, add(sum, i));
+                    assign(i, add(i, 1i64));
+                },
+            );
+            sum
+        }
+    });
+
+    let compiled = compiler.compile(count_to_n).expect("compilation failed");
+    let f = compiled.as_fn();
+
+    assert_eq!(f(5), 0 + 1 + 2 + 3 + 4);
+    assert_eq!(f(10), 45);
+}
+
+#[test]
+fn test_staged_block_bind() {
+    // ctx.bind evaluates a complex staged expression once and binds the result
+    // to a new Var<T>. Use it to avoid cloning expression trees.
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun1("bind_test", |ctx, n: Var<I64Type>| {
+        staged_block! {
+            let doubled = ctx.bind(add(n, n));
+            add(doubled, doubled)
+        }
+    });
+
+    let compiled = compiler.compile(f).expect("compilation failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(5), 20); // (5+5) + (5+5)
+    assert_eq!(f(3), 12); // (3+3) + (3+3)
+}
+
+#[test]
+fn test_staged_block_fibonacci() {
+    let mut compiler = Compiler::new();
+
+    let fib_iter = compiler.fun1("fib_iter_sb", |ctx, n: Var<I64Type>| {
+        staged_block! {
+            let i    = ctx.let_var(2i64);
+            let a    = ctx.let_var(0i64);
+            let b    = ctx.let_var(1i64);
+            let temp = ctx.let_var(0i64);
+            if_then_else(
+                lt(n, 2),
+                n,
+                staged_block! {
+                    while_loop(
+                        lt(i, add(n, 1)),
+                        staged_block! {
+                            assign(temp, add(a, b));
+                            assign(a, b);
+                            assign(b, temp);
+                            assign(i, add(i, 1i64));
+                        },
+                    );
+                    b
+                },
+            )
+        }
+    });
+
+    let compiled = compiler.compile(fib_iter).expect("compilation failed");
+    let fib = compiled.as_fn();
+
+    assert_eq!(fib(0), 0);
+    assert_eq!(fib(1), 1);
+    assert_eq!(fib(5), 5);
+    assert_eq!(fib(10), 55);
+}

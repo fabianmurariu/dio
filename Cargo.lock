@@ -2052,11 +2052,21 @@ dependencies = [
  "rand",
  "rhai",
  "rust-lms-derive",
+ "rust-lms-macros",
  "wasmtime",
 ]
 
 [[package]]
 name = "rust-lms-derive"
+version = "0.1.0"
+dependencies = [
+ "proc-macro2",
+ "quote",
+ "syn",
+]
+
+[[package]]
+name = "rust-lms-macros"
 version = "0.1.0"
 dependencies = [
  "proc-macro2",
