@@ -13,12 +13,12 @@ use rust_lms::prelude::*;
 fn test_ergonomic_arithmetic() {
     let mut compiler = Compiler::new();
 
-    let x = compiler.let_var(10i64);
+    let f = compiler.fun0("arith", |ctx| {
+        let x = ctx.let_var(10i64);
+        (x, add(*x, 5i64))
+    });
 
-    // All arithmetic operations accept primitives directly
-    let expr = (x, add(*x, 5i64)); // Ergonomic add;
-
-    let compiled = compiler.compile(expr).expect("compilation failed");
+    let compiled = compiler.compile(call0(f)).expect("compilation failed");
     assert_eq!(compiled.run(), 15);
 }
 
@@ -26,14 +26,13 @@ fn test_ergonomic_arithmetic() {
 fn test_ergonomic_let_var() {
     let mut compiler = Compiler::new();
 
-    // let_var returns InitVar directly - no tuple unpacking needed!
-    let x = compiler.let_var(42i64);
-    let y = compiler.let_var(8i64);
+    let f = compiler.fun0("let_var_test", |ctx| {
+        let x = ctx.let_var(42i64);
+        let y = ctx.let_var(8i64);
+        (x, y, add::<I64Type, _, _>(*x, *y))
+    });
 
-    // x and y automatically initialize when used in the tuple, use *x to get Var
-    let expr = (x, y, add::<I64Type, _, _>(*x, *y));
-
-    let compiled = compiler.compile(expr).expect("compilation failed");
+    let compiled = compiler.compile(call0(f)).expect("compilation failed");
     assert_eq!(compiled.run(), 50);
 }
 
@@ -61,18 +60,14 @@ fn test_ergonomic_comparison() {
 fn test_ergonomic_while_loop() {
     let mut compiler = Compiler::new();
 
-    let i = compiler.let_var(0i64);
-    let sum = compiler.let_var(0i64);
-
-    let count_to_n = compiler.fun1("count_to_n", |_ctx, n: Var<I64Type>| {
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<I64Type>| {
+        let i = ctx.let_var(0i64);
+        let sum = ctx.let_var(0i64);
         (
-            (i, sum),
+            i, sum,
             while_loop(
-                lt::<I64Type, _, _>(*i, n), // Ergonomic condition
-                (
-                    assign(*sum, add(*sum, *i)),
-                    assign(*i, add(*i, 1i64)), // Ergonomic increment
-                ),
+                lt::<I64Type, _, _>(*i, n),
+                (assign(*sum, add(*sum, *i)), assign(*i, add(*i, 1i64))),
             ),
             *sum,
         )
@@ -128,14 +123,12 @@ fn test_ergonomic_slice_set() {
 fn test_ergonomic_slice_subslice() {
     let mut compiler = Compiler::new();
 
-    let i = compiler.let_var(0u64);
-    let total = compiler.let_var(0i64);
-
-    // fn sum_middle(arr: &[i64]) -> i64
-    let sum_middle = compiler.fun1("sum_middle", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
-        let sub = arr.slice_unchecked(1u64, 4u64); // Ergonomic slice indices!
+    let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        let i = ctx.let_var(0u64);
+        let total = ctx.let_var(0i64);
+        let sub = arr.slice_unchecked(1u64, 4u64);
         (
-            (i, total),
+            i, total,
             while_loop(
                 lt(*i, sub.len()),
                 (
@@ -162,21 +155,13 @@ fn test_ergonomic_slice_subslice() {
 fn test_ergonomic_mixed_operations() {
     let mut compiler = Compiler::new();
 
-    let x = compiler.let_var(5i64);
-    let y = compiler.let_var(10i64);
+    let f = compiler.fun0("mixed_ops", |ctx| {
+        let x = ctx.let_var(5i64);
+        let y = ctx.let_var(10i64);
+        (x, y, if_then_else(lt(*x, *y), mul(*x, 2i64), div(*y, 2i64)))
+    });
 
-    // Mix of all ergonomic features - variables auto-initialize
-    let expr = (
-        x,
-        y,
-        if_then_else(
-            lt(*x, *y),
-            mul(*x, 2i64),
-            div(*y, 2i64),
-        ),
-    );
-
-    let compiled = compiler.compile(expr).expect("compilation failed");
+    let compiled = compiler.compile(call0(f)).expect("compilation failed");
     assert_eq!(compiled.run(), 10); // x < y, so x * 2 = 10
 }
 

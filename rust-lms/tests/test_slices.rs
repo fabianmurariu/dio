@@ -62,14 +62,11 @@ fn test_slice_get_unchecked() {
 fn test_slice_sum() {
     let mut compiler = Compiler::new();
 
-    // Variables for the loop
-    let i = compiler.let_var(0u64);
-    let total = compiler.let_var(0i64);
-
-    // fn sum(arr: &[i64]) -> i64
-    let sum = compiler.fun1("sum", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        let i = ctx.let_var(0u64);
+        let total = ctx.let_var(0i64);
         (
-            (i, total),
+            i, total,
             while_loop(
                 lt(*i, arr.len()),
                 (
@@ -117,10 +114,8 @@ fn test_slice_mutable_set() {
 fn test_slice_mutable_fill() {
     let mut compiler = Compiler::new();
 
-    let i = compiler.let_var(0u64);
-
-    // fn fill_with_42(arr: &mut [i64])
-    let fill = compiler.fun1("fill", |_ctx, arr: Var<SRefMut<Slice<I64Type>>>| {
+    let fill = compiler.fun1("fill", |ctx, arr: Var<SRefMut<Slice<I64Type>>>| {
+        let i = ctx.let_var(0u64);
         (
             i,
             while_loop(
@@ -144,15 +139,12 @@ fn test_slice_mutable_fill() {
 fn test_slice_subslice() {
     let mut compiler = Compiler::new();
 
-    // fn sum_middle(arr: &[i64]) -> i64
-    // Returns sum of arr[1..4]
-    let i = compiler.let_var(0u64);
-    let total = compiler.let_var(0i64);
-
-    let sum_middle = compiler.fun1("sum_middle", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        let i = ctx.let_var(0u64);
+        let total = ctx.let_var(0i64);
         let sub = arr.slice_unchecked(1u64, 4u64);
         (
-            (i, total),
+            i, total,
             while_loop(
                 lt(*i, sub.len()),
                 (
@@ -179,14 +171,12 @@ fn test_slice_subslice() {
 fn test_slice_count_all_larger_than_3() {
     let mut compiler = Compiler::new();
 
-    let i = compiler.let_var(0u64);
-    let count = compiler.let_var(0u64);
-
-    // fn count_greater_than_3(arr: &[i64]) -> u64
     let count_greater_than_3 =
-        compiler.fun1("count_greater_than_3", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        compiler.fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+            let i = ctx.let_var(0u64);
+            let count = ctx.let_var(0u64);
             (
-                (i, count),
+                i, count,
                 while_loop(
                     lt(*i, arr.len()),
                     (
@@ -217,13 +207,11 @@ fn test_slice_count_all_larger_than_3() {
 fn test_slice_f64() {
     let mut compiler = Compiler::new();
 
-    let i = compiler.let_var(0u64);
-    let total = compiler.let_var(0f64);
-
-    // fn sum_f64(arr: &[f64]) -> f64
-    let sum_f64 = compiler.fun1("sum_f64", |_ctx, arr: Var<SRef<Slice<F64Type>>>| {
+    let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+        let i = ctx.let_var(0u64);
+        let total = ctx.let_var(0f64);
         (
-            (i, total),
+            i, total,
             while_loop(
                 lt(*i, arr.len()),
                 (

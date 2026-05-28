@@ -376,12 +376,3 @@ impl_fun_n!(6, FunType6, FunRef6, Call6, call6, [A, B, C, D, E, F], [arg0: Arg0,
 impl_fun_n!(7, FunType7, FunRef7, Call7, call7, [A, B, C, D, E, F, G], [arg0: Arg0, arg1: Arg1, arg2: Arg2, arg3: Arg3, arg4: Arg4, arg5: Arg5, arg6: Arg6], [0, 1, 2, 3, 4, 5, 6]);
 impl_fun_n!(8, FunType8, FunRef8, Call8, call8, [A, B, C, D, E, F, G, H], [arg0: Arg0, arg1: Arg1, arg2: Arg2, arg3: Arg3, arg4: Arg4, arg5: Arg5, arg6: Arg6, arg7: Arg7], [0, 1, 2, 3, 4, 5, 6, 7]);
 
-// =============================================================================
-// Backward compatibility: FunRef as alias for FunRef1
-// =============================================================================
-
-/// Backward-compatible alias for FunRef1
-pub type FunRef<A, OUT> = FunRef1<A, OUT>;
-
-/// Backward-compatible alias for FunType1
-pub type FunType<A, OUT> = FunType1<A, OUT>;

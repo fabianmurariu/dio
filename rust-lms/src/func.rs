@@ -88,7 +88,7 @@ impl<'a> VarBuilder<'a> {
     /// # Safety
     /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
     /// Prefer using `let_var()` which ensures initialization.
-    pub unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
+    pub(crate) unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
         let id = *self.next_var_id;
         *self.next_var_id += 1;
         Var::new(id)
@@ -185,51 +185,6 @@ impl<'a> Compiler<'a> {
         crate::ffi::ExternRef::new(extern_id)
     }
 
-    /// Create an uninitialized variable reference.
-    ///
-    /// # Safety
-    /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
-    /// Prefer using `let_var()` which ensures initialization.
-    ///
-    /// This is useful for variables that will be captured by function closures and
-    /// initialized within the closure body.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let i = compiler.var_unchecked::<I64Type>();
-    /// let func = compiler.fun1("example", |n| {
-    ///     seq(assign(i, Const::new(0)), i) // Must assign before use
-    /// });
-    /// ```
-    pub unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
-        let id = self.next_var_id;
-        self.next_var_id += 1;
-        Var::new(id)
-    }
-
-    /// Create a variable with an initial value.
-    ///
-    /// Returns an `InitVar` that can be used directly without tuple unpacking.
-    /// The initialization happens automatically when the variable is used in a tuple.
-    ///
-    /// Accepts any value that can be converted into a staged expression.
-    /// This allows ergonomic usage like `let_var(42i64)` instead of
-    /// `let_var(Const::<I64Type>::new(42))`.
-    ///
-    /// # Example
-    /// ```ignore
-    /// let x = compiler.let_var(42i64);
-    /// let expr = (x, add(x, 8i64)); // x initializes, then is used in add
-    /// ```
-    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
-    where
-        T: StagedType,
-        E: crate::staged::IntoStaged<T>,
-    {
-        let var = unsafe { self.var_unchecked() };
-        crate::staged::LetVar::new(var, init.into_staged())
-    }
-
     /// Define a unary function.
     ///
     /// The body function is called immediately to build the expression tree.
@@ -243,7 +198,7 @@ impl<'a> Compiler<'a> {
     /// If `A` is a `#[repr(C)] Copy` struct, the function will accept the struct
     /// by value at the Rust level (`fn(Point)`), but internally store it in a
     /// stack slot for field access.
-    pub fn fun1<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef<A, OUT>
+    pub fn fun1<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef1<A, OUT>
     where
         A: StagedType,
         OUT: StagedType,
@@ -268,11 +223,11 @@ impl<'a> Compiler<'a> {
     ///     call1(f, sub(x, Const::<I64Type>::new(1)))
     /// });
     /// ```
-    pub fn fun1_rec<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef<A, OUT>
+    pub fn fun1_rec<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef1<A, OUT>
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef<A, OUT>, &mut VarBuilder, Var<A>) -> BODY,
+        F: FnOnce(FunRef1<A, OUT>, &mut VarBuilder, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun1_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1081,8 +1036,12 @@ mod tests {
     fn test_var_before_fun1() {
         let mut compiler = Compiler::new();
 
-        // Create a variable first (this would break the old code that used func_id as param_id)
-        let _unused = unsafe { compiler.var_unchecked::<I64Type>() };
+        // Ensure that functions defined after internal var allocation don't get wrong param IDs.
+        // Allocate a var inside a fun0 first to advance the counter.
+        let _prime = compiler.fun0("prime_counter", |ctx| {
+            let _x = ctx.let_var(0i64);
+            Const::<I64Type>::new(0)
+        });
 
         // Define: double(x) = x + x
         let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
@@ -1188,14 +1147,13 @@ mod tests {
     fn test_let_var() {
         let mut compiler = Compiler::new();
 
-        // Test new ergonomic let_var API
-        let x = compiler.let_var(42i64);
-        let y = compiler.let_var(8i64);
+        let f = compiler.fun0("let_var_test", |ctx| {
+            let x = ctx.let_var(42i64);
+            let y = ctx.let_var(8i64);
+            (x, y, add::<I64Type, _, _>(*x, *y))
+        });
 
-        // x and y are InitVar, use *x to get Var<I64Type>
-        let expr = (x, y, add::<I64Type, _, _>(*x, *y));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 50); // 42 + 8 = 50
     }
 
@@ -1203,17 +1161,13 @@ mod tests {
     fn test_ergonomic_assign() {
         let mut compiler = Compiler::new();
 
-        let x = unsafe { compiler.var_unchecked::<I64Type>() };
-        let y = unsafe { compiler.var_unchecked::<I64Type>() };
+        let f = compiler.fun0("ergonomic_assign", |ctx| {
+            let x = ctx.let_var(0i64);
+            let y = ctx.let_var(0i64);
+            (assign(*x, 10i64), assign(*y, 32i64), add(*x, *y))
+        });
 
-        // Test ergonomic assign with primitive values (no Const::new needed)
-        let expr = (
-            assign(x, 10i64), // Instead of assign(x, Const::<I64Type>::new(10))
-            assign(y, 32i64), // Instead of assign(y, Const::<I64Type>::new(32))
-            add(x, y),
-        );
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 42);
     }
 
@@ -1275,19 +1229,12 @@ mod tests {
     fn test_while_loop_zero_iterations() {
         let mut compiler = Compiler::new();
 
-        // Create local variable
-        let result = compiler.let_var(0i64);
+        let f = compiler.fun0("while_zero", |ctx| {
+            let result = ctx.let_var(0i64);
+            (result, while_loop(false, assign(*result, 999)), assign(*result, 42), *result)
+        });
 
-        // while(false) { result = 999 } ; result = 42
-        // Loop body never executes, result should be 42
-        let expr = (
-            result,
-            while_loop(false, assign(*result, 999)),
-            assign(*result, 42),
-            *result,
-        );
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 42);
     }
 
@@ -1295,19 +1242,13 @@ mod tests {
     fn test_while_loop_factorial() {
         let mut compiler = Compiler::new();
 
-        // Create local variables BEFORE fun1
-        let i = compiler.let_var(1i64);
-        let result = compiler.let_var(1i64);
-
-        // Iterative factorial using while loop
-        let factorial_iter = compiler.fun1("factorial_iter", |_ctx, n: Var<I64Type>| {
-            // i = 1; result = 1;
-            // while (i <= n) { result = result * i; i = i + 1; }
-            // return result;
+        let factorial_iter = compiler.fun1("factorial_iter", |ctx, n: Var<I64Type>| {
+            let i = ctx.let_var(1i64);
+            let result = ctx.let_var(1i64);
             (
-                (i, result),
+                i, result,
                 while_loop(
-                    lt(*i, add(n, 1)), // i <= n
+                    lt(*i, add(n, 1)),
                     (assign(*result, mul(*result, *i)), assign(*i, add(*i, 1))),
                 ),
                 *result,
@@ -1331,27 +1272,19 @@ mod tests {
     fn test_while_loop_fibonacci_iterative() {
         let mut compiler = Compiler::new();
 
-        // Create local variables BEFORE fun1
-        let i = compiler.let_var(2i64);
-        let a = compiler.let_var(0i64); // fib(i-2)
-        let b = compiler.let_var(1i64); // fib(i-1)
-        let temp = compiler.let_var(0i64);
-
-        // Iterative Fibonacci using while loop
-        // Much faster than recursive version!
-        let fib_iter = compiler.fun1("fib_iter", |_ctx, n: Var<I64Type>| {
-            // if n < 2 return n
-            // else: a = 0; b = 1; i = 2;
-            //       while (i <= n) { temp = a + b; a = b; b = temp; i = i + 1; }
-            //       return b;
+        let fib_iter = compiler.fun1("fib_iter", |ctx, n: Var<I64Type>| {
+            let i = ctx.let_var(2i64);
+            let a = ctx.let_var(0i64);
+            let b = ctx.let_var(1i64);
+            let temp = ctx.let_var(0i64);
             (
-                (i, a, b, temp),
+                i, a, b, temp,
                 if_then_else(
                     lt(n, 2),
                     n,
                     (
                         while_loop(
-                            lt(*i, add(n, 1)), // i <= n
+                            lt(*i, add(n, 1)),
                             (
                                 assign(*temp, add(*a, *b)),
                                 assign(*a, *b),

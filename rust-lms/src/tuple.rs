@@ -107,13 +107,13 @@ mod tests {
     fn test_tuple_with_assignments() {
         let mut compiler = Compiler::new();
 
-        let x = compiler.let_var(0i64);
-        let y = compiler.let_var(1i64);
+        let f = compiler.fun0("tuple_assign", |ctx| {
+            let x = ctx.let_var(0i64);
+            let y = ctx.let_var(0i64);
+            (assign(*x, 5i64), assign(*y, 10i64), add(*x, *y))
+        });
 
-        // Assign x=5, y=10, return x+y
-        let expr = (assign(*x, 5i64), assign(*y, 10i64), add(*x, *y));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 15);
     }
 
@@ -121,43 +121,43 @@ mod tests {
     fn test_large_tuple() {
         let mut compiler = Compiler::new();
 
-        let vars: Vec<_> = (0..10).map(|_| compiler.let_var(0i64)).collect();
-
-        // Assign 10 variables, then sum them all
-        let expr = (
-            assign(*vars[0], 1i64),
-            assign(*vars[1], 2i64),
-            assign(*vars[2], 3i64),
-            assign(*vars[3], 4i64),
-            assign(*vars[4], 5i64),
-            assign(*vars[5], 6i64),
-            assign(*vars[6], 7i64),
-            assign(*vars[7], 8i64),
-            assign(*vars[8], 9i64),
-            assign(*vars[9], 10i64),
+        let f = compiler.fun0("large_tuple", |ctx| {
+            let v0 = ctx.let_var(1i64);
+            let v1 = ctx.let_var(2i64);
+            let v2 = ctx.let_var(3i64);
+            let v3 = ctx.let_var(4i64);
+            let v4 = ctx.let_var(5i64);
+            let v5 = ctx.let_var(6i64);
+            let v6 = ctx.let_var(7i64);
+            let v7 = ctx.let_var(8i64);
+            let v8 = ctx.let_var(9i64);
+            let v9 = ctx.let_var(10i64);
             // Sum: 1+2+3+4+5+6+7+8+9+10 = 55
-            add(
+            (
+                v0, v1, v2, v3, v4, v5, v6, v7, v8, v9,
                 add(
                     add(
                         add(
                             add(
                                 add(
-                                    add(add(add(*vars[0], *vars[1]), *vars[2]), *vars[3]),
-                                    *vars[4],
+                                    add(
+                                        add(add(add(*v0, *v1), *v2), *v3),
+                                        *v4,
+                                    ),
+                                    *v5,
                                 ),
-                                *vars[5],
+                                *v6,
                             ),
-                            *vars[6],
+                            *v7,
                         ),
-                        *vars[7],
+                        *v8,
                     ),
-                    *vars[8],
+                    *v9,
                 ),
-                *vars[9],
-            ),
-        );
+            )
+        });
 
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 55);
     }
 
@@ -165,13 +165,13 @@ mod tests {
     fn test_nested_tuples() {
         let mut compiler = Compiler::new();
 
-        let x = compiler.let_var(0i64);
-        let y = compiler.let_var(0i64);
+        let f = compiler.fun0("nested_tuples", |ctx| {
+            let x = ctx.let_var(0i64);
+            let y = ctx.let_var(0i64);
+            ((x, y, assign(*x, 10i64), assign(*y, 20i64)), add(*x, *y))
+        });
 
-        // Nested tuples work too
-        let expr = ((assign(*x, 10i64), assign(*y, 20i64)), add(*x, *y));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
+        let compiled = compiler.compile(call0(f)).expect("compilation failed");
         assert_eq!(compiled.run(), 30);
     }
 }

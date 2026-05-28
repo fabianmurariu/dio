@@ -129,8 +129,8 @@ pub mod prelude {
         FatSliceMutType, FatSliceType,
     };
     pub use crate::func::{
-        call0, call1, call2, call3, Compiled, Compiler, FunRef, FunRef0, FunRef1, FunRef2, FunRef3,
-        FunType, FunType0, FunType1, FunType2, FunType3,
+        call0, call1, call2, call3, Compiled, Compiler, FunRef0, FunRef1, FunRef2, FunRef3,
+        FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
         range, Filter, IntoStagedIterator, Map, RangeIter, SliceIter, StagedIterator, Zip,
