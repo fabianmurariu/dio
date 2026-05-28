@@ -104,6 +104,7 @@ pub mod ffi;
 pub mod func;
 pub(crate) mod func_def;
 pub(crate) mod func_impl;
+pub mod iter;
 pub mod num;
 pub mod option;
 pub mod refer;
@@ -131,6 +132,9 @@ pub mod prelude {
         call0, call1, call2, call3, Compiled, Compiler, FunRef, FunRef0, FunRef1, FunRef2, FunRef3,
         FunType, FunType0, FunType1, FunType2, FunType3,
     };
+    pub use crate::iter::{
+        range, Filter, IntoStagedIterator, Map, RangeIter, SliceIter, StagedIterator, Zip,
+    };
     pub use crate::num::{add, div, eq, lt, mul, sub};
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
@@ -149,7 +153,7 @@ pub mod prelude {
     };
     pub use crate::slice::{Slice, SliceLen, SliceLenMut, SliceMutOps, SliceRefOps};
     pub use crate::staged::{
-        assign, unit, Assign, BoxableStaged, CompilationContext, Const, InitVar, IntoStaged,
+        assign, unit, Assign, BoxableStaged, CompilationContext, Const, LetVar, IntoStaged,
         Staged, Var,
     };
     pub use crate::types::{

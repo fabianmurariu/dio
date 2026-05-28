@@ -329,8 +329,8 @@ where
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
     T: StagedType + SupportsComparison,
-    L: IntoStaged<T> + Clone,
-    R: IntoStaged<T> + Clone,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
     L::Staged: Clone,
     R::Staged: Clone,
 {

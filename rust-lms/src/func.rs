@@ -98,13 +98,13 @@ impl<'a> VarBuilder<'a> {
     ///
     /// Returns an `InitVar` that can be used directly without tuple unpacking.
     /// Accepts any value that can be converted into a staged expression.
-    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::InitVar<T, E::Staged>
+    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
     where
         T: StagedType,
         E: crate::staged::IntoStaged<T>,
     {
         let var = unsafe { self.var_unchecked() };
-        crate::staged::InitVar::new(var, init.into_staged())
+        crate::staged::LetVar::new(var, init.into_staged())
     }
 }
 
@@ -221,13 +221,13 @@ impl<'a> Compiler<'a> {
     /// let x = compiler.let_var(42i64);
     /// let expr = (x, add(x, 8i64)); // x initializes, then is used in add
     /// ```
-    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::InitVar<T, E::Staged>
+    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
     where
         T: StagedType,
         E: crate::staged::IntoStaged<T>,
     {
         let var = unsafe { self.var_unchecked() };
-        crate::staged::InitVar::new(var, init.into_staged())
+        crate::staged::LetVar::new(var, init.into_staged())
     }
 
     /// Define a unary function.

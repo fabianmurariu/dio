@@ -47,3 +47,7 @@ harness = false
 [[bench]]
 name = "minimal_comparison"
 harness = false
+
+[[bench]]
+name = "filtered_sum_two_slices"
+harness = false

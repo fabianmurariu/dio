@@ -313,6 +313,20 @@ impl IntoStaged<crate::types::UnitType> for () {
     }
 }
 
+impl IntoStaged<crate::types::I32Type> for i32 {
+    type Staged = Const<crate::types::I32Type>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<crate::types::U32Type> for u32 {
+    type Staged = Const<crate::types::U32Type>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
 // Blanket impl for anything that's already Staged
 impl<T, S> IntoStaged<T> for S
 where
@@ -411,15 +425,15 @@ pub fn unit() -> Const<UnitType> {
 /// let i = compiler.let_var(0u64);  // Returns InitVar<U64Type, Const<U64Type>>
 /// let expr = (i, add(*i, 5i64));   // i initializes, *i gives Var<U64Type>
 /// ```
-pub struct InitVar<T: StagedType, EXPR> {
+pub struct LetVar<T: StagedType, EXPR> {
     var: Var<T>,
     init: EXPR,
 }
 
-impl<T: StagedType, EXPR> InitVar<T, EXPR> {
+impl<T: StagedType, EXPR> LetVar<T, EXPR> {
     /// Create a new initialized variable wrapper
     pub(crate) fn new(var: Var<T>, init: EXPR) -> Self {
-        InitVar { var, init }
+        LetVar { var, init }
     }
 
     /// Get the underlying variable reference
@@ -432,9 +446,9 @@ impl<T: StagedType, EXPR> InitVar<T, EXPR> {
 }
 
 // Manually implement Clone (Var<T> is always Copy, clone the expr)
-impl<T: StagedType + Copy, EXPR: Clone> Clone for InitVar<T, EXPR> {
+impl<T: StagedType + Copy, EXPR: Clone> Clone for LetVar<T, EXPR> {
     fn clone(&self) -> Self {
-        InitVar {
+        LetVar {
             var: self.var.clone(), // Var<T> is Copy
             init: self.init.clone(),
         }
@@ -442,10 +456,10 @@ impl<T: StagedType + Copy, EXPR: Clone> Clone for InitVar<T, EXPR> {
 }
 
 // InitVar is Copy when EXPR is Copy (like Const<T>)
-impl<T: StagedType + Copy, EXPR: Copy> Copy for InitVar<T, EXPR> {}
+impl<T: StagedType + Copy, EXPR: Copy> Copy for LetVar<T, EXPR> {}
 
 // Deref to allow transparent access to the underlying Var
-impl<T: StagedType, EXPR> std::ops::Deref for InitVar<T, EXPR> {
+impl<T: StagedType, EXPR> std::ops::Deref for LetVar<T, EXPR> {
     type Target = Var<T>;
 
     fn deref(&self) -> &Self::Target {
@@ -454,7 +468,7 @@ impl<T: StagedType, EXPR> std::ops::Deref for InitVar<T, EXPR> {
 }
 
 // When InitVar is staged, it performs the initialization
-impl<T, EXPR> Staged for InitVar<T, EXPR>
+impl<T, EXPR> Staged for LetVar<T, EXPR>
 where
     T: StagedType,
     EXPR: Staged<Out = T>,
@@ -483,8 +497,8 @@ where
 }
 
 // Allow implicit conversion from InitVar to Var for convenience
-impl<T: StagedType, EXPR> From<InitVar<T, EXPR>> for Var<T> {
-    fn from(init_var: InitVar<T, EXPR>) -> Var<T> {
+impl<T: StagedType, EXPR> From<LetVar<T, EXPR>> for Var<T> {
+    fn from(init_var: LetVar<T, EXPR>) -> Var<T> {
         init_var.var
     }
 }

@@ -107,7 +107,7 @@ pub trait ConstantType: StagedType {
 ///
 /// Primitive types (i64, f64, bool) are always CopyType.
 /// Structs are CopyType only if all their fields are CopyType.
-pub trait CopyType: StagedType {}
+pub trait CopyType: StagedType + Copy {}
 
 // =============================================================================
 // Concrete Type Markers
