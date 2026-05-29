@@ -189,8 +189,8 @@ where
 /// // Compute sum of 1..=n (stored in 'sum' variable)
 /// // i = 1; sum = 0;
 /// // while (i <= n) { sum = sum + i; i = i + 1; }
-/// let i = compiler.var::<I64Type>();
-/// let sum = compiler.var::<I64Type>();
+/// let i = compiler.var::<i64>();
+/// let sum = compiler.var::<i64>();
 /// seq(
 ///     seq(assign(i, Const::new(1)), assign(sum, Const::new(0))),
 ///     seq(

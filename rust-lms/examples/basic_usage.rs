@@ -16,8 +16,8 @@ fn main() {
     println!("Example 1: Simple arithmetic");
     {
         let compiler = Compiler::new();
-        let five = Const::<I64Type>::new(5);
-        let two = Const::<I64Type>::new(2);
+        let five = Const::<i64>::new(5);
+        let two = Const::<i64>::new(2);
 
         let expr = mul(add(five, Const::new(3)), two); // (5 + 3) * 2 = 16
 
@@ -34,10 +34,10 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: square(x) = x * x
-        let square = compiler.fun1("square", |_ctx, x: Var<I64Type>| mul(x, x));
+        let square = compiler.fun1("square", |_ctx, x: Var<i64>| mul(x, x));
 
         // Call: square(7) = 49
-        let expr = call1(square, Const::<I64Type>::new(7));
+        let expr = call1(square, Const::<i64>::new(7));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -52,13 +52,13 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: double(x) = x + x
-        let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
+        let double = compiler.fun1("double", |_ctx, x: Var<i64>| add(x, x));
 
         // Define: add_one(x) = x + 1
-        let add_one = compiler.fun1("add_one", |_ctx, x: Var<I64Type>| add(x, Const::new(1)));
+        let add_one = compiler.fun1("add_one", |_ctx, x: Var<i64>| add(x, Const::new(1)));
 
         // Compute: double(add_one(5)) = double(6) = 12
-        let expr = call1(double, call1(add_one, Const::<I64Type>::new(5)));
+        let expr = call1(double, call1(add_one, Const::<i64>::new(5)));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -73,11 +73,11 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // x is used multiple times in the body - no clone needed!
-        let cube = compiler.fun1("cube", |_ctx, x: Var<I64Type>| {
+        let cube = compiler.fun1("cube", |_ctx, x: Var<i64>| {
             mul(mul(x, x), x) // x * x * x
         });
 
-        let expr = call1(cube, Const::<I64Type>::new(3));
+        let expr = call1(cube, Const::<i64>::new(3));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -92,7 +92,7 @@ fn main() {
         let compiler = Compiler::new();
 
         // Comparisons change type to Bool
-        let comparison = lt(Const::<I64Type>::new(5), Const::new(10)); // 5 < 10 : BoolType
+        let comparison = lt(Const::<i64>::new(5), Const::new(10)); // 5 < 10 : BoolType
 
         // Note: We can compile and get a bool result
         let compiled = compiler.compile(comparison).expect("compilation failed");
@@ -108,12 +108,12 @@ fn main() {
         let mut compiler = Compiler::new();
 
         // Define: f(x) = (x + 3) * (10 - x)
-        let f = compiler.fun1("f", |_ctx, x: Var<I64Type>| {
+        let f = compiler.fun1("f", |_ctx, x: Var<i64>| {
             mul(add(x, Const::new(3)), sub(Const::new(10), x))
         });
 
         // f(2) = (2 + 3) * (10 - 2) = 5 * 8 = 40
-        let expr = call1(f, Const::<I64Type>::new(2));
+        let expr = call1(f, Const::<i64>::new(2));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -126,12 +126,12 @@ fn main() {
     // Example 7: Boxing for dynamic dispatch
     println!("Example 7: Dynamic dispatch via boxing");
     {
-        let c = Const::<I64Type>::new(42);
-        let _boxed: Box<dyn Staged<Out = I64Type>> = c.boxed();
-        println!("  Boxed Const<I64Type> as Box<dyn Staged<Out = I64Type>>");
+        let c = Const::<i64>::new(42);
+        let _boxed: Box<dyn Staged<Out = i64>> = c.boxed();
+        println!("  Boxed Const<i64> as Box<dyn Staged<Out = i64>>");
 
         let expr = add(Const::new(1), Const::new(2));
-        let _boxed_expr: Box<dyn Staged<Out = I64Type>> = expr.boxed();
+        let _boxed_expr: Box<dyn Staged<Out = i64>> = expr.boxed();
         println!("  Can box operations too");
         println!("  Can store heterogeneous expression trees in collections\n");
     }

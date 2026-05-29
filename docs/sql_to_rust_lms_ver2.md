@@ -3,6 +3,7 @@
 ## Overview
 
 This document provides a concrete implementation plan for building a SQL query execution engine that:
+
 - Reads Parquet files using the `parquet` and `arrow` crates
 - Parses SQL using `datafusion-sql` and `datafusion-expr` (logical plan + expressions)
 - Compiles query pipelines using `rust-lms` (Cranelift JIT)
@@ -11,6 +12,7 @@ This document provides a concrete implementation plan for building a SQL query e
 - Uses **runtime Rust code** for complex operations (hash tables)
 
 **Key Principles:**
+
 1. **Zero-copy**: Staged arrays wrap pointers directly into Arrow buffers - no data copying
 2. **Hybrid execution**: Simple operations (scan, filter, project) are JIT-compiled; complex operations (hash tables) remain in Rust and are called via external functions
 3. **Pipeline segments**: Each segment compiles to one function; Rust orchestrates between segments
@@ -77,7 +79,7 @@ pub trait StagedElement: StagedType {
     type Native;
 }
 
-impl StagedElement for I64Type {
+impl StagedElement for i64 {
     type Native = i64;
 }
 
@@ -345,7 +347,7 @@ impl StagedStringView {
 
 /// A staged column - union of all supported array types
 pub enum StagedColumn {
-    Int64(StagedPrimitiveArray<I64Type>),
+    Int64(StagedPrimitiveArray<i64>),
     Float64(StagedPrimitiveArray<F64Type>),
     Boolean(StagedBooleanArray),
     StringView(StagedStringViewArray),
@@ -353,7 +355,7 @@ pub enum StagedColumn {
 
 /// A staged scalar value extracted from a column
 pub enum StagedValue {
-    Int64(Var<I64Type>),
+    Int64(Var<i64>),
     Float64(Var<F64Type>),
     Boolean(Var<BoolType>),
     StringView(StagedStringView),
@@ -1584,7 +1586,7 @@ mod tests {
         // Create staged array and compile a simple loop
         let mut compiler = Compiler::new();
         let sum_fn = compiler.fun3("sum", |vctx, data_ptr, len, _validity| {
-            let staged_arr = StagedPrimitiveArray::<I64Type>::from_arrow_ptrs(
+            let staged_arr = StagedPrimitiveArray::<i64>::from_arrow_ptrs(
                 data_ptr, len, Const::new(std::ptr::null()).into(), false
             );
 
@@ -1628,7 +1630,7 @@ mod tests {
 ## Implementation Order
 
 1. **Phase 1: Staged Arrays** (Foundation)
-   - Implement `StagedPrimitiveArray<I64Type>` and `<F64Type>`
+   - Implement `StagedPrimitiveArray<i64>` and `<F64Type>`
    - Implement `StagedBooleanArray`
    - Implement `StagedStringViewArray`
    - Write tests for each array type
@@ -1672,14 +1674,14 @@ mod tests {
 
 ## Key Design Decisions Summary
 
-| Decision | Choice | Rationale |
-|----------|--------|-----------|
-| Data Access | Zero-copy via staged array wrappers | No copying = maximum performance |
-| SQL Parsing | datafusion-sql + datafusion-expr | Mature SQL parser, avoid reinventing |
-| Hash Tables | Runtime Rust (not JIT) | Complex dynamic structures; external function calls |
-| Compilation Unit | One JIT function per pipeline | Clear boundaries at pipeline breakers |
-| String Encoding | StringView (i128) | Modern Arrow format, efficient comparisons |
-| Null Handling | Validity bitmaps | Standard Arrow approach |
+| Decision         | Choice                              | Rationale                                           |
+| ---------------- | ----------------------------------- | --------------------------------------------------- |
+| Data Access      | Zero-copy via staged array wrappers | No copying = maximum performance                    |
+| SQL Parsing      | datafusion-sql + datafusion-expr    | Mature SQL parser, avoid reinventing                |
+| Hash Tables      | Runtime Rust (not JIT)              | Complex dynamic structures; external function calls |
+| Compilation Unit | One JIT function per pipeline       | Clear boundaries at pipeline breakers               |
+| String Encoding  | StringView (i128)                   | Modern Arrow format, efficient comparisons          |
+| Null Handling    | Validity bitmaps                    | Standard Arrow approach                             |
 
 ---
 

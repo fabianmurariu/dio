@@ -3,7 +3,7 @@
 //! This module defines:
 //! - `StagedType`: Base trait for all types that can participate in staged computation
 //! - `ConstantType`: Trait for types that can be compile-time constants
-//! - Concrete type markers: `I64Type`, `U64Type`, `BoolType`, etc.
+//! - Concrete type markers: `i64`, `U64Type`, `BoolType`, etc.
 
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -19,7 +19,7 @@ use cranelift_frontend::FunctionBuilder;
 /// - Its Cranelift IR type
 /// - Size and alignment information for struct layout
 pub trait StagedType {
-    /// The actual runtime type (e.g., i64 for I64Type)
+    /// The actual runtime type (e.g., i64 for i64)
     type RuntimeValue;
 
     /// Get the Cranelift IR type representation.
@@ -94,10 +94,7 @@ pub trait StagedType {
 /// so this is a separate trait.
 pub trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(
-        value: &Self::RuntimeValue,
-        builder: &mut FunctionBuilder,
-    ) -> Value;
+    fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
 }
 
 /// Marker trait for types that are Copy at the semantic level.
@@ -113,39 +110,29 @@ pub trait CopyType: StagedType + Copy {}
 // Concrete Type Markers
 // =============================================================================
 
-/// Marker type for i64 values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct I64Type;
-
 /// Marker type for u64 values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct U64Type;
+pub type U64Type = u64;
 
 /// Marker type for i32 values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct I32Type;
+pub type I32Type = i32;
 
 /// Marker type for u32 values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct U32Type;
+pub type U32Type = u32;
 
 /// Marker type for boolean values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct BoolType;
+pub type BoolType = bool;
 
 /// Marker type for f64 values
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct F64Type;
+pub type F64Type = f64;
 
 /// Marker type for unit (no value) - used for side-effect-only expressions
-#[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct UnitType;
+pub type UnitType = ();
 
 // =============================================================================
 // StagedType implementations
 // =============================================================================
 
-impl StagedType for I64Type {
+impl StagedType for i64 {
     type RuntimeValue = i64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -161,13 +148,13 @@ impl StagedType for I64Type {
     }
 }
 
-impl ConstantType for I64Type {
+impl ConstantType for i64 {
     fn codegen_constant(value: &i64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value)
     }
 }
 
-impl CopyType for I64Type {}
+impl CopyType for i64 {}
 
 impl StagedType for U64Type {
     type RuntimeValue = u64;

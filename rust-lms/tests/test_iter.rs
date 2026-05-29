@@ -11,7 +11,7 @@ use rust_lms::prelude::*;
 fn test_iter_sum_i64() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("sum_i64", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("sum_i64", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter().sum(ctx)
     });
 
@@ -41,9 +41,9 @@ fn test_iter_sum_f64() {
 fn test_iter_sum_with_map() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter()
-            .map(|x| mul::<I64Type, _, _>(x, 2i64))
+            .map(|x| mul::<i64, _, _>(x, 2i64))
             .sum(ctx)
     });
 
@@ -58,9 +58,9 @@ fn test_iter_sum_with_map() {
 fn test_iter_sum_with_filter() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter()
-            .filter(|x| lt::<I64Type, _, _>(0i64, x))
+            .filter(|x| lt::<i64, _, _>(0i64, x))
             .sum(ctx)
     });
 
@@ -79,7 +79,7 @@ fn test_iter_sum_with_filter() {
 fn test_iter_count_all() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("count_all", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("count_all", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter().count(ctx)
     });
 
@@ -94,9 +94,9 @@ fn test_iter_count_all() {
 fn test_iter_count_filtered() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter()
-            .filter(|x| lt::<I64Type, _, _>(3i64, x))
+            .filter(|x| lt::<i64, _, _>(3i64, x))
             .count(ctx)
     });
 
@@ -115,7 +115,7 @@ fn test_iter_count_filtered() {
 fn test_iter_min_i64() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("min_i64", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("min_i64", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter().min(ctx)
     });
 
@@ -145,9 +145,9 @@ fn test_iter_max_f64() {
 fn test_iter_min_max_filtered() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.staged_iter()
-            .filter(|x| lt::<I64Type, _, _>(0i64, x))
+            .filter(|x| lt::<i64, _, _>(0i64, x))
             .min(ctx)
     });
 
@@ -166,22 +166,20 @@ fn test_iter_min_max_filtered() {
 fn test_iter_fold_count_and_sum() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1(
-        "count_and_sum",
-        |ctx, arr: Var<SRef<Slice<F64Type>>>| {
-            // Declare accumulator vars BEFORE fold
-            let count = ctx.var(0u64);
-            let sum   = ctx.var(0.0f64);
+    let f = compiler.fun1("count_and_sum", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+        // Declare accumulator vars BEFORE fold
+        let count = ctx.var(0u64);
+        let sum = ctx.var(0.0f64);
 
-            // fold uses user-managed vars — no Accumulator trait needed
-            arr.staged_iter().fold(ctx, (count, sum), |ctx, (c, s), elem| {
-                ctx.assign(c, add::<U64Type, _, _>(c, 1u64));
-                ctx.assign(s, add::<F64Type, _, _>(s, elem));
+        // fold uses user-managed vars — no Accumulator trait needed
+        arr.staged_iter()
+            .fold(ctx, (count, sum), |ctx, (c, s), elem| {
+                ctx.store(c, add::<U64Type, _, _>(c, 1u64));
+                ctx.store(s, add::<F64Type, _, _>(s, elem));
             });
 
-            count  // return count as the function result
-        },
-    );
+        count // return count as the function result
+    });
 
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
@@ -205,7 +203,7 @@ fn test_iter_zip_dot_product() {
             let acc = ctx.var(0.0f64);
 
             a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
-                ctx.assign(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)));
+                ctx.store(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)));
             });
 
             acc
@@ -228,11 +226,11 @@ fn test_iter_zip_element_wise_sum() {
     // sum of (a[i] + b[i]) for all i
     let f = compiler.fun2(
         "zip_sum",
-        |ctx, a: Var<SRef<Slice<I64Type>>>, b: Var<SRef<Slice<I64Type>>>| {
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
             let total = ctx.var(0i64);
 
             a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
-                ctx.assign(total, add::<I64Type, _, _>(total, add::<I64Type, _, _>(ai, bi)));
+                ctx.store(total, add::<i64, _, _>(total, add::<i64, _, _>(ai, bi)));
             });
 
             total
@@ -257,13 +255,11 @@ fn test_range_sum() {
     let mut compiler = Compiler::new();
 
     // Sum of range [0, n)
-    let f = compiler.fun1("range_sum", |ctx, n: Var<U64Type>| {
-        range(0u64, n).sum(ctx)
-    });
+    let f = compiler.fun1("range_sum", |ctx, n: Var<U64Type>| range(0u64, n).sum(ctx));
 
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
 
     assert_eq!(f(10u64), 45u64); // 0+1+...+9 = 45
-    assert_eq!(f(5u64), 10u64);  // 0+1+2+3+4 = 10
+    assert_eq!(f(5u64), 10u64); // 0+1+2+3+4 = 10
 }

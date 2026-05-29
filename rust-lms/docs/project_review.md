@@ -1,6 +1,6 @@
 # rust-lms Project Review
 
-*Snapshot: 2026-05-27, master @ f03ef74*
+_Snapshot: 2026-05-27, master @ f03ef74_
 
 ## TL;DR
 
@@ -25,7 +25,8 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
 ## What Currently Works
 
 ### Type system (`types.rs`, ~380 LOC)
-- Primitive markers: `I64Type`, `U64Type`, `I32Type`, `U32Type`, `F64Type`,
+
+- Primitive markers: `i64`, `U64Type`, `I32Type`, `U32Type`, `F64Type`,
   `BoolType`, `UnitType`.
 - `Owned<T>` wrapper for by-value struct ABI.
 - `StagedType` is the open trait for "things that can flow through codegen";
@@ -35,6 +36,7 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
   pass-by-value structs and fat-pointer slices across the ABI boundary.
 
 ### Core staging primitives (`staged.rs`, ~500 LOC)
+
 - `Var<T>` — Copy-when-T-Copy, just an integer ID.
 - `Const<T>` — embedded literal.
 - `LetVar<T, EXPR>` — bundles a `Var<T>` with its initializer, derefs to the
@@ -46,11 +48,13 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
   map, extern func refs, and a per-function `unit_value` cache.
 
 ### Control flow (`control.rs`, `tuple.rs`)
+
 - `IfThenElse`, `IfThen`, `While` — direct mapping onto Cranelift blocks.
 - Tuples `(a, b, c, ...)` sequence side-effects: the tuple's `Out` is the
   last element's `Out` (up to arity 12).
 
 ### Slice & reference support (`slice.rs`, `refer.rs`, ~1300 LOC together)
+
 - `SRef<'a, T>` / `SRefMut<'a, T>` — single-value references.
 - `Slice<T>` DST with `SRef<'a, Slice<T>>` (`&[T]`) and
   `SRefMut<'a, Slice<T>>` (`&mut [T]`) wrappers.
@@ -62,6 +66,7 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
   signatures.
 
 ### Functions (`func.rs`, `func_def.rs`, `func_impl.rs`, ~2 KLOC together)
+
 - `Compiler::fun0..fun8` (+ `_rec` variants) for arities 0–8.
 - `extern_fn::<S: ExternFn>` for safe-ish FFI with auto-generated ABI types
   (via `rust-lms-derive`).
@@ -70,12 +75,14 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
 - Cranelift opt level is `speed` and libcalls are colocated.
 
 ### Other
+
 - `r#struct.rs` (~580 LOC) — field path traversal, copy struct ABI flattening.
 - `option.rs` (~1.5 KLOC) — `COption<T>`, `OptRef<T>`, `OptMutRef<T>` and
   pattern matching combinators.
 - Iterators (`iter/`) — see "Issue 1" below.
 
 ### Test coverage
+
 - `tests/test_slices.rs`, `tests/test_structs.rs`, `tests/test_extern_fn.rs`,
   `tests/test_ergonomic_api.rs`, `tests/type_safety.rs`, `tests/programs.rs`.
 - Examples: `basic_usage.rs`, `cranelift_functions.rs`.
@@ -91,15 +98,15 @@ macro-expanded boilerplate in `func.rs` (1.5 KLOC) and `option.rs` (1.5 KLOC).
 `src/iter/` advertises a push-based / CPS-fused iterator design, but the
 combinators that matter are stubs:
 
-| Combinator | Status |
-|---|---|
-| `StagedIterator::map` | works |
-| `StagedIterator::filter` | works |
-| `StagedIterator::for_each` | works |
-| `StagedIterator::fold` | **disabled** — `traits.rs:89` |
+| Combinator                                | Status                            |
+| ----------------------------------------- | --------------------------------- |
+| `StagedIterator::map`                     | works                             |
+| `StagedIterator::filter`                  | works                             |
+| `StagedIterator::for_each`                | works                             |
+| `StagedIterator::fold`                    | **disabled** — `traits.rs:89`     |
 | `StagedIterator::sum / count / min / max` | **disabled** — `traits.rs:97-106` |
-| `IndexedStagedIterator::zip` | **disabled** — `traits.rs:174` |
-| `Zip::consume_indexed` | **disabled** — `zip.rs:30` |
+| `IndexedStagedIterator::zip`              | **disabled** — `traits.rs:174`    |
+| `Zip::consume_indexed`                    | **disabled** — `zip.rs:30`        |
 
 The root cause is a Rust type-system limitation: terminal operations need the
 body expression to be `Clone` (so the loop body can be reused), but the
@@ -112,7 +119,7 @@ Users must still write `while_loop` + `let_var` + manual indexing. The whole
 point of the iterator API was to make `slice.staged_iter().zip(other).filter()
 .fold()` work, and it can't.
 
-**Why this is *fundamental*:** every other improvement (loop unrolling, SIMD,
+**Why this is _fundamental_:** every other improvement (loop unrolling, SIMD,
 multi-source fusion) is supposed to slot into the iterator pipeline. Without a
 working `fold`/`zip`, the iterator layer is dead weight.
 
@@ -132,25 +139,25 @@ Side-effects are composed by tuple construction; `(a, b, c)` runs `a`, then
 ((i, total), while_loop(...), *total)
 ```
 
-…where `(i, total)` is a tuple-of-`LetVar`-wrappers that exists *purely* to
+…where `(i, total)` is a tuple-of-`LetVar`-wrappers that exists _purely_ to
 trigger initialization, and the outermost expression's type is a 3-tuple of
 `Staged` values. Three failure modes follow from this design:
 
 1. **Silent omission.** Forgetting to thread a `LetVar` into the body tuple
    doesn't fail at staging — it fails inside Cranelift codegen with `Variable
-   N not found in var_map` (see `staged.rs:160`). The borrow checker thinks
+N not found in var_map` (see `staged.rs:160`). The borrow checker thinks
    the code is fine; the JIT panics at run time.
 2. **Spaghetti types.** A modestly nested loop body produces a return type
    spanning a screen-and-a-half. Type errors from a missing comma in a body
    tuple are unreadable.
 3. **Encoded scope leakage.** The benches define `let i = compiler.let_var(...)`
-   *outside* the function body and then include `i` in the body tuple, which
+   _outside_ the function body and then include `i` in the body tuple, which
    blurs the line between "variable I want inside this function" and
    "variable I want at module scope." (See `test_slices.rs:69`.) Recent code
    has migrated to `ctx.let_var(...)` inside the closure, which is better;
    the older pattern still compiles silently.
 
-**Why this is *fundamental*:** the DSL's entire control-flow story is built
+**Why this is _fundamental_:** the DSL's entire control-flow story is built
 on overloaded `Tuple` impls. Fixing it cleanly requires a real
 `Seq<A, B>`-style sequencing primitive (or a `do!`-style macro) — a breaking
 API change.
@@ -165,13 +172,13 @@ the macro lands.
 
 The README publishes the current state honestly:
 
-| Size | Native | rust-lms warm | Ratio |
-|---|---|---|---|
-| 1K | 782 ns | 1.25 µs | 1.6x |
-| 10K | 9.36 µs | 15.2 µs | 1.6x |
-| 100K | 234 µs | 347 µs | 1.5x |
+| Size | Native  | rust-lms warm | Ratio |
+| ---- | ------- | ------------- | ----- |
+| 1K   | 782 ns  | 1.25 µs       | 1.6x  |
+| 10K  | 9.36 µs | 15.2 µs       | 1.6x  |
+| 100K | 234 µs  | 347 µs        | 1.5x  |
 
-For a *JIT*, being slower than `rustc -O3` on a tight loop is awkward. Several
+For a _JIT_, being slower than `rustc -O3` on a tight loop is awkward. Several
 suspects in the current code:
 
 - **No loop unrolling.** `docs/loop_unrolling_design.md` lays out a clean
@@ -186,8 +193,8 @@ suspects in the current code:
 - **`opt_level = "speed"` only.** Cranelift also has `speed_and_size`. Worth
   exploring whether the egraph optimiser (introduced upstream) helps.
 
-**Why this is *fundamental*:** the project's reason to exist over hand-written
-Rust is *runtime code generation* — schema-shaped queries, branchless
+**Why this is _fundamental_:** the project's reason to exist over hand-written
+Rust is _runtime code generation_ — schema-shaped queries, branchless
 selection, fused operator pipelines. If a JITted loop costs more than the
 equivalent native loop, the runtime-compile pivot has to pay for itself in
 ways that aren't visible in current benches (e.g. dynamic shapes).
@@ -218,7 +225,7 @@ project leans on it heavily, which compounds:
   appears half-done — see the prelude re-exports in `lib.rs:132` listing
   both `FunRef` and `FunRef1`) leaves callers inconsistent.
 
-**Why this is *fundamental*:** more of a code-health issue, but it shapes how
+**Why this is _fundamental_:** more of a code-health issue, but it shapes how
 quickly the rest of the issues here can be addressed. A `macro_rules!` rewrite
 (or `seq_macro` crate) shrinking this to one definition unblocks routine
 maintenance.
@@ -234,7 +241,7 @@ guarantees less than it claims:
 
 - `Compiler::var_unchecked` exists and is `unsafe`, with a comment that says
   "you MUST assign before reading or codegen will panic." This is a
-  *runtime* panic dressed up as `unsafe` — the compiler can't help.
+  _runtime_ panic dressed up as `unsafe` — the compiler can't help.
 - `var_map.get(&self.id).expect(...)` (`staged.rs:160`) — every lookup is a
   panic on miss. Forgetting to sequence a `LetVar` produces this.
 - `extern_func_ids.get(&extern_id).expect(...)` (`staged.rs:65`) — same shape
@@ -243,11 +250,11 @@ guarantees less than it claims:
   bench, so users never see Cranelift errors typed back to them.
 
 The type-level constraints on operations (`Add<L, R>` requires `Out = T` on
-both sides; `Lt` always returns `BoolType`; etc.) *do* work — and they're
+both sides; `Lt` always returns `BoolType`; etc.) _do_ work — and they're
 genuinely nice. But the surrounding scaffolding has too many panic paths for
 the "type-safe staged computation" pitch to hold up.
 
-**Why this is *fundamental*:** the gap between "type-safe at the leaves" and
+**Why this is _fundamental_:** the gap between "type-safe at the leaves" and
 "type-safe end-to-end" is exactly what a new user trips on when adopting an
 embedded DSL.
 
@@ -269,7 +276,7 @@ initialization at compile time, or remove it and direct users to `let_var` only.
   one-trick file. Worth consolidating.
 - **Tracked dead file.** `examples/dump_wasm_clif.rs` shows `AD` in git status
   (added then deleted). Either restore or clean.
-- **Doc-test format drift.** Most module rustdoc uses ```` ```ignore ```` —
+- **Doc-test format drift.** Most module rustdoc uses ` ```ignore ` —
   reasonable given the codegen-time machinery, but means rustdoc never catches
   drift in the example snippets that the prelude / lib.rs lean on.
 

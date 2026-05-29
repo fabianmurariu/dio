@@ -23,12 +23,12 @@ use syn::{parse_macro_input, Block, Pat, Stmt};
 ///
 /// All other `let` bindings (non-`ctx` calls) follow the same split pattern and
 /// require `T: Copy` for `.var()` to work; this holds for all primitive staged
-/// types (`I64Type`, `U64Type`, `F64Type`, `BoolType`, `UnitType`).
+/// types (`i64`, `U64Type`, `F64Type`, `BoolType`, `UnitType`).
 ///
 /// # Example
 ///
 /// ```ignore
-/// let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<I64Type>| {
+/// let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
 ///     staged_block! {
 ///         let i   = ctx.let_var(0i64);
 ///         let sum = ctx.let_var(0i64);

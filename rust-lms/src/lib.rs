@@ -20,9 +20,9 @@
 //! use cranelift_frontend::Variable;
 //!
 //! // Create variables and constants
-//! let x = Var::<I64Type>::new(Variable::from_u32(0));
-//! let five = Const::<I64Type>::new(5);
-//! let two = Const::<I64Type>::new(2);
+//! let x = Var::<i64>::new(Variable::from_u32(0));
+//! let five = Const::<i64>::new(5);
+//! let two = Const::<i64>::new(2);
 //!
 //! // Build expressions: (x + 5) * 2
 //! let expr = mul(add(x, five), two);
@@ -51,7 +51,7 @@
 //!
 //! ### Type Markers
 //!
-//! - [`I64Type`](types::I64Type), [`U64Type`](types::U64Type): Integer types
+//! - [`i64`](types::i64), [`U64Type`](types::U64Type): Integer types
 //! - [`F64Type`](types::F64Type): Floating-point type
 //! - [`BoolType`](types::BoolType): Boolean type
 //!
@@ -133,11 +133,10 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, Filter, IndexedSource, IndexedStagedIterator,
-        IntoStagedIterator, Map, MinMax, RangeIter, SliceIter,
-        StagedIterator, Zip,
+        range, Filter, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
+        RangeIter, SliceIter, StagedIterator, Zip,
     };
-    pub use crate::num::{add, div, eq, lt, mul, sub};
+    pub use crate::num::{add, div, eq, gt, lt, max, min, mul, rem, select, sub};
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
@@ -145,8 +144,8 @@ pub mod prelude {
     };
     pub use crate::r#struct::{
         field_mut_ptr, field_mut_ref, field_path, field_ptr, field_ref, load_field,
-        CopyFieldAccess, Field, FieldMutPtr, FieldMutRef, FieldPath, FieldPtr, FieldRef,
-        LoadField, MutRefFieldAccess, OwnedFieldAccess, RefFieldAccess,
+        CopyFieldAccess, Field, FieldMutPtr, FieldMutRef, FieldPath, FieldPtr, FieldRef, LoadField,
+        MutRefFieldAccess, OwnedFieldAccess, RefFieldAccess,
     };
     pub use crate::refer::{
         array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut, store,
@@ -155,14 +154,14 @@ pub mod prelude {
     };
     pub use crate::slice::{Slice, SliceLen, SliceLenMut, SliceMutOps, SliceRefOps};
     pub use crate::staged::{
-        assign, unit, Assign, BoxableStaged, CompilationContext, Const, LetVar, IntoStaged,
-        Staged, Var,
+        assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
+        Var,
+    };
+    pub use crate::types::{
+        BoolType, ConstantType, CopyType, F64Type, I32Type, Owned, StagedType, U32Type, U64Type,
+        UnitType,
     };
     pub use rust_lms_macros::staged_block;
-    pub use crate::types::{
-        BoolType, ConstantType, CopyType, F64Type, I32Type, I64Type, Owned, StagedType, U32Type,
-        U64Type, UnitType,
-    };
 
     // Re-export derive macro
     #[cfg(feature = "derive")]

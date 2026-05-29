@@ -1,9 +1,9 @@
 //! Tests for ergonomic API improvements
 //!
 //! These tests demonstrate the improved ergonomics from using IntoStaged:
-//! - assign(var, 42i64) instead of assign(var, Const::<I64Type>::new(42))
-//! - add(x, 5i64) instead of add(x, Const::<I64Type>::new(5))
-//! - lt(x, 100i64) instead of lt(x, Const::<I64Type>::new(100))
+//! - assign(var, 42i64) instead of assign(var, Const::<i64>::new(42))
+//! - add(x, 5i64) instead of add(x, Const::<i64>::new(5))
+//! - lt(x, 100i64) instead of lt(x, Const::<i64>::new(100))
 //! - while_loop(true, ...) instead of while_loop(Const::<BoolType>::new(true), ...)
 //! - arr.get_unchecked(0u64) instead of arr.get_unchecked(Const::<U64Type>::new(0))
 
@@ -29,7 +29,7 @@ fn test_ergonomic_let_var() {
     let f = compiler.fun0("let_var_test", |ctx| {
         let x = ctx.var(42i64);
         let y = ctx.var(8i64);
-        add::<I64Type, _, _>(x, y)
+        add::<i64, _, _>(x, y)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -40,12 +40,12 @@ fn test_ergonomic_let_var() {
 fn test_ergonomic_comparison() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("clamp_max", |_ctx, x: Var<I64Type>| {
+    let f = compiler.fun1("clamp_max", |_ctx, x: Var<i64>| {
         // Ergonomic comparison and conditional
         if_then_else(
-            lt::<I64Type, _, _>(x, 100i64), // Ergonomic lt
+            lt::<i64, _, _>(x, 100i64), // Ergonomic lt
             x,
-            Const::<I64Type>::new(100), // Constants in return positions need type annotation
+            Const::<i64>::new(100), // Constants in return positions need type annotation
         )
     });
 
@@ -60,14 +60,14 @@ fn test_ergonomic_comparison() {
 fn test_ergonomic_while_loop() {
     let mut compiler = Compiler::new();
 
-    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<I64Type>| {
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
         let i = ctx.let_var(0i64);
         let sum = ctx.let_var(0i64);
         (
             i,
             sum,
             while_loop(
-                lt::<I64Type, _, _>(*i, n),
+                lt::<i64, _, _>(*i, n),
                 (assign(*sum, add(*sum, *i)), assign(*i, add(*i, 1i64))),
             ),
             *sum,
@@ -87,7 +87,7 @@ fn test_ergonomic_slice_operations() {
     let mut compiler = Compiler::new();
 
     // fn get_second(arr: &[i64]) -> i64
-    let get_second = compiler.fun1("get_second", |_ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let get_second = compiler.fun1("get_second", |_ctx, arr: Var<SRef<Slice<i64>>>| {
         arr.get_unchecked(1u64) // Ergonomic index - no Const needed!
     });
 
@@ -106,7 +106,7 @@ fn test_ergonomic_slice_set() {
     let mut compiler = Compiler::new();
 
     // fn set_first(arr: &mut [i64])
-    let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<I64Type>>>| {
+    let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
         arr.set_unchecked(0u64, 999i64) // Both index and value are ergonomic!
     });
 
@@ -124,7 +124,7 @@ fn test_ergonomic_slice_set() {
 fn test_ergonomic_slice_subslice() {
     let mut compiler = Compiler::new();
 
-    let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+    let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<i64>>>| {
         let i = ctx.let_var(0u64);
         let total = ctx.let_var(0i64);
         let sub = arr.slice_unchecked(1u64, 4u64);
@@ -193,7 +193,7 @@ fn test_imperative_basic_var() {
     let f = compiler.fun0("imp_basic", |ctx| {
         let x = ctx.var(42i64);
         let y = ctx.var(8i64);
-        add::<I64Type, _, _>(x, y)
+        add::<i64, _, _>(x, y)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -204,12 +204,12 @@ fn test_imperative_basic_var() {
 fn test_imperative_while_loop() {
     let mut compiler = Compiler::new();
 
-    let count_to_n = compiler.fun1("count_to_n_imp", |ctx, n: Var<I64Type>| {
+    let count_to_n = compiler.fun1("count_to_n_imp", |ctx, n: Var<i64>| {
         let i = ctx.var(0i64);
         let sum = ctx.var(0i64);
         ctx.while_loop(lt(i, n), move |ctx| {
-            ctx.assign(sum, add(sum, i));
-            ctx.assign(i, add(i, 1i64));
+            ctx.store(sum, add(sum, i));
+            ctx.store(i, add(i, 1i64));
         });
         sum
     });
@@ -226,7 +226,7 @@ fn test_imperative_bind() {
     // ctx.bind evaluates a complex expression once and binds to a Copy Var.
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("bind_test_imp", |ctx, n: Var<I64Type>| {
+    let f = compiler.fun1("bind_test_imp", |ctx, n: Var<i64>| {
         let doubled = ctx.bind(add(n, n));
         add(doubled, doubled)
     });
@@ -241,17 +241,17 @@ fn test_imperative_bind() {
 fn test_imperative_fibonacci() {
     let mut compiler = Compiler::new();
 
-    let fib_iter = compiler.fun1("fib_iter_imp", |ctx, n: Var<I64Type>| {
+    let fib_iter = compiler.fun1("fib_iter_imp", |ctx, n: Var<i64>| {
         let i = ctx.var(2i64);
         let a = ctx.var(0i64);
         let b = ctx.var(1i64);
         let temp = ctx.var(0i64);
         if_then_else(lt(n, 2), n, {
             ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                ctx.assign(temp, add(a, b));
-                ctx.assign(a, b);
-                ctx.assign(b, temp);
-                ctx.assign(i, add(i, 1i64));
+                ctx.store(temp, add(a, b));
+                ctx.store(a, b);
+                ctx.store(b, temp);
+                ctx.store(i, add(i, 1i64));
             });
             b
         })

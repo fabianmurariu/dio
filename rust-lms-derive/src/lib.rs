@@ -33,7 +33,7 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnTyp
 /// #[derive(StagedType, Copy, Clone)]
 /// #[repr(C)]
 /// struct Point {
-///     #[staged(I64Type)]
+///     #[staged(i64)]
 ///     x: i64,
 ///     #[staged(F64Type)]
 ///     y: f64,
@@ -251,7 +251,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 return Ok(quote! { ::rust_lms::types::U32Type });
             }
             if path.is_ident("i64") {
-                return Ok(quote! { ::rust_lms::types::I64Type });
+                return Ok(quote! { i64 });
             }
             if path.is_ident("u64") {
                 return Ok(quote! { ::rust_lms::types::U64Type });
@@ -269,7 +269,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 return Ok(quote! { ::rust_lms::types::U64Type });
             }
             if path.is_ident("isize") {
-                return Ok(quote! { ::rust_lms::types::I64Type });
+                return Ok(quote! { i64 });
             }
 
             // Handle generic types like COption<T>, FatSlice<T>
@@ -405,7 +405,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 ///
 /// // Usage:
 /// // let sum_fn = compiler.extern_fn::<SumArrayExtern>();
-/// // let result = call_extern1::<_, _, FatSliceType<I64Type>, I64Type>(sum_fn, slice_arg);
+/// // let result = call_extern1::<_, _, FatSliceType<i64>, i64>(sum_fn, slice_arg);
 /// ```
 #[proc_macro_attribute]
 pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -488,10 +488,8 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // If there were any errors, return them
     if !errors.is_empty() {
-        let compile_errors: proc_macro2::TokenStream = errors
-            .into_iter()
-            .map(|e| e.to_compile_error())
-            .collect();
+        let compile_errors: proc_macro2::TokenStream =
+            errors.into_iter().map(|e| e.to_compile_error()).collect();
         return TokenStream::from(quote! {
             #input
             #compile_errors

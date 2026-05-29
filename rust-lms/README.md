@@ -20,9 +20,9 @@ use rust_lms::prelude::*;
 use cranelift_frontend::Variable;
 
 // Create variables and constants
-let x = Var::<I64Type>::new(Variable::from_u32(0));
-let five = Const::<I64Type>::new(5);
-let two = Const::<I64Type>::new(2);
+let x = Var::<i64>::new(Variable::from_u32(0));
+let five = Const::<i64>::new(5);
+let two = Const::<i64>::new(2);
 
 // Build expressions: (x + 5) * 2
 let expr = mul(add(x, five), two);
@@ -47,6 +47,7 @@ The design separates **values** from **operations**:
 - **Operations**: `Add<L,R>`, `Lt<L,R>` - separate structs that implement `Staged`
 
 This separation enables:
+
 1. Type-level constraints on operations
 2. Heterogeneous operations (changing types)
 3. Copy semantics for lightweight values
@@ -61,7 +62,7 @@ trait Staged {
 }
 
 // Type markers
-struct I64Type;    // i64 values
+struct i64;    // i64 values
 struct U64Type;    // u64 values
 struct F64Type;    // f64 values
 struct BoolType;   // boolean values
@@ -98,7 +99,7 @@ rust-lms/
 ├── src/
 │   ├── lib.rs          # Main library entry point
 │   ├── staged.rs       # Core Staged trait, Var<T>, Const<T>
-│   ├── types.rs        # Type system (StagedType, I64Type, etc.)
+│   ├── types.rs        # Type system (StagedType, i64, etc.)
 │   └── num/
 │       ├── mod.rs      # Numeric operations module
 │       ├── traits.rs   # Capability traits (SupportsAdd, etc.)
@@ -122,6 +123,7 @@ enum Rep<T> {
 ```
 
 Issues:
+
 - Can't be `Copy` (contains `Box`)
 - Hard to enforce type constraints
 - Difficult to support heterogeneous operations
@@ -141,6 +143,7 @@ struct Lt<L, R> { left: L, right: R }    // ✅ Can change output type!
 ```
 
 Benefits:
+
 - Values can be `Copy`
 - Type constraints enforced at compile time
 - Operations are first-class values

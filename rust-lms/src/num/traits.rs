@@ -5,7 +5,7 @@
 use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
-use crate::types::{BoolType, F64Type, I32Type, I64Type, StagedType, U32Type, U64Type};
+use crate::types::{BoolType, F64Type, I32Type, StagedType, U32Type, U64Type};
 
 // =============================================================================
 // Capability Traits
@@ -35,6 +35,12 @@ pub trait SupportsDiv: StagedType {
     fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 }
 
+/// Types that support remainder (modulo)
+pub trait SupportsRem: StagedType {
+    /// Generate code for remainder
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+}
+
 /// Types that support comparison operations
 pub trait SupportsComparison: StagedType {
     /// Generate code for less-than comparison
@@ -48,34 +54,40 @@ pub trait SupportsComparison: StagedType {
 }
 
 // =============================================================================
-// Implementations for I64Type
+// Implementations for i64
 // =============================================================================
 
-impl SupportsAdd for I64Type {
+impl SupportsAdd for i64 {
     fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iadd(left, right)
     }
 }
 
-impl SupportsSub for I64Type {
+impl SupportsSub for i64 {
     fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().isub(left, right)
     }
 }
 
-impl SupportsMul for I64Type {
+impl SupportsMul for i64 {
     fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().imul(left, right)
     }
 }
 
-impl SupportsDiv for I64Type {
+impl SupportsDiv for i64 {
     fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().sdiv(left, right)
     }
 }
 
-impl SupportsComparison for I64Type {
+impl SupportsRem for i64 {
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().srem(left, right)
+    }
+}
+
+impl SupportsComparison for i64 {
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
         builder.ins().icmp(IntCC::SignedLessThan, left, right)
@@ -117,6 +129,12 @@ impl SupportsMul for U64Type {
 impl SupportsDiv for U64Type {
     fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().udiv(left, right) // Note: unsigned division
+    }
+}
+
+impl SupportsRem for U64Type {
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().urem(left, right)
     }
 }
 
@@ -165,6 +183,12 @@ impl SupportsDiv for I32Type {
     }
 }
 
+impl SupportsRem for I32Type {
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().srem(left, right)
+    }
+}
+
 impl SupportsComparison for I32Type {
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         use cranelift_codegen::ir::condcodes::IntCC;
@@ -207,6 +231,12 @@ impl SupportsMul for U32Type {
 impl SupportsDiv for U32Type {
     fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
         builder.ins().udiv(left, right) // Note: unsigned division
+    }
+}
+
+impl SupportsRem for U32Type {
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().urem(left, right)
     }
 }
 

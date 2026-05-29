@@ -727,7 +727,7 @@ where
 ///     &mut compiler,
 ///     some_option_expr,
 ///     |ctx, val| add(val, 1i64),  // Some(x) => x + 1
-///     Const::<I64Type>::new(0),   // None => 0
+///     Const::<i64>::new(0),   // None => 0
 /// );
 /// ```
 pub fn match_opt<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
@@ -987,7 +987,7 @@ mod tests {
         let compiler = Compiler::new();
 
         // Create COption::Some(42)
-        let expr = c_some::<I64Type, _>(42i64);
+        let expr = c_some::<i64, _>(42i64);
         let wrapped = unwrap_or(expr, 0i64);
 
         let compiled = compiler.compile(wrapped).expect("compilation failed");
@@ -999,7 +999,7 @@ mod tests {
         let compiler = Compiler::new();
 
         // Create COption::None, unwrap_or should return default
-        let expr = c_none::<I64Type>();
+        let expr = c_none::<i64>();
         let wrapped = unwrap_or(expr, 99i64);
 
         let compiled = compiler.compile(wrapped).expect("compilation failed");
@@ -1010,7 +1010,7 @@ mod tests {
     fn test_is_some() {
         let compiler = Compiler::new();
 
-        let some_expr = c_some::<I64Type, _>(42i64);
+        let some_expr = c_some::<i64, _>(42i64);
         let check = is_some(some_expr);
 
         let compiled = compiler.compile(check).expect("compilation failed");
@@ -1021,7 +1021,7 @@ mod tests {
     fn test_is_none() {
         let compiler = Compiler::new();
 
-        let none_expr = c_none::<I64Type>();
+        let none_expr = c_none::<i64>();
         let check = is_none(none_expr);
 
         let compiled = compiler.compile(check).expect("compilation failed");
@@ -1033,14 +1033,9 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // match Some(10) { Some(x) => x + 5, None => 0 }
-        let func = compiler.fun1("test", |ctx, _dummy: Var<I64Type>| {
-            let opt = c_some::<I64Type, _>(10i64);
-            match_opt(
-                ctx,
-                opt,
-                |_ctx, val| add(val, 5i64),
-                Const::<I64Type>::new(0),
-            )
+        let func = compiler.fun1("test", |ctx, _dummy: Var<i64>| {
+            let opt = c_some::<i64, _>(10i64);
+            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<i64>::new(0))
         });
 
         let compiled = compiler
@@ -1054,14 +1049,9 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // match None { Some(x) => x + 5, None => 99 }
-        let func = compiler.fun1("test", |ctx, _dummy: Var<I64Type>| {
-            let opt = c_none::<I64Type>();
-            match_opt(
-                ctx,
-                opt,
-                |_ctx, val| add(val, 5i64),
-                Const::<I64Type>::new(99),
-            )
+        let func = compiler.fun1("test", |ctx, _dummy: Var<i64>| {
+            let opt = c_none::<i64>();
+            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<i64>::new(99))
         });
 
         let compiled = compiler
@@ -1097,10 +1087,9 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn unwrap_or_default(opt: COption<i64>) -> i64
-        let unwrap_fn = compiler.fun1(
-            "unwrap_or_default",
-            |_ctx, opt: Var<COptionType<I64Type>>| unwrap_or(opt, -1i64),
-        );
+        let unwrap_fn = compiler.fun1("unwrap_or_default", |_ctx, opt: Var<COptionType<i64>>| {
+            unwrap_or(opt, -1i64)
+        });
 
         let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1120,15 +1109,15 @@ mod tests {
 
         // fn maybe_double(x: i64) -> COption<i64>
         // Returns Some(x * 2) if x > 0, else None
-        let maybe_double = compiler.fun1("maybe_double", |ctx, x: Var<I64Type>| {
-            let doubled = c_some::<I64Type, _>(mul(x, 2i64));
-            let none = c_none::<I64Type>();
+        let maybe_double = compiler.fun1("maybe_double", |ctx, x: Var<i64>| {
+            let doubled = c_some::<i64, _>(mul(x, 2i64));
+            let none = c_none::<i64>();
             // if x > 0 then Some(x*2) else None
             match_opt(
                 ctx,
                 if_then_else(lt(0i64, x), doubled, none),
-                |_ctx, val| c_some::<I64Type, _>(val),
-                c_none::<I64Type>(),
+                |_ctx, val| c_some::<i64, _>(val),
+                c_none::<i64>(),
             )
         });
 
@@ -1146,12 +1135,12 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn add_one_if_some(opt: COption<i64>) -> COption<i64>
-        let add_one = compiler.fun1("add_one_if_some", |ctx, opt: Var<COptionType<I64Type>>| {
+        let add_one = compiler.fun1("add_one_if_some", |ctx, opt: Var<COptionType<i64>>| {
             match_opt(
                 ctx,
                 opt,
-                |_ctx, val| c_some::<I64Type, _>(add(val, 1i64)),
-                c_none::<I64Type>(),
+                |_ctx, val| c_some::<i64, _>(add(val, 1i64)),
+                c_none::<i64>(),
             )
         });
 
@@ -1227,15 +1216,10 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn deref_or_default(opt: Option<&i64>) -> i64
-        let deref_fn = compiler.fun1("deref_or_default", |ctx, opt: Var<OptRefType<I64Type>>| {
+        let deref_fn = compiler.fun1("deref_or_default", |ctx, opt: Var<OptRefType<i64>>| {
             use crate::refer::load_ref;
             // if some, load the value; else return -1
-            match_opt_ref(
-                ctx,
-                opt,
-                |_ctx, ptr| load_ref(ptr),
-                Const::<I64Type>::new(-1),
-            )
+            match_opt_ref(ctx, opt, |_ctx, ptr| load_ref(ptr), Const::<i64>::new(-1))
         });
 
         let compiled = compiler.compile(deref_fn).expect("compilation failed");
@@ -1256,8 +1240,8 @@ mod tests {
 
         // fn make_ref(ptr: &i64) -> Option<&i64>
         // Just wraps the reference in Some
-        let make_ref = compiler.fun1("make_ref", |_ctx, ptr: Var<SRef<I64Type>>| {
-            opt_ref_some::<I64Type, _>(ptr)
+        let make_ref = compiler.fun1("make_ref", |_ctx, ptr: Var<SRef<i64>>| {
+            opt_ref_some::<i64, _>(ptr)
         });
 
         let compiled = compiler.compile(make_ref).expect("compilation failed");
@@ -1274,13 +1258,13 @@ mod tests {
 
         // fn ref_if_positive(ptr: &i64) -> Option<&i64>
         // Returns Some(ptr) if *ptr > 0, else None
-        let ref_if_pos = compiler.fun1("ref_if_positive", |_ctx, ptr: Var<SRef<I64Type>>| {
+        let ref_if_pos = compiler.fun1("ref_if_positive", |_ctx, ptr: Var<SRef<i64>>| {
             use crate::refer::load_ref;
             let val = load_ref(ptr);
             if_then_else(
                 lt(0i64, val), // val > 0
-                opt_ref_some::<I64Type, _>(ptr),
-                opt_ref_none::<I64Type>(),
+                opt_ref_some::<i64, _>(ptr),
+                opt_ref_none::<i64>(),
             )
         });
 
@@ -1307,18 +1291,15 @@ mod tests {
 
         // fn read_and_double(opt: Option<&mut i64>) -> i64
         // If Some, reads the value and returns it doubled (without mutating); else returns -1
-        let read_fn = compiler.fun1(
-            "read_and_double",
-            |ctx, opt: Var<OptMutRefType<I64Type>>| {
-                use crate::refer::load_ref_mut;
-                match_opt_mut_ref(
-                    ctx,
-                    opt,
-                    |_ctx, ptr| mul(load_ref_mut(ptr), 2i64),
-                    Const::<I64Type>::new(-1),
-                )
-            },
-        );
+        let read_fn = compiler.fun1("read_and_double", |ctx, opt: Var<OptMutRefType<i64>>| {
+            use crate::refer::load_ref_mut;
+            match_opt_mut_ref(
+                ctx,
+                opt,
+                |_ctx, ptr| mul(load_ref_mut(ptr), 2i64),
+                Const::<i64>::new(-1),
+            )
+        });
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1340,31 +1321,28 @@ mod tests {
 
         // fn increment_in_place(opt: Option<&mut i64>) -> i64
         // If Some, increments the value in place and returns new value; else returns -1
-        let incr_fn = compiler.fun1(
-            "increment_in_place",
-            |ctx, opt: Var<OptMutRefType<I64Type>>| {
-                use crate::refer::{load_ref_mut, store_ref};
-                // Use a local variable to hold the new value
-                let result = ctx.let_var(0i64);
-                (
-                    result,
-                    match_opt_mut_ref(
-                        ctx,
-                        opt,
-                        |_ctx, ptr| {
-                            // Load current value, add 1, store back, and assign to result
-                            let incremented = add(load_ref_mut(ptr), 1i64);
-                            (
-                                store_ref(ptr, incremented),
-                                assign(*result, load_ref_mut(ptr)),
-                            )
-                        },
-                        assign(*result, -1i64),
-                    ),
-                    *result,
-                )
-            },
-        );
+        let incr_fn = compiler.fun1("increment_in_place", |ctx, opt: Var<OptMutRefType<i64>>| {
+            use crate::refer::{load_ref_mut, store_ref};
+            // Use a local variable to hold the new value
+            let result = ctx.let_var(0i64);
+            (
+                result,
+                match_opt_mut_ref(
+                    ctx,
+                    opt,
+                    |_ctx, ptr| {
+                        // Load current value, add 1, store back, and assign to result
+                        let incremented = add(load_ref_mut(ptr), 1i64);
+                        (
+                            store_ref(ptr, incremented),
+                            assign(*result, load_ref_mut(ptr)),
+                        )
+                    },
+                    assign(*result, -1i64),
+                ),
+                *result,
+            )
+        });
 
         let compiled = compiler.compile(incr_fn).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1385,8 +1363,8 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn make_mut_ref(ptr: &mut i64) -> Option<&mut i64>
-        let make_ref = compiler.fun1("make_mut_ref", |_ctx, ptr: Var<SRefMut<I64Type>>| {
-            opt_mut_ref_some::<I64Type, _>(ptr)
+        let make_ref = compiler.fun1("make_mut_ref", |_ctx, ptr: Var<SRefMut<i64>>| {
+            opt_mut_ref_some::<i64, _>(ptr)
         });
 
         let compiled = compiler.compile(make_ref).expect("compilation failed");
@@ -1441,7 +1419,7 @@ mod tests {
         // Returns Some(a + b) if both are Some, else None
         let add_opts = compiler.fun2(
             "add_options",
-            |ctx, a: Var<COptionType<I64Type>>, b: Var<COptionType<I64Type>>| {
+            |ctx, a: Var<COptionType<i64>>, b: Var<COptionType<i64>>| {
                 match_opt(
                     ctx,
                     a,
@@ -1449,11 +1427,11 @@ mod tests {
                         match_opt(
                             ctx,
                             b,
-                            |_ctx, b_val| c_some::<I64Type, _>(add(a_val, b_val)),
-                            c_none::<I64Type>(),
+                            |_ctx, b_val| c_some::<i64, _>(add(a_val, b_val)),
+                            c_none::<i64>(),
                         )
                     },
-                    c_none::<I64Type>(),
+                    c_none::<i64>(),
                 )
             },
         );
@@ -1474,7 +1452,7 @@ mod tests {
         // fn unwrap_or_add(opt: COption<i64>, default: i64) -> i64
         let unwrap_add = compiler.fun2(
             "unwrap_or_add",
-            |_ctx, opt: Var<COptionType<I64Type>>, default: Var<I64Type>| unwrap_or(opt, default),
+            |_ctx, opt: Var<COptionType<i64>>, default: Var<i64>| unwrap_or(opt, default),
         );
 
         let compiled = compiler.compile(unwrap_add).expect("compilation failed");

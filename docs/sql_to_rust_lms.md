@@ -19,7 +19,7 @@ This document outlines what needs to be added to `rust-lms` to support compiled 
 
 ## Current rust-lms Capabilities
 
-**Types**: `I64Type`, `U64Type`, `F64Type`, `BoolType`, `UnitType`
+**Types**: `i64`, `U64Type`, `F64Type`, `BoolType`, `UnitType`
 **Values**: `VarRef<T>`, `Const<T>`
 **Operations**: `Add`, `Sub`, `Mul`, `Div`, `Lt`, `Eq`
 **Control**: `Seq`, `IfThenElse`, `IfThen`, `While`
@@ -84,7 +84,7 @@ pub struct PtrOffset<P, I> { ptr: P, index: I }
 impl<P, I, T> Staged for PtrOffset<P, I>
 where
     P: Staged<Out = PtrType<T>>,
-    I: Staged<Out = I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType,
 {
     type Out = PtrType<T>;
@@ -192,7 +192,7 @@ Types that map directly to Arrow array representations.
 /// Represents an Arrow array buffer (data pointer + length + null bitmap)
 pub struct ArrowBuffer<T: StagedType> {
     data_ptr: VarRef<PtrType<T>>,
-    length: VarRef<I64Type>,
+    length: VarRef<i64>,
     null_bitmap: VarRef<PtrType<U8Type>>, // Optional
 }
 
@@ -200,7 +200,7 @@ pub struct ArrowBuffer<T: StagedType> {
 pub struct ArrowStringArray {
     data_ptr: VarRef<PtrType<U8Type>>,    // String data
     offsets_ptr: VarRef<PtrType<I32Type>>, // Offset array
-    length: VarRef<I64Type>,
+    length: VarRef<i64>,
 }
 ```
 
@@ -210,12 +210,12 @@ pub struct ArrowStringArray {
 /// For-each loop over array elements (push-style iteration)
 pub struct ForEach<ARRAY, BODY> {
     array: ARRAY,
-    body: BODY, // Takes VarRef<T> for current element and VarRef<I64Type> for index
+    body: BODY, // Takes VarRef<T> for current element and VarRef<i64> for index
 }
 
 // Example usage:
-let sum = compiler.var::<I64Type>();
-compiler.for_each(arr, |elem: VarRef<I64Type>, idx| {
+let sum = compiler.var::<i64>();
+compiler.for_each(arr, |elem: VarRef<i64>, idx| {
     assign(sum, add(sum, elem))
 })
 ```
@@ -378,7 +378,7 @@ pub struct TupleType3<A, B, C> { ... }
 // etc.
 
 // Or use a macro/builder pattern:
-tuple_type!(RecordType, a: I64Type, b: F64Type, c: StringViewType);
+tuple_type!(RecordType, a: i64, b: F64Type, c: StringViewType);
 ```
 
 ### 6.2 Tuple Operations
@@ -447,7 +447,7 @@ impl Operator for TableScan {
         -> impl Staged<Out = UnitType>
     {
         // Generate: for i in 0..length { consumer.consume(record_at(i)) }
-        let i = compiler.var::<I64Type>();
+        let i = compiler.var::<i64>();
         seq(
             assign(i, Const::new(0)),
             while_loop(
@@ -690,18 +690,21 @@ pub extern "C" fn get_batch_length(batch: *const RecordBatch) -> i64 {
 ## Implementation Priority
 
 ### Must Have (Core Functionality)
+
 1. **Phase 1**: Pointer and memory types - foundation for everything
 2. **Phase 2**: External function calls - required for runtime functions
 3. **Phase 3**: Arrow integration types - basic array access
 4. **Phase 7.1-7.3**: Basic operators (Scan, Filter, Project)
 
 ### Should Have (Feature Complete)
+
 5. **Phase 4**: String operations - needed for real SQL queries
 6. **Phase 5**: Hash table operations - for joins
 7. **Phase 7.5-7.6**: Hash Join and Aggregation
 8. **Phase 8**: Memory management
 
 ### Nice to Have (Production Ready)
+
 9. **Phase 6**: Tuple types - cleaner record handling
 10. **Phase 9-10**: Full DataFusion integration
 

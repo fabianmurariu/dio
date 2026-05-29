@@ -3,7 +3,7 @@
 use crate::func::Ctx;
 use crate::num::{add, lt, sub, Sub};
 use crate::staged::{IntoStaged, Var};
-use crate::types::{U64Type};
+use crate::types::U64Type;
 
 use super::traits::{IndexedStagedIterator, StagedIterator};
 
@@ -19,7 +19,10 @@ where
     S: IntoStaged<U64Type>,
     E: IntoStaged<U64Type>,
 {
-    RangeIter { start: start.into_staged(), end: end.into_staged() }
+    RangeIter {
+        start: start.into_staged(),
+        end: end.into_staged(),
+    }
 }
 
 impl<Start, End> StagedIterator for RangeIter<Start, End>
@@ -39,7 +42,7 @@ where
 
         ctx.while_loop(lt(i, end), move |ctx| {
             consumer(ctx, i);
-            ctx.assign(i, add(i, 1u64));
+            ctx.store(i, add(i, 1u64));
         });
     }
 }

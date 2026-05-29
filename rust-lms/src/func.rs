@@ -216,7 +216,7 @@ impl Ctx {
     ///
     /// Accepts any value that implements `IntoStaged<T>` — primitives like
     /// `42i64` work directly, as do staged expressions.
-    pub fn assign<T, E>(&mut self, var: Var<T>, expr: E)
+    pub fn store<T, E>(&mut self, var: Var<T>, expr: E)
     where
         T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
@@ -376,7 +376,7 @@ impl<'a> Compiler<'a> {
     ///
     /// let mut compiler = Compiler::new();
     /// let my_add = compiler.extern_fn::<MyAddExtern>();
-    /// let result = call_extern2::<_, _, _, I64Type, I64Type, I64Type>(my_add, x, y);
+    /// let result = call_extern2::<_, _, _, i64, i64, i64>(my_add, x, y);
     /// ```
     pub fn extern_fn<S: crate::ffi::ExternFn>(&mut self) -> crate::ffi::ExternRef<S> {
         let extern_id = self.extern_functions.len();
@@ -422,11 +422,11 @@ impl<'a> Compiler<'a> {
     ///
     /// # Example
     /// ```ignore
-    /// let factorial = compiler.fun1_rec("factorial", |f, ctx, x: Var<I64Type>| {
+    /// let factorial = compiler.fun1_rec("factorial", |f, ctx, x: Var<i64>| {
     ///     // Can create local variables
     ///     let temp = ctx.let_var(0i64);
     ///     // Recursive call: f(x - 1)
-    ///     call1(f, sub(x, Const::<I64Type>::new(1)))
+    ///     call1(f, sub(x, Const::<i64>::new(1)))
     /// });
     /// ```
     pub fn fun1_rec<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef1<A, OUT>
@@ -1245,7 +1245,7 @@ mod tests {
     #[test]
     fn test_simple_constant() {
         let compiler = Compiler::new();
-        let five = Const::<I64Type>::new(5);
+        let five = Const::<i64>::new(5);
 
         let compiled = compiler.compile(five).expect("compilation failed");
         let result = compiled.run();
@@ -1256,7 +1256,7 @@ mod tests {
     #[test]
     fn test_simple_addition() {
         let compiler = Compiler::new();
-        let expr = add::<I64Type, _, _>(3i64, 4i64);
+        let expr = add::<i64, _, _>(3i64, 4i64);
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -1269,8 +1269,8 @@ mod tests {
         let compiler = Compiler::new();
         // (3 + 4) * 2 = 14
         let expr = mul(
-            add(Const::<I64Type>::new(3), Const::<I64Type>::new(4)),
-            Const::<I64Type>::new(2),
+            add(Const::<i64>::new(3), Const::<i64>::new(4)),
+            Const::<i64>::new(2),
         );
 
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -1284,10 +1284,10 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: square(x) = x * x
-        let square = compiler.fun1("square", |_ctx, x: Var<I64Type>| mul(x, x));
+        let square = compiler.fun1("square", |_ctx, x: Var<i64>| mul(x, x));
 
         // Call: square(5) = 25
-        let expr = call1(square, Const::<I64Type>::new(5));
+        let expr = call1(square, Const::<i64>::new(5));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -1303,14 +1303,14 @@ mod tests {
         // Allocate a var inside a fun0 first to advance the counter.
         let _prime = compiler.fun0("prime_counter", |ctx| {
             let _x = ctx.var(0i64);
-            Const::<I64Type>::new(0)
+            Const::<i64>::new(0)
         });
 
         // Define: double(x) = x + x
-        let double = compiler.fun1("double", |_ctx, x: Var<I64Type>| add(x, x));
+        let double = compiler.fun1("double", |_ctx, x: Var<i64>| add(x, x));
 
         // Call: double(7) = 14
-        let expr = call1(double, Const::<I64Type>::new(7));
+        let expr = call1(double, Const::<i64>::new(7));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         let result = compiled.run();
@@ -1323,7 +1323,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: cube(x) = x * x * x
-        let cube = compiler.fun1("cube", |_ctx, x: Var<I64Type>| mul(mul(x, x), x));
+        let cube = compiler.fun1("cube", |_ctx, x: Var<i64>| mul(mul(x, x), x));
 
         // Compile the function reference itself (not a call)
         let compiled = compiler.compile(cube).expect("compilation failed");
@@ -1345,14 +1345,14 @@ mod tests {
         // Define a recursive function: rec(x) = x + rec(x - 1)
         // Note: This will infinite loop if called, but we're just testing
         // that it compiles and the function can reference itself
-        let _rec = compiler.fun1_rec("recursive", |f, _ctx, x: Var<I64Type>| {
+        let _rec = compiler.fun1_rec("recursive", |f, _ctx, x: Var<i64>| {
             // Body references itself: call f recursively
-            add(x, call1(f, sub(x, Const::<I64Type>::new(1))))
+            add(x, call1(f, sub(x, Const::<i64>::new(1))))
         });
 
         // Just test that compilation succeeds
         // We don't call it since it would infinite loop without conditionals
-        let expr = Const::<I64Type>::new(42);
+        let expr = Const::<i64>::new(42);
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 42);
     }
@@ -1365,12 +1365,12 @@ mod tests {
     fn test_if_then_else_basic() {
         // Test true branch
         let compiler = Compiler::new();
-        let expr_true = if_then_else(true, Const::<I64Type>::new(10), Const::<I64Type>::new(20));
+        let expr_true = if_then_else(true, Const::<i64>::new(10), Const::<i64>::new(20));
         assert_eq!(compiler.compile(expr_true).unwrap().run(), 10);
 
         // Test false branch
         let compiler = Compiler::new();
-        let expr_false = if_then_else(false, Const::<I64Type>::new(10), Const::<I64Type>::new(20));
+        let expr_false = if_then_else(false, Const::<i64>::new(10), Const::<i64>::new(20));
         assert_eq!(compiler.compile(expr_false).unwrap().run(), 20);
     }
 
@@ -1379,11 +1379,11 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
-        let clamp = compiler.fun1("clamp", |_ctx, x: Var<I64Type>| {
+        let clamp = compiler.fun1("clamp", |_ctx, x: Var<i64>| {
             if_then_else(
                 lt(x, 0),
-                Const::<I64Type>::new(0),
-                if_then_else(lt(10, x), Const::<I64Type>::new(10), x),
+                Const::<i64>::new(0),
+                if_then_else(lt(10, x), Const::<i64>::new(10), x),
             )
         });
 
@@ -1400,7 +1400,7 @@ mod tests {
         let compiler = Compiler::new();
 
         // (5, 10) => 10 (first value ignored, second returned)
-        let expr = (Const::<I64Type>::new(5), Const::<I64Type>::new(10));
+        let expr = (Const::<i64>::new(5), Const::<i64>::new(10));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 10);
@@ -1413,7 +1413,7 @@ mod tests {
         let f = compiler.fun0("let_var_test", |ctx| {
             let x = ctx.var(42i64);
             let y = ctx.var(8i64);
-            add::<I64Type, _, _>(x, y)
+            add::<i64, _, _>(x, y)
         });
 
         let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -1427,8 +1427,8 @@ mod tests {
         let f = compiler.fun0("ergonomic_assign", |ctx| {
             let x = ctx.var(0i64);
             let y = ctx.var(0i64);
-            ctx.assign(x, 10i64);
-            ctx.assign(y, 32i64);
+            ctx.store(x, 10i64);
+            ctx.store(y, 32i64);
             add(x, y)
         });
 
@@ -1441,7 +1441,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<I64Type>| {
+        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<i64>| {
             if_then_else(lt(n, 2), Const::new(1), mul(n, call1(f, sub(n, 1))))
         });
 
@@ -1459,13 +1459,13 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fib(n) = if n < 2 then n else fib(n-1) + fib(n-2)
-        let fib = compiler.fun1_rec("fib", |f, _ctx, n: Var<I64Type>| {
+        let fib = compiler.fun1_rec("fib", |f, _ctx, n: Var<i64>| {
             if_then_else(
-                lt(n, Const::<I64Type>::new(2)),
+                lt(n, Const::<i64>::new(2)),
                 n, // fib(0) = 0, fib(1) = 1
                 add(
-                    call1(f, sub(n, Const::<I64Type>::new(1))),
-                    call1(f, sub(n, Const::<I64Type>::new(2))),
+                    call1(f, sub(n, Const::<i64>::new(1))),
+                    call1(f, sub(n, Const::<i64>::new(2))),
                 ),
             )
         });
@@ -1497,9 +1497,9 @@ mod tests {
         let f = compiler.fun0("while_zero", |ctx| {
             let result = ctx.var(0i64);
             ctx.while_loop(false, move |ctx| {
-                ctx.assign(result, 999i64);
+                ctx.store(result, 999i64);
             });
-            ctx.assign(result, 42i64);
+            ctx.store(result, 42i64);
             result
         });
 
@@ -1511,12 +1511,12 @@ mod tests {
     fn test_while_loop_factorial() {
         let mut compiler = Compiler::new();
 
-        let factorial_iter = compiler.fun1("factorial_iter", |ctx, n: Var<I64Type>| {
+        let factorial_iter = compiler.fun1("factorial_iter", |ctx, n: Var<i64>| {
             let i = ctx.var(1i64);
             let result = ctx.var(1i64);
             ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                ctx.assign(result, mul(result, i));
-                ctx.assign(i, add(i, 1i64));
+                ctx.store(result, mul(result, i));
+                ctx.store(i, add(i, 1i64));
             });
             result
         });
@@ -1538,17 +1538,17 @@ mod tests {
     fn test_while_loop_fibonacci_iterative() {
         let mut compiler = Compiler::new();
 
-        let fib_iter = compiler.fun1("fib_iter", |ctx, n: Var<I64Type>| {
+        let fib_iter = compiler.fun1("fib_iter", |ctx, n: Var<i64>| {
             let i = ctx.var(2i64);
             let a = ctx.var(0i64);
             let b = ctx.var(1i64);
             let temp = ctx.var(0i64);
             if_then_else(lt(n, 2), n, {
                 ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                    ctx.assign(temp, add(a, b));
-                    ctx.assign(a, b);
-                    ctx.assign(b, temp);
-                    ctx.assign(i, add(i, 1i64));
+                    ctx.store(temp, add(a, b));
+                    ctx.store(a, b);
+                    ctx.store(b, temp);
+                    ctx.store(i, add(i, 1i64));
                 });
                 b
             })
@@ -1577,7 +1577,7 @@ mod tests {
 
         // Function that sums elements > 5 using local variables
         // fn sum_gt_5(arr: &[i64]) -> i64
-        let sum_gt_5 = compiler.fun1("sum_gt_5", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
+        let sum_gt_5 = compiler.fun1("sum_gt_5", |ctx, arr: Var<SRef<Slice<i64>>>| {
             // Create local variables inside the function using ctx
             let i = ctx.let_var(0u64);
             let sum = ctx.let_var(0i64);
@@ -1629,7 +1629,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Define: get_answer() = 42
-        let get_answer = compiler.fun0("get_answer", |_ctx| Const::<I64Type>::new(42));
+        let get_answer = compiler.fun0("get_answer", |_ctx| Const::<i64>::new(42));
 
         let expr = call0(get_answer);
         let compiled = compiler.compile(expr).expect("compilation failed");
@@ -1640,7 +1640,7 @@ mod tests {
     fn test_fun2_add() {
         let mut compiler = Compiler::new();
 
-        let add_fn = compiler.fun2("add", |_ctx, a: Var<I64Type>, b: Var<I64Type>| add(a, b));
+        let add_fn = compiler.fun2("add", |_ctx, a: Var<i64>, b: Var<i64>| add(a, b));
 
         let compiled = compiler.compile(add_fn).expect("compilation failed");
         let add_ptr = compiled.as_fn();
@@ -1656,7 +1656,7 @@ mod tests {
         // clamp(x, min, max) = if x < min then min else (if x > max then max else x)
         let clamp_fn = compiler.fun3(
             "clamp",
-            |_ctx, x: Var<I64Type>, min: Var<I64Type>, max: Var<I64Type>| {
+            |_ctx, x: Var<i64>, min: Var<i64>, max: Var<i64>| {
                 if_then_else(lt(x, min), min, if_then_else(lt(max, x), max, x))
             },
         );
@@ -1678,7 +1678,7 @@ mod tests {
         // Define: gcd(a, b) = if b == 0 then a else gcd(b, a % b)
         // Note: We'll use a different implementation since we don't have modulo
         // gcd(a, b) = if b == 0 then a else gcd(b, a - b * (a / b))
-        let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<I64Type>, b: Var<I64Type>| {
+        let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<i64>, b: Var<i64>| {
             if_then_else(
                 eq(b, 0i64),
                 a,

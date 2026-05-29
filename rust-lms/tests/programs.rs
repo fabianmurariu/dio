@@ -68,7 +68,7 @@ fn test_compute_stats() {
     let func = compiled.as_fn();
 
     // Test data
-    let data = vec![1.0, 5.0, 3.0, 8.0, 2.0, 9.0, 4.0];
+    let data = [1.0, 5.0, 3.0, 8.0, 2.0, 9.0, 4.0];
     let threshold = 4.0; // Values > 4.0: 5.0, 8.0, 9.0
 
     let mut count = 0u64;

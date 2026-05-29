@@ -4,7 +4,7 @@ use std::marker::PhantomData;
 
 use crate::func::Ctx;
 use crate::staged::{Staged, Var};
-use crate::types::{ConstantType, CopyType, StagedType, U64Type};
+use crate::types::{ConstantType, CopyType, StagedType};
 
 use super::traits::{IndexedStagedIterator, StagedIterator};
 
@@ -19,7 +19,11 @@ pub struct Map<I, F, U> {
 
 impl<I, F, U> Map<I, F, U> {
     pub(crate) fn new(inner: I, map_fn: F) -> Self {
-        Map { inner, map_fn, _phantom: PhantomData }
+        Map {
+            inner,
+            map_fn,
+            _phantom: PhantomData,
+        }
     }
 }
 

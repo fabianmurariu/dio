@@ -29,7 +29,10 @@ where
     'a: 'static,
 {
     pub fn new(slice: S) -> Self {
-        SliceIter { slice, _phantom: PhantomData }
+        SliceIter {
+            slice,
+            _phantom: PhantomData,
+        }
     }
 }
 
@@ -46,14 +49,14 @@ where
     where
         F: FnOnce(&mut Ctx, Var<T>) + 'static,
     {
-        let i    = ctx.var(0u64);
+        let i = ctx.var(0u64);
         let elem = ctx.var(Const::<T>::new(Default::default()));
         let slice = self.slice;
 
         ctx.while_loop(lt(i, slice.clone().len()), move |ctx| {
-            ctx.assign(elem, SliceRefOps::get_unchecked(slice.clone(), i));
+            ctx.store(elem, SliceRefOps::get_unchecked(slice.clone(), i));
             consumer(ctx, elem);
-            ctx.assign(i, add(i, 1u64));
+            ctx.store(i, add(i, 1u64));
         });
     }
 }

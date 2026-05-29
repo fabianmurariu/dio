@@ -12,7 +12,7 @@ use rust_lms::refer::SRef;
 #[derive(StagedType, Copy, Clone)]
 #[repr(C)]
 pub struct Point {
-    #[staged(I64Type)]
+    #[staged(i64)]
     x: i64,
     #[staged(F64Type)]
     y: f64,
@@ -46,7 +46,7 @@ fn test_struct_multiple_fields() {
         let _y = pt.get(PointType::y); // Just to verify we can access y
 
         // Add 3 to x for testing
-        add::<I64Type, _, _>(x, 3i64)
+        add::<i64, _, _>(x, 3i64)
     });
 
     let compiled = compiler.compile(sum_fields).expect("compilation failed");
@@ -79,7 +79,7 @@ fn test_struct_pass_by_value_semantics() {
 #[derive(StagedType, Copy, Clone)]
 #[repr(C)]
 pub struct Inner {
-    #[staged(I64Type)]
+    #[staged(i64)]
     value: i64,
 }
 
@@ -88,7 +88,7 @@ pub struct Inner {
 pub struct Outer {
     #[staged(Inner)]
     inner: Inner,
-    #[staged(I64Type)]
+    #[staged(i64)]
     extra: i64,
 }
 
@@ -205,7 +205,7 @@ fn test_struct_copy_semantics() {
     // fn double_x(pt: Point) -> i64
     let double_x = compiler.fun1("double_x", |_ctx, pt: Var<Point>| {
         let x = pt.get(PointType::x);
-        mul::<I64Type, _, _>(x, 2i64)
+        mul::<i64, _, _>(x, 2i64)
     });
 
     let compiled = compiler.compile(double_x).expect("compilation failed");
@@ -288,7 +288,7 @@ fn test_mixed_struct_read_i64_after_f64_access() {
 pub struct MixedStruct {
     #[staged(F64Type)]
     a: f64,
-    #[staged(I64Type)]
+    #[staged(i64)]
     b: i64,
     #[staged(F64Type)]
     c: f64,
@@ -300,7 +300,7 @@ pub struct MixedStruct {
 pub struct FloatFirst {
     #[staged(F64Type)]
     x: f64,
-    #[staged(I64Type)]
+    #[staged(i64)]
     y: i64,
 }
 
@@ -392,7 +392,7 @@ fn test_return_mixed_struct() {
     let mut compiler = Compiler::new();
 
     // Function that takes two values and returns a Point struct
-    let make_point = compiler.fun2("make_point", |ctx, x: Var<I64Type>, y: Var<F64Type>| {
+    let make_point = compiler.fun2("make_point", |ctx, x: Var<i64>, y: Var<F64Type>| {
         // We need to construct a Point - but we don't have struct construction yet
         // For now, just test that we can return the input x
         x

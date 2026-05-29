@@ -6,8 +6,8 @@
 //!
 //! # Example
 //! ```ignore
-//! let x = compiler.var_unchecked::<I64Type>();
-//! let y = compiler.var_unchecked::<I64Type>();
+//! let x = compiler.var_unchecked::<i64>();
+//! let y = compiler.var_unchecked::<i64>();
 //!
 //! // Instead of: seq(assign(x, Const::new(5)), seq(assign(y, Const::new(10)), add(x, y)))
 //! // You can write:
@@ -85,7 +85,7 @@ mod tests {
 
         // (5, 10) => 10 (first ignored, second returned)
         // Note: Top-level tuples need Const, but operations can use primitives via IntoStaged
-        let expr = (Const::<I64Type>::new(5), Const::<I64Type>::new(10));
+        let expr = (Const::<i64>::new(5), Const::<i64>::new(10));
 
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 10);
@@ -134,20 +134,20 @@ mod tests {
             let v9 = ctx.let_var(10i64);
             // Sum: 1+2+3+4+5+6+7+8+9+10 = 55
             (
-                v0, v1, v2, v3, v4, v5, v6, v7, v8, v9,
+                v0,
+                v1,
+                v2,
+                v3,
+                v4,
+                v5,
+                v6,
+                v7,
+                v8,
+                v9,
                 add(
                     add(
                         add(
-                            add(
-                                add(
-                                    add(
-                                        add(add(add(*v0, *v1), *v2), *v3),
-                                        *v4,
-                                    ),
-                                    *v5,
-                                ),
-                                *v6,
-                            ),
+                            add(add(add(add(add(add(*v0, *v1), *v2), *v3), *v4), *v5), *v6),
                             *v7,
                         ),
                         *v8,

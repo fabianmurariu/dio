@@ -108,7 +108,7 @@ where
 /// - `Var<SRef<'a, T>>` -> `FieldRef<'a, ..>` -> can be returned
 /// - Chained: `FieldRef<'a, ..>` -> `FieldRef<'a, ..>` -> lifetime preserved
 pub struct FieldRef<'a, P, F> {
-    ptr: P,  // Stored by value, not &'a P
+    ptr: P, // Stored by value, not &'a P
     _lifetime: PhantomData<&'a ()>,
     _field: PhantomData<F>,
 }
@@ -379,7 +379,7 @@ pub trait CopyFieldAccess<T: StagedType>: Sized + Staged {
     /// # Example
     /// ```ignore
     /// let pt: Var<Owned<Point>> = ...;
-    /// let x = pt.get(PointType::x);  // Returns impl Staged<Out = I64Type>
+    /// let x = pt.get(PointType::x);  // Returns impl Staged<Out = i64>
     /// ```
     fn get<F>(self, field: F) -> LoadField<Self, F>
     where
@@ -516,7 +516,10 @@ where
 impl<'a, T: StagedType> RefFieldAccess<'a, T> for Var<SRef<'a, T>> where Var<SRef<'a, T>>: Staged {}
 
 // For Var<SRefMut<'a, T>> - can also get immutable references
-impl<'a, T: StagedType> RefFieldAccess<'a, T> for Var<SRefMut<'a, T>> where Var<SRefMut<'a, T>>: Staged {}
+impl<'a, T: StagedType> RefFieldAccess<'a, T> for Var<SRefMut<'a, T>> where
+    Var<SRefMut<'a, T>>: Staged
+{
+}
 
 // For FieldRef - chaining
 impl<'a, P, F, T, ParentT> RefFieldAccess<'a, T> for FieldRef<'a, P, F>
@@ -543,7 +546,10 @@ where
 // -----------------------------------------------------------------------------
 
 // For Var<SRefMut<'a, T>> - can get mutable references
-impl<'a, T: StagedType> MutRefFieldAccess<'a, T> for Var<SRefMut<'a, T>> where Var<SRefMut<'a, T>>: Staged {}
+impl<'a, T: StagedType> MutRefFieldAccess<'a, T> for Var<SRefMut<'a, T>> where
+    Var<SRefMut<'a, T>>: Staged
+{
+}
 
 // For FieldMutRef - chaining mutable references
 impl<'a, P, F, T, ParentT> MutRefFieldAccess<'a, T> for FieldMutRef<'a, P, F>

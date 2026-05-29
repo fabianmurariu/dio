@@ -119,7 +119,7 @@ pub trait Staged {
 ///
 /// # Example
 /// ```ignore
-/// let x: VarRef<I64Type> = compiler.var();
+/// let x: VarRef<i64> = compiler.var();
 /// let expr = add(x, x);  // x used twice - no problem, it's Copy!
 /// ```
 pub struct Var<T: StagedType> {
@@ -182,8 +182,8 @@ impl<T: StagedType> std::fmt::Debug for Var<T> {
 ///
 /// # Example
 /// ```ignore
-/// let five = Const::<I64Type>::new(5);
-/// let ten = Const::<I64Type>::new(10);
+/// let five = Const::<i64>::new(5);
+/// let ten = Const::<i64>::new(10);
 /// ```
 #[derive(Clone)]
 pub struct Const<T: ConstantType> {
@@ -212,7 +212,7 @@ impl<T: ConstantType> Staged for Const<T> {
 // From implementations for ergonomic constant creation
 // =============================================================================
 
-impl From<i64> for Const<crate::types::I64Type> {
+impl From<i64> for Const<i64> {
     fn from(value: i64) -> Self {
         Const::new(value)
     }
@@ -268,7 +268,7 @@ impl<T: Staged> BoxableStaged for T {}
 /// Trait for values that can be converted into staged expressions.
 ///
 /// This trait enables ergonomic APIs like `assign(var, 42i64)` instead of
-/// `assign(var, Const::<I64Type>::new(42))`.
+/// `assign(var, Const::<i64>::new(42))`.
 pub trait IntoStaged<T: StagedType> {
     /// The staged type this converts to
     type Staged: Staged<Out = T>;
@@ -278,8 +278,8 @@ pub trait IntoStaged<T: StagedType> {
 }
 
 // Implement IntoStaged for primitives
-impl IntoStaged<crate::types::I64Type> for i64 {
-    type Staged = Const<crate::types::I64Type>;
+impl IntoStaged<i64> for i64 {
+    type Staged = Const<i64>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
@@ -350,7 +350,7 @@ where
 ///
 /// # Example
 /// ```ignore
-/// let x = compiler.var::<I64Type>();
+/// let x = compiler.var::<i64>();
 /// let expr = (assign(x, 5i64), x);  // assigns 5 to x, returns x
 /// ```
 #[derive(Clone)]
@@ -391,7 +391,7 @@ where
 ///
 /// Accepts any value that implements `IntoStaged<T>`.
 /// This allows ergonomic usage like `assign(var, 42i64)` instead of
-/// `assign(var, Const::<I64Type>::new(42))`.
+/// `assign(var, Const::<i64>::new(42))`.
 pub fn assign<T, E>(var: Var<T>, expr: E) -> Assign<Var<T>, E::Staged>
 where
     T: StagedType,

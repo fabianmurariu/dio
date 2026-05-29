@@ -62,10 +62,7 @@ fn build_filtered_sum_lms() -> impl Fn(&[i64], &[i64], i64) -> i64 {
 
     let f = compiler.fun3(
         "filtered_sum",
-        |ctx,
-         x: Var<SRef<Slice<I64Type>>>,
-         y: Var<SRef<Slice<I64Type>>>,
-         z: Var<I64Type>| {
+        |ctx, x: Var<SRef<Slice<i64>>>, y: Var<SRef<Slice<i64>>>, z: Var<i64>| {
             let i = ctx.let_var(0u64);
             let acc = ctx.let_var(0i64);
             let v = ctx.let_var(0i64);
@@ -222,13 +219,7 @@ fn bench_filtered_sum(c: &mut Criterion) {
         );
 
         group.bench_with_input(BenchmarkId::new("rust-lms-slices", size), &size, |b, _| {
-            b.iter(|| {
-                black_box(lms(
-                    black_box(&x[..]),
-                    black_box(&y[..]),
-                    black_box(z),
-                ))
-            });
+            b.iter(|| black_box(lms(black_box(&x[..]), black_box(&y[..]), black_box(z))));
         });
 
         // ---------------- WASM variants ----------------

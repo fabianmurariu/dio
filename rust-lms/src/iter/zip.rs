@@ -38,20 +38,21 @@ where
     /// at the same 0-based index. Caller must ensure equal-length sources.
     pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<<I as IndexedSource>::Item>, Var<<S as IndexedSource>::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<<I as IndexedSource>::Item>, Var<<S as IndexedSource>::Item>)
+            + 'static,
     {
-        let i     = ctx.var(0u64);
+        let i = ctx.var(0u64);
         let elem1 = ctx.var(Const::<<I as IndexedSource>::Item>::new(Default::default()));
         let elem2 = ctx.var(Const::<<S as IndexedSource>::Item>::new(Default::default()));
         let prim_len = IndexedSource::len(&self.iter);
         let prim = self.iter;
-        let sec  = self.other;
+        let sec = self.other;
 
         ctx.while_loop(lt(i, prim_len), move |ctx| {
-            ctx.assign(elem1, IndexedSource::get_at(prim.clone(), i));
-            ctx.assign(elem2, IndexedSource::get_at(sec.clone(), i));
+            ctx.store(elem1, IndexedSource::get_at(prim.clone(), i));
+            ctx.store(elem2, IndexedSource::get_at(sec.clone(), i));
             consumer(ctx, elem1, elem2);
-            ctx.assign(i, add(i, 1u64));
+            ctx.store(i, add(i, 1u64));
         });
     }
 }

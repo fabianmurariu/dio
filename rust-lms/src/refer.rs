@@ -281,7 +281,7 @@ pub struct PtrOffset<'a, P, I> {
 impl<'a, P, I, T, Tag: 'a> Staged for PtrOffset<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
     SRef<'a, T, Tag>: StagedType,
 {
@@ -303,7 +303,7 @@ where
 pub fn ptr_offset<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffset<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
     Tag: 'a,
 {
@@ -325,7 +325,7 @@ pub struct PtrOffsetMut<'a, P, I> {
 impl<'a, P, I, T, Tag: 'a> Staged for PtrOffsetMut<'a, P, I>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
     SRefMut<'a, T, Tag>: StagedType,
 {
@@ -347,7 +347,7 @@ where
 pub fn ptr_offset_mut<'a, P, I, T, Tag>(ptr: P, index: I) -> PtrOffsetMut<'a, P, I>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
     Tag: 'a,
 {
@@ -372,7 +372,7 @@ pub struct ArrayIndex<'a, P, I> {
 impl<'a, P, I, T, Tag: 'a> Staged for ArrayIndex<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
 {
     type Out = T;
@@ -397,7 +397,7 @@ where
 pub fn array_index<'a, P, I, T, Tag: 'a>(ptr: P, index: I) -> ArrayIndex<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
-    I: Staged<Out = crate::types::I64Type>,
+    I: Staged<Out = i64>,
     T: StagedType + 'a,
 {
     ArrayIndex {
@@ -416,8 +416,8 @@ mod tests {
     fn test_load_store_i64() {
         let mut compiler = Compiler::new();
 
-        let write_fn = compiler.fun1("write_42", |_ctx, ptr: Var<SRefMut<I64Type>>| {
-            (store_ref(ptr, Const::<I64Type>::new(42)), load_ref_mut(ptr))
+        let write_fn = compiler.fun1("write_42", |_ctx, ptr: Var<SRefMut<i64>>| {
+            (store_ref(ptr, Const::<i64>::new(42)), load_ref_mut(ptr))
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
@@ -450,8 +450,8 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Using raw pointer types (SPtr/SMutPtr)
-        let write_fn = compiler.fun1("write_ptr", |_ctx, ptr: Var<SMutPtr<I64Type>>| {
-            (store(ptr, Const::<I64Type>::new(99)), load_mut(ptr))
+        let write_fn = compiler.fun1("write_ptr", |_ctx, ptr: Var<SMutPtr<i64>>| {
+            (store(ptr, Const::<i64>::new(99)), load_mut(ptr))
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
@@ -468,8 +468,8 @@ mod tests {
     fn test_ptr_offset() {
         let mut compiler = Compiler::new();
 
-        let test_fn = compiler.fun1("test_offset", |_ctx, ptr: Var<SPtr<I64Type>>| {
-            load(ptr_offset(ptr, Const::<I64Type>::new(2)))
+        let test_fn = compiler.fun1("test_offset", |_ctx, ptr: Var<SPtr<i64>>| {
+            load(ptr_offset(ptr, Const::<i64>::new(2)))
         });
 
         let compiled = compiler.compile(test_fn).expect("compilation failed");
@@ -485,8 +485,8 @@ mod tests {
     fn test_array_index() {
         let mut compiler = Compiler::new();
 
-        let get_third = compiler.fun1("get_third", |_ctx, ptr: Var<SPtr<I64Type>>| {
-            array_index(ptr, Const::<I64Type>::new(3))
+        let get_third = compiler.fun1("get_third", |_ctx, ptr: Var<SPtr<i64>>| {
+            array_index(ptr, Const::<i64>::new(3))
         });
 
         let compiled = compiler.compile(get_third).expect("compilation failed");

@@ -17,24 +17,44 @@ pub trait MinMax: Copy {
 }
 
 impl MinMax for i64 {
-    fn min_sentinel() -> Self { i64::MIN }
-    fn max_sentinel() -> Self { i64::MAX }
+    fn min_sentinel() -> Self {
+        i64::MIN
+    }
+    fn max_sentinel() -> Self {
+        i64::MAX
+    }
 }
 impl MinMax for u64 {
-    fn min_sentinel() -> Self { u64::MIN }
-    fn max_sentinel() -> Self { u64::MAX }
+    fn min_sentinel() -> Self {
+        u64::MIN
+    }
+    fn max_sentinel() -> Self {
+        u64::MAX
+    }
 }
 impl MinMax for f64 {
-    fn min_sentinel() -> Self { f64::NEG_INFINITY }
-    fn max_sentinel() -> Self { f64::INFINITY }
+    fn min_sentinel() -> Self {
+        f64::NEG_INFINITY
+    }
+    fn max_sentinel() -> Self {
+        f64::INFINITY
+    }
 }
 impl MinMax for i32 {
-    fn min_sentinel() -> Self { i32::MIN }
-    fn max_sentinel() -> Self { i32::MAX }
+    fn min_sentinel() -> Self {
+        i32::MIN
+    }
+    fn max_sentinel() -> Self {
+        i32::MAX
+    }
 }
 impl MinMax for u32 {
-    fn min_sentinel() -> Self { u32::MIN }
-    fn max_sentinel() -> Self { u32::MAX }
+    fn min_sentinel() -> Self {
+        u32::MIN
+    }
+    fn max_sentinel() -> Self {
+        u32::MAX
+    }
 }
 
 // =============================================================================
@@ -99,7 +119,7 @@ pub trait StagedIterator: Sized {
     {
         let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.assign(acc, add::<Self::Item, _, _>(acc, elem));
+            ctx.store(acc, add::<Self::Item, _, _>(acc, elem));
         });
         acc
     }
@@ -111,7 +131,7 @@ pub trait StagedIterator: Sized {
     {
         let acc = ctx.var(0u64);
         self.for_each(ctx, move |ctx, _elem| {
-            ctx.assign(acc, add::<U64Type, _, _>(acc, 1u64));
+            ctx.store(acc, add::<U64Type, _, _>(acc, 1u64));
         });
         acc
     }
@@ -126,7 +146,7 @@ pub trait StagedIterator: Sized {
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
             ctx.if_then(lt::<Self::Item, _, _>(elem, acc), move |ctx| {
-                ctx.assign(acc, elem);
+                ctx.store(acc, elem);
             });
         });
         acc
@@ -142,7 +162,7 @@ pub trait StagedIterator: Sized {
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
             ctx.if_then(gt::<Self::Item, _, _>(elem, acc), move |ctx| {
-                ctx.assign(acc, elem);
+                ctx.store(acc, elem);
             });
         });
         acc

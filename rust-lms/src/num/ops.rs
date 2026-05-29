@@ -5,7 +5,7 @@ use cranelift_codegen::ir::{InstBuilder, Value};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{BoolType, StagedType};
 
-use super::traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsSub};
+use super::traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsRem, SupportsSub};
 
 // =============================================================================
 // Arithmetic Operations
@@ -99,6 +99,28 @@ where
     }
 }
 
+/// Remainder (modulo) operation
+#[derive(Clone)]
+pub struct Rem<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for Rem<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: StagedType + SupportsRem,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_rem(lv, rv, ctx.builder)
+    }
+}
+
 // =============================================================================
 // Comparison Operations (produce BoolType)
 // =============================================================================
@@ -176,7 +198,7 @@ where
 ///
 /// Accepts any values that can be converted into staged expressions.
 /// This allows ergonomic usage like `add(x, 5i64)` instead of
-/// `add(x, Const::<I64Type>::new(5))`.
+/// `add(x, Const::<i64>::new(5))`.
 pub fn add<T, L, R>(left: L, right: R) -> Add<L::Staged, R::Staged>
 where
     T: StagedType + SupportsAdd,
@@ -228,11 +250,24 @@ where
     }
 }
 
+/// Create a remainder (modulo) operation
+pub fn rem<T, L, R>(left: L, right: R) -> Rem<L::Staged, R::Staged>
+where
+    T: StagedType + SupportsRem,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Rem {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
 /// Create a less-than comparison
 ///
 /// Accepts any values that can be converted into staged expressions.
 /// This allows ergonomic usage like `lt(x, 100i64)` instead of
-/// `lt(x, Const::<I64Type>::new(100))`.
+/// `lt(x, Const::<i64>::new(100))`.
 pub fn lt<T, L, R>(left: L, right: R) -> Lt<L::Staged, R::Staged>
 where
     T: StagedType + SupportsComparison,
@@ -311,7 +346,11 @@ where
 /// // Branchless min
 /// let new_min = select(lt(*val, *min), *val, *min);
 /// ```
-pub fn select<C, T, F, Out>(condition: C, if_true: T, if_false: F) -> Select<C::Staged, T::Staged, F::Staged>
+pub fn select<C, T, F, Out>(
+    condition: C,
+    if_true: T,
+    if_false: F,
+) -> Select<C::Staged, T::Staged, F::Staged>
 where
     C: IntoStaged<BoolType>,
     T: IntoStaged<Out>,
@@ -337,7 +376,10 @@ where
     let left_s = left.into_staged();
     let right_s = right.into_staged();
     Select {
-        condition: Lt { left: left_s.clone(), right: right_s.clone() },
+        condition: Lt {
+            left: left_s.clone(),
+            right: right_s.clone(),
+        },
         if_true: left_s,
         if_false: right_s,
     }
@@ -355,7 +397,10 @@ where
     let left_s = left.into_staged();
     let right_s = right.into_staged();
     Select {
-        condition: Gt { left: left_s.clone(), right: right_s.clone() },
+        condition: Gt {
+            left: left_s.clone(),
+            right: right_s.clone(),
+        },
         if_true: left_s,
         if_false: right_s,
     }

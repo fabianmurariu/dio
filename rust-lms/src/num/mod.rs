@@ -8,8 +8,8 @@
 mod ops;
 mod traits;
 
-pub use ops::{Add, Div, Eq, Lt, Mul, Select, Sub};
-pub use traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsSub};
+pub use ops::{Add, Div, Eq, Lt, Mul, Rem, Select, Sub};
+pub use traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsRem, SupportsSub};
 
 // Re-export helper functions
-pub use ops::{add, div, eq, gt, lt, max, min, mul, select, sub};
+pub use ops::{add, div, eq, gt, lt, max, min, mul, rem, select, sub};

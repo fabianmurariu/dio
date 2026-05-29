@@ -20,7 +20,7 @@
 //!
 //! ```ignore
 //! // Sum all elements in a slice
-//! let sum = compiler.fun1("sum", |arr: Var<SRef<Slice<I64Type>>>| {
+//! let sum = compiler.fun1("sum", |arr: Var<SRef<Slice<i64>>>| {
 //!     let i = compiler.let_var(0u64);
 //!     let total = compiler.let_var(0i64);
 //!
@@ -219,7 +219,7 @@ impl<'a, S, T> Staged for SliceAsPtr<'a, S>
 where
     S: Staged<Out = SRef<'a, Slice<T>>>,
     T: StagedType,
-    T: 'a
+    T: 'a,
 {
     type Out = SRef<'a, T>;
 
@@ -682,7 +682,9 @@ where
 // =============================================================================
 
 /// Extension trait for immutable slice operations.
-pub trait SliceRefOps<'a, T: StagedType + 'a>: Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone {
+pub trait SliceRefOps<'a, T: StagedType + 'a>:
+    Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone
+{
     /// Get the length of the slice.
     fn len(self) -> SliceLen<Self> {
         SliceLen { slice: self }
@@ -690,7 +692,10 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>: Staged<Out = SRef<'a, Slice<T>>> 
 
     /// Get the raw data pointer.
     fn as_ptr(self) -> SliceAsPtr<'a, Self> {
-        SliceAsPtr { slice: self, _phantom: PhantomData }
+        SliceAsPtr {
+            slice: self,
+            _phantom: PhantomData,
+        }
     }
 
     /// Get a reference to an element without bounds checking.
@@ -741,14 +746,19 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>: Staged<Out = SRef<'a, Slice<T>>> 
     }
 }
 
-impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where S: Staged<Out = SRef<'a, Slice<T>>> + Clone {}
+impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where
+    S: Staged<Out = SRef<'a, Slice<T>>> + Clone
+{
+}
 
 // =============================================================================
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
 // =============================================================================
 
 /// Extension trait for mutable slice operations.
-pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized + Clone {
+pub trait SliceMutOps<'a, T: StagedType + 'a>:
+    Staged<Out = SRefMut<'a, Slice<T>>> + Sized + Clone
+{
     /// Get the length of the slice.
     fn len(self) -> SliceLenMut<Self> {
         SliceLenMut { slice: self }
@@ -756,7 +766,10 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
 
     /// Get the raw mutable data pointer.
     fn as_mut_ptr(self) -> SliceAsMutPtr<'a, Self> {
-        SliceAsMutPtr { slice: self, _phantom: PhantomData }
+        SliceAsMutPtr {
+            slice: self,
+            _phantom: PhantomData,
+        }
     }
 
     /// Get a mutable reference to an element without bounds checking.
@@ -821,7 +834,10 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     }
 }
 
-impl<'a, T: StagedType + 'a, S> SliceMutOps<'a, T> for S where S: Staged<Out = SRefMut<'a, Slice<T>>> + Clone {}
+impl<'a, T: StagedType + 'a, S> SliceMutOps<'a, T> for S where
+    S: Staged<Out = SRefMut<'a, Slice<T>>> + Clone
+{
+}
 
 #[cfg(test)]
 mod tests {
