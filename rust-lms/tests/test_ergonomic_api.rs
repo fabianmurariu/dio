@@ -1,11 +1,12 @@
 //! Tests for ergonomic API improvements
 //!
-//! These tests demonstrate the improved ergonomics from using IntoStaged:
-//! - assign(var, 42i64) instead of assign(var, Const::<i64>::new(42))
-//! - add(x, 5i64) instead of add(x, Const::<i64>::new(5))
-//! - lt(x, 100i64) instead of lt(x, Const::<i64>::new(100))
-//! - while_loop(true, ...) instead of while_loop(Const::<BoolType>::new(true), ...)
-//! - arr.get_unchecked(0u64) instead of arr.get_unchecked(Const::<U64Type>::new(0))
+//! These tests demonstrate the improved ergonomics from using IntoStaged plus
+//! std::ops impls:
+//! - `ctx.store(var, 42i64)` instead of `assign(var, Const::<i64>::new(42))`
+//! - `x + 5i64` instead of `add(x, Const::<i64>::new(5))`
+//! - `lt(x, 100i64)` instead of `lt(x, Const::<i64>::new(100))`
+//! - `while_loop(true, ...)` instead of `while_loop(Const::<BoolType>::new(true), ...)`
+//! - `arr.get_unchecked(0u64)` instead of `arr.get_unchecked(Const::<U64Type>::new(0))`
 
 use rust_lms::prelude::*;
 
@@ -15,7 +16,7 @@ fn test_ergonomic_arithmetic() {
 
     let f = compiler.fun0("arith", |ctx| {
         let x = ctx.let_var(10i64);
-        (x, add(*x, 5i64))
+        (x, *x + 5i64)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -29,7 +30,7 @@ fn test_ergonomic_let_var() {
     let f = compiler.fun0("let_var_test", |ctx| {
         let x = ctx.var(42i64);
         let y = ctx.var(8i64);
-        add::<i64, _, _>(x, y)
+        x + y
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -43,7 +44,7 @@ fn test_ergonomic_comparison() {
     let f = compiler.fun1("clamp_max", |_ctx, x: Var<i64>| {
         // Ergonomic comparison and conditional
         if_then_else(
-            lt::<i64, _, _>(x, 100i64), // Ergonomic lt
+            lt(x, 100i64),
             x,
             Const::<i64>::new(100), // Constants in return positions need type annotation
         )
@@ -61,17 +62,13 @@ fn test_ergonomic_while_loop() {
     let mut compiler = Compiler::new();
 
     let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
-        let i = ctx.let_var(0i64);
-        let sum = ctx.let_var(0i64);
-        (
-            i,
-            sum,
-            while_loop(
-                lt::<i64, _, _>(*i, n),
-                (assign(*sum, add(*sum, *i)), assign(*i, add(*i, 1i64))),
-            ),
-            *sum,
-        )
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
     });
 
     let compiled = compiler.compile(count_to_n).expect("compilation failed");
@@ -125,21 +122,14 @@ fn test_ergonomic_slice_subslice() {
     let mut compiler = Compiler::new();
 
     let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<i64>>>| {
-        let i = ctx.let_var(0u64);
-        let total = ctx.let_var(0i64);
+        let i = ctx.var(0u64);
+        let total = ctx.var(0i64);
         let sub = arr.slice_unchecked(1u64, 4u64);
-        (
-            i,
-            total,
-            while_loop(
-                lt(*i, sub.len()),
-                (
-                    assign(*total, add(*total, sub.get_unchecked(*i))),
-                    assign(*i, add(*i, 1u64)),
-                ),
-            ),
-            *total,
-        )
+        ctx.while_loop(lt(i, sub.clone().len()), move |ctx| {
+            ctx.store(total, total + sub.clone().get_unchecked(i));
+            ctx.store(i, i + 1u64);
+        });
+        total
     });
 
     let compiled = compiler.compile(sum_middle).expect("compilation failed");
@@ -158,9 +148,9 @@ fn test_ergonomic_mixed_operations() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun0("mixed_ops", |ctx| {
-        let x = ctx.let_var(5i64);
-        let y = ctx.let_var(10i64);
-        (x, y, if_then_else(lt(*x, *y), mul(*x, 2i64), div(*y, 2i64)))
+        let x = ctx.var(5i64);
+        let y = ctx.var(10i64);
+        if_then_else(lt(x, y), x * 2i64, y / 2i64)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -171,9 +161,7 @@ fn test_ergonomic_mixed_operations() {
 fn test_ergonomic_f64_operations() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| {
-        add(mul(x, 2.5f64), 3.5f64)
-    });
+    let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| x * 2.5f64 + 3.5f64);
 
     let compiled = compiler.compile(f).expect("compilation failed");
     let compute = compiled.as_fn();
@@ -193,7 +181,7 @@ fn test_imperative_basic_var() {
     let f = compiler.fun0("imp_basic", |ctx| {
         let x = ctx.var(42i64);
         let y = ctx.var(8i64);
-        add::<i64, _, _>(x, y)
+        x + y
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -208,8 +196,8 @@ fn test_imperative_while_loop() {
         let i = ctx.var(0i64);
         let sum = ctx.var(0i64);
         ctx.while_loop(lt(i, n), move |ctx| {
-            ctx.store(sum, add(sum, i));
-            ctx.store(i, add(i, 1i64));
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
         });
         sum
     });
@@ -227,8 +215,8 @@ fn test_imperative_bind() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("bind_test_imp", |ctx, n: Var<i64>| {
-        let doubled = ctx.bind(add(n, n));
-        add(doubled, doubled)
+        let doubled = ctx.bind(n + n);
+        doubled + doubled
     });
 
     let compiled = compiler.compile(f).expect("compilation failed");
@@ -246,12 +234,12 @@ fn test_imperative_fibonacci() {
         let a = ctx.var(0i64);
         let b = ctx.var(1i64);
         let temp = ctx.var(0i64);
-        if_then_else(lt(n, 2), n, {
-            ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                ctx.store(temp, add(a, b));
+        if_then_else(lt(n, 2i64), n, {
+            ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+                ctx.store(temp, a + b);
                 ctx.store(a, b);
                 ctx.store(b, temp);
-                ctx.store(i, add(i, 1i64));
+                ctx.store(i, i + 1i64);
             });
             b
         })

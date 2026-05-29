@@ -136,7 +136,9 @@ pub mod prelude {
         range, Filter, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
         RangeIter, SliceIter, StagedIterator, Zip,
     };
-    pub use crate::num::{add, div, eq, gt, lt, max, min, mul, rem, select, sub};
+    pub use crate::num::{
+        add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
+    };
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,

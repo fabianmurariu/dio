@@ -46,7 +46,7 @@ fn test_struct_multiple_fields() {
         let _y = pt.get(PointType::y); // Just to verify we can access y
 
         // Add 3 to x for testing
-        add::<i64, _, _>(x, 3i64)
+        x + 3i64
     });
 
     let compiled = compiler.compile(sum_fields).expect("compilation failed");
@@ -158,7 +158,7 @@ fn test_nested_struct_multiple_access() {
         let inner_val = outer.field(OuterType::inner).get(InnerType::value);
         let extra = outer.get(OuterType::extra);
 
-        add(inner_val, extra)
+        inner_val + extra
     });
 
     let compiled = compiler.compile(sum_outer).expect("compilation failed");
@@ -182,7 +182,7 @@ fn test_nested_struct_multiple_access_ref() {
         let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
         let extra = outer.get(OuterType::extra);
 
-        add(inner_val, extra)
+        inner_val + extra
     });
 
     let compiled = compiler.compile(sum_outer).expect("compilation failed");
@@ -205,7 +205,7 @@ fn test_struct_copy_semantics() {
     // fn double_x(pt: Point) -> i64
     let double_x = compiler.fun1("double_x", |_ctx, pt: Var<Point>| {
         let x = pt.get(PointType::x);
-        mul::<i64, _, _>(x, 2i64)
+        x * 2i64
     });
 
     let compiled = compiler.compile(double_x).expect("compilation failed");

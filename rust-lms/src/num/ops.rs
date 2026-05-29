@@ -2,16 +2,16 @@
 
 use cranelift_codegen::ir::{InstBuilder, Value};
 
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
 use crate::types::{BoolType, StagedType};
 
-use super::traits::{SupportsAdd, SupportsComparison, SupportsDiv, SupportsMul, SupportsRem, SupportsSub};
+use super::traits::{IntNum, Num};
 
 // =============================================================================
 // Arithmetic Operations
 // =============================================================================
 
-/// Addition operation: takes two Staged values with same Out type, produces same type
+/// Addition operation: takes two Staged values with same Out type, produces same type.
 #[derive(Clone)]
 pub struct Add<L, R> {
     left: L,
@@ -22,7 +22,7 @@ impl<L, R, T> Staged for Add<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsAdd,
+    T: Num,
 {
     type Out = T;
 
@@ -33,7 +33,7 @@ where
     }
 }
 
-/// Subtraction operation
+/// Subtraction operation.
 #[derive(Clone)]
 pub struct Sub<L, R> {
     left: L,
@@ -44,7 +44,7 @@ impl<L, R, T> Staged for Sub<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsSub,
+    T: Num,
 {
     type Out = T;
 
@@ -55,7 +55,7 @@ where
     }
 }
 
-/// Multiplication operation
+/// Multiplication operation.
 #[derive(Clone)]
 pub struct Mul<L, R> {
     left: L,
@@ -66,7 +66,7 @@ impl<L, R, T> Staged for Mul<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsMul,
+    T: Num,
 {
     type Out = T;
 
@@ -77,7 +77,7 @@ where
     }
 }
 
-/// Division operation
+/// Division operation.
 #[derive(Clone)]
 pub struct Div<L, R> {
     left: L,
@@ -88,7 +88,7 @@ impl<L, R, T> Staged for Div<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsDiv,
+    T: Num,
 {
     type Out = T;
 
@@ -99,7 +99,7 @@ where
     }
 }
 
-/// Remainder (modulo) operation
+/// Remainder (modulo) operation. Only integers support this.
 #[derive(Clone)]
 pub struct Rem<L, R> {
     left: L,
@@ -110,7 +110,7 @@ impl<L, R, T> Staged for Rem<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsRem,
+    T: IntNum,
 {
     type Out = T;
 
@@ -125,7 +125,7 @@ where
 // Comparison Operations (produce BoolType)
 // =============================================================================
 
-/// Less-than comparison: takes two values of same type, produces Bool
+/// Less-than comparison.
 #[derive(Clone)]
 pub struct Lt<L, R> {
     left: L,
@@ -136,9 +136,9 @@ impl<L, R, T> Staged for Lt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsComparison,
+    T: Num,
 {
-    type Out = BoolType; // Always returns boolean!
+    type Out = BoolType;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -147,6 +147,7 @@ where
     }
 }
 
+/// Greater-than comparison.
 #[derive(Clone)]
 pub struct Gt<L, R> {
     left: L,
@@ -157,9 +158,9 @@ impl<L, R, T> Staged for Gt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsComparison,
+    T: Num,
 {
-    type Out = BoolType; // Always returns boolean!
+    type Out = BoolType;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -168,7 +169,7 @@ where
     }
 }
 
-/// Equality comparison: takes two values of same type, produces Bool
+/// Equality comparison.
 #[derive(Clone)]
 pub struct Eq<L, R> {
     left: L,
@@ -179,9 +180,9 @@ impl<L, R, T> Staged for Eq<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: StagedType + SupportsComparison,
+    T: Num,
 {
-    type Out = BoolType; // Always returns boolean!
+    type Out = BoolType;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -194,14 +195,10 @@ where
 // Helper Functions for Ergonomics
 // =============================================================================
 
-/// Create an addition operation
-///
-/// Accepts any values that can be converted into staged expressions.
-/// This allows ergonomic usage like `add(x, 5i64)` instead of
-/// `add(x, Const::<i64>::new(5))`.
+/// Build a staged addition. Accepts any `IntoStaged<T>` where `T: Num`.
 pub fn add<T, L, R>(left: L, right: R) -> Add<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsAdd,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -211,10 +208,10 @@ where
     }
 }
 
-/// Create a subtraction operation
+/// Build a staged subtraction.
 pub fn sub<T, L, R>(left: L, right: R) -> Sub<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsSub,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -224,10 +221,10 @@ where
     }
 }
 
-/// Create a multiplication operation
+/// Build a staged multiplication.
 pub fn mul<T, L, R>(left: L, right: R) -> Mul<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsMul,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -237,10 +234,10 @@ where
     }
 }
 
-/// Create a division operation
+/// Build a staged division.
 pub fn div<T, L, R>(left: L, right: R) -> Div<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsDiv,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -250,10 +247,10 @@ where
     }
 }
 
-/// Create a remainder (modulo) operation
+/// Build a staged remainder (modulo). Only integers support this.
 pub fn rem<T, L, R>(left: L, right: R) -> Rem<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsRem,
+    T: IntNum,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -263,14 +260,10 @@ where
     }
 }
 
-/// Create a less-than comparison
-///
-/// Accepts any values that can be converted into staged expressions.
-/// This allows ergonomic usage like `lt(x, 100i64)` instead of
-/// `lt(x, Const::<i64>::new(100))`.
+/// Build a staged less-than comparison.
 pub fn lt<T, L, R>(left: L, right: R) -> Lt<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsComparison,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -280,10 +273,10 @@ where
     }
 }
 
-/// Create a greater-than comparison
+/// Build a staged greater-than comparison.
 pub fn gt<T, L, R>(left: L, right: R) -> Gt<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsComparison,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -293,10 +286,10 @@ where
     }
 }
 
-/// Create an equality comparison
+/// Build a staged equality comparison.
 pub fn eq<T, L, R>(left: L, right: R) -> Eq<L::Staged, R::Staged>
 where
-    T: StagedType + SupportsComparison,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -310,8 +303,7 @@ where
 // Conditional Select Operation (branchless)
 // =============================================================================
 
-/// Select operation: if condition is true, return if_true, else return if_false
-/// This compiles to a branchless cmov instruction on x86-64.
+/// Select: branchless `if condition { if_true } else { if_false }`.
 #[derive(Clone)]
 pub struct Select<C, T, F> {
     condition: C,
@@ -328,7 +320,7 @@ where
 {
     type Out = Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let cond = self.condition.codegen(ctx);
         let true_val = self.if_true.codegen(ctx);
         let false_val = self.if_false.codegen(ctx);
@@ -336,16 +328,6 @@ where
     }
 }
 
-/// Create a conditional select operation (branchless)
-///
-/// Returns `if_true` if `condition` is true, otherwise returns `if_false`.
-/// This compiles to a branchless cmov instruction.
-///
-/// # Example
-/// ```ignore
-/// // Branchless min
-/// let new_min = select(lt(*val, *min), *val, *min);
-/// ```
 pub fn select<C, T, F, Out>(
     condition: C,
     if_true: T,
@@ -364,10 +346,10 @@ where
     }
 }
 
-/// Branchless minimum of two values
+/// Branchless minimum.
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: StagedType + SupportsComparison,
+    T: Num,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
     L::Staged: Clone,
@@ -385,12 +367,12 @@ where
     }
 }
 
-/// Branchless maximum of two values
+/// Branchless maximum.
 pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: StagedType + SupportsComparison,
-    L: IntoStaged<T> + Clone,
-    R: IntoStaged<T> + Clone,
+    T: Num,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
     L::Staged: Clone,
     R::Staged: Clone,
 {
@@ -405,3 +387,147 @@ where
         if_false: right_s,
     }
 }
+
+// =============================================================================
+// std::ops integration — let users write `x + y`, `var % 2`, etc.
+//
+// We impl each of {Add, Sub, Mul, Div, Rem} for the staged carriers (Var<T>,
+// Const<T>, and each op struct). The macro keeps the boilerplate to a single
+// line per carrier.
+// =============================================================================
+
+/// Impls `core::ops::{Add, Sub, Mul, Div}` (requires `Num`) for the given type
+/// pattern. The type must implement `Staged<Out = T>` for some `T: Num`.
+macro_rules! impl_num_ops_for {
+    ([$($gen:tt)*] $self:ty) => {
+        impl<$($gen)*, __Out, __R> ::core::ops::Add<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: Num + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Add<Self, __R::Staged>;
+            fn add(self, rhs: __R) -> Self::Output {
+                add::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::Sub<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: Num + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Sub<Self, __R::Staged>;
+            fn sub(self, rhs: __R) -> Self::Output {
+                sub::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::Mul<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: Num + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Mul<Self, __R::Staged>;
+            fn mul(self, rhs: __R) -> Self::Output {
+                mul::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::Div<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: Num + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Div<Self, __R::Staged>;
+            fn div(self, rhs: __R) -> Self::Output {
+                div::<__Out, _, _>(self, rhs)
+            }
+        }
+    };
+}
+
+/// Impls `core::ops::Rem` (requires `IntNum`) for the given type pattern.
+macro_rules! impl_rem_op_for {
+    ([$($gen:tt)*] $self:ty) => {
+        impl<$($gen)*, __Out, __R> ::core::ops::Rem<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Rem<Self, __R::Staged>;
+            fn rem(self, rhs: __R) -> Self::Output {
+                rem::<__Out, _, _>(self, rhs)
+            }
+        }
+    };
+}
+
+// Carriers: Var<T>, Const<T>, and the op structs themselves.
+impl_num_ops_for!([T: StagedType] Var<T>);
+impl_rem_op_for!([T: StagedType] Var<T>);
+
+impl_num_ops_for!([T: crate::types::ConstantType] Const<T>);
+impl_rem_op_for!([T: crate::types::ConstantType] Const<T>);
+
+impl_num_ops_for!([L, R] Add<L, R>);
+impl_rem_op_for!([L, R] Add<L, R>);
+
+impl_num_ops_for!([L, R] Sub<L, R>);
+impl_rem_op_for!([L, R] Sub<L, R>);
+
+impl_num_ops_for!([L, R] Mul<L, R>);
+impl_rem_op_for!([L, R] Mul<L, R>);
+
+impl_num_ops_for!([L, R] Div<L, R>);
+impl_rem_op_for!([L, R] Div<L, R>);
+
+impl_num_ops_for!([L, R] Rem<L, R>);
+impl_rem_op_for!([L, R] Rem<L, R>);
+
+// Conditional select carries through operators too.
+impl_num_ops_for!([C, T, F] Select<C, T, F>);
+impl_rem_op_for!([C, T, F] Select<C, T, F>);
+
+// LetVar acts like a Var when used in expressions.
+impl_num_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
+impl_rem_op_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
+
+// Slice access carriers (immutable and mutable reads, length).
+impl_num_ops_for!([S] crate::slice::SliceLen<S>);
+impl_rem_op_for!([S] crate::slice::SliceLen<S>);
+
+impl_num_ops_for!([S] crate::slice::SliceLenMut<S>);
+impl_rem_op_for!([S] crate::slice::SliceLenMut<S>);
+
+impl_num_ops_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
+impl_rem_op_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
+
+impl_num_ops_for!([S, I] crate::slice::SliceGetUncheckedMut<S, I>);
+impl_rem_op_for!([S, I] crate::slice::SliceGetUncheckedMut<S, I>);
+
+// Reference-load carriers.
+impl_num_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);
+impl_rem_op_for!(['a, P] crate::refer::LoadRef<'a, P>);
+
+impl_num_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
+impl_rem_op_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
+
+impl_num_ops_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
+impl_rem_op_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
+
+// Struct field accessors.
+impl_num_ops_for!([P, F] crate::r#struct::LoadField<P, F>);
+impl_rem_op_for!([P, F] crate::r#struct::LoadField<P, F>);
+
+impl_num_ops_for!([P, F] crate::r#struct::FieldPath<P, F>);
+impl_rem_op_for!([P, F] crate::r#struct::FieldPath<P, F>);

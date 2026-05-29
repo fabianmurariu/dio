@@ -1,6 +1,5 @@
 //! Integration tests for slice support.
 
-use rust_lms::num::{gt, lt};
 use rust_lms::prelude::*;
 
 #[test]
@@ -41,8 +40,8 @@ fn test_slice_sum() {
         let i = ctx.var(0u64);
         let total = ctx.var(0i64);
         ctx.while_loop(lt(i, arr.len()), move |ctx| {
-            ctx.store(total, add(total, arr.get_unchecked(i)));
-            ctx.store(i, add(i, 1u64));
+            ctx.store(total, total + arr.get_unchecked(i));
+            ctx.store(i, i + 1u64);
         });
         total
     });
@@ -71,9 +70,9 @@ fn test_slice_mutable_fill() {
     let mut compiler = Compiler::new();
     let fill = compiler.fun1("fill", |ctx, arr: Var<SRefMut<Slice<i64>>>| {
         let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, arr.len()), move |ctx| {
-            ctx.emit(arr.set_unchecked(i, 42i64));
-            ctx.store(i, add(i, 1u64));
+        ctx.while_loop(lt(i, arr.clone().len()), move |ctx| {
+            ctx.emit(arr.clone().set_unchecked(i, 42i64));
+            ctx.store(i, i + 1u64);
         });
         Const::<UnitType>::new(())
     });
@@ -91,9 +90,9 @@ fn test_slice_subslice() {
         let i = ctx.var(0u64);
         let total = ctx.var(0i64);
         let sub = arr.slice_unchecked(1u64, 4u64);
-        ctx.while_loop(lt(i, sub.len()), move |ctx| {
-            ctx.store(total, add(total, sub.get_unchecked(i)));
-            ctx.store(i, add(i, 1u64));
+        ctx.while_loop(lt(i, sub.clone().len()), move |ctx| {
+            ctx.store(total, total + sub.clone().get_unchecked(i));
+            ctx.store(i, i + 1u64);
         });
         total
     });
@@ -110,11 +109,11 @@ fn test_slice_count_all_larger_than_3() {
         compiler.fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
             let i = ctx.var(0u64);
             let count = ctx.var(0u64);
-            ctx.while_loop(lt(i, arr.len()), move |ctx| {
-                ctx.if_then(gt(arr.get_unchecked(i), 3i64), move |ctx| {
-                    ctx.store(count, add(count, 1u64));
+            ctx.while_loop(lt(i, arr.clone().len()), move |ctx| {
+                ctx.if_then(gt(arr.clone().get_unchecked(i), 3i64), move |ctx| {
+                    ctx.store(count, count + 1u64);
                 });
-                ctx.store(i, add(i, 1u64));
+                ctx.store(i, i + 1u64);
             });
             count
         });
@@ -132,9 +131,9 @@ fn test_slice_f64() {
     let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
         let i = ctx.var(0u64);
         let total = ctx.var(0.0f64);
-        ctx.while_loop(lt(i, arr.len()), move |ctx| {
-            ctx.store(total, add(total, arr.get_unchecked(i)));
-            ctx.store(i, add(i, 1u64));
+        ctx.while_loop(lt(i, arr.clone().len()), move |ctx| {
+            ctx.store(total, total + arr.clone().get_unchecked(i));
+            ctx.store(i, i + 1u64);
         });
         total
     });
@@ -148,7 +147,7 @@ fn test_slice_f64() {
 fn test_slice_return_subslice_len() {
     let mut compiler = Compiler::new();
     let get_half_len = compiler.fun1("get_half_len", |_ctx, arr: Var<SRef<Slice<i64>>>| {
-        let half = div(arr.len(), 2u64);
+        let half = arr.clone().len() / 2u64;
         let sub = arr.slice_unchecked(0u64, half);
         sub.len()
     });

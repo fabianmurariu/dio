@@ -1,324 +1,143 @@
 //! Capability traits for numeric types.
 //!
-//! These traits define which operations are supported by different staged types.
+//! - [`Num`]: shared arithmetic (`+ - * /`) and comparison (`< > ==`) for any
+//!   integer or floating-point staged type. Both branches of the hierarchy
+//!   refine this.
+//! - [`IntNum`]: adds remainder (modulo). Implemented by `i64`, `u64`, `i32`,
+//!   `u32`.
+//! - [`FloatNum`]: marker for floating-point staged types; reserved for future
+//!   float-only operations (sqrt, abs, ...). Implemented by `f64`.
+//!
+//! `bool` deliberately does not implement `Num` — boolean values use the
+//! control-flow combinators (`if_then`, `if_then_else`) rather than arithmetic.
 
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
-use crate::types::{BoolType, F64Type, I32Type, StagedType, U32Type, U64Type};
+use crate::types::{ConstantType, CopyType, StagedType};
 
 // =============================================================================
-// Capability Traits
+// Trait hierarchy
 // =============================================================================
 
-/// Types that support addition
-pub trait SupportsAdd: StagedType {
-    /// Generate code for addition
+/// Numeric staged types — share arithmetic and comparison operations.
+pub trait Num: StagedType + ConstantType + CopyType + 'static {
     fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-}
-
-/// Types that support subtraction
-pub trait SupportsSub: StagedType {
-    /// Generate code for subtraction
     fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-}
-
-/// Types that support multiplication
-pub trait SupportsMul: StagedType {
-    /// Generate code for multiplication
     fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-}
-
-/// Types that support division
-pub trait SupportsDiv: StagedType {
-    /// Generate code for division
     fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-}
-
-/// Types that support remainder (modulo)
-pub trait SupportsRem: StagedType {
-    /// Generate code for remainder
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-}
-
-/// Types that support comparison operations
-pub trait SupportsComparison: StagedType {
-    /// Generate code for less-than comparison
     fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-
-    /// Generate code for greater-than comparison
     fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-
-    /// Generate code for equality comparison
     fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 }
 
-// =============================================================================
-// Implementations for i64
-// =============================================================================
-
-impl SupportsAdd for i64 {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iadd(left, right)
-    }
+/// Integer-typed numbers — additionally support remainder (modulo).
+pub trait IntNum: Num {
+    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 }
 
-impl SupportsSub for i64 {
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().isub(left, right)
-    }
-}
-
-impl SupportsMul for i64 {
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().imul(left, right)
-    }
-}
-
-impl SupportsDiv for i64 {
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().sdiv(left, right)
-    }
-}
-
-impl SupportsRem for i64 {
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().srem(left, right)
-    }
-}
-
-impl SupportsComparison for i64 {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::SignedLessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::Equal, left, right)
-    }
-}
+/// Floating-point numbers — marker; reserved for future float-only ops.
+pub trait FloatNum: Num {}
 
 // =============================================================================
-// Implementations for U64Type
+// Macro-generated impls for primitive integer types
 // =============================================================================
 
-impl SupportsAdd for U64Type {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iadd(left, right)
-    }
+macro_rules! impl_int_num {
+    ($ty:ty, signed) => {
+        impl Num for $ty {
+            fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().iadd(l, r)
+            }
+            fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().isub(l, r)
+            }
+            fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().imul(l, r)
+            }
+            fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().sdiv(l, r)
+            }
+            fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::SignedLessThan, l, r)
+            }
+            fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::SignedGreaterThan, l, r)
+            }
+            fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::Equal, l, r)
+            }
+        }
+        impl IntNum for $ty {
+            fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().srem(l, r)
+            }
+        }
+    };
+    ($ty:ty, unsigned) => {
+        impl Num for $ty {
+            fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().iadd(l, r)
+            }
+            fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().isub(l, r)
+            }
+            fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().imul(l, r)
+            }
+            fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().udiv(l, r)
+            }
+            fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::UnsignedLessThan, l, r)
+            }
+            fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::UnsignedGreaterThan, l, r)
+            }
+            fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().icmp(IntCC::Equal, l, r)
+            }
+        }
+        impl IntNum for $ty {
+            fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().urem(l, r)
+            }
+        }
+    };
 }
 
-impl SupportsSub for U64Type {
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().isub(left, right)
-    }
-}
-
-impl SupportsMul for U64Type {
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().imul(left, right)
-    }
-}
-
-impl SupportsDiv for U64Type {
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().udiv(left, right) // Note: unsigned division
-    }
-}
-
-impl SupportsRem for U64Type {
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().urem(left, right)
-    }
-}
-
-impl SupportsComparison for U64Type {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedLessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::Equal, left, right)
-    }
-}
+impl_int_num!(i64, signed);
+impl_int_num!(u64, unsigned);
+impl_int_num!(i32, signed);
+impl_int_num!(u32, unsigned);
 
 // =============================================================================
-// Implementations for I32Type
+// Floating point
 // =============================================================================
 
-impl SupportsAdd for I32Type {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iadd(left, right)
+impl Num for f64 {
+    fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fadd(l, r)
+    }
+    fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fsub(l, r)
+    }
+    fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fmul(l, r)
+    }
+    fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fdiv(l, r)
+    }
+    fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::LessThan, l, r)
+    }
+    fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::GreaterThan, l, r)
+    }
+    fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::Equal, l, r)
     }
 }
 
-impl SupportsSub for I32Type {
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().isub(left, right)
-    }
-}
-
-impl SupportsMul for I32Type {
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().imul(left, right)
-    }
-}
-
-impl SupportsDiv for I32Type {
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().sdiv(left, right)
-    }
-}
-
-impl SupportsRem for I32Type {
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().srem(left, right)
-    }
-}
-
-impl SupportsComparison for I32Type {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::SignedLessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::SignedGreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::Equal, left, right)
-    }
-}
-
-// =============================================================================
-// Implementations for U32Type
-// =============================================================================
-
-impl SupportsAdd for U32Type {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iadd(left, right)
-    }
-}
-
-impl SupportsSub for U32Type {
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().isub(left, right)
-    }
-}
-
-impl SupportsMul for U32Type {
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().imul(left, right)
-    }
-}
-
-impl SupportsDiv for U32Type {
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().udiv(left, right) // Note: unsigned division
-    }
-}
-
-impl SupportsRem for U32Type {
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().urem(left, right)
-    }
-}
-
-impl SupportsComparison for U32Type {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedLessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::Equal, left, right)
-    }
-}
-
-// =============================================================================
-// Implementations for F64Type
-// =============================================================================
-
-impl SupportsAdd for F64Type {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().fadd(left, right)
-    }
-}
-
-impl SupportsSub for F64Type {
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().fsub(left, right)
-    }
-}
-
-impl SupportsMul for F64Type {
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().fmul(left, right)
-    }
-}
-
-impl SupportsDiv for F64Type {
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().fdiv(left, right)
-    }
-}
-
-impl SupportsComparison for F64Type {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::FloatCC;
-        builder.ins().fcmp(FloatCC::LessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::FloatCC;
-        builder.ins().fcmp(FloatCC::GreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::FloatCC;
-        builder.ins().fcmp(FloatCC::Equal, left, right)
-    }
-}
-
-// =============================================================================
-// Implementations for BoolType (limited operations)
-// =============================================================================
-
-impl SupportsComparison for BoolType {
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedLessThan, left, right)
-    }
-
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::UnsignedGreaterThan, left, right)
-    }
-
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value {
-        use cranelift_codegen::ir::condcodes::IntCC;
-        builder.ins().icmp(IntCC::Equal, left, right)
-    }
-}
+impl FloatNum for f64 {}

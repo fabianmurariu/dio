@@ -1,9 +1,9 @@
 //! Core traits for staged iteration.
 
 use crate::func::Ctx;
-use crate::num::{add, gt, lt, SupportsAdd, SupportsComparison};
+use crate::num::{gt, lt, Num};
 use crate::staged::{Const, Staged, Var};
-use crate::types::{BoolType, ConstantType, CopyType, StagedType, U64Type};
+use crate::types::{BoolType, StagedType, U64Type};
 
 use super::{Filter, Map, Zip};
 
@@ -114,12 +114,12 @@ pub trait StagedIterator: Sized {
     /// Sum all elements. Accumulator starts at `T::RuntimeValue::default()` (zero).
     fn sum(self, ctx: &mut Ctx) -> Var<Self::Item>
     where
-        Self::Item: StagedType + ConstantType + CopyType + SupportsAdd + 'static,
+        Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: Default,
     {
         let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.store(acc, add::<Self::Item, _, _>(acc, elem));
+            ctx.store(acc, acc + elem);
         });
         acc
     }
@@ -131,7 +131,7 @@ pub trait StagedIterator: Sized {
     {
         let acc = ctx.var(0u64);
         self.for_each(ctx, move |ctx, _elem| {
-            ctx.store(acc, add::<U64Type, _, _>(acc, 1u64));
+            ctx.store(acc, acc + 1u64);
         });
         acc
     }
@@ -139,13 +139,13 @@ pub trait StagedIterator: Sized {
     /// Find the minimum element. Starts at the type's maximum sentinel.
     fn min(self, ctx: &mut Ctx) -> Var<Self::Item>
     where
-        Self::Item: StagedType + ConstantType + CopyType + SupportsComparison + 'static,
+        Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(lt::<Self::Item, _, _>(elem, acc), move |ctx| {
+            ctx.if_then(lt(elem, acc), move |ctx| {
                 ctx.store(acc, elem);
             });
         });
@@ -155,13 +155,13 @@ pub trait StagedIterator: Sized {
     /// Find the maximum element. Starts at the type's minimum sentinel.
     fn max(self, ctx: &mut Ctx) -> Var<Self::Item>
     where
-        Self::Item: StagedType + ConstantType + CopyType + SupportsComparison + 'static,
+        Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(gt::<Self::Item, _, _>(elem, acc), move |ctx| {
+            ctx.if_then(gt(elem, acc), move |ctx| {
                 ctx.store(acc, elem);
             });
         });

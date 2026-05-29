@@ -35,21 +35,18 @@ fn test_heterogeneous_operations() {
 
 #[test]
 fn test_bool_comparison() {
+    // Comparisons produce BoolType. To combine two booleans we use control
+    // flow (`if_then_else`) rather than arithmetic — booleans are no longer
+    // a `Num` so `eq(bool, bool)` is intentionally rejected at compile time.
     let compiler = Compiler::new();
     let x = Const::<i64>::new(5);
     let y = Const::<i64>::new(10);
 
-    // Comparisons change type to Bool
-    let comparison = lt(x, y); // 5 < 10 = true
-    let equality = eq(x, y); // 5 == 10 = false
+    // `lt` produces BoolType; `if_then_else` then yields an i64.
+    let expr = if_then_else(lt(x, y), Const::<i64>::new(1), Const::<i64>::new(0));
 
-    // We can compare the results (both are BoolType)
-    let bool_comparison = eq(comparison, equality); // true == false = false
-
-    let compiled = compiler
-        .compile(bool_comparison)
-        .expect("compilation failed");
-    assert!(!compiled.run()); // true != false
+    let compiled = compiler.compile(expr).expect("compilation failed");
+    assert_eq!(compiled.run(), 1); // 5 < 10 → true → 1
 }
 
 #[test]

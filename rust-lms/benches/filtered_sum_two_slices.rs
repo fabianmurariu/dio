@@ -18,7 +18,6 @@ use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::time::Duration;
 
-use rust_lms::num::gt;
 use rust_lms::prelude::*;
 
 const SIZES: &[usize] = &[10_000, 100_000, 1_000_000];
@@ -63,25 +62,18 @@ fn build_filtered_sum_lms() -> impl Fn(&[i64], &[i64], i64) -> i64 {
     let f = compiler.fun3(
         "filtered_sum",
         |ctx, x: Var<SRef<Slice<i64>>>, y: Var<SRef<Slice<i64>>>, z: Var<i64>| {
-            let i = ctx.let_var(0u64);
-            let acc = ctx.let_var(0i64);
-            let v = ctx.let_var(0i64);
+            let i = ctx.var(0u64);
+            let acc = ctx.var(0i64);
+            let v = ctx.var(0i64);
 
-            // while (i < x.len()) {
-            //   v = x[i] + y[i];
-            //   if (v > z) acc += v;
-            //   i += 1;
-            // }
-            let loop_body = while_loop(
-                lt(*i, x.len()),
-                (
-                    assign(*v, add(x.get_unchecked(*i), y.get_unchecked(*i))),
-                    if_then(gt(*v, z), assign(*acc, add(*acc, *v))),
-                    assign(*i, add(*i, 1u64)),
-                ),
-            );
-
-            (i, acc, v, loop_body, *acc)
+            ctx.while_loop(lt(i, x.clone().len()), move |ctx| {
+                ctx.store(v, x.clone().get_unchecked(i) + y.clone().get_unchecked(i));
+                ctx.if_then(gt(v, z), move |ctx| {
+                    ctx.store(acc, acc + v);
+                });
+                ctx.store(i, i + 1u64);
+            });
+            acc
         },
     );
 

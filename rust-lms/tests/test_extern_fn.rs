@@ -135,7 +135,7 @@ fn test_extern_fn_with_internal() {
     let ext_add = compiler.extern_fn::<ExtAddExtern>();
 
     // Mix internal and external function calls
-    let internal_double = compiler.fun1("double", |_ctx, x: Var<i64>| add(x, x));
+    let internal_double = compiler.fun1("double", |_ctx, x: Var<i64>| x + x);
 
     let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
         // double(ext_add(x, y))

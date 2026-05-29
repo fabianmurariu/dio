@@ -42,9 +42,7 @@ fn test_iter_sum_with_map() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
-        arr.staged_iter()
-            .map(|x| mul::<i64, _, _>(x, 2i64))
-            .sum(ctx)
+        arr.staged_iter().map(|x| x * 2i64).sum(ctx)
     });
 
     let compiled = compiler.compile(f).expect("compile failed");
@@ -59,9 +57,7 @@ fn test_iter_sum_with_filter() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
-        arr.staged_iter()
-            .filter(|x| lt::<i64, _, _>(0i64, x))
-            .sum(ctx)
+        arr.staged_iter().filter(|x| lt(0i64, x)).sum(ctx)
     });
 
     let compiled = compiler.compile(f).expect("compile failed");
@@ -95,9 +91,7 @@ fn test_iter_count_filtered() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<i64>>>| {
-        arr.staged_iter()
-            .filter(|x| lt::<i64, _, _>(3i64, x))
-            .count(ctx)
+        arr.staged_iter().filter(|x| lt(3i64, x)).count(ctx)
     });
 
     let compiled = compiler.compile(f).expect("compile failed");
@@ -146,9 +140,7 @@ fn test_iter_min_max_filtered() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<i64>>>| {
-        arr.staged_iter()
-            .filter(|x| lt::<i64, _, _>(0i64, x))
-            .min(ctx)
+        arr.staged_iter().filter(|x| lt(0i64, x)).min(ctx)
     });
 
     let compiled = compiler.compile(f).expect("compile failed");
@@ -174,8 +166,8 @@ fn test_iter_fold_count_and_sum() {
         // fold uses user-managed vars — no Accumulator trait needed
         arr.staged_iter()
             .fold(ctx, (count, sum), |ctx, (c, s), elem| {
-                ctx.store(c, add::<U64Type, _, _>(c, 1u64));
-                ctx.store(s, add::<F64Type, _, _>(s, elem));
+                ctx.store(c, c + 1u64);
+                ctx.store(s, s + elem);
             });
 
         count // return count as the function result
@@ -203,7 +195,7 @@ fn test_iter_zip_dot_product() {
             let acc = ctx.var(0.0f64);
 
             a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
-                ctx.store(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)));
+                ctx.store(acc, acc + ai * bi);
             });
 
             acc
@@ -230,7 +222,7 @@ fn test_iter_zip_element_wise_sum() {
             let total = ctx.var(0i64);
 
             a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
-                ctx.store(total, add::<i64, _, _>(total, add::<i64, _, _>(ai, bi)));
+                ctx.store(total, total + ai + bi);
             });
 
             total
