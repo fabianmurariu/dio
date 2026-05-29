@@ -18,8 +18,8 @@
 //! - At the Cranelift level: multiple i64 parameters, stored to stack slot
 //! - Internally: pointer to stack slot for field access
 
-use crate::staged::{CompilationContext, Staged, Var};
-use crate::types::StagedType;
+use crate::staged::{assign, CompilationContext, Staged, Var};
+use crate::types::{BoolType, StagedType, UnitType};
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
 };
@@ -52,7 +52,6 @@ pub struct StructInfo {
     pub num_abi_values: usize,
 }
 
-
 // =============================================================================
 // Internal: FunDef - Stored function definition
 // =============================================================================
@@ -71,64 +70,249 @@ pub(crate) struct FunDef {
 }
 
 // =============================================================================
-// VarBuilder: Context for creating local variables within functions
+// Ctx: Imperative context for building staged function bodies
 // =============================================================================
 
-/// A builder context for creating variables within function bodies.
+/// Imperative context for building staged function bodies.
 ///
-/// This is passed to closures in `fun1` and `fun1_rec` to allow local
-/// variable creation without exposing the entire Compiler.
-pub struct VarBuilder {
+/// Passed to closures in `fun1`, `fun2`, etc. Call methods to emit code in
+/// declaration order — no expression tree, no `Clone` constraints, no tuple
+/// sequencing boilerplate.
+///
+/// # Example
+/// ```ignore
+/// compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+///     let acc = ctx.var(0.0f64);
+///     arr.staged_iter().for_each(ctx, |ctx, elem| {
+///         ctx.assign(acc, add(acc, elem));
+///     });
+///     acc
+/// });
+/// ```
+pub struct Ctx {
     pub(crate) next_var_id: usize,
+    actions: Vec<Box<dyn FnOnce(&mut CompilationContext) + 'static>>,
 }
 
-impl VarBuilder {
+impl Ctx {
     pub(crate) fn new(start: usize) -> Self {
-        VarBuilder { next_var_id: start }
+        Ctx {
+            next_var_id: start,
+            actions: Vec::new(),
+        }
     }
 
     pub(crate) fn final_id(&self) -> usize {
         self.next_var_id
     }
 
-    /// Create an uninitialized variable reference.
+    /// Consume this context, producing a `FunDef.body` closure that replays
+    /// all accumulated actions then evaluates and returns `ret`.
+    pub(crate) fn into_body<Ret>(
+        self,
+        ret: Ret,
+    ) -> Box<dyn FnOnce(&mut CompilationContext) -> Value>
+    where
+        Ret: Staged + 'static,
+    {
+        let actions = self.actions;
+        Box::new(move |ctx| {
+            for action in actions {
+                action(ctx);
+            }
+            ret.codegen(ctx)
+        })
+    }
+
+    fn alloc<T: StagedType + 'static>(&mut self) -> Var<T> {
+        let id = self.next_var_id;
+        self.next_var_id += 1;
+        Var::new(id)
+    }
+
+    /// Allocate a variable ID without registering an initialization action.
     ///
     /// # Safety
-    /// You MUST assign to this variable before reading from it, otherwise codegen will panic.
-    /// Prefer using `let_var()` which ensures initialization.
+    /// Caller must ensure the variable is assigned before it is used in codegen.
     pub(crate) unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
         Var::new(id)
     }
 
-    /// Create a variable with an initial value.
+    /// Declare a variable with an initial value.
     ///
-    /// Returns a `LetVar` that sequences the initialization when staged.
-    /// Deref with `*` to get the underlying `Var<T>` for use in expressions.
+    /// Returns a `LetVar<T, E::Staged>` for backward compatibility with old
+    /// tuple-sequencing code. The initialization is automatically registered as
+    /// an action in the `Ctx`; including the returned `LetVar` in a tuple
+    /// sequence double-inits (harmlessly). Prefer `Ctx::var()` for new code.
     pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
     where
-        T: StagedType,
+        T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
+        E::Staged: Clone + 'static,
     {
-        let var = unsafe { self.var_unchecked() };
-        crate::staged::LetVar::new(var, init.into_staged())
+        let init_staged = init.into_staged();
+        let v = self.alloc::<T>();
+        let ctype = T::cranelift_type();
+        let id = v.id;
+        let init_for_action = init_staged.clone();
+        self.actions.push(Box::new(move |ctx| {
+            let value = init_for_action.codegen(ctx);
+            let cv = ctx.builder.declare_var(ctype);
+            ctx.var_map.insert(id, cv);
+            ctx.builder.def_var(cv, value);
+        }));
+        crate::staged::LetVar::new(v, init_staged)
     }
 
-    /// Evaluate a staged expression once and bind the result to a new variable.
+    /// Declare a new variable initialized to `init` at this point in the body.
     ///
-    /// Use this instead of reusing a complex expression directly when you need
-    /// the result in multiple places — avoids cloning the expression tree.
-    /// Deref with `*` to get the underlying `Var<T>`.
-    pub fn bind<T, E>(&mut self, expr: E) -> crate::staged::LetVar<T, E::Staged>
+    /// Returns a `Var<T>` that can be used in expressions and passed to `assign`.
+    pub fn var<T, E>(&mut self, init: E) -> Var<T>
     where
-        T: StagedType,
+        T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
+        E::Staged: 'static,
     {
-        let var = unsafe { self.var_unchecked() };
-        crate::staged::LetVar::new(var, expr.into_staged())
+        let v = self.alloc::<T>();
+        let init_staged = init.into_staged();
+        let ctype = T::cranelift_type();
+        let id = v.id;
+        self.actions.push(Box::new(move |ctx| {
+            let value = init_staged.codegen(ctx);
+            let cv = ctx.builder.declare_var(ctype);
+            ctx.var_map.insert(id, cv);
+            ctx.builder.def_var(cv, value);
+        }));
+        v
+    }
+
+    /// Evaluate a complex staged expression once, binding the result to a new
+    /// variable. Avoids recomputing the expression if used in multiple places.
+    pub fn bind<T, E>(&mut self, expr: E) -> Var<T>
+    where
+        T: StagedType + 'static,
+        E: Staged<Out = T> + 'static,
+    {
+        let v = self.alloc::<T>();
+        let ctype = T::cranelift_type();
+        let id = v.id;
+        self.actions.push(Box::new(move |ctx| {
+            let value = expr.codegen(ctx);
+            let cv = if let Some(&existing) = ctx.var_map.get(&id) {
+                existing
+            } else {
+                let cv = ctx.builder.declare_var(ctype);
+                ctx.var_map.insert(id, cv);
+                cv
+            };
+            ctx.builder.def_var(cv, value);
+        }));
+        v
+    }
+
+    /// Emit an assignment: `var = expr`.
+    ///
+    /// Accepts any value that implements `IntoStaged<T>` — primitives like
+    /// `42i64` work directly, as do staged expressions.
+    pub fn assign<T, E>(&mut self, var: Var<T>, expr: E)
+    where
+        T: StagedType + 'static,
+        E: crate::staged::IntoStaged<T>,
+        E::Staged: 'static,
+    {
+        let staged_expr = expr.into_staged();
+        self.actions.push(Box::new(move |ctx| {
+            assign(var, staged_expr).codegen(ctx);
+        }));
+    }
+
+    /// Emit any unit-typed staged expression (e.g. a store, an extern call).
+    pub fn emit<S: Staged<Out = UnitType> + 'static>(&mut self, stmt: S) {
+        self.actions.push(Box::new(move |ctx| {
+            stmt.codegen(ctx);
+        }));
+    }
+
+    /// Emit a while loop: `while cond { body }`.
+    ///
+    /// `body` is called once at staging time; the closure emits the per-iteration
+    /// side effects into a child `Ctx`. `cond` accepts `IntoStaged<BoolType>`
+    /// so `false` and `true` work directly.
+    pub fn while_loop<C, F>(&mut self, cond: C, body: F)
+    where
+        C: crate::staged::IntoStaged<BoolType>,
+        C::Staged: 'static,
+        F: FnOnce(&mut Ctx) + 'static,
+    {
+        let cond = cond.into_staged();
+        let mut child = Ctx::new(self.next_var_id);
+        body(&mut child);
+        self.next_var_id = child.next_var_id;
+        let body_actions = child.actions;
+
+        self.actions.push(Box::new(move |ctx| {
+            let loop_header = ctx.builder.create_block();
+            let loop_body = ctx.builder.create_block();
+            let loop_exit = ctx.builder.create_block();
+
+            ctx.builder.ins().jump(loop_header, &[]);
+
+            ctx.builder.switch_to_block(loop_header);
+            let cond_val = cond.codegen(ctx);
+            ctx.builder
+                .ins()
+                .brif(cond_val, loop_body, &[], loop_exit, &[]);
+
+            ctx.builder.switch_to_block(loop_body);
+            ctx.builder.seal_block(loop_body);
+            for action in body_actions {
+                action(ctx);
+            }
+            ctx.builder.ins().jump(loop_header, &[]);
+            ctx.builder.seal_block(loop_header);
+
+            ctx.builder.switch_to_block(loop_exit);
+            ctx.builder.seal_block(loop_exit);
+        }));
+    }
+
+    /// Emit a one-sided conditional: `if cond { then }`.
+    pub fn if_then<C, F>(&mut self, cond: C, then: F)
+    where
+        C: Staged<Out = BoolType> + 'static,
+        F: FnOnce(&mut Ctx) + 'static,
+    {
+        let mut child = Ctx::new(self.next_var_id);
+        then(&mut child);
+        self.next_var_id = child.next_var_id;
+        let then_actions = child.actions;
+
+        self.actions.push(Box::new(move |ctx| {
+            let then_block = ctx.builder.create_block();
+            let merge_block = ctx.builder.create_block();
+
+            let cond_val = cond.codegen(ctx);
+            ctx.builder
+                .ins()
+                .brif(cond_val, then_block, &[], merge_block, &[]);
+
+            ctx.builder.switch_to_block(then_block);
+            ctx.builder.seal_block(then_block);
+            for action in then_actions {
+                action(ctx);
+            }
+            ctx.builder.ins().jump(merge_block, &[]);
+
+            ctx.builder.switch_to_block(merge_block);
+            ctx.builder.seal_block(merge_block);
+        }));
     }
 }
+
+/// Backward-compatible alias. Prefer `Ctx`.
+pub type VarBuilder = Ctx;
 
 // =============================================================================
 // Compiler: Owns everything, coordinates compilation
@@ -288,11 +472,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Define a recursive binary function.
-    pub fn fun2_rec<A, B, OUT, F, BODY>(
-        &mut self,
-        name: &str,
-        body_fn: F,
-    ) -> FunRef2<A, B, OUT>
+    pub fn fun2_rec<A, B, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef2<A, B, OUT>
     where
         A: StagedType,
         B: StagedType,
@@ -304,11 +484,7 @@ impl<'a> Compiler<'a> {
     }
 
     /// Define a ternary function.
-    pub fn fun3<A, B, C, OUT, F, BODY>(
-        &mut self,
-        name: &str,
-        body_fn: F,
-    ) -> FunRef3<A, B, C, OUT>
+    pub fn fun3<A, B, C, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef3<A, B, C, OUT>
     where
         A: StagedType,
         B: StagedType,
@@ -367,7 +543,14 @@ impl<'a> Compiler<'a> {
         C: StagedType,
         D: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef4<A, B, C, D, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        F: FnOnce(
+            FunRef4<A, B, C, D, OUT>,
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun4_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -405,7 +588,15 @@ impl<'a> Compiler<'a> {
         D: StagedType,
         E: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef5<A, B, C, D, E, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
+        F: FnOnce(
+            FunRef5<A, B, C, D, E, OUT>,
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun5_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -445,7 +636,16 @@ impl<'a> Compiler<'a> {
         E: StagedType,
         FF: StagedType,
         OUT: StagedType,
-        FN: FnOnce(FunRef6<A, B, C, D, E, FF, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
+        FN: FnOnce(
+            FunRef6<A, B, C, D, E, FF, OUT>,
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+            Var<FF>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun6_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -466,7 +666,16 @@ impl<'a> Compiler<'a> {
         FF: StagedType,
         G: StagedType,
         OUT: StagedType,
-        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
+        FN: FnOnce(
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+            Var<FF>,
+            Var<G>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun7(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -487,7 +696,17 @@ impl<'a> Compiler<'a> {
         FF: StagedType,
         G: StagedType,
         OUT: StagedType,
-        FN: FnOnce(FunRef7<A, B, C, D, E, FF, G, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
+        FN: FnOnce(
+            FunRef7<A, B, C, D, E, FF, G, OUT>,
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+            Var<FF>,
+            Var<G>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun7_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -509,7 +728,17 @@ impl<'a> Compiler<'a> {
         G: StagedType,
         H: StagedType,
         OUT: StagedType,
-        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
+        FN: FnOnce(
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+            Var<FF>,
+            Var<G>,
+            Var<H>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun8(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -531,7 +760,18 @@ impl<'a> Compiler<'a> {
         G: StagedType,
         H: StagedType,
         OUT: StagedType,
-        FN: FnOnce(FunRef8<A, B, C, D, E, FF, G, H, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
+        FN: FnOnce(
+            FunRef8<A, B, C, D, E, FF, G, H, OUT>,
+            &mut VarBuilder,
+            Var<A>,
+            Var<B>,
+            Var<C>,
+            Var<D>,
+            Var<E>,
+            Var<FF>,
+            Var<G>,
+            Var<H>,
+        ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun8_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -549,10 +789,7 @@ impl<'a> Compiler<'a> {
     /// - Parameters: Multiple i64 values are received, stored to a stack slot,
     ///   and the variable holds the stack slot pointer
     /// - Returns: The result pointer is used to load multiple i64 values for return
-    pub fn compile<S: Staged>(
-        self,
-        expr: S,
-    ) -> Result<Compiled<'a, S::Out>, CompileError> {
+    pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -561,8 +798,8 @@ impl<'a> Compiler<'a> {
         flag_builder
             .set("use_colocated_libcalls", "true")
             .map_err(|e| CompileError::JitError(e.to_string()))?;
-        let isa_builder = cranelift_native::builder()
-            .map_err(|e| CompileError::JitError(e.to_string()))?;
+        let isa_builder =
+            cranelift_native::builder().map_err(|e| CompileError::JitError(e.to_string()))?;
         let isa = isa_builder
             .finish(settings::Flags::new(flag_builder))
             .map_err(|e| CompileError::JitError(e.to_string()))?;
@@ -721,7 +958,8 @@ impl<'a> Compiler<'a> {
                                 builder.def_var(len_var, len_value);
 
                                 // Store in slice_vars for optimized access
-                                slice_vars.insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+                                slice_vars
+                                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
 
                                 // Store ptr_var in var_map - slice operations should use slice_vars
                                 // for the optimized path. The fallback path (loading from stack)
@@ -733,11 +971,12 @@ impl<'a> Compiler<'a> {
                                 // SMALL STRUCT (≤16 bytes): Passed by value in registers
                                 // Create stack slot, store values, use pointer
                                 let align_shift = struct_info.alignment.trailing_zeros() as u8;
-                                let stack_slot = builder.create_sized_stack_slot(StackSlotData::new(
-                                    StackSlotKind::ExplicitSlot,
-                                    struct_info.size,
-                                    align_shift,
-                                ));
+                                let stack_slot =
+                                    builder.create_sized_stack_slot(StackSlotData::new(
+                                        StackSlotKind::ExplicitSlot,
+                                        struct_info.size,
+                                        align_shift,
+                                    ));
 
                                 let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
 
@@ -795,10 +1034,12 @@ impl<'a> Compiler<'a> {
                             let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
                             for i in 0..struct_info.num_abi_values {
                                 let offset = (i * 8) as i32;
-                                let val =
-                                    builder
-                                        .ins()
-                                        .load(types::I64, MemFlags::trusted(), result, offset);
+                                let val = builder.ins().load(
+                                    types::I64,
+                                    MemFlags::trusted(),
+                                    result,
+                                    offset,
+                                );
                                 return_values.push(val);
                             }
                             builder.ins().return_(&return_values);
@@ -1061,7 +1302,7 @@ mod tests {
         // Ensure that functions defined after internal var allocation don't get wrong param IDs.
         // Allocate a var inside a fun0 first to advance the counter.
         let _prime = compiler.fun0("prime_counter", |ctx| {
-            let _x = ctx.let_var(0i64);
+            let _x = ctx.var(0i64);
             Const::<I64Type>::new(0)
         });
 
@@ -1170,13 +1411,13 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let f = compiler.fun0("let_var_test", |ctx| {
-            let x = ctx.let_var(42i64);
-            let y = ctx.let_var(8i64);
-            (x, y, add::<I64Type, _, _>(*x, *y))
+            let x = ctx.var(42i64);
+            let y = ctx.var(8i64);
+            add::<I64Type, _, _>(x, y)
         });
 
         let compiled = compiler.compile(call0(f)).expect("compilation failed");
-        assert_eq!(compiled.run(), 50); // 42 + 8 = 50
+        assert_eq!(compiled.run(), 50);
     }
 
     #[test]
@@ -1184,9 +1425,11 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let f = compiler.fun0("ergonomic_assign", |ctx| {
-            let x = ctx.let_var(0i64);
-            let y = ctx.let_var(0i64);
-            (assign(*x, 10i64), assign(*y, 32i64), add(*x, *y))
+            let x = ctx.var(0i64);
+            let y = ctx.var(0i64);
+            ctx.assign(x, 10i64);
+            ctx.assign(y, 32i64);
+            add(x, y)
         });
 
         let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -1252,8 +1495,12 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let f = compiler.fun0("while_zero", |ctx| {
-            let result = ctx.let_var(0i64);
-            (result, while_loop(false, assign(*result, 999)), assign(*result, 42), *result)
+            let result = ctx.var(0i64);
+            ctx.while_loop(false, move |ctx| {
+                ctx.assign(result, 999i64);
+            });
+            ctx.assign(result, 42i64);
+            result
         });
 
         let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -1265,16 +1512,13 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let factorial_iter = compiler.fun1("factorial_iter", |ctx, n: Var<I64Type>| {
-            let i = ctx.let_var(1i64);
-            let result = ctx.let_var(1i64);
-            (
-                i, result,
-                while_loop(
-                    lt(*i, add(n, 1)),
-                    (assign(*result, mul(*result, *i)), assign(*i, add(*i, 1))),
-                ),
-                *result,
-            )
+            let i = ctx.var(1i64);
+            let result = ctx.var(1i64);
+            ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
+                ctx.assign(result, mul(result, i));
+                ctx.assign(i, add(i, 1i64));
+            });
+            result
         });
 
         let compiled = compiler
@@ -1282,12 +1526,12 @@ mod tests {
             .expect("compilation failed");
         let factorial_fn = compiled.as_fn();
 
-        assert_eq!(factorial_fn(0), 1); // 0! = 1
-        assert_eq!(factorial_fn(1), 1); // 1! = 1
-        assert_eq!(factorial_fn(2), 2); // 2! = 2
-        assert_eq!(factorial_fn(3), 6); // 3! = 6
-        assert_eq!(factorial_fn(5), 120); // 5! = 120
-        assert_eq!(factorial_fn(10), 3628800); // 10! = 3628800
+        assert_eq!(factorial_fn(0), 1);
+        assert_eq!(factorial_fn(1), 1);
+        assert_eq!(factorial_fn(2), 2);
+        assert_eq!(factorial_fn(3), 6);
+        assert_eq!(factorial_fn(5), 120);
+        assert_eq!(factorial_fn(10), 3628800);
     }
 
     #[test]
@@ -1295,35 +1539,24 @@ mod tests {
         let mut compiler = Compiler::new();
 
         let fib_iter = compiler.fun1("fib_iter", |ctx, n: Var<I64Type>| {
-            let i = ctx.let_var(2i64);
-            let a = ctx.let_var(0i64);
-            let b = ctx.let_var(1i64);
-            let temp = ctx.let_var(0i64);
-            (
-                i, a, b, temp,
-                if_then_else(
-                    lt(n, 2),
-                    n,
-                    (
-                        while_loop(
-                            lt(*i, add(n, 1)),
-                            (
-                                assign(*temp, add(*a, *b)),
-                                assign(*a, *b),
-                                assign(*b, *temp),
-                                assign(*i, add(*i, 1)),
-                            ),
-                        ),
-                        *b,
-                    ),
-                ),
-            )
+            let i = ctx.var(2i64);
+            let a = ctx.var(0i64);
+            let b = ctx.var(1i64);
+            let temp = ctx.var(0i64);
+            if_then_else(lt(n, 2), n, {
+                ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
+                    ctx.assign(temp, add(a, b));
+                    ctx.assign(a, b);
+                    ctx.assign(b, temp);
+                    ctx.assign(i, add(i, 1i64));
+                });
+                b
+            })
         });
 
         let compiled = compiler.compile(fib_iter).expect("compilation failed");
         let fib_fn = compiled.as_fn();
 
-        // Test Fibonacci sequence
         assert_eq!(fib_fn(0), 0);
         assert_eq!(fib_fn(1), 1);
         assert_eq!(fib_fn(2), 1);
@@ -1445,21 +1678,17 @@ mod tests {
         // Define: gcd(a, b) = if b == 0 then a else gcd(b, a % b)
         // Note: We'll use a different implementation since we don't have modulo
         // gcd(a, b) = if b == 0 then a else gcd(b, a - b * (a / b))
-        let gcd = compiler.fun2_rec(
-            "gcd",
-            |f, _ctx, a: Var<I64Type>, b: Var<I64Type>| {
-                if_then_else(
-                    eq(b, 0i64),
-                    a,
-                    call2(f, b, sub(a, mul(b, div(a, b)))), // a % b = a - b * (a / b)
-                )
-            },
-        );
+        let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<I64Type>, b: Var<I64Type>| {
+            if_then_else(
+                eq(b, 0i64),
+                a,
+                call2(f, b, sub(a, mul(b, div(a, b)))), // a % b = a - b * (a / b)
+            )
+        });
 
         // gcd(48, 18) = 6
         let expr = call2(gcd, 48i64, 18i64);
         let compiled = compiler.compile(expr).expect("compilation failed");
         assert_eq!(compiled.run(), 6);
     }
-
 }

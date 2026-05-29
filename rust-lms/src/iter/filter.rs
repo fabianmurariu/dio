@@ -1,18 +1,17 @@
-//! Filter combinator - keeps only elements matching a predicate.
+//! Filter combinator — keeps only elements matching a predicate.
 
-use crate::control::if_then;
-use crate::func::VarBuilder;
+use crate::func::Ctx;
 use crate::staged::{Staged, Var};
-use crate::types::{BoolType, CopyType, UnitType};
+use crate::types::BoolType;
 
 use super::traits::StagedIterator;
 
-/// Iterator adapter that keeps only elements matching a predicate.
+/// Iterator adapter that keeps only elements satisfying a predicate.
 ///
-/// **Does NOT implement `IndexedStagedIterator`** - filter breaks index correspondence.
+/// Does NOT implement `IndexedStagedIterator` — filter breaks index correspondence.
 pub struct Filter<I, P> {
-    inner: I,
-    predicate: P,
+    pub(crate) inner: I,
+    pub(crate) predicate: P,
 }
 
 impl<I, P> Filter<I, P> {
@@ -24,27 +23,22 @@ impl<I, P> Filter<I, P> {
 impl<I, P, Cond> StagedIterator for Filter<I, P>
 where
     I: StagedIterator,
-    I::Item: CopyType,
-    P: Fn(Var<I::Item>) -> Cond,
-    Cond: Staged<Out = BoolType> + Clone,
+    I::Item: crate::types::CopyType + 'static,
+    P: Fn(Var<I::Item>) -> Cond + 'static,
+    Cond: Staged<Out = BoolType> + 'static,
 {
     type Item = I::Item;
 
-    fn consume<F, Body>(
-        self,
-        builder: &mut VarBuilder,
-        consumer: F,
-    ) -> impl Staged<Out = UnitType> + use<I, P, Cond, F, Body>
+    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(Var<Self::Item>) -> Body,
-        Body: Staged<Out = UnitType> + Clone,
+        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
     {
-        self.inner.consume(builder, move |elem| {
-            let condition = (self.predicate)(elem);
-            let body = consumer(elem);
-            if_then(condition, body) // Only execute if predicate passes
-        })
+        let predicate = self.predicate;
+        self.inner.for_each(ctx, move |ctx, elem| {
+            let cond = predicate(elem);
+            ctx.if_then(cond, move |ctx| {
+                consumer(ctx, elem);
+            });
+        });
     }
 }
-
-// Filter does NOT implement IndexedStagedIterator - this is intentional!

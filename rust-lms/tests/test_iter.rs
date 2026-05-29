@@ -1,4 +1,5 @@
-//! Integration tests for the staged iterator API: fold, sum, count, min, max, zip.
+//! Integration tests for the staged iterator API: sum, count, min, max, fold, zip.
+//! All use the imperative Ctx API: ctx.var(), ctx.assign(), etc.
 
 use rust_lms::prelude::*;
 
@@ -40,7 +41,6 @@ fn test_iter_sum_f64() {
 fn test_iter_sum_with_map() {
     let mut compiler = Compiler::new();
 
-    // sum of (x * 2) for each element
     let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
         arr.staged_iter()
             .map(|x| mul::<I64Type, _, _>(x, 2i64))
@@ -50,7 +50,7 @@ fn test_iter_sum_with_map() {
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
 
-    let data: [i64; 4] = [1, 2, 3, 4]; // sum of doubles = 2+4+6+8 = 20
+    let data: [i64; 4] = [1, 2, 3, 4]; // 2+4+6+8 = 20
     assert_eq!(f(&data[..]), 20);
 }
 
@@ -58,7 +58,6 @@ fn test_iter_sum_with_map() {
 fn test_iter_sum_with_filter() {
     let mut compiler = Compiler::new();
 
-    // sum of positive elements
     let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
         arr.staged_iter()
             .filter(|x| lt::<I64Type, _, _>(0i64, x))
@@ -69,7 +68,7 @@ fn test_iter_sum_with_filter() {
     let f = compiled.as_fn();
 
     let data: [i64; 6] = [-3, 5, -1, 8, 0, 2];
-    assert_eq!(f(&data[..]), 15); // 5 + 8 + 2
+    assert_eq!(f(&data[..]), 15); // 5+8+2
 }
 
 // =============================================================================
@@ -95,7 +94,6 @@ fn test_iter_count_all() {
 fn test_iter_count_filtered() {
     let mut compiler = Compiler::new();
 
-    // count elements > 3
     let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
         arr.staged_iter()
             .filter(|x| lt::<I64Type, _, _>(3i64, x))
@@ -147,7 +145,6 @@ fn test_iter_max_f64() {
 fn test_iter_min_max_filtered() {
     let mut compiler = Compiler::new();
 
-    // min of positive elements
     let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<I64Type>>>| {
         arr.staged_iter()
             .filter(|x| lt::<I64Type, _, _>(0i64, x))
@@ -162,7 +159,7 @@ fn test_iter_min_max_filtered() {
 }
 
 // =============================================================================
-// fold (multi-accumulator)
+// fold (multi-accumulator via user-managed vars)
 // =============================================================================
 
 #[test]
@@ -172,15 +169,17 @@ fn test_iter_fold_count_and_sum() {
     let f = compiler.fun1(
         "count_and_sum",
         |ctx, arr: Var<SRef<Slice<F64Type>>>| {
-            let (fold_loop, (count_var, sum_var)) = arr
-                .staged_iter()
-                .fold(ctx, (0u64, 0.0f64), |(count, sum), elem| {
-                    (add::<U64Type, _, _>(count, 1u64), add::<F64Type, _, _>(sum, elem))
-                });
-            staged_block! {
-                fold_loop;
-                count_var
-            }
+            // Declare accumulator vars BEFORE fold
+            let count = ctx.var(0u64);
+            let sum   = ctx.var(0.0f64);
+
+            // fold uses user-managed vars — no Accumulator trait needed
+            arr.staged_iter().fold(ctx, (count, sum), |ctx, (c, s), elem| {
+                ctx.assign(c, add::<U64Type, _, _>(c, 1u64));
+                ctx.assign(s, add::<F64Type, _, _>(s, elem));
+            });
+
+            count  // return count as the function result
         },
     );
 
@@ -203,19 +202,13 @@ fn test_iter_zip_dot_product() {
     let f = compiler.fun2(
         "dot_product",
         |ctx, a: Var<SRef<Slice<F64Type>>>, b: Var<SRef<Slice<F64Type>>>| {
-            let acc_lv = ctx.let_var(0.0f64);
-            let acc = acc_lv.var();
+            let acc = ctx.var(0.0f64);
 
-            // acc is Var<F64Type> (Copy) — use move to capture by value
-            let zip_loop = a.staged_iter().zip(b).for_each(ctx, move |ai, bi| {
-                assign(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)))
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                ctx.assign(acc, add::<F64Type, _, _>(acc, mul::<F64Type, _, _>(ai, bi)));
             });
 
-            staged_block! {
-                acc_lv;
-                zip_loop;
-                acc
-            }
+            acc
         },
     );
 
@@ -224,7 +217,7 @@ fn test_iter_zip_dot_product() {
 
     let a: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
     let b: [f64; 4] = [4.0, 3.0, 2.0, 1.0];
-    // dot = 1*4 + 2*3 + 3*2 + 4*1 = 4+6+6+4 = 20
+    // dot = 1*4 + 2*3 + 3*2 + 4*1 = 20
     assert!((dot(&a[..], &b[..]) - 20.0).abs() < 1e-9);
 }
 
@@ -233,23 +226,16 @@ fn test_iter_zip_element_wise_sum() {
     let mut compiler = Compiler::new();
 
     // sum of (a[i] + b[i]) for all i
-    // Variables must be declared outside the consumer closure since ctx can't be
-    // called inside for_each (it's already borrowed by the outer fun2 closure).
     let f = compiler.fun2(
         "zip_sum",
         |ctx, a: Var<SRef<Slice<I64Type>>>, b: Var<SRef<Slice<I64Type>>>| {
-            let total_lv = ctx.let_var(0i64);
-            let total = total_lv.var();
+            let total = ctx.var(0i64);
 
-            let zip_loop = a.staged_iter().zip(b).for_each(ctx, move |ai, bi| {
-                assign(total, add::<I64Type, _, _>(total, add::<I64Type, _, _>(ai, bi)))
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                ctx.assign(total, add::<I64Type, _, _>(total, add::<I64Type, _, _>(ai, bi)));
             });
 
-            staged_block! {
-                total_lv;
-                zip_loop;
-                total
-            }
+            total
         },
     );
 
@@ -258,7 +244,7 @@ fn test_iter_zip_element_wise_sum() {
 
     let a: [i64; 4] = [1, 2, 3, 4];
     let b: [i64; 4] = [10, 20, 30, 40];
-    // sum of (1+10)+(2+20)+(3+30)+(4+40) = 11+22+33+44 = 110
+    // (1+10)+(2+20)+(3+30)+(4+40) = 11+22+33+44 = 110
     assert_eq!(f(&a[..], &b[..]), 110);
 }
 

@@ -1,123 +1,57 @@
-//! Iterator over integer ranges.
+//! Iterator over integer ranges [start, end).
 
-use crate::control::while_loop;
-use crate::func::VarBuilder;
+use crate::func::Ctx;
 use crate::num::{add, lt, sub, Sub};
-use crate::staged::{assign, CompilationContext, IntoStaged, LetVar, Staged, Var};
-use crate::types::{U64Type, UnitType};
-use cranelift_codegen::ir::Value;
+use crate::staged::{IntoStaged, Var};
+use crate::types::{U64Type};
 
 use super::traits::{IndexedStagedIterator, StagedIterator};
 
-/// Iterator over a range of integers [start, end).
+/// Iterator over a range of u64 values [start, end).
 pub struct RangeIter<Start, End> {
     start: Start,
     end: End,
 }
 
-/// Create a range iterator.
+/// Create a range iterator over [start, end).
 pub fn range<S, E>(start: S, end: E) -> RangeIter<S::Staged, E::Staged>
 where
     S: IntoStaged<U64Type>,
     E: IntoStaged<U64Type>,
 {
-    RangeIter {
-        start: start.into_staged(),
-        end: end.into_staged(),
-    }
+    RangeIter { start: start.into_staged(), end: end.into_staged() }
 }
 
 impl<Start, End> StagedIterator for RangeIter<Start, End>
 where
-    Start: Staged<Out = U64Type> + Clone,
-    End: Staged<Out = U64Type> + Clone,
+    Start: crate::staged::Staged<Out = U64Type> + Clone + 'static,
+    End: crate::staged::Staged<Out = U64Type> + Clone + 'static,
 {
     type Item = U64Type;
 
-    fn consume<F, Body>(
-        self,
-        builder: &mut VarBuilder,
-        consumer: F,
-    ) -> impl Staged<Out = UnitType> + use<Start, End, F, Body>
+    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(Var<U64Type>) -> Body,
-        Body: Staged<Out = UnitType> + Clone,
+        F: FnOnce(&mut Ctx, Var<U64Type>) + 'static,
     {
-        // Initialize index to start value
-        let i = builder.let_var(0u64); // Will assign to start in loop struct
-        let body = consumer(*i);
+        // i starts at `start`, increments to `end`
+        let i = ctx.var(self.start.clone());
+        let end = self.end;
 
-        RangeIterLoop {
-            index: i,
-            start: self.start,
-            end: self.end,
-            body,
-        }
+        ctx.while_loop(lt(i, end), move |ctx| {
+            consumer(ctx, i);
+            ctx.assign(i, add(i, 1u64));
+        });
     }
 }
 
 impl<Start, End> IndexedStagedIterator for RangeIter<Start, End>
 where
-    Start: Staged<Out = U64Type> + Clone,
-    End: Staged<Out = U64Type> + Clone,
+    Start: crate::staged::Staged<Out = U64Type> + Clone + 'static,
+    End: crate::staged::Staged<Out = U64Type> + Clone + 'static,
 {
     type LenExpr = Sub<End, Start>;
 
-    fn len(&self, builder: &mut VarBuilder) -> LetVar<U64Type, Self::LenExpr> {
-        builder.let_var(sub(self.end.clone(), self.start.clone()))
-    }
-
-    fn consume_indexed<F, Body>(
-        self,
-        builder: &mut VarBuilder,
-        consumer: F,
-    ) -> impl Staged<Out = UnitType> + use<Start, End, F, Body>
-    where
-        F: FnOnce(Var<U64Type>, Var<U64Type>) -> Body,
-        Body: Staged<Out = UnitType> + Clone,
-    {
-        let i = builder.let_var(0u64);
-        // For range, index and value are the same
-        let body = consumer(*i, *i);
-
-        RangeIterLoop {
-            index: i,
-            start: self.start,
-            end: self.end,
-            body,
-        }
-    }
-}
-
-struct RangeIterLoop<I, Start, End, Body> {
-    index: I,
-    start: Start,
-    end: End,
-    body: Body,
-}
-
-impl<I, Start, End, Body> Staged for RangeIterLoop<I, Start, End, Body>
-where
-    I: Staged<Out = UnitType> + std::ops::Deref<Target = Var<U64Type>>,
-    Start: Staged<Out = U64Type> + Clone,
-    End: Staged<Out = U64Type> + Clone,
-    Body: Staged<Out = UnitType> + Clone,
-{
-    type Out = UnitType;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Initialize index
-        self.index.codegen(ctx);
-        let i_var = *self.index.deref();
-
-        // Assign start value to index
-        assign(i_var, self.start.clone()).codegen(ctx);
-
-        // Generate: while (i < end) { body; i++; }
-        while_loop(
-            lt(i_var, self.end.clone()),
-            (self.body.clone(), assign(i_var, add(i_var, 1u64))),
-        )
-        .codegen(ctx)
+    fn len(&self) -> Self::LenExpr {
+        sub(self.end.clone(), self.start.clone())
     }
 }

@@ -27,9 +27,9 @@ fn test_ergonomic_let_var() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun0("let_var_test", |ctx| {
-        let x = ctx.let_var(42i64);
-        let y = ctx.let_var(8i64);
-        (x, y, add::<I64Type, _, _>(*x, *y))
+        let x = ctx.var(42i64);
+        let y = ctx.var(8i64);
+        add::<I64Type, _, _>(x, y)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -64,7 +64,8 @@ fn test_ergonomic_while_loop() {
         let i = ctx.let_var(0i64);
         let sum = ctx.let_var(0i64);
         (
-            i, sum,
+            i,
+            sum,
             while_loop(
                 lt::<I64Type, _, _>(*i, n),
                 (assign(*sum, add(*sum, *i)), assign(*i, add(*i, 1i64))),
@@ -128,7 +129,8 @@ fn test_ergonomic_slice_subslice() {
         let total = ctx.let_var(0i64);
         let sub = arr.slice_unchecked(1u64, 4u64);
         (
-            i, total,
+            i,
+            total,
             while_loop(
                 lt(*i, sub.len()),
                 (
@@ -170,10 +172,7 @@ fn test_ergonomic_f64_operations() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| {
-        add(
-            mul(x, 2.5f64),
-            3.5f64,
-        )
+        add(mul(x, 2.5f64), 3.5f64)
     });
 
     let compiled = compiler.compile(f).expect("compilation failed");
@@ -183,21 +182,18 @@ fn test_ergonomic_f64_operations() {
 }
 
 // =============================================================================
-// staged_block! macro tests
+// Imperative Ctx API tests (replaces old staged_block! tests)
 // =============================================================================
 
 #[test]
-fn test_staged_block_basic_let_var() {
+fn test_imperative_basic_var() {
     let mut compiler = Compiler::new();
 
-    // staged_block! sequences let-bindings automatically.
-    // Variables declared with let become Var<T> (no * needed in expressions).
-    let f = compiler.fun0("sb_basic", |ctx| {
-        staged_block! {
-            let x = ctx.let_var(42i64);
-            let y = ctx.let_var(8i64);
-            add::<I64Type, _, _>(x, y)
-        }
+    // ctx.var() declares + inits inline; no tuple sequencing needed.
+    let f = compiler.fun0("imp_basic", |ctx| {
+        let x = ctx.var(42i64);
+        let y = ctx.var(8i64);
+        add::<I64Type, _, _>(x, y)
     });
 
     let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -205,23 +201,17 @@ fn test_staged_block_basic_let_var() {
 }
 
 #[test]
-fn test_staged_block_while_loop() {
+fn test_imperative_while_loop() {
     let mut compiler = Compiler::new();
 
-    // Variables from staged_block! let-bindings are Var<T> — use directly, no *.
-    let count_to_n = compiler.fun1("count_to_n_sb", |ctx, n: Var<I64Type>| {
-        staged_block! {
-            let i   = ctx.let_var(0i64);
-            let sum = ctx.let_var(0i64);
-            while_loop(
-                lt::<I64Type, _, _>(i, n),
-                staged_block! {
-                    assign(sum, add(sum, i));
-                    assign(i, add(i, 1i64));
-                },
-            );
-            sum
-        }
+    let count_to_n = compiler.fun1("count_to_n_imp", |ctx, n: Var<I64Type>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.assign(sum, add(sum, i));
+            ctx.assign(i, add(i, 1i64));
+        });
+        sum
     });
 
     let compiled = compiler.compile(count_to_n).expect("compilation failed");
@@ -232,51 +222,39 @@ fn test_staged_block_while_loop() {
 }
 
 #[test]
-fn test_staged_block_bind() {
-    // ctx.bind evaluates a complex staged expression once and binds the result
-    // to a new Var<T>. Use it to avoid cloning expression trees.
+fn test_imperative_bind() {
+    // ctx.bind evaluates a complex expression once and binds to a Copy Var.
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("bind_test", |ctx, n: Var<I64Type>| {
-        staged_block! {
-            let doubled = ctx.bind(add(n, n));
-            add(doubled, doubled)
-        }
+    let f = compiler.fun1("bind_test_imp", |ctx, n: Var<I64Type>| {
+        let doubled = ctx.bind(add(n, n));
+        add(doubled, doubled)
     });
 
     let compiled = compiler.compile(f).expect("compilation failed");
     let f = compiled.as_fn();
     assert_eq!(f(5), 20); // (5+5) + (5+5)
-    assert_eq!(f(3), 12); // (3+3) + (3+3)
+    assert_eq!(f(3), 12);
 }
 
 #[test]
-fn test_staged_block_fibonacci() {
+fn test_imperative_fibonacci() {
     let mut compiler = Compiler::new();
 
-    let fib_iter = compiler.fun1("fib_iter_sb", |ctx, n: Var<I64Type>| {
-        staged_block! {
-            let i    = ctx.let_var(2i64);
-            let a    = ctx.let_var(0i64);
-            let b    = ctx.let_var(1i64);
-            let temp = ctx.let_var(0i64);
-            if_then_else(
-                lt(n, 2),
-                n,
-                staged_block! {
-                    while_loop(
-                        lt(i, add(n, 1)),
-                        staged_block! {
-                            assign(temp, add(a, b));
-                            assign(a, b);
-                            assign(b, temp);
-                            assign(i, add(i, 1i64));
-                        },
-                    );
-                    b
-                },
-            )
-        }
+    let fib_iter = compiler.fun1("fib_iter_imp", |ctx, n: Var<I64Type>| {
+        let i = ctx.var(2i64);
+        let a = ctx.var(0i64);
+        let b = ctx.var(1i64);
+        let temp = ctx.var(0i64);
+        if_then_else(lt(n, 2), n, {
+            ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
+                ctx.assign(temp, add(a, b));
+                ctx.assign(a, b);
+                ctx.assign(b, temp);
+                ctx.assign(i, add(i, 1i64));
+            });
+            b
+        })
     });
 
     let compiled = compiler.compile(fib_iter).expect("compilation failed");

@@ -1,6 +1,6 @@
 //! FunDef construction helpers for function definitions.
 
-use crate::func::{FunDef, VarBuilder};
+use crate::func::{Ctx, FunDef};
 use crate::func_impl::{TypeInfo, FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8};
 use crate::staged::{Staged, Var};
 use crate::types::StagedType;
@@ -9,7 +9,7 @@ macro_rules! impl_make_fun {
     // Zero parameters
     (0, $make_fun:ident, $make_fun_rec:ident, $FunRef:ident) => {
         impl FunDef {
-            pub fn $make_fun<OUT, F, BODY>(
+            pub fn $make_fun<OUT, F, Ret>(
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -17,17 +17,17 @@ macro_rules! impl_make_fun {
             ) -> $FunRef<OUT>
             where
                 OUT: StagedType,
-                F: FnOnce(&mut VarBuilder) -> BODY,
-                BODY: Staged<Out = OUT> + 'static,
+                F: FnOnce(&mut Ctx) -> Ret,
+                Ret: Staged<Out = OUT> + 'static,
             {
-                let mut vb = VarBuilder::new(*next_var_id);
-                let body_expr = body_fn(&mut vb);
-                *next_var_id = vb.final_id();
+                let mut ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(&mut ctx);
+                *next_var_id = ctx.final_id();
 
                 let func_id = functions.len();
                 functions.push(Some(FunDef {
                     name: name.to_string(),
-                    body: Box::new(move |ctx| body_expr.codegen(ctx)),
+                    body: ctx.into_body(ret),
                     param_infos: vec![],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids: vec![],
@@ -35,7 +35,7 @@ macro_rules! impl_make_fun {
                 $FunRef::new(func_id)
             }
 
-            pub fn $make_fun_rec<OUT, F, BODY>(
+            pub fn $make_fun_rec<OUT, F, Ret>(
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -43,20 +43,20 @@ macro_rules! impl_make_fun {
             ) -> $FunRef<OUT>
             where
                 OUT: StagedType,
-                F: FnOnce($FunRef<OUT>, &mut VarBuilder) -> BODY,
-                BODY: Staged<Out = OUT> + 'static,
+                F: FnOnce($FunRef<OUT>, &mut Ctx) -> Ret,
+                Ret: Staged<Out = OUT> + 'static,
             {
                 let func_id = functions.len();
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let mut vb = VarBuilder::new(*next_var_id);
-                let body_expr = body_fn(func_ref, &mut vb);
-                *next_var_id = vb.final_id();
+                let mut ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(func_ref, &mut ctx);
+                *next_var_id = ctx.final_id();
 
                 functions[func_id] = Some(FunDef {
                     name: name.to_string(),
-                    body: Box::new(move |ctx| body_expr.codegen(ctx)),
+                    body: ctx.into_body(ret),
                     param_infos: vec![],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids: vec![],
@@ -69,7 +69,7 @@ macro_rules! impl_make_fun {
     // N parameters (N >= 1)
     ($n:tt, $make_fun:ident, $make_fun_rec:ident, $FunRef:ident, [$($T:ident),+], [$($var:ident),+]) => {
         impl FunDef {
-            pub fn $make_fun<$($T,)+ OUT, FN, BODY>(
+            pub fn $make_fun<$($T,)+ OUT, FN, Ret>(
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -78,8 +78,8 @@ macro_rules! impl_make_fun {
             where
                 $($T: StagedType,)+
                 OUT: StagedType,
-                FN: FnOnce(&mut VarBuilder, $(Var<$T>),+) -> BODY,
-                BODY: Staged<Out = OUT> + 'static,
+                FN: FnOnce(&mut Ctx, $(Var<$T>),+) -> Ret,
+                Ret: Staged<Out = OUT> + 'static,
             {
                 $(
                     let $var = {
@@ -90,14 +90,14 @@ macro_rules! impl_make_fun {
                 )+
                 let param_var_ids = vec![$($var.id),+];
 
-                let mut vb = VarBuilder::new(*next_var_id);
-                let body_expr = body_fn(&mut vb, $($var),+);
-                *next_var_id = vb.final_id();
+                let mut ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(&mut ctx, $($var),+);
+                *next_var_id = ctx.final_id();
 
                 let func_id = functions.len();
                 functions.push(Some(FunDef {
                     name: name.to_string(),
-                    body: Box::new(move |ctx| body_expr.codegen(ctx)),
+                    body: ctx.into_body(ret),
                     param_infos: vec![$(TypeInfo::from_staged_type::<$T>()),+],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids,
@@ -105,7 +105,7 @@ macro_rules! impl_make_fun {
                 $FunRef::new(func_id)
             }
 
-            pub fn $make_fun_rec<$($T,)+ OUT, FN, BODY>(
+            pub fn $make_fun_rec<$($T,)+ OUT, FN, Ret>(
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -114,8 +114,8 @@ macro_rules! impl_make_fun {
             where
                 $($T: StagedType,)+
                 OUT: StagedType,
-                FN: FnOnce($FunRef<$($T,)+ OUT>, &mut VarBuilder, $(Var<$T>),+) -> BODY,
-                BODY: Staged<Out = OUT> + 'static,
+                FN: FnOnce($FunRef<$($T,)+ OUT>, &mut Ctx, $(Var<$T>),+) -> Ret,
+                Ret: Staged<Out = OUT> + 'static,
             {
                 $(
                     let $var = {
@@ -130,13 +130,13 @@ macro_rules! impl_make_fun {
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let mut vb = VarBuilder::new(*next_var_id);
-                let body_expr = body_fn(func_ref, &mut vb, $($var),+);
-                *next_var_id = vb.final_id();
+                let mut ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(func_ref, &mut ctx, $($var),+);
+                *next_var_id = ctx.final_id();
 
                 functions[func_id] = Some(FunDef {
                     name: name.to_string(),
-                    body: Box::new(move |ctx| body_expr.codegen(ctx)),
+                    body: ctx.into_body(ret),
                     param_infos: vec![$(TypeInfo::from_staged_type::<$T>()),+],
                     return_info: TypeInfo::from_staged_type::<OUT>(),
                     param_var_ids,

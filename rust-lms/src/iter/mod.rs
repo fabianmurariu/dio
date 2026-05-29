@@ -1,34 +1,33 @@
-//! Push-based staged iterators with CPS-style fusion.
+//! Push-based staged iterators with imperative consumer API.
 //!
-//! This module provides composable iterators that compile to efficient fused loops.
+//! # Core concepts
 //!
-//! # Core Concepts
-//!
-//! - **Push-based iteration**: Iterator controls the loop, consumer provides callback
-//! - **CPS-style fusion**: Combinators wrap callbacks, enabling single-loop compilation
-//! - **IndexedStagedIterator**: Subset of iterators supporting `zip` (like Rayon)
+//! - **Imperative consumers**: `for_each(ctx, |ctx, elem| { ctx.assign(...); })` — no `Clone` constraints.
+//! - **Combinators**: `map`, `filter` wrap consumers before passing to the source iterator.
+//! - **IndexedStagedIterator**: slices and ranges, enabling `zip`.
 //!
 //! # Example
 //!
 //! ```ignore
+//! let sum = ctx.var(0.0f64);
 //! slice.staged_iter()
-//!     .map(|x| add(*x, 2.0))
-//!     .filter(|x| gt(*x, 3.0))
-//!     .fold(builder, (0u64, 0.0f64), |(count, sum), x| {
-//!         (add(*count, 1u64), add(*sum, *x))
-//!     })
+//!      .filter(|x| gt(x, 0.0))
+//!      .for_each(ctx, move |ctx, elem| {
+//!          ctx.assign(sum, add(sum, elem));
+//!      });
 //! ```
 
 mod traits;
-mod accumulator;
 mod slice_iter;
 mod range_iter;
 mod map;
 mod filter;
 mod zip;
+mod accumulator;
 
-pub use traits::{StagedIterator, IndexedStagedIterator, IndexedSource, IntoStagedIterator, MinMax};
-pub use accumulator::{Accumulator, FoldExpr, IntoAccumulatorUpdate};
+pub use traits::{
+    IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
+};
 pub use slice_iter::SliceIter;
 pub use range_iter::{RangeIter, range};
 pub use map::Map;

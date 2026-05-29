@@ -459,7 +459,9 @@ impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRe
 }
 
 /// Check if an `Option<&T>` is `Some`.
-pub fn is_ref_some<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(opt: E) -> IsRefSome<E> {
+pub fn is_ref_some<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(
+    opt: E,
+) -> IsRefSome<E> {
     IsRefSome { opt }
 }
 
@@ -482,7 +484,9 @@ impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRe
 }
 
 /// Check if an `Option<&T>` is `None`.
-pub fn is_ref_none<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(opt: E) -> IsRefNone<E> {
+pub fn is_ref_none<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(
+    opt: E,
+) -> IsRefNone<E> {
     IsRefNone { opt }
 }
 
@@ -1169,7 +1173,7 @@ mod tests {
         assert_eq!(std::mem::size_of::<COption<f64>>(), 16);
         assert_eq!(std::mem::align_of::<COption<f64>>(), 8);
 
-        let some: COption<f64> = COption::Some(3.14);
+        let some: COption<f64> = COption::Some(3.15);
         let ptr = &some as *const COption<f64> as *const u8;
         unsafe {
             // Discriminant at offset 0
@@ -1177,7 +1181,7 @@ mod tests {
             assert_eq!(disc, 1, "discriminant should be 1 for Some");
             // Value at offset 8
             let val = *((ptr.add(8)) as *const f64);
-            assert_eq!(val, 3.14, "value should be 3.14");
+            assert_eq!(val, 3.15, "value should be 3.15");
         }
     }
 
@@ -1193,7 +1197,7 @@ mod tests {
         let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(3.14)), 3.14);
+        assert_eq!(f(COption::Some(3.15)), 3.15);
         assert_eq!(f(COption::Some(-2.5)), -2.5);
         assert_eq!(f(COption::None), 0.0);
     }
@@ -1209,7 +1213,7 @@ mod tests {
         let compiled = compiler.compile(wrap).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(3.14), COption::Some(3.14));
+        assert_eq!(f(3.15), COption::Some(3.15));
         assert_eq!(f(0.0), COption::Some(0.0));
         assert_eq!(f(-1.5), COption::Some(-1.5));
     }
