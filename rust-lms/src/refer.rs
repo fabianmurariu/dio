@@ -307,7 +307,11 @@ where
     T: StagedType + 'a,
     Tag: 'a,
 {
-    PtrOffset { ptr, index , _marker: PhantomData }
+    PtrOffset {
+        ptr,
+        index,
+        _marker: PhantomData,
+    }
 }
 
 /// Pointer offset for mutable reference/pointer
@@ -347,7 +351,11 @@ where
     T: StagedType + 'a,
     Tag: 'a,
 {
-    PtrOffsetMut { ptr, index, _marker: PhantomData }
+    PtrOffsetMut {
+        ptr,
+        index,
+        _marker: PhantomData,
+    }
 }
 
 // =============================================================================
@@ -392,7 +400,11 @@ where
     I: Staged<Out = crate::types::I64Type>,
     T: StagedType + 'a,
 {
-    ArrayIndex { ptr, index, _marker: PhantomData }
+    ArrayIndex {
+        ptr,
+        index,
+        _marker: PhantomData,
+    }
 }
 
 #[cfg(test)]
@@ -427,10 +439,10 @@ mod tests {
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        let value = 3.14159;
+        let value = 3.15159;
         let result = f(&value);
 
-        assert_eq!(result, 3.14159);
+        assert_eq!(result, 3.15159);
     }
 
     #[test]

@@ -30,7 +30,7 @@ fn test_simple_struct_field_access() {
     let f = compiled.as_fn();
 
     // Create a test point - passed by VALUE
-    let point = Point { x: 42, y: 3.14 };
+    let point = Point { x: 42, y: 3.15 };
     let result = f(point); // Pass by value, not &point
 
     assert_eq!(result, 42);
@@ -52,7 +52,7 @@ fn test_struct_multiple_fields() {
     let compiled = compiler.compile(sum_fields).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let point = Point { x: 10, y: 3.14 };
+    let point = Point { x: 10, y: 3.15 };
     let result = f(point); // Pass by value
 
     assert_eq!(result, 13); // 10 + 3
@@ -223,7 +223,9 @@ fn test_outer_extra_field() {
     let mut compiler = Compiler::new();
 
     // fn get_extra(outer: Outer) -> i64  -- just get the extra field, no nesting
-    let get_extra = compiler.fun1("get_extra", |_ctx, outer: Var<Outer>| outer.get(OuterType::extra));
+    let get_extra = compiler.fun1("get_extra", |_ctx, outer: Var<Outer>| {
+        outer.get(OuterType::extra)
+    });
 
     let compiled = compiler.compile(get_extra).expect("compilation failed");
     let f = compiled.as_fn();
@@ -251,10 +253,14 @@ fn test_mixed_struct_read_f64_field() {
     let compiled = compiler.compile(get_y).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let point = Point { x: 42, y: 3.14 };
+    let point = Point { x: 42, y: 3.15 };
     let result = f(point);
 
-    assert!((result - 3.14).abs() < 1e-10, "Expected 3.14, got {}", result);
+    assert!(
+        (result - 3.15).abs() < 1e-10,
+        "Expected 3.15, got {}",
+        result
+    );
 }
 
 #[test]
@@ -271,7 +277,7 @@ fn test_mixed_struct_read_i64_after_f64_access() {
     let compiled = compiler.compile(read_both).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let point = Point { x: 100, y: 3.14 };
+    let point = Point { x: 100, y: 3.15 };
     let result = f(point);
 
     assert_eq!(result, 100);
@@ -304,27 +310,43 @@ fn test_float_first_struct() {
     let mut compiler = Compiler::new();
 
     // Struct with f64 as first field
-    let get_a = compiler.fun1("get_a", |_ctx, s: Var<MixedStruct>| s.get(MixedStructType::a));
+    let get_a = compiler.fun1("get_a", |_ctx, s: Var<MixedStruct>| {
+        s.get(MixedStructType::a)
+    });
 
     let compiled = compiler.compile(get_a).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let s = MixedStruct { a: 2.71, b: 42, c: 1.41 };
+    let s = MixedStruct {
+        a: 2.71,
+        b: 42,
+        c: 1.41,
+    };
     let result = f(s);
 
-    assert!((result - 2.71).abs() < 1e-10, "Expected 2.71, got {}", result);
+    assert!(
+        (result - 2.71).abs() < 1e-10,
+        "Expected 2.71, got {}",
+        result
+    );
 }
 
 #[test]
 fn test_float_first_struct_read_int() {
     let mut compiler = Compiler::new();
 
-    let get_b = compiler.fun1("get_b", |_ctx, s: Var<MixedStruct>| s.get(MixedStructType::b));
+    let get_b = compiler.fun1("get_b", |_ctx, s: Var<MixedStruct>| {
+        s.get(MixedStructType::b)
+    });
 
     let compiled = compiler.compile(get_b).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let s = MixedStruct { a: 2.71, b: 42, c: 1.41 };
+    let s = MixedStruct {
+        a: 2.71,
+        b: 42,
+        c: 1.41,
+    };
     let result = f(s);
 
     assert_eq!(result, 42);
@@ -343,7 +365,11 @@ fn test_16byte_float_first_struct() {
     let s = FloatFirst { x: 2.71, y: 42 };
     let result = f(s);
 
-    assert!((result - 2.71).abs() < 1e-10, "Expected 2.71, got {}", result);
+    assert!(
+        (result - 2.71).abs() < 1e-10,
+        "Expected 2.71, got {}",
+        result
+    );
 }
 
 #[test]
@@ -375,6 +401,6 @@ fn test_return_mixed_struct() {
     let compiled = compiler.compile(make_point).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let result = f(42, 3.14);
+    let result = f(42, 3.15);
     assert_eq!(result, 42);
 }
