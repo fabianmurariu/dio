@@ -5,7 +5,7 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::{InstBuilder, Value};
+use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::Module;
@@ -83,6 +83,48 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             self.unit_value = Some(val);
             val
         }
+    }
+
+    /// Resolve the data pointer (`*T`) of a slice operand.
+    ///
+    /// A slice's Staged value is a single `i64` with one of two encodings:
+    /// - **register-resolved** (slice parameters): the `(ptr, len)` pair lives
+    ///   in two Cranelift variables recorded in [`Self::slice_vars`], keyed by
+    ///   the operand's `var_id`. We read `ptr` directly — no memory access.
+    /// - **memory-resolved** (subslices and anything without a `var_id`): the
+    ///   operand's `codegen` value is a pointer to a `(ptr, len)` pair on a
+    ///   stack slot, with `ptr` at offset 0 and `len` at offset 8.
+    ///
+    /// This pair of helpers ([`Self::slice_data_ptr`] / [`Self::slice_len`]) is
+    /// the single place that knows about slice layout; slice ops call into it
+    /// rather than re-deriving the pointer themselves.
+    pub fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
+        if let Some(var_id) = slice.var_id() {
+            if let Some(sv) = self.slice_vars.get(&var_id).copied() {
+                return self.builder.use_var(sv.ptr_var);
+            }
+        }
+        // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair.
+        let slice_ptr = slice.codegen(self);
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+    }
+
+    /// Resolve the length (`usize`) of a slice operand.
+    ///
+    /// See [`Self::slice_data_ptr`] for the two encodings; `len` is the second
+    /// register variable, or offset 8 of the `(ptr, len)` pair.
+    pub fn slice_len(&mut self, slice: &impl Staged) -> Value {
+        if let Some(var_id) = slice.var_id() {
+            if let Some(sv) = self.slice_vars.get(&var_id).copied() {
+                return self.builder.use_var(sv.len_var);
+            }
+        }
+        let slice_ptr = slice.codegen(self);
+        self.builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
     }
 }
 

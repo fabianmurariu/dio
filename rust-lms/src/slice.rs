@@ -14,7 +14,24 @@
 //! ```
 //!
 //! At the ABI boundary, slice references are passed as 2 x i64 (ptr, len).
-//! Internally, they're stored in a stack slot and accessed via pointer.
+//!
+//! # Canonical Staged representation
+//!
+//! Within the staged graph a slice's `codegen` value is always a single `i64`,
+//! resolved one of two ways (see [`CompilationContext::slice_data_ptr`] /
+//! [`CompilationContext::slice_len`], which are the only code that knows this):
+//!
+//! - **register-resolved** — slice *parameters* are split at the ABI boundary
+//!   into two Cranelift variables (`ptr_var`, `len_var`) kept in
+//!   `ctx.slice_vars` keyed by `var_id`. Slice ops read those registers
+//!   directly, with no memory access (the fast path for tight loops).
+//! - **memory-resolved** — subslices (and any operand without a `var_id`) have
+//!   a `codegen` value that is a *pointer to* a `(ptr, len)` pair on a stack
+//!   slot: `ptr` at offset 0, `len` at offset 8.
+//!
+//! So `Slice<T>` really is just "ptr + len"; the indirection only exists
+//! because `Staged::codegen` returns a single `Value`, so an anonymous slice
+//! needs somewhere (the stack slot) to hold its two halves.
 //!
 //! # Example
 //!
@@ -157,20 +174,7 @@ where
     type Out = U64Type;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        // Check for optimized slice storage (fat pointer parameters)
-        if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use len directly from register variable
-                return ctx.builder.use_var(slice_vars.len_var);
-            }
-        }
-
-        // Fallback: slice is a pointer to (ptr, len) pair on stack
-        let slice_ptr = self.slice.codegen(ctx);
-        // Load len from offset 8
-        ctx.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        ctx.slice_len(&self.slice)
     }
 }
 
@@ -188,19 +192,7 @@ where
     type Out = U64Type;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        // Check for optimized slice storage (fat pointer parameters)
-        if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use len directly from register variable
-                return ctx.builder.use_var(slice_vars.len_var);
-            }
-        }
-
-        // Fallback: slice is a pointer to (ptr, len) pair on stack
-        let slice_ptr = self.slice.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        ctx.slice_len(&self.slice)
     }
 }
 
@@ -224,20 +216,7 @@ where
     type Out = SRef<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        // Check for optimized slice storage (fat pointer parameters)
-        if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                return ctx.builder.use_var(slice_vars.ptr_var);
-            }
-        }
-
-        // Fallback: slice is a pointer to (ptr, len) pair on stack
-        let slice_ptr = self.slice.codegen(ctx);
-        // Load ptr from offset 0
-        ctx.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        ctx.slice_data_ptr(&self.slice)
     }
 }
 
@@ -256,19 +235,7 @@ where
     type Out = SRefMut<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        // Check for optimized slice storage (fat pointer parameters)
-        if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                return ctx.builder.use_var(slice_vars.ptr_var);
-            }
-        }
-
-        // Fallback: slice is a pointer to (ptr, len) pair on stack
-        let slice_ptr = self.slice.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        ctx.slice_data_ptr(&self.slice)
     }
 }
 
@@ -295,25 +262,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let index = self.index.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // Compute element address: data_ptr + index * sizeof(T)
         let element_size = T::size_of() as i64;
@@ -342,25 +291,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let index = self.index.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
@@ -391,25 +322,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let index = self.index.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // Compute element address
         let element_size = T::size_of() as i64;
@@ -442,25 +355,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let index = self.index.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
@@ -498,25 +393,7 @@ where
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // Compute element address
         let element_size = T::size_of() as i64;
@@ -561,25 +438,7 @@ where
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // Compute new pointer: data_ptr + start * sizeof(T)
         let element_size = T::size_of() as i64;
@@ -632,25 +491,7 @@ where
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
 
-        // Get data pointer - optimized path if available
-        let data_ptr = if let Some(var_id) = self.slice.var_id() {
-            if let Some(slice_vars) = ctx.slice_vars.get(&var_id) {
-                // Optimized path: use ptr directly from register variable
-                ctx.builder.use_var(slice_vars.ptr_var)
-            } else {
-                // Fallback: load from stack
-                let slice_ptr = self.slice.codegen(ctx);
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-            }
-        } else {
-            // Fallback: load from stack
-            let slice_ptr = self.slice.codegen(ctx);
-            ctx.builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
-        };
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         let element_size = T::size_of() as i64;
         let scale = ctx.builder.ins().iconst(types::I64, element_size);
