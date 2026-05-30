@@ -267,14 +267,37 @@ impl Ctx {
 
             ctx.builder.switch_to_block(loop_body);
             ctx.builder.seal_block(loop_body);
+            // Expose this loop's exit block so `break_loop` inside the body can
+            // jump to it; pop once the body is fully emitted.
+            ctx.loop_exit_stack.push(loop_exit);
             for action in body_actions {
                 action(ctx);
             }
+            ctx.loop_exit_stack.pop();
             ctx.builder.ins().jump(loop_header, &[]);
             ctx.builder.seal_block(loop_header);
 
             ctx.builder.switch_to_block(loop_exit);
             ctx.builder.seal_block(loop_exit);
+        }));
+    }
+
+    /// Break out of the innermost enclosing loop.
+    ///
+    /// Emits a jump to the current loop's exit block. Typically used inside an
+    /// `if_then` to exit early. Panics at codegen time if called outside a loop.
+    pub fn break_loop(&mut self) {
+        self.actions.push(Box::new(move |ctx| {
+            let exit = *ctx
+                .loop_exit_stack
+                .last()
+                .expect("break_loop called outside of a loop");
+            ctx.builder.ins().jump(exit, &[]);
+            // The current block is now terminated; switch to a fresh (dead)
+            // block so any following emitted instructions remain well-formed.
+            let dead = ctx.builder.create_block();
+            ctx.builder.switch_to_block(dead);
+            ctx.builder.seal_block(dead);
         }));
     }
 
@@ -1020,6 +1043,7 @@ impl<'a> Compiler<'a> {
                             extern_func_ids: &extern_func_ids,
                             slice_vars: &mut slice_vars,
                             unit_value: None,
+                            loop_exit_stack: Vec::new(),
                         };
                         (func_def.body)(&mut ctx)
                     };
@@ -1092,6 +1116,7 @@ impl<'a> Compiler<'a> {
                         extern_func_ids: &extern_func_ids,
                         slice_vars: &mut slice_vars,
                         unit_value: None,
+                        loop_exit_stack: Vec::new(),
                     };
                     expr.codegen(&mut ctx)
                 };

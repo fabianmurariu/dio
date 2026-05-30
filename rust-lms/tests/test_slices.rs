@@ -103,6 +103,21 @@ fn test_slice_subslice() {
 }
 
 #[test]
+fn test_slice_swap() {
+    let mut compiler = Compiler::new();
+    let swap = compiler.fun1("swap_ends", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
+        // swap arr[0] and arr[last]
+        let last = arr.len() - 1u64;
+        arr.swap_unchecked(0u64, last)
+    });
+    let compiled = compiler.compile(swap).expect("compilation failed");
+    let f = compiled.as_fn();
+    let mut data: [i64; 4] = [1, 2, 3, 4];
+    f(&mut data[..]);
+    assert_eq!(data, [4, 2, 3, 1]);
+}
+
+#[test]
 fn test_slice_of_slice() {
     // Slicing is closed: a sub-slice supports `slice_unchecked` again.
     let mut compiler = Compiler::new();

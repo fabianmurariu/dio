@@ -24,12 +24,14 @@ mod map;
 mod filter;
 mod zip;
 mod accumulator;
+mod early_exit;
 
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
+pub use early_exit::IndexedEarlyExit;
 pub use slice_iter::SliceIter;
-pub use range_iter::{RangeIter, range};
+pub use range_iter::{range, range_step, RangeIter, RangeStep};
 pub use map::Map;
 pub use filter::Filter;
 pub use zip::Zip;

@@ -6,7 +6,7 @@ use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::refer::SRef;
 use crate::slice::{Slice, SliceGetUnchecked, SliceLen, SliceRefOps};
-use crate::staged::{Const, Var};
+use crate::staged::Var;
 use crate::types::{ConstantType, CopyType, StagedType, U64Type};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
@@ -50,11 +50,13 @@ where
         F: FnOnce(&mut Ctx, Var<T>) + 'static,
     {
         let i = ctx.var(0u64);
-        let elem = ctx.var(Const::<T>::new(Default::default()));
         let slice = self.slice;
 
         ctx.while_loop(lt(i, slice.clone().len()), move |ctx| {
-            ctx.store(elem, SliceRefOps::get_unchecked(slice.clone(), i));
+            // Bind the element *inside* the loop: no dead pre-loop init, and the
+            // frontend resolves this single-def var to the loaded value with no
+            // copy — so the emitted body matches a hand-written `while_loop`.
+            let elem = ctx.bind(SliceRefOps::get_unchecked(slice.clone(), i));
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
         });

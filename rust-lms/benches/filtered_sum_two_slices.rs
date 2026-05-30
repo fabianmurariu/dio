@@ -66,8 +66,8 @@ fn build_filtered_sum_lms() -> impl Fn(&[i64], &[i64], i64) -> i64 {
             let acc = ctx.var(0i64);
             let v = ctx.var(0i64);
 
-            ctx.while_loop(lt(i, x.clone().len()), move |ctx| {
-                ctx.store(v, x.clone().get_unchecked(i) + y.clone().get_unchecked(i));
+            ctx.while_loop(lt(i, x.len()), move |ctx| {
+                ctx.store(v, x.get_unchecked(i) + y.get_unchecked(i));
                 ctx.if_then(gt(v, z), move |ctx| {
                     ctx.store(acc, acc + v);
                 });

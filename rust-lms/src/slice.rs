@@ -348,6 +348,45 @@ where
 }
 
 // =============================================================================
+// SliceSwapUnchecked: Swap two elements (no bounds check, mutable slices only)
+// =============================================================================
+
+/// Swap the elements at indices `i` and `j` without bounds checking. Only valid
+/// on a mutable `CopyType` slice. Emits two loads then two stores.
+#[derive(Clone, Copy)]
+pub struct SliceSwapUnchecked<S, I, J> {
+    slice: S,
+    i: I,
+    j: J,
+}
+
+impl<S, I, J> Staged for SliceSwapUnchecked<S, I, J>
+where
+    S: Staged,
+    S::Out: MutSliceType,
+    ElemOf<S>: CopyType,
+    I: Staged<Out = U64Type>,
+    J: Staged<Out = U64Type>,
+{
+    type Out = UnitType;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let i = self.i.codegen(ctx);
+        let j = self.j.codegen(ctx);
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
+        let addr_i = element_addr::<S>(ctx, data_ptr, i);
+        let addr_j = element_addr::<S>(ctx, data_ptr, j);
+
+        let ty = ElemOf::<S>::cranelift_type();
+        let vi = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_i, 0);
+        let vj = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_j, 0);
+        ctx.builder.ins().store(MemFlags::trusted(), vj, addr_i, 0);
+        ctx.builder.ins().store(MemFlags::trusted(), vi, addr_j, 0);
+        ctx.get_unit_value()
+    }
+}
+
+// =============================================================================
 // SliceSliceUnchecked: Get sub-slice (no bounds check)
 // =============================================================================
 
@@ -549,6 +588,23 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
             slice: self,
             start: start.into_staged(),
             end: end.into_staged(),
+        }
+    }
+
+    /// Swap the elements at indices `i` and `j` without bounds checking.
+    ///
+    /// Only available for `CopyType` elements. Ergonomic like the other ops:
+    /// `arr.swap_unchecked(0u64, lo + 1u64)`.
+    fn swap_unchecked<I, J>(self, i: I, j: J) -> SliceSwapUnchecked<Self, I::Staged, J::Staged>
+    where
+        I: IntoStaged<U64Type>,
+        J: IntoStaged<U64Type>,
+        T: CopyType,
+    {
+        SliceSwapUnchecked {
+            slice: self,
+            i: i.into_staged(),
+            j: j.into_staged(),
         }
     }
 }

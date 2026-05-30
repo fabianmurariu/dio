@@ -255,3 +255,75 @@ fn test_range_sum() {
     assert_eq!(f(10u64), 45u64); // 0+1+...+9 = 45
     assert_eq!(f(5u64), 10u64); // 0+1+2+3+4 = 10
 }
+
+#[test]
+fn test_range_step_sum() {
+    let mut compiler = Compiler::new();
+    // Sum of [0, n) stepping by 2: 0 + 2 + 4 + ...
+    let f = compiler.fun1("range_step_sum", |ctx, n: Var<U64Type>| {
+        range_step(0u64, n, 2u64).sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(10u64), 20u64); // 0+2+4+6+8
+    assert_eq!(f(9u64), 20u64); // 0+2+4+6+8
+}
+
+#[test]
+fn test_range_i64_sum() {
+    let mut compiler = Compiler::new();
+    // i64 range works as a StagedIterator (no zip/len, but sum/fold do).
+    let f = compiler.fun1("range_i64_sum", |ctx, n: Var<i64>| range(0i64, n).sum(ctx));
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(5i64), 10i64); // 0+1+2+3+4
+}
+
+#[test]
+fn test_range_into_staged_iter() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("range_into_iter", |ctx, n: Var<U64Type>| {
+        range(0u64, n).into_staged_iter().map(|x| x * 3u64).sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(4u64), 18u64); // 3*(0+1+2+3)
+}
+
+#[test]
+fn test_iter_any() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("any_gt_4", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().any(ctx, |x| gt(x, 4i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert!(f(&[1i64, 2, 3, 5][..])); // 5 > 4
+    assert!(!f(&[1i64, 2, 3, 4][..])); // none > 4
+    assert!(!f(&[][..]));
+}
+
+#[test]
+fn test_iter_all() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("all_positive", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().all(ctx, |x| gt(x, 0i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert!(f(&[1i64, 2, 3][..]));
+    assert!(!f(&[1i64, -2, 3][..]));
+    assert!(f(&[][..])); // vacuously true
+}
+
+#[test]
+fn test_iter_position() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("pos_of_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().position(ctx, |x| eq(x, 3i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[10i64, 20, 3, 40][..]), 2); // index 2
+    assert_eq!(f(&[10i64, 20][..]), 2); // not found -> len (2)
+}

@@ -5,7 +5,7 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, Value};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::Module;
@@ -48,6 +48,9 @@ pub struct CompilationContext<'a, 'b> {
     pub slice_vars: &'b mut HashMap<usize, SliceVars>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
     pub unit_value: Option<Value>,
+    /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
+    /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
+    pub loop_exit_stack: Vec<Block>,
 }
 
 impl<'a, 'b> CompilationContext<'a, 'b> {

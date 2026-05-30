@@ -270,3 +270,38 @@ where
         body,
     }
 }
+
+// =============================================================================
+// Not<C> - Logical negation of a boolean
+// =============================================================================
+
+/// Logical negation: `!cond`.
+#[derive(Clone)]
+pub struct Not<C> {
+    cond: C,
+}
+
+impl<C> Staged for Not<C>
+where
+    C: Staged<Out = BoolType>,
+{
+    type Out = BoolType;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let v = self.cond.codegen(ctx);
+        // bool is an i8 in {0, 1}; `v == 0` is its negation.
+        ctx.builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, v, 0)
+    }
+}
+
+/// Negate a boolean staged expression: `not(cond)`.
+pub fn not<C>(cond: C) -> Not<C::Staged>
+where
+    C: IntoStaged<BoolType>,
+{
+    Not {
+        cond: cond.into_staged(),
+    }
+}

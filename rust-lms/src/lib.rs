@@ -123,7 +123,9 @@ pub mod _internal {
 
 /// Commonly used types and traits
 pub mod prelude {
-    pub use crate::control::{if_then, if_then_else, while_loop, IfThen, IfThenElse, While};
+    pub use crate::control::{
+        if_then, if_then_else, not, while_loop, IfThen, IfThenElse, Not, While,
+    };
     pub use crate::ffi::{
         call_extern0, call_extern1, call_extern2, ExternFn, ExternRef, FatSlice, FatSliceMut,
         FatSliceMutType, FatSliceType,
@@ -133,8 +135,8 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, Filter, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
-        RangeIter, SliceIter, StagedIterator, Zip,
+        range, range_step, Filter, IndexedEarlyExit, IndexedSource, IndexedStagedIterator,
+        IntoStagedIterator, Map, MinMax, RangeIter, RangeStep, SliceIter, StagedIterator, Zip,
     };
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,

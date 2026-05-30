@@ -247,4 +247,13 @@ pub trait IndexedSource: Clone + 'static {
 pub trait IntoStagedIterator {
     type Iter: StagedIterator;
     fn staged_iter(self) -> Self::Iter;
+
+    /// Alias for [`staged_iter`](Self::staged_iter), reading more naturally at
+    /// call sites that consume `self`: `arr.into_staged_iter()`.
+    fn into_staged_iter(self) -> Self::Iter
+    where
+        Self: Sized,
+    {
+        self.staged_iter()
+    }
 }
