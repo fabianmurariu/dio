@@ -332,6 +332,55 @@ impl Ctx {
             ctx.builder.seal_block(merge_block);
         }));
     }
+
+    /// Emit a two-sided conditional: `if cond { then } else { els }`.
+    ///
+    /// Both branches are side-effecting (they emit into the `Ctx` they receive)
+    /// and the construct yields no value — sequence with `ctx.var`/`ctx.store`
+    /// if you need a result out.
+    pub fn if_then_else<C, T, E>(&mut self, cond: C, then: T, els: E)
+    where
+        C: Staged<Out = BoolType> + 'static,
+        T: FnOnce(&mut Ctx) + 'static,
+        E: FnOnce(&mut Ctx) + 'static,
+    {
+        // Stage both branches into child contexts, keeping var ids disjoint.
+        let mut then_child = Ctx::new(self.next_var_id);
+        then(&mut then_child);
+        let mut else_child = Ctx::new(then_child.next_var_id);
+        els(&mut else_child);
+        self.next_var_id = else_child.next_var_id;
+        let then_actions = then_child.actions;
+        let else_actions = else_child.actions;
+
+        self.actions.push(Box::new(move |ctx| {
+            let then_block = ctx.builder.create_block();
+            let else_block = ctx.builder.create_block();
+            let merge_block = ctx.builder.create_block();
+
+            let cond_val = cond.codegen(ctx);
+            ctx.builder
+                .ins()
+                .brif(cond_val, then_block, &[], else_block, &[]);
+
+            ctx.builder.switch_to_block(then_block);
+            ctx.builder.seal_block(then_block);
+            for action in then_actions {
+                action(ctx);
+            }
+            ctx.builder.ins().jump(merge_block, &[]);
+
+            ctx.builder.switch_to_block(else_block);
+            ctx.builder.seal_block(else_block);
+            for action in else_actions {
+                action(ctx);
+            }
+            ctx.builder.ins().jump(merge_block, &[]);
+
+            ctx.builder.switch_to_block(merge_block);
+            ctx.builder.seal_block(merge_block);
+        }));
+    }
 }
 
 /// Backward-compatible alias. Prefer `Ctx`.

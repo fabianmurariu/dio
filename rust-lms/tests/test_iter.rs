@@ -291,6 +291,60 @@ fn test_range_into_staged_iter() {
 }
 
 #[test]
+fn test_iter_filter_map() {
+    let mut compiler = Compiler::new();
+    // keep evens, map to x*10, sum: [1,2,3,4] -> 2,4 -> 20,40 -> 60
+    let f = compiler.fun1("fm_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter()
+            .filter_map(|x| eq(x % 2i64, 0i64).then_some(x * 10i64))
+            .sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[1i64, 2, 3, 4][..]), 60);
+    assert_eq!(f(&[1i64, 3, 5][..]), 0); // no evens
+}
+
+#[test]
+fn test_iter_find_map() {
+    let mut compiler = Compiler::new();
+    // first element > 3, mapped to x*10; -1 if none found
+    let f = compiler.fun1("find_map", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        let (val, found) = arr
+            .staged_iter()
+            .find_map(ctx, |x| gt(x, 3i64).then_some(x * 10i64));
+        select(found, val, -1i64)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[1i64, 2, 5, 4][..]), 50); // first > 3 is 5 -> 50
+    assert_eq!(f(&[1i64, 2, 3][..]), -1); // none > 3
+}
+
+#[test]
+fn test_iter_count_if() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("count_gt_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().count_if(ctx, |x| gt(x, 3i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[1i64, 4, 5, 2, 6][..]), 3u64); // 4,5,6
+    assert_eq!(f(&[][..]), 0u64);
+}
+
+#[test]
+fn test_iter_sum_if() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("sum_even", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().sum_if(ctx, |x| eq(x % 2i64, 0i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[1i64, 2, 3, 4, 5, 6][..]), 12); // 2+4+6
+}
+
+#[test]
 fn test_iter_any() {
     let mut compiler = Compiler::new();
     let f = compiler.fun1("any_gt_4", |ctx, arr: Var<SRef<Slice<i64>>>| {

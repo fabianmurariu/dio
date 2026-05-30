@@ -110,6 +110,7 @@ pub mod option;
 pub mod refer;
 pub mod slice;
 pub mod staged;
+pub mod staged_opt;
 pub mod r#struct;
 pub mod tuple;
 pub mod types;
@@ -135,9 +136,11 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, range_step, Filter, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map,
-        MinMax, RangeIter, RangeStep, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
+        range, range_step, Filter, FilterMap, IndexedSource, IndexedStagedIterator,
+        IntoStagedIterator, Map, MinMax, RangeIter, RangeStep, Scan, SkipWhile, SliceIter,
+        StagedIterator, TakeWhile, Zip,
     };
+    pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
     };

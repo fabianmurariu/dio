@@ -2,11 +2,12 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{add, gt, lt, Num};
+use crate::num::{add, gt, lt, select, Num};
 use crate::staged::{Const, Staged, Var};
-use crate::types::{BoolType, StagedType, U64Type};
+use crate::staged_opt::StagedOpt;
+use crate::types::{BoolType, ConstantType, CopyType, StagedType, U64Type};
 
-use super::{Filter, Map, Scan, SkipWhile, TakeWhile, Zip};
+use super::{Filter, FilterMap, Map, Scan, SkipWhile, TakeWhile, Zip};
 
 // =============================================================================
 // MinMax sentinels for min/max reductions
@@ -123,6 +124,17 @@ pub trait StagedIterator: Sized {
         Scan::new(self, init, f)
     }
 
+    /// Map-and-filter fused: `f` returns a [`StagedOpt`] (typically via
+    /// `cond.then_some(value)`); `Some` payloads are kept, `None` dropped. No
+    /// `Option` is materialized — one branch per element, value in a register.
+    fn filter_map<F, O>(self, f: F) -> FilterMap<Self, F>
+    where
+        F: Fn(Var<Self::Item>) -> O,
+        O: StagedOpt,
+    {
+        FilterMap::new(self, f)
+    }
+
     /// Yield elements while `p` holds; stop the whole iteration at the first
     /// element where it fails (short-circuits via `break_loop`).
     fn take_while<P, Cond>(self, p: P) -> TakeWhile<Self, P>
@@ -172,6 +184,43 @@ pub trait StagedIterator: Sized {
         acc
     }
 
+    /// Branchless count of elements satisfying `pred`.
+    ///
+    /// Equivalent to `self.filter(pred).count(ctx)` but adds a predicated
+    /// `0/1` (via cmov) every iteration instead of branching — so the loop
+    /// body has no data-dependent branch and stays vectorizable.
+    fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<U64Type>
+    where
+        Self::Item: 'static,
+        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        Cond: Staged<Out = BoolType> + 'static,
+    {
+        let acc = ctx.var(0u64);
+        self.for_each(ctx, move |ctx, elem| {
+            ctx.store(acc, acc + select(pred(elem), 1u64, 0u64));
+        });
+        acc
+    }
+
+    /// Branchless sum of elements satisfying `pred`.
+    ///
+    /// Equivalent to `self.filter(pred).sum(ctx)` but adds `select(pred, elem,
+    /// 0)` every iteration instead of branching.
+    fn sum_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<Self::Item>
+    where
+        Self::Item: Num,
+        <Self::Item as StagedType>::RuntimeValue: Default,
+        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        Cond: Staged<Out = BoolType> + 'static,
+    {
+        let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
+        self.for_each(ctx, move |ctx, elem| {
+            let zero = Const::<Self::Item>::new(Default::default());
+            ctx.store(acc, acc + select(pred(elem), elem, zero));
+        });
+        acc
+    }
+
     /// Find the minimum element. Starts at the type's maximum sentinel.
     fn min(self, ctx: &mut Ctx) -> Var<Self::Item>
     where
@@ -181,9 +230,10 @@ pub trait StagedIterator: Sized {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(lt(elem, acc), move |ctx| {
-                ctx.store(acc, elem);
-            });
+            // Branchless: unconditional store of a cmov. Both arms are already
+            // in registers, so there's no downside, and the body stays
+            // vectorizable/unrollable.
+            ctx.store(acc, select(lt(elem, acc), elem, acc));
         });
         acc
     }
@@ -197,9 +247,8 @@ pub trait StagedIterator: Sized {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
         let acc = ctx.var(Const::<Self::Item>::new(sentinel));
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(gt(elem, acc), move |ctx| {
-                ctx.store(acc, elem);
-            });
+            // Branchless: see `min`.
+            ctx.store(acc, select(gt(elem, acc), elem, acc));
         });
         acc
     }
@@ -296,6 +345,33 @@ pub trait StagedIterator: Sized {
             ctx.store(idx, add(idx, 1u64));
         });
         idx
+    }
+
+    /// First `Some` produced by `f`, short-circuiting. Returns `(value, found)`:
+    /// when `found` is `false` the iterator was exhausted and `value` holds the
+    /// default — check `found` before using `value`. No `Option` is
+    /// materialized; `f` is typically `|x| cond.then_some(mapped)`.
+    fn find_map<F, O>(self, ctx: &mut Ctx, f: F) -> (Var<O::Item>, Var<bool>)
+    where
+        F: Fn(Var<Self::Item>) -> O + 'static,
+        O: StagedOpt + 'static,
+        O::Item: ConstantType + CopyType + 'static,
+        <O::Item as StagedType>::RuntimeValue: Default,
+    {
+        let result = ctx.var(Const::<O::Item>::new(Default::default()));
+        let found = ctx.var(false);
+        self.for_each(ctx, move |ctx, elem| {
+            f(elem).eliminate(
+                ctx,
+                move |ctx, v| {
+                    ctx.store(result, v);
+                    ctx.store(found, true);
+                    ctx.break_loop();
+                },
+                |_| {},
+            );
+        });
+        (result, found)
     }
 }
 

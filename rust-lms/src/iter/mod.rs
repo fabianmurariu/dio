@@ -18,6 +18,7 @@
 //! ```
 
 mod filter;
+mod filter_map;
 mod map;
 mod range_iter;
 mod scan;
@@ -28,6 +29,7 @@ mod traits;
 mod zip;
 
 pub use filter::Filter;
+pub use filter_map::FilterMap;
 pub use map::Map;
 pub use range_iter::{range, range_step, RangeIter, RangeStep};
 pub use scan::Scan;
