@@ -59,7 +59,7 @@
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{CopyType, StagedType, U64Type, UnitType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -157,41 +157,75 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
 }
 
 // =============================================================================
+// SliceType: unify immutable and mutable slice fat pointers
+// =============================================================================
+
+/// A staged slice fat-pointer type. Implemented by both `SRef<Slice<T>>`
+/// (`&[T]`) and `SRefMut<Slice<T>>` (`&mut [T]`), so a *single* op impl can
+/// serve both — the mutability lives entirely in the associated `ElemRef`.
+///
+/// This is what keeps slices *closed under sub-slicing*: every op below is
+/// generic over `S::Out: SliceType`, and `SliceSliceUnchecked` reports
+/// `Out = S::Out`, so the result of `slice_unchecked` is itself a slice that
+/// supports `len`/`get`/`slice_unchecked`/… all over again — and a sub-slice
+/// of a `&mut [T]` stays mutable.
+pub trait SliceType: StagedType {
+    /// Element type (`T`).
+    type Elem: StagedType;
+    /// Reference-to-element produced by `as_ptr`/`get_ref_unchecked`:
+    /// `SRef<T>` for an immutable slice, `SRefMut<T>` for a mutable one.
+    type ElemRef: StagedType;
+}
+
+impl<'a, T: StagedType> SliceType for SRef<'a, Slice<T>> {
+    type Elem = T;
+    type ElemRef = SRef<'a, T>;
+}
+
+impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
+    type Elem = T;
+    type ElemRef = SRefMut<'a, T>;
+}
+
+/// Marker for *mutable* slices (`SRefMut<Slice<T>>`). Gates the writing ops
+/// (`set_unchecked`) so they cannot be called on an immutable slice.
+pub trait MutSliceType: SliceType {}
+
+impl<'a, T: StagedType> MutSliceType for SRefMut<'a, Slice<T>> {}
+
+/// Convenience accessor for `S`'s element type inside generic op impls.
+type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
+
+/// Emit `data_ptr + index * sizeof(Elem)`, the address of element `index`.
+fn element_addr<S>(ctx: &mut CompilationContext, data_ptr: Value, index: Value) -> Value
+where
+    S: Staged,
+    S::Out: SliceType,
+{
+    let element_size = ElemOf::<S>::size_of() as i64;
+    let scale = ctx.builder.ins().iconst(types::I64, element_size);
+    let byte_offset = ctx.builder.ins().imul(index, scale);
+    ctx.builder.ins().iadd(data_ptr, byte_offset)
+}
+
+// =============================================================================
 // SliceLen: Get length of a slice
 // =============================================================================
 
-/// Get the length of an immutable slice.
+/// Get the length of a slice (immutable or mutable).
 #[derive(Clone, Copy)]
 pub struct SliceLen<S> {
     slice: S,
 }
 
-impl<'a, S, T> Staged for SliceLen<S>
+impl<S> Staged for SliceLen<S>
 where
-    S: Staged<Out = SRef<'a, Slice<T>>>,
-    T: StagedType + 'a,
+    S: Staged,
+    S::Out: SliceType,
 {
     type Out = U64Type;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        ctx.slice_len(&self.slice)
-    }
-}
-
-/// Get the length of a mutable slice.
-#[derive(Clone, Copy)]
-pub struct SliceLenMut<S> {
-    slice: S,
-}
-
-impl<'a, S, T> Staged for SliceLenMut<S>
-where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    T: StagedType + 'a,
-{
-    type Out = U64Type;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.slice_len(&self.slice)
     }
 }
@@ -200,41 +234,21 @@ where
 // SliceAsPtr: Get raw pointer to slice data
 // =============================================================================
 
-/// Get the raw data pointer from an immutable slice.
+/// Get the data pointer of a slice. Yields `SRef<T>` for an immutable slice and
+/// `SRefMut<T>` for a mutable one (via `SliceType::ElemRef`).
 #[derive(Clone, Copy)]
-pub struct SliceAsPtr<'a, S> {
+pub struct SliceAsPtr<S> {
     slice: S,
-    _phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, S, T> Staged for SliceAsPtr<'a, S>
+impl<S> Staged for SliceAsPtr<S>
 where
-    S: Staged<Out = SRef<'a, Slice<T>>>,
-    T: StagedType,
-    T: 'a,
+    S: Staged,
+    S::Out: SliceType,
 {
-    type Out = SRef<'a, T>;
+    type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        ctx.slice_data_ptr(&self.slice)
-    }
-}
-
-/// Get the raw mutable data pointer from a mutable slice.
-#[derive(Clone, Copy)]
-pub struct SliceAsMutPtr<'a, S> {
-    slice: S,
-    _phantom: PhantomData<&'a mut ()>,
-}
-
-impl<'a, S, T> Staged for SliceAsMutPtr<'a, S>
-where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    T: StagedType + 'a,
-{
-    type Out = SRefMut<'a, T>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.slice_data_ptr(&self.slice)
     }
 }
@@ -243,60 +257,26 @@ where
 // SliceGetRefUnchecked: Get reference to element (no bounds check)
 // =============================================================================
 
-/// Get an immutable reference to an element without bounds checking.
+/// Get a reference to an element without bounds checking. Mutability follows
+/// the slice: `SRef<T>` for `&[T]`, `SRefMut<T>` for `&mut [T]`.
 #[derive(Clone, Copy)]
-pub struct SliceGetRefUnchecked<'a, S, I> {
+pub struct SliceGetRefUnchecked<S, I> {
     slice: S,
     index: I,
-    _phantom: PhantomData<&'a ()>,
 }
 
-impl<'a, S, I, T> Staged for SliceGetRefUnchecked<'a, S, I>
+impl<S, I> Staged for SliceGetRefUnchecked<S, I>
 where
-    S: Staged<Out = SRef<'a, Slice<T>>>,
+    S: Staged,
+    S::Out: SliceType,
     I: Staged<Out = U64Type>,
-    T: StagedType + 'a,
 {
-    type Out = SRef<'a, T>;
+    type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
-
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        // Compute element address: data_ptr + index * sizeof(T)
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        ctx.builder.ins().iadd(data_ptr, byte_offset)
-    }
-}
-
-/// Get a mutable reference to an element without bounds checking.
-#[derive(Clone, Copy)]
-pub struct SliceGetMutUnchecked<'a, S, I> {
-    slice: S,
-    index: I,
-    _phantom: PhantomData<&'a mut ()>,
-}
-
-impl<'a, S, I, T> Staged for SliceGetMutUnchecked<'a, S, I>
-where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    I: Staged<Out = U64Type>,
-    T: StagedType + 'a,
-{
-    type Out = SRefMut<'a, T>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        let index = self.index.codegen(ctx);
-
-        let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        ctx.builder.ins().iadd(data_ptr, byte_offset)
+        element_addr::<S>(ctx, data_ptr, index)
     }
 }
 
@@ -304,75 +284,41 @@ where
 // SliceGetUnchecked: Get element by value (no bounds check, CopyType only)
 // =============================================================================
 
-/// Get an element by value from an immutable slice without bounds checking.
+/// Get an element by value without bounds checking (`CopyType` elements only).
 #[derive(Clone, Copy)]
 pub struct SliceGetUnchecked<S, I> {
     slice: S,
     index: I,
 }
 
-impl<'a, S, I, T> Staged for SliceGetUnchecked<S, I>
+impl<S, I> Staged for SliceGetUnchecked<S, I>
 where
-    S: Staged<Out = SRef<'a, Slice<T>>>,
+    S: Staged,
+    S::Out: SliceType,
+    ElemOf<S>: CopyType,
     I: Staged<Out = U64Type>,
-    T: StagedType + CopyType + 'a,
 {
-    type Out = T;
+    type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
-
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        // Compute element address
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
-
-        // Load the element value
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
-    }
-}
-
-/// Get an element by value from a mutable slice without bounds checking.
-#[derive(Clone, Copy)]
-pub struct SliceGetUncheckedMut<S, I> {
-    slice: S,
-    index: I,
-}
-
-impl<'a, S, I, T> Staged for SliceGetUncheckedMut<S, I>
-where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    I: Staged<Out = U64Type>,
-    T: StagedType + CopyType + 'a,
-{
-    type Out = T;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        let index = self.index.codegen(ctx);
-
-        let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
-
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), element_ptr, 0)
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
+        ctx.builder.ins().load(
+            ElemOf::<S>::cranelift_type(),
+            MemFlags::trusted(),
+            element_ptr,
+            0,
+        )
     }
 }
 
 // =============================================================================
-// SliceSetUnchecked: Set element (no bounds check)
+// SliceSetUnchecked: Set element (no bounds check, mutable slices only)
 // =============================================================================
 
-/// Set an element without bounds checking.
+/// Set an element without bounds checking. Only valid on a mutable slice
+/// (`S::Out: MutSliceType`).
 #[derive(Clone, Copy)]
 pub struct SliceSetUnchecked<S, I, V> {
     slice: S,
@@ -380,33 +326,23 @@ pub struct SliceSetUnchecked<S, I, V> {
     value: V,
 }
 
-impl<'a, S, I, V, T> Staged for SliceSetUnchecked<S, I, V>
+impl<S, I, V> Staged for SliceSetUnchecked<S, I, V>
 where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
+    S: Staged,
+    S::Out: MutSliceType,
     I: Staged<Out = U64Type>,
-    V: Staged<Out = T>,
-    T: StagedType + 'a,
+    V: Staged<Out = ElemOf<S>>,
 {
     type Out = UnitType;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
-
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        // Compute element address
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        let element_ptr = ctx.builder.ins().iadd(data_ptr, byte_offset);
-
-        // Store the value
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
         ctx.builder
             .ins()
             .store(MemFlags::trusted(), value, element_ptr, 0);
-
-        // Return unit
         ctx.get_unit_value()
     }
 }
@@ -415,9 +351,12 @@ where
 // SliceSliceUnchecked: Get sub-slice (no bounds check)
 // =============================================================================
 
-/// Get a sub-slice without bounds checking.
+/// Get a sub-slice without bounds checking, for elements `[start..end]`.
 ///
-/// Creates a new (ptr, len) pair pointing to elements [start..end].
+/// Reports `Out = S::Out`, so sub-slicing a `&[T]` yields a `&[T]` and
+/// sub-slicing a `&mut [T]` yields a `&mut [T]` — slices stay closed under
+/// this operation. Materializes a fresh `(ptr, len)` pair on a stack slot
+/// (the memory-resolved encoding; see the module docs).
 #[derive(Clone, Copy)]
 pub struct SliceSliceUnchecked<S, START, END> {
     slice: S,
@@ -425,95 +364,37 @@ pub struct SliceSliceUnchecked<S, START, END> {
     end: END,
 }
 
-impl<'a, S, START, END, T> Staged for SliceSliceUnchecked<S, START, END>
+impl<S, START, END> Staged for SliceSliceUnchecked<S, START, END>
 where
-    S: Staged<Out = SRef<'a, Slice<T>>>,
+    S: Staged,
+    S::Out: SliceType,
     START: Staged<Out = U64Type>,
     END: Staged<Out = U64Type>,
-    T: StagedType + 'a,
 {
-    type Out = SRef<'a, Slice<T>>;
+    type Out = S::Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
-
         let data_ptr = ctx.slice_data_ptr(&self.slice);
 
-        // Compute new pointer: data_ptr + start * sizeof(T)
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let start_offset = ctx.builder.ins().imul(start, scale);
-        let new_ptr = ctx.builder.ins().iadd(data_ptr, start_offset);
-
-        // Compute new length: end - start
+        // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
+        let new_ptr = element_addr::<S>(ctx, data_ptr, start);
         let new_len = ctx.builder.ins().isub(end, start);
 
-        // Create stack slot for the new (ptr, len) pair
+        // Materialize the new (ptr, len) pair on a 16-byte stack slot.
         let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             16, // size
             3,  // align_shift = log2(8) = 3
         ));
         let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-
-        // Store ptr at offset 0, len at offset 8
         ctx.builder
             .ins()
             .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
         ctx.builder
             .ins()
             .store(MemFlags::trusted(), new_len, slot_ptr, 8);
-
-        // Return pointer to the stack slot
-        slot_ptr
-    }
-}
-
-/// Get a mutable sub-slice without bounds checking.
-#[derive(Clone, Copy)]
-pub struct SliceSliceMutUnchecked<S, START, END> {
-    slice: S,
-    start: START,
-    end: END,
-}
-
-impl<'a, S, START, END, T> Staged for SliceSliceMutUnchecked<S, START, END>
-where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    START: Staged<Out = U64Type>,
-    END: Staged<Out = U64Type>,
-    T: StagedType + 'a,
-{
-    type Out = SRefMut<'a, Slice<T>>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        let start = self.start.codegen(ctx);
-        let end = self.end.codegen(ctx);
-
-        let data_ptr = ctx.slice_data_ptr(&self.slice);
-
-        let element_size = T::size_of() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let start_offset = ctx.builder.ins().imul(start, scale);
-        let new_ptr = ctx.builder.ins().iadd(data_ptr, start_offset);
-
-        let new_len = ctx.builder.ins().isub(end, start);
-
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16,
-            3,
-        ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_len, slot_ptr, 8);
-
         slot_ptr
     }
 }
@@ -532,11 +413,8 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     }
 
     /// Get the raw data pointer.
-    fn as_ptr(self) -> SliceAsPtr<'a, Self> {
-        SliceAsPtr {
-            slice: self,
-            _phantom: PhantomData,
-        }
+    fn as_ptr(self) -> SliceAsPtr<Self> {
+        SliceAsPtr { slice: self }
     }
 
     /// Get a reference to an element without bounds checking.
@@ -544,14 +422,13 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     /// Accepts any value that can be converted into a u64 staged expression for the index.
     /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
     /// `arr.get_ref_unchecked(Const::<U64Type>::new(5))`.
-    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<'a, Self, I::Staged>
+    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
         I: IntoStaged<U64Type>,
     {
         SliceGetRefUnchecked {
             slice: self,
             index: index.into_staged(),
-            _phantom: PhantomData,
         }
     }
 
@@ -597,41 +474,42 @@ impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where
 // =============================================================================
 
 /// Extension trait for mutable slice operations.
+///
+/// The read-only ops (`len`, `as_mut_ptr`, `get_*`, `slice_mut_unchecked`)
+/// build the same unified op structs as [`SliceRefOps`]; the associated
+/// `ElemRef`/`Out` keep their mutable flavor automatically. `set_unchecked` is
+/// gated on `MutSliceType`, so it only exists here.
 pub trait SliceMutOps<'a, T: StagedType + 'a>:
     Staged<Out = SRefMut<'a, Slice<T>>> + Sized + Clone
 {
     /// Get the length of the slice.
-    fn len(self) -> SliceLenMut<Self> {
-        SliceLenMut { slice: self }
+    fn len(self) -> SliceLen<Self> {
+        SliceLen { slice: self }
     }
 
     /// Get the raw mutable data pointer.
-    fn as_mut_ptr(self) -> SliceAsMutPtr<'a, Self> {
-        SliceAsMutPtr {
-            slice: self,
-            _phantom: PhantomData,
-        }
+    fn as_mut_ptr(self) -> SliceAsPtr<Self> {
+        SliceAsPtr { slice: self }
     }
 
     /// Get a mutable reference to an element without bounds checking.
-    fn get_mut_unchecked<I>(self, index: I) -> SliceGetMutUnchecked<'a, Self, I::Staged>
+    fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
         I: IntoStaged<U64Type>,
     {
-        SliceGetMutUnchecked {
+        SliceGetRefUnchecked {
             slice: self,
             index: index.into_staged(),
-            _phantom: PhantomData,
         }
     }
 
     /// Get an element by value without bounds checking.
-    fn get_unchecked<I>(self, index: I) -> SliceGetUncheckedMut<Self, I::Staged>
+    fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
         I: IntoStaged<U64Type>,
         T: CopyType,
     {
-        SliceGetUncheckedMut {
+        SliceGetUnchecked {
             slice: self,
             index: index.into_staged(),
         }
@@ -662,12 +540,12 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
         self,
         start: START,
         end: END,
-    ) -> SliceSliceMutUnchecked<Self, START::Staged, END::Staged>
+    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
         START: IntoStaged<U64Type>,
         END: IntoStaged<U64Type>,
     {
-        SliceSliceMutUnchecked {
+        SliceSliceUnchecked {
             slice: self,
             start: start.into_staged(),
             end: end.into_staged(),

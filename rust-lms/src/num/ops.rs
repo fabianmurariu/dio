@@ -502,18 +502,13 @@ impl_rem_op_for!([C, T, F] Select<C, T, F>);
 impl_num_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
 impl_rem_op_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
 
-// Slice access carriers (immutable and mutable reads, length).
+// Slice access carriers (length, element reads). The carriers are now unified
+// across immutable and mutable slices, so one impl each covers both.
 impl_num_ops_for!([S] crate::slice::SliceLen<S>);
 impl_rem_op_for!([S] crate::slice::SliceLen<S>);
 
-impl_num_ops_for!([S] crate::slice::SliceLenMut<S>);
-impl_rem_op_for!([S] crate::slice::SliceLenMut<S>);
-
 impl_num_ops_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
 impl_rem_op_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
-
-impl_num_ops_for!([S, I] crate::slice::SliceGetUncheckedMut<S, I>);
-impl_rem_op_for!([S, I] crate::slice::SliceGetUncheckedMut<S, I>);
 
 // Reference-load carriers.
 impl_num_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);

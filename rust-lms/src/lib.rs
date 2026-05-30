@@ -154,7 +154,7 @@ pub mod prelude {
         store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset, PtrOffsetMut, RustPtr, RustRef,
         SMutPtr, SPtr, SRef, SRefMut, Store,
     };
-    pub use crate::slice::{Slice, SliceLen, SliceLenMut, SliceMutOps, SliceRefOps};
+    pub use crate::slice::{Slice, SliceLen, SliceMutOps, SliceRefOps, SliceType};
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
         Var,
