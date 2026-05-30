@@ -17,21 +17,24 @@
 //!      });
 //! ```
 
-mod traits;
-mod slice_iter;
-mod range_iter;
-mod map;
 mod filter;
+mod map;
+mod range_iter;
+mod scan;
+mod skip_while;
+mod slice_iter;
+mod take_while;
+mod traits;
 mod zip;
-mod accumulator;
-mod early_exit;
 
+pub use filter::Filter;
+pub use map::Map;
+pub use range_iter::{range, range_step, RangeIter, RangeStep};
+pub use scan::Scan;
+pub use skip_while::SkipWhile;
+pub use slice_iter::SliceIter;
+pub use take_while::TakeWhile;
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
-pub use early_exit::IndexedEarlyExit;
-pub use slice_iter::SliceIter;
-pub use range_iter::{range, range_step, RangeIter, RangeStep};
-pub use map::Map;
-pub use filter::Filter;
 pub use zip::Zip;

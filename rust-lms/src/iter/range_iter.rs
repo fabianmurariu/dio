@@ -7,7 +7,7 @@
 use std::marker::PhantomData;
 
 use crate::func::Ctx;
-use crate::num::{add, div, lt, sub, Add, Div, Num, Sub};
+use crate::num::{lt, sub, Add, Div, Num, Sub};
 use crate::staged::{Const, IntoStaged, Staged, Var};
 
 use super::traits::{IndexedStagedIterator, IntoStagedIterator, StagedIterator};

@@ -327,3 +327,96 @@ fn test_iter_position() {
     assert_eq!(f(&[10i64, 20, 3, 40][..]), 2); // index 2
     assert_eq!(f(&[10i64, 20][..]), 2); // not found -> len (2)
 }
+
+#[test]
+fn test_iter_any_after_filter() {
+    // Early exit now composes after a combinator (was indexed-only before).
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("any_even_gt_4", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter()
+            .filter(|x| eq(x % 2i64, 0i64))
+            .any(ctx, |x| gt(x, 4i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert!(f(&[1i64, 3, 6][..])); // 6 is even and > 4
+    assert!(!f(&[1i64, 3, 4, 5][..])); // only even is 4, not > 4
+}
+
+#[test]
+fn test_iter_position_after_map() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("pos_after_map", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter()
+            .map(|x| x * 2i64)
+            .position(ctx, |x| eq(x, 6i64))
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    assert_eq!(f(&[1i64, 2, 3, 4][..]), 2); // 3*2 == 6 at index 2
+}
+
+#[test]
+fn test_iter_scan_prefix_sum() {
+    // Running (prefix) sum via scan, then total via sum of the running values'
+    // last == grand total; here we just sum the prefix sums for a check value.
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("scan_prefix", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter()
+            .scan(0i64, |ctx, acc, x| ctx.store(acc, acc + x))
+            .sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    // prefix sums of [1,2,3,4] = [1,3,6,10]; their sum = 20
+    assert_eq!(f(&[1i64, 2, 3, 4][..]), 20);
+}
+
+#[test]
+fn test_iter_take_while() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("take_while_lt5", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().take_while(|x| lt(x, 5i64)).sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    // takes 1,2,3 then stops at 5; sum = 6 (the 4 after 5 is not reached)
+    assert_eq!(f(&[1i64, 2, 3, 5, 4][..]), 6);
+}
+
+#[test]
+fn test_iter_nested_break() {
+    // Count elements of `a` that appear in `b`. The inner `any` builds its own
+    // loop and breaks out of it; the outer loop must continue unaffected.
+    let mut compiler = Compiler::new();
+    let f = compiler.fun2(
+        "count_in_both",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
+            let count = ctx.var(0u64);
+            a.staged_iter().for_each(ctx, move |ctx, ai| {
+                let present = b.staged_iter().any(ctx, move |bj| eq(bj, ai));
+                ctx.if_then(present, move |ctx| {
+                    ctx.store(count, count + 1u64);
+                });
+            });
+            count
+        },
+    );
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    let a: [i64; 4] = [1, 2, 3, 7];
+    let b: [i64; 3] = [2, 3, 4];
+    assert_eq!(f(&a[..], &b[..]), 2); // 2 and 3 are in both
+}
+
+#[test]
+fn test_iter_skip_while() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("skip_while_lt5", |ctx, arr: Var<SRef<Slice<i64>>>| {
+        arr.staged_iter().skip_while(|x| lt(x, 5i64)).sum(ctx)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+    // skips 1,2,3; yields 5,4,6 from the first >=5; sum = 15
+    assert_eq!(f(&[1i64, 2, 3, 5, 4, 6][..]), 15);
+}

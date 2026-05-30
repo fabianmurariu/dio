@@ -135,8 +135,8 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, range_step, Filter, IndexedEarlyExit, IndexedSource, IndexedStagedIterator,
-        IntoStagedIterator, Map, MinMax, RangeIter, RangeStep, SliceIter, StagedIterator, Zip,
+        range, range_step, Filter, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map,
+        MinMax, RangeIter, RangeStep, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
     };
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,

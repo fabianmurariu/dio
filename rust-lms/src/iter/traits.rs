@@ -1,11 +1,12 @@
 //! Core traits for staged iteration.
 
+use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{gt, lt, Num};
+use crate::num::{add, gt, lt, Num};
 use crate::staged::{Const, Staged, Var};
 use crate::types::{BoolType, StagedType, U64Type};
 
-use super::{Filter, Map, Zip};
+use super::{Filter, Map, Scan, SkipWhile, TakeWhile, Zip};
 
 // =============================================================================
 // MinMax sentinels for min/max reductions
@@ -107,6 +108,41 @@ pub trait StagedIterator: Sized {
         Filter::new(self, p)
     }
 
+    /// Stateful map: thread a mutable `Var<St>` accumulator (initialized to
+    /// `init`) through the iteration. `f(ctx, state, elem)` updates `state`;
+    /// the post-update `state` is emitted as each element.
+    ///
+    /// Example — prefix sums:
+    /// `iter.scan(0i64, |ctx, acc, x| ctx.store(acc, acc + x))`.
+    fn scan<St, Init, F>(self, init: Init, f: F) -> Scan<Self, St, Init, F>
+    where
+        St: StagedType + crate::types::CopyType + 'static,
+        Init: crate::staged::IntoStaged<St>,
+        F: Fn(&mut Ctx, Var<St>, Var<Self::Item>) + 'static,
+    {
+        Scan::new(self, init, f)
+    }
+
+    /// Yield elements while `p` holds; stop the whole iteration at the first
+    /// element where it fails (short-circuits via `break_loop`).
+    fn take_while<P, Cond>(self, p: P) -> TakeWhile<Self, P>
+    where
+        P: Fn(Var<Self::Item>) -> Cond,
+        Cond: Staged<Out = BoolType>,
+    {
+        TakeWhile::new(self, p)
+    }
+
+    /// Skip leading elements while `p` holds; yield the rest (starting at the
+    /// first element where `p` fails).
+    fn skip_while<P, Cond>(self, p: P) -> SkipWhile<Self, P>
+    where
+        P: Fn(Var<Self::Item>) -> Cond,
+        Cond: Staged<Out = BoolType>,
+    {
+        SkipWhile::new(self, p)
+    }
+
     // =========================================================================
     // Terminal operations
     // =========================================================================
@@ -194,6 +230,73 @@ pub trait StagedIterator: Sized {
             f(ctx, acc, elem);
         });
     }
+
+    // =========================================================================
+    // Short-circuiting terminals
+    //
+    // These drive the ordinary `for_each` loop but `break_loop` out of it once
+    // the answer is known. Because combinators (`map`/`filter`/…) introduce
+    // only `if_then`s — never loops — the `break_loop` always targets the
+    // source's single iteration loop, so these compose freely after `filter`,
+    // `map`, etc. (Eager terminals like `sum`/`fold` emit no break and keep
+    // their optimal loop body.)
+    // =========================================================================
+
+    /// `true` as soon as any element satisfies `pred` (short-circuits).
+    fn any<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    where
+        Self::Item: 'static,
+        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        Cond: Staged<Out = BoolType> + 'static,
+    {
+        let found = ctx.var(false);
+        self.for_each(ctx, move |ctx, elem| {
+            ctx.if_then(pred(elem), move |ctx| {
+                ctx.store(found, true);
+                ctx.break_loop();
+            });
+        });
+        found
+    }
+
+    /// `true` only if every element satisfies `pred` (short-circuits on the
+    /// first failure).
+    fn all<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    where
+        Self::Item: 'static,
+        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        Cond: Staged<Out = BoolType> + 'static,
+    {
+        let result = ctx.var(true);
+        self.for_each(ctx, move |ctx, elem| {
+            ctx.if_then(not(pred(elem)), move |ctx| {
+                ctx.store(result, false);
+                ctx.break_loop();
+            });
+        });
+        result
+    }
+
+    /// Index (in this iterator's sequence, i.e. after any `filter`) of the
+    /// first element satisfying `pred`, or the total element count if none
+    /// match (short-circuits).
+    fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<U64Type>
+    where
+        Self::Item: 'static,
+        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        Cond: Staged<Out = BoolType> + 'static,
+    {
+        // `idx` counts elements seen; on a match we break *before* incrementing,
+        // so it holds the match position. With no match it ends at the count.
+        let idx = ctx.var(0u64);
+        self.for_each(ctx, move |ctx, elem| {
+            ctx.if_then(pred(elem), move |ctx| {
+                ctx.break_loop();
+            });
+            ctx.store(idx, add(idx, 1u64));
+        });
+        idx
+    }
 }
 
 // =============================================================================
@@ -201,6 +304,7 @@ pub trait StagedIterator: Sized {
 // =============================================================================
 
 /// A staged iterator that tracks element positions, enabling `zip`.
+#[allow(clippy::len_without_is_empty)]
 pub trait IndexedStagedIterator: StagedIterator {
     /// The type of the length expression (e.g. `SliceLen<S>`, `Sub<End, Start>`).
     type LenExpr: Staged<Out = U64Type> + Clone + 'static;
