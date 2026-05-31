@@ -170,7 +170,7 @@ fn test_ergonomic_f64_operations() {
 }
 
 // =============================================================================
-// Imperative Ctx API tests (replaces old staged_block! tests)
+// Imperative Ctx API tests
 // =============================================================================
 
 #[test]

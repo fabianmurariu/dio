@@ -31,22 +31,12 @@ use rust_lms::prelude::*;
 fn euler_01_multiples_of_3_or_5() {
     let mut compiler = Compiler::new();
 
+    // Branchless predicated sum over [1, n): keep i when divisible by 3 or 5.
+    // `select(a, true, b)` is a logical OR of the two divisibility tests.
     let f = compiler.fun1("e01", |ctx, n: Var<i64>| {
-        let i = ctx.var(1i64);
-        let acc = ctx.var(0i64);
-        ctx.while_loop(lt(i, n), move |ctx| {
-            ctx.if_then(eq(i % 3i64, 0i64), move |ctx| {
-                ctx.store(acc, acc + i);
-            });
-            // Add i if divisible by 5 AND not divisible by 3 (already counted).
-            ctx.if_then(eq(i % 5i64, 0i64), move |ctx| {
-                ctx.if_then(gt(i % 3i64, 0i64), move |ctx| {
-                    ctx.store(acc, acc + i);
-                });
-            });
-            ctx.store(i, i + 1i64);
-        });
-        acc
+        range(1i64, n).sum_if(ctx, |i| {
+            select(eq(i % 3i64, 0i64), true, eq(i % 5i64, 0i64))
+        })
     });
 
     let compiled = compiler.compile(f).expect("compile");
@@ -202,14 +192,8 @@ fn euler_06_sum_square_difference() {
     let mut compiler = Compiler::new();
 
     let f = compiler.fun1("e06", |ctx, n: Var<i64>| {
-        let i = ctx.var(1i64);
-        let sum = ctx.var(0i64);
-        let sq_sum = ctx.var(0i64);
-        ctx.while_loop(lt(i, n + 1i64), move |ctx| {
-            ctx.store(sum, sum + i);
-            ctx.store(sq_sum, sq_sum + i * i);
-            ctx.store(i, i + 1i64);
-        });
+        let sum = range(1i64, n + 1i64).sum(ctx);
+        let sq_sum = range(1i64, n + 1i64).map(|i| i * i).sum(ctx);
         sum * sum - sq_sum
     });
 
@@ -429,7 +413,10 @@ fn euler_14_longest_collatz() {
             ctx.store(x, i);
             let len = ctx.var(1i64);
             ctx.while_loop(gt(x, 1i64), move |ctx| {
-                ctx.store(x, if_then_else(eq(x % 2i64, 0i64), x / 2i64, x * 3i64 + 1i64));
+                ctx.store(
+                    x,
+                    if_then_else(eq(x % 2i64, 0i64), x / 2i64, x * 3i64 + 1i64),
+                );
                 ctx.store(len, len + 1i64);
             });
             ctx.if_then(gt(len, best_len), move |ctx| {
@@ -484,59 +471,53 @@ fn euler_15_lattice_paths() {
 fn euler_21_amicable_sum() {
     let fill = {
         let mut compiler = Compiler::new();
-        let fill_sigma = compiler.fun1(
-            "e21_sigma",
-            |ctx, sigma: Var<SRefMut<Slice<U64Type>>>| {
-                let n = ctx.var(0u64);
-                ctx.store(n, sigma.len());
-                let i = ctx.var(2u64);
-                ctx.while_loop(lt(i, n), move |ctx| {
-                    let s = ctx.var(1u64);
-                    let d = ctx.var(2u64);
-                    ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
-                        ctx.if_then(eq(i % d, 0u64), move |ctx| {
-                            ctx.store(s, s + d);
-                            let q = ctx.var(0u64);
-                            ctx.store(q, i / d);
-                            ctx.if_then(gt(q, d), move |ctx| {
-                                ctx.store(s, s + q);
-                            });
+        let fill_sigma = compiler.fun1("e21_sigma", |ctx, sigma: Var<SRefMut<Slice<U64Type>>>| {
+            let n = ctx.var(0u64);
+            ctx.store(n, sigma.len());
+            let i = ctx.var(2u64);
+            ctx.while_loop(lt(i, n), move |ctx| {
+                let s = ctx.var(1u64);
+                let d = ctx.var(2u64);
+                ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
+                    ctx.if_then(eq(i % d, 0u64), move |ctx| {
+                        ctx.store(s, s + d);
+                        let q = ctx.var(0u64);
+                        ctx.store(q, i / d);
+                        ctx.if_then(gt(q, d), move |ctx| {
+                            ctx.store(s, s + q);
                         });
-                        ctx.store(d, d + 1u64);
                     });
-                    ctx.emit(sigma.set_unchecked(i, s));
-                    ctx.store(i, i + 1u64);
+                    ctx.store(d, d + 1u64);
                 });
-                Const::<UnitType>::new(())
-            },
-        );
+                ctx.emit(sigma.set_unchecked(i, s));
+                ctx.store(i, i + 1u64);
+            });
+            Const::<UnitType>::new(())
+        });
         compiler.compile(fill_sigma).expect("compile fill")
     };
 
     let sum = {
         let mut compiler = Compiler::new();
-        let sum_amicable = compiler.fun1(
-            "e21_sum",
-            |ctx, sigma: Var<SRef<Slice<U64Type>>>| {
-                let n = ctx.var(0u64);
-                ctx.store(n, sigma.len());
-                let total = ctx.var(0u64);
-                let a = ctx.var(2u64);
-                ctx.while_loop(lt(a, n), move |ctx| {
-                    let b = ctx.var(0u64);
-                    ctx.store(b, sigma.get_unchecked(a));
-                    ctx.if_then(gt(b, a), move |ctx| {
-                        ctx.if_then(lt(b, n), move |ctx| {
-                            ctx.if_then(eq(sigma.get_unchecked(b), a), move |ctx| {
-                                ctx.store(total, total + a + b);
-                            });
+        let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<U64Type>>>| {
+            let n = ctx.var(0u64);
+            ctx.store(n, sigma.len());
+            let total = ctx.var(0u64);
+            let a = ctx.var(2u64);
+            ctx.while_loop(lt(a, n), move |ctx| {
+                let b = ctx.var(0u64);
+                ctx.store(b, sigma.get_unchecked(a));
+                ctx.if_then(gt(b, a), move |ctx| {
+                    ctx.if_then(lt(b, n), move |ctx| {
+                        ctx.if_then(eq(sigma.get_unchecked(b), a), move |ctx| {
+                            ctx.store(total, total + a + b);
                         });
                     });
-                    ctx.store(a, a + 1u64);
                 });
-                total
-            },
-        );
+                ctx.store(a, a + 1u64);
+            });
+            total
+        });
         compiler.compile(sum_amicable).expect("compile sum")
     };
 
@@ -571,14 +552,12 @@ fn euler_25_thousand_digit_fibonacci() {
 fn euler_28_spiral_diagonals() {
     let mut compiler = Compiler::new();
 
+    // Center (1) plus the four corners of each ring k = 3, 5, ..., size.
     let f = compiler.fun1("e28", |ctx, size: Var<i64>| {
-        let total = ctx.var(1i64);
-        let k = ctx.var(3i64);
-        ctx.while_loop(lt(k, size + 1i64), move |ctx| {
-            ctx.store(total, total + k * k * 4i64 - (k - 1i64) * 6i64);
-            ctx.store(k, k + 2i64);
-        });
-        total
+        let rings = range_step(3i64, size + 1i64, 2i64)
+            .map(|k| k * k * 4i64 - (k - 1i64) * 6i64)
+            .sum(ctx);
+        rings + 1i64
     });
 
     let compiled = compiler.compile(f).expect("compile");
@@ -723,9 +702,7 @@ fn euler_67_max_path_sum_triangle() {
                     ctx.store(r, workspace.get_unchecked(j + 1u64));
                     let best = ctx.var(0i64);
                     ctx.store(best, select(gt(l, r), l, r));
-                    ctx.emit(
-                        workspace.set_unchecked(j, tri.get_unchecked(row_offset + j) + best),
-                    );
+                    ctx.emit(workspace.set_unchecked(j, tri.get_unchecked(row_offset + j) + best));
                     ctx.store(j, j + 1u64);
                 });
                 ctx.store(row_plus_1, row_plus_1 - 1u64);

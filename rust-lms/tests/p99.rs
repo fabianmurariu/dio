@@ -53,12 +53,7 @@ fn p99_05_reverse_in_place() {
         ctx.while_loop(lt(lo + 1u64, hi_plus_1), move |ctx| {
             let hi = ctx.var(0u64);
             ctx.store(hi, hi_plus_1 - 1u64);
-            let a = ctx.var(0i64);
-            let b = ctx.var(0i64);
-            ctx.store(a, arr.get_unchecked(lo));
-            ctx.store(b, arr.get_unchecked(hi));
-            ctx.emit(arr.set_unchecked(lo, b));
-            ctx.emit(arr.set_unchecked(hi, a));
+            ctx.emit(arr.swap_unchecked(lo, hi));
             ctx.store(lo, lo + 1u64);
             ctx.store(hi_plus_1, hi);
         });
@@ -94,20 +89,14 @@ fn p99_05_reverse_in_place() {
 fn p99_31_is_prime() {
     let mut compiler = Compiler::new();
 
+    // n is prime iff n > 1 and no divisor d in [2, √n] divides it. `take_while`
+    // stops the scan at √n; `all` short-circuits on the first divisor — both
+    // break out of the same range loop.
     let f = compiler.fun1("p31_isprime", |ctx, n: Var<i64>| {
-        let result = ctx.var(false);
-        ctx.if_then(gt(n, 1i64), move |ctx| {
-            let prime = ctx.var(true);
-            let d = ctx.var(2i64);
-            ctx.while_loop(lt(d * d, n + 1i64), move |ctx| {
-                ctx.if_then(eq(n % d, 0i64), move |ctx| {
-                    ctx.store(prime, false);
-                });
-                ctx.store(d, d + 1i64);
-            });
-            ctx.store(result, prime);
-        });
-        result
+        let no_divisor = range(2i64, n)
+            .take_while(move |d| lt(d * d, n + 1i64))
+            .all(ctx, move |d| not(eq(n % d, 0i64)));
+        select(gt(n, 1i64), no_divisor, false)
     });
 
     let compiled = compiler.compile(f).expect("compile");

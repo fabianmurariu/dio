@@ -1,174 +1,108 @@
-# Dio v3: JIT Compiled Columnar Expression Evaluator
+# dio — staged JIT compilation in Rust
 
-A high-performance JIT compiled columnar expression evaluator that transforms arithmetic expressions written in a Lisp-like DSL into optimized machine code using a multi-stage compilation pipeline.
+This workspace is built around **[`rust-lms`](rust-lms/)**, a type-safe
+**multi-stage programming** library in the spirit of Scala
+[LMS](https://scala-lms.github.io/) (Lightweight Modular Staging). You build a
+description of a computation out of ordinary, strongly-typed Rust values; the
+library lowers it to [Cranelift](https://cranelift.dev/) IR, JIT-compiles it to
+native machine code, and hands you back a callable function pointer.
 
-## 📚 **NEW: Complete Documentation Available**
-
-**📖 [Read the full Dio v3 documentation →](docs/dio3.md)**
-
-**⚡ [Understanding Generic Execution →](docs/generic_execution.md)**
-
-The new documentation covers:
-- Complete architecture overview of the new ByteCode pipeline
-- Detailed explanation of all compilation stages
-- Performance characteristics and optimization opportunities  
-- Getting started guide for new contributors
-- Comprehensive API reference
-
-## 🆕 New ByteCode Pipeline (v3)
-
-Dio v3 introduces a revolutionary **4-stage compilation pipeline**:
-
-```
-Lisp Expression → ByteCode IR → SSA v2 IR → Cranelift IR → Native Machine Code
-```
-
-### Key Features
-
-- **🔍 Debuggable Pipeline**: Full visibility into every transformation stage
-- **🚀 Zero-Copy Execution**: Direct Arrow array pointer passing
-- **⚡ Unified Code Generation**: Both elementwise and reductions use consistent patterns
-- **🎯 Direct Type Extraction**: Lambda expressions provide explicit return types
-- **🔄 Expression Caching**: Compiled functions cached by expression hash
-
-### Quick Start
+The key property is that **a value's Rust type encodes its staged type**, so the
+Rust compiler *is* the staged type checker: invalid computations (adding an `i64`
+to a `bool`, writing through a `&[T]`, returning a dangling field reference) don't
+type-check at `cargo build` — there is no separate, runtime type system to get
+wrong.
 
 ```rust
-use dio::{parse_expr, execute_generic_bytecode};
-use dio::array_support::create_u64_array_from_vec;
+use rust_lms::prelude::*;
 
-fn main() {
-    // Parse a Lambda expression with explicit types
-    let expr = parse_expr("(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))").unwrap();
-    
-    // Create input arrays
-    let a = create_u64_array_from_vec(vec![1, 2, 3, 4, 5]).unwrap();
-    let b = create_u64_array_from_vec(vec![10, 20, 30, 40, 50]).unwrap();
-    
-    // Execute using the new ByteCode pipeline
-    let result = execute_generic_bytecode(&expr, &[a, b]).unwrap();
-    println!("Result: {:?}", result); // [11, 22, 33, 44, 55]
-}
+let mut compiler = Compiler::new();
+
+// Define an iterative factorial as a staged function.
+let factorial = compiler.fun1("factorial", |ctx, n: Var<i64>| {
+    let i      = ctx.var(1i64);
+    let result = ctx.var(1i64);
+    ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+        ctx.store(result, result * i);
+        ctx.store(i, i + 1i64);
+    });
+    result
+});
+
+// Compile to native code and get a typed function pointer.
+let compiled = compiler.compile(factorial).expect("compile");
+let factorial = compiled.as_fn();           // extern "C" fn(i64) -> i64
+
+assert_eq!(factorial(5), 120);
+assert_eq!(factorial(10), 3_628_800);
 ```
 
-### Lambda Expression Syntax
+## Two phases
 
-Dio v3 uses **typed Lambda expressions** for explicit type information:
-
-```lisp
-; Elementwise addition
-(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))
-
-; Elementwise operations with multiple operands
-(lambda ([U64Array a] [U64Array b] [U64Array c] U64Array) (+ a b c))
-
-; Reduction operations (unified as length-1 vectors)
-(lambda ([U64Array a] U64) (sum a))
-(lambda ([U64Array a] [U64Array b] U64) (sum (+ a b)))
-
-; Mixed operations
-(lambda ([U64Array x] [U64Array y] U64Array) (+ (* x 2) y))
+```text
+   Rust source (stage 0)          Cranelift + JIT            native code (stage 1)
+  ┌────────────────────┐  compile  ┌──────────────┐ finalize ┌──────────────────┐
+  │ build a typed tree │ ────────► │  IR + ABI    │ ───────► │ fn(...) -> ...    │
+  │  of Staged values  │           │  lowering    │          │ .as_fn()/.run()   │
+  └────────────────────┘           └──────────────┘          └──────────────────┘
 ```
 
-**Supported Types:**
-- `U64Array`, `I64Array` - Array types for unsigned/signed 64-bit integers
-- `U64`, `I64` - Scalar types (for reduction results)
+- **Stage 0 ("now"):** plain Rust that *builds* a computation — `Var<i64>`,
+  `add(x, y)`, `slice.staged_iter().filter(..).sum(ctx)`. Nothing runs on data.
+- **Stage 1 ("later"):** `Compiler::compile` JIT-compiles that description into a
+  native function you call as many times as you like.
 
-## 🔧 Development
+## What's in the box
 
-### Debug Pipeline Transformations
+- **Numbers & operators** — `i64`, `u64`, `i32`, `u32`, `f64`, `bool`, `()`, with
+  `+ - * / %`, comparisons, and branchless `select`/`min`/`max`.
+- **Functions** — `fun0`..`fun8` (and recursive `_rec` variants), first-class
+  `FunRef` handles, direct calls.
+- **Control flow** — value-producing `if_then_else` (real phi nodes), `if_then`,
+  `while_loop`, `break_loop`, `not`.
+- **Memory** — typed references and raw pointers (`SRef`/`SRefMut`/`SPtr`/
+  `SMutPtr`), load/store/offset/index.
+- **Slices** — `&[T]`/`&mut [T]` as 16-byte fat pointers, closed under
+  sub-slicing, with register-resident `(ptr, len)` for hot loops.
+- **Structs** — `#[derive(StagedType)]` on `#[repr(C)] Copy` structs, with
+  lifetime-aware field access and correct by-value / by-reference ABI.
+- **Staged iterators** — push-based, fully fused: `map`/`filter`/`filter_map`/
+  `scan`/`take_while`/`skip_while`/`zip`, plus `sum`/`count`/`min`/`max`/`fold`,
+  branchless `sum_if`/`count_if`, and short-circuiting `any`/`all`/`position`/
+  `find_map`.
+- **Optionals** — staging-time `StagedOpt` (never materializes; becomes control
+  flow) and FFI-safe `COption<T>`.
+- **FFI** — call ordinary Rust `extern "C"` functions from JIT code via
+  `#[extern_fn]` and `FatSlice`.
 
-Enable debug tracing to see transformations at each stage:
+## Workspace layout
+
+| Crate | Role |
+|-------|------|
+| [`rust-lms`](rust-lms/) | the staged-computation library and Cranelift backend |
+| [`rust-lms-derive`](rust-lms-derive/) | `#[derive(StagedType)]` and `#[extern_fn]` proc macros |
+| [`sql-gen`](sql-gen/) | (early) SQL → staged-code generation over `datafusion-sql` + `arrow` |
+
+## Build & test
 
 ```bash
-DIO_DEBUG_PIPELINE=1 cargo test test_generic_execute_binary_u64 -- --nocapture
+cargo build                                   # build the workspace
+cargo test                                    # run all tests
+cargo test -p rust-lms                        # just the library
+cargo test -p rust-lms <name>                 # a single test
+
+# Inspect the generated Cranelift IR for any test:
+RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms test_while_loop_factorial -- --nocapture
 ```
 
-Example output:
-```
-=== PIPELINE DEBUG ===
---- Input AST ---
-(lambda ([U64Array a] [U64Array b] U64Array) (+ a b))
+## Documentation
 
---- ByteCode (C-like) ---
-function(u64[] a, u64[] b, u64 length) -> u64[] {
-  for (i = 0; i < length; i += 1) {
-    output[i] = (a[i] + b[i]);
-  }
-  return;
-}
-
---- SSA v2 ---
-Entry block: BlockId(0)
-Block BlockId(0):
-  Parameters: SsaValue(0): U64, ...
-
---- Cranelift IR (SSA v2) ---
-function u0:0(i64, i64, i64, i64) apple_aarch64 {
-  ...
-}
-```
-
-### Build Commands
-
-```bash
-# Build the project
-cargo build
-
-# Run all tests
-cargo test
-
-# Run specific test with debug output  
-DIO_DEBUG_PIPELINE=1 cargo test test_name -- --nocapture
-
-# Check compilation without building
-cargo check
-```
-
-## 🏗️ Architecture
-
-The v3 pipeline provides significant improvements:
-
-### Before v3 (Deprecated):
-```
-Lisp → SSA v1 → Cranelift → Machine Code
-```
-- Complex type inference
-- Separate code paths for elementwise/reductions
-- Limited debuggability
-
-### v3 Pipeline:
-```
-Lisp → ByteCode → SSA v2 → Cranelift → Machine Code
-```
-- Direct Lambda return type usage  
-- Unified vector approach (reductions as length-1 arrays)
-- Full pipeline visibility with debug tracing
-- Consistent code generation patterns
-
-## 📖 Documentation
-
-- **[docs/dio3.md](docs/dio3.md)** - Complete project documentation
-- **[docs/generic_execution.md](docs/generic_execution.md)** - Generic execution system details
-
-## 🧪 Current Status
-
-### ✅ Working Features
-- **Elementwise Operations**: `+`, `-`, `*`, `/` with proper array indexing
-- **Debug Pipeline**: Complete visibility into all transformation stages
-- **Type System**: Robust typed Lambda expressions  
-- **Zero-Copy Execution**: Direct Arrow array pointer passing
-- **Unified Approach**: Both elementwise and reductions use consistent patterns
-
-### 🚧 Known Issues
-- **Reduction SSA Generation**: Variable scoping across loop boundaries needs phi nodes
-- **Limited Type Support**: Currently only U64/I64 integers
-
-### 📋 Future Enhancements
-- **Additional Types**: F64 floating point support
-- **More Operations**: Comparison operators, conditional expressions
-- **Advanced Optimizations**: Loop unrolling, vectorization hints
-
-## 📄 License
-
-This project is part of the Dio expression evaluator research implementation.
+- **[rust-lms/docs/deep_dive.md](rust-lms/docs/deep_dive.md)** — the architecture
+  deep dive: the mental model, every subsystem, the ABI, and the invariants to
+  respect. **Start here** if you're new (human or AI agent).
+- **[rust-lms/README.md](rust-lms/README.md)** — library-focused overview.
+- **[rust-lms/docs/staged_iterator_api.md](rust-lms/docs/staged_iterator_api.md)**
+  and **[rust-lms/docs/loop_unrolling_design.md](rust-lms/docs/loop_unrolling_design.md)**
+  — iterator design and the unrolling/SIMD roadmap.
+- The integration tests under `rust-lms/tests/` (`programs.rs`, `p99.rs`,
+  `euler.rs`, `test_iter.rs`, …) are the best worked examples of every feature.

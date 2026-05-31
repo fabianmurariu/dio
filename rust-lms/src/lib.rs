@@ -168,8 +168,6 @@ pub mod prelude {
         BoolType, ConstantType, CopyType, F64Type, I32Type, Owned, StagedType, U32Type, U64Type,
         UnitType,
     };
-    pub use rust_lms_macros::staged_block;
-
     // Re-export derive macro
     #[cfg(feature = "derive")]
     pub use rust_lms_derive::StagedType;

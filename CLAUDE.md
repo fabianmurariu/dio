@@ -1,68 +1,103 @@
 # CLAUDE.md
 
-This file provides guidance to Claude Code (claude.ai/code) when working with code in this repository.
+Guidance for Claude Code (claude.ai/code) when working in this repository.
 
-## Project Overview
+## What this project is
 
-Dio is a JIT compiled columnar expression evaluator that compiles arithmetic expressions into optimized machine code using Cranelift. It operates on Apache Arrow arrays for efficient columnar data processing.
+This workspace is built around **`rust-lms`**, a type-safe **multi-stage
+programming** (staging / LMS-style) library. You build a description of a
+computation out of strongly-typed Rust values, and the library lowers it to
+[Cranelift](https://cranelift.dev/) IR and JIT-compiles it to native machine code.
 
-## Build and Development Commands
+There are two phases, and keeping them straight is essential:
 
-### Basic Commands
-- `cargo build` - Build the project
-- `cargo check` - Check compilation without producing binaries
-- `cargo test` - Run all tests
-- `cargo test <test_name>` - Run specific test by name
+- **Stage 0 ("now"):** ordinary Rust that *builds* an expression graph of `Staged`
+  values (`Var<i64>`, `Add<L, R>`, `SliceIter<…>`). No computation on data happens
+  here.
+- **Stage 1 ("later"):** `Compiler::compile` turns that graph into native code.
 
-### Development Workflow
-- `cargo fmt` - Format code (when rustfmt is configured)
-- `cargo clippy` - Run linter (when clippy is available)
+> **You are writing a code generator, not an evaluator.** Every construct's job is
+> a single `Staged::codegen` method that emits Cranelift instructions. A feature is
+> "correct" when the IR it emits is correct *and* its Rust trait bounds make
+> invalid stage-1 code impossible to express.
 
-## Architecture Overview
+The library's defining idea: **a value's Rust type encodes its staged type**, so
+the Rust type checker is the staged type checker. Put real constraints on `Staged`
+impls (`T: Num`, `S::Out: MutSliceType`, lifetime bounds) — that's the type system.
 
-The project is designed around a three-phase compilation pipeline:
+## Workspace layout
 
-### Core Components
+- `rust-lms/` — the library and Cranelift backend (the heart of the project).
+- `rust-lms-derive/` — `#[derive(StagedType)]` and `#[extern_fn]` proc macros.
+- `sql-gen/` — early/stub crate for SQL → staged-code generation.
 
-1. **Expression DSL** (`Expr` enum): Represents arithmetic expressions and reductions
-   - Elementwise operations: `Add`, `Sub`, `Mul`, `Div` that operate on arrays element-by-element
-   - Reduction operations: `Sum`, `Count` that reduce arrays to scalars
-   - Column references and literals
+## Build & test
 
-2. **JIT Compilation Pipeline**:
-   - **Phase 1**: Expression analysis to determine input columns and output types
-   - **Phase 2**: Compilation strategy selection (elementwise vs reduction loops)  
-   - **Phase 3**: Cranelift IR generation and JIT compilation
+```bash
+cargo build                                   # build the workspace
+cargo check                                   # type-check only
+cargo test                                    # all tests
+cargo test -p rust-lms                        # just the library
+cargo test -p rust-lms <name>                 # a single test
+cargo fmt        cargo clippy                  # format / lint
 
-3. **Array Pointer Management**: Zero-copy integration with Arrow arrays
-   - `ArrayDescriptor`: Wraps Arrow array pointers with metadata
-   - `ExecutionContext`: Manages input arrays and output buffers
-   - Direct pointer passing to compiled functions without copying
+# Print the generated Cranelift IR for a test (the first debugging tool to reach for):
+RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms <name> -- --nocapture
+```
 
-### Key Design Principles
+## Architecture (rust-lms)
 
-- **Zero-copy execution**: Array data remains in Arrow format, passed as pointers to compiled functions
-- **Expression caching**: Compiled functions are cached by expression hash to avoid recompilation
-- **Two execution modes**: 
-  - Elementwise: `output[i] = f(input1[i], input2[i], ...)` 
-  - Reduction: `accumulator = reduce(input_arrays)`
+- **`Staged` trait** (`src/staged.rs`) — the contract: `type Out: StagedType` plus
+  `fn codegen(&self, ctx) -> Value`. Everything that becomes stage-1 code
+  implements it.
+- **Type system** (`src/types.rs`, `src/num/traits.rs`) — `StagedType` (with ABI
+  methods), `ConstantType`, `CopyType`, and the capability traits `Num`/`IntNum`/
+  `FloatNum` that carry instruction selection (signed vs unsigned vs float). Type
+  markers are mostly the real primitives (`i64`, `u64=U64Type`, `f64=F64Type`,
+  `bool=BoolType`, `()=UnitType`). **`bool` is not `Num`** — keep it on the
+  control-flow/`select` path.
+- **Values** — `Var<T>` (Copy handle to a Cranelift variable), `Const<T>`,
+  `IntoStaged<T>` (lets APIs accept bare literals like `5i64`).
+- **Operations as types** (`src/num/ops.rs`) — `Add<L,R>`, `Lt<L,R>`, … are generic
+  structs, not enum variants; bounds enforce type safety; comparisons are
+  heterogeneous (`Out = BoolType`). `select`/`min`/`max` are branchless.
+- **Compiler & functions** (`src/func.rs`, `func_impl.rs`, `func_def.rs`) —
+  `Compiler` owns definitions; `fun0..8`(`_rec`) define functions; `compile`
+  performs ABI lowering and JIT; `Compiled::run()`/`as_fn()` execute.
+- **Authoring styles** — imperative `Ctx`/`VarBuilder` (`ctx.var`/`store`/`if_then`/
+  `while_loop`/`break_loop`, preferred) and expression-tree (tuples + `assign` +
+  `while_loop`/`if_then_else`).
+- **Control flow** (`src/control.rs`) — `IfThenElse` (merge block param = phi),
+  `IfThen`, `While`, `Not`.
+- **Memory** — `src/refer.rs` (`SRef`/`SRefMut`/`SPtr`/`SMutPtr`), `src/slice.rs`
+  (`Slice<T>` fat pointers, `SliceType`, closed under sub-slicing), `src/struct.rs`
+  (`#[derive(StagedType)]`, `Field`, four field-access traits, `Owned<T>`).
+- **Iterators** (`src/iter/`) — push-based, fused: sources + combinators +
+  terminals. Prefer branchless terminals (`count_if`/`sum_if`) in hot loops.
+- **Optionals** — `StagedOpt` (`src/staged_opt.rs`, never materializes → control
+  flow) vs `COption` (`src/option.rs`, FFI-safe, stored value).
+- **FFI** (`src/ffi.rs`, `#[extern_fn]`) — call Rust `extern "C"` fns; `FatSlice`.
 
-## Implementation Status
+**For a full, current walkthrough see [`rust-lms/docs/deep_dive.md`](rust-lms/docs/deep_dive.md).**
 
-This is an early-stage project. The current codebase contains:
-- Basic Cargo.toml setup
-- Empty lib.rs stub
-- Comprehensive design document in `docs/dio1.md`
+## Invariants to respect
 
-Planned dependencies (from design doc):
-- `cranelift*` crates for JIT compilation
-- `arrow` for columnar data structures  
-- `thiserror` for error handling
+- Leave the Cranelift builder valid: terminate the current block correctly and
+  `seal_block` only after all predecessors are emitted (mis-ordered sealing is the
+  #1 cause of Cranelift panics).
+- Slice ptr/len layout lives in exactly one place — `CompilationContext::
+  slice_data_ptr`/`slice_len`. Don't re-derive it elsewhere.
+- Slice/pointer ops are **unchecked** (no bounds checks); safety is the staged
+  author's contract, surfaced through Rust types (mutability, lifetimes) wherever
+  possible.
+- `Compiled` owns the JIT module's executable memory — it must outlive any `as_fn`
+  pointer.
 
-## Testing Strategy
+## Testing
 
-When implementing, follow the testing patterns outlined in the design document:
-- Unit tests for individual expression evaluation
-- Integration tests for complex nested expressions  
-- Performance benchmarks using `criterion`
-- Memory leak detection for unsafe pointer operations
+The integration tests under `rust-lms/tests/` (`programs.rs`, `p99.rs`,
+`euler.rs`, `test_iter.rs`, `test_slices.rs`, `test_structs.rs`,
+`test_extern_fn.rs`, `type_safety.rs`) are the spec and the best worked examples of
+the current, idiomatic API. When adding a feature, add a test there in the same
+style, and verify the emitted IR with `RUST_LMS_DEBUG_IR=1` when codegen is
+involved.
