@@ -81,6 +81,7 @@ assert_eq!(factorial(10), 3_628_800);
 |-------|------|
 | [`rust-lms`](rust-lms/) | the staged-computation library and Cranelift backend |
 | [`rust-lms-derive`](rust-lms-derive/) | `#[derive(StagedType)]` and `#[extern_fn]` proc macros |
+| [`arrow-lms`](arrow-lms/) | staged Apache Arrow interop — pass a `RecordBatch` column into a JIT kernel and operate on it via iterators |
 | [`sql-gen`](sql-gen/) | (early) SQL → staged-code generation over `datafusion-sql` + `arrow` |
 
 ## Build & test

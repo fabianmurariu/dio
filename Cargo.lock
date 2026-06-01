@@ -238,6 +238,16 @@ dependencies = [
 ]
 
 [[package]]
+name = "arrow-lms"
+version = "0.1.0"
+dependencies = [
+ "arrow",
+ "cranelift-codegen 0.127.1",
+ "memoffset",
+ "rust-lms",
+]
+
+[[package]]
 name = "arrow-ord"
 version = "57.2.0"
 source = "registry+https://github.com/rust-lang/crates.io-index"

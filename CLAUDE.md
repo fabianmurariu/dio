@@ -29,6 +29,10 @@ impls (`T: Num`, `S::Out: MutSliceType`, lifetime bounds) — that's the type sy
 
 - `rust-lms/` — the library and Cranelift backend (the heart of the project).
 - `rust-lms-derive/` — `#[derive(StagedType)]` and `#[extern_fn]` proc macros.
+- `arrow-lms/` — staged Apache Arrow interop: `#[repr(C)]` column descriptors
+  (`FfiArray`) extracted from a `RecordBatch`, exposed to staged code as iterator
+  sources (`StagedArrowArrayI32`). The data layer the SQL executor will codegen
+  against.
 - `sql-gen/` — early/stub crate for SQL → staged-code generation.
 
 ## Build & test
