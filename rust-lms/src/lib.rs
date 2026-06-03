@@ -150,9 +150,8 @@ pub mod prelude {
         opt_ref_none, opt_ref_some, unwrap_or, COption, COptionType, OptMutRefType, OptRefType,
     };
     pub use crate::r#struct::{
-        field_mut_ptr, field_mut_ref, field_path, field_ptr, field_ref, load_field,
-        CopyFieldAccess, Field, FieldMutPtr, FieldMutRef, FieldPath, FieldPtr, FieldRef, LoadField,
-        MutRefFieldAccess, OwnedFieldAccess, RefFieldAccess,
+        field_addr, field_path, load_field, CopyFieldAccess, Field, FieldAddr, FieldPath,
+        FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,
     };
     pub use crate::refer::{
         array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut, store,
@@ -165,7 +164,7 @@ pub mod prelude {
         Var,
     };
     pub use crate::types::{
-        BoolType, ConstantType, CopyType, F64Type, I32Type, Owned, StagedType, U32Type, U64Type,
+        BoolType, ConstantType, CopyType, F64Type, I32Type, StagedType, U32Type, U64Type,
         UnitType,
     };
     // Re-export derive macro

@@ -113,6 +113,7 @@ fn test_nested_struct_access() {
         inner: Inner { value: 777 },
         extra: 123,
     };
+
     let result = f(test_struct); // Pass by value
 
     assert_eq!(result, 777);
