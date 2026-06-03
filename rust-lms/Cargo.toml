@@ -9,7 +9,6 @@ cranelift-frontend = { workspace = true }
 cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
-memoffset = "0.9"
 rust-lms-derive = { path = "../rust-lms-derive", optional = true }
 # Optional benchmark dependencies (enable via features)
 mlua = { version = "0.9", features = ["luajit"], optional = true }

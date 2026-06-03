@@ -129,9 +129,8 @@ impl<T: StagedType> StagedType for COptionType<T> {
     }
 
     fn num_abi_values() -> usize {
-        // Number of i64s needed to hold this struct
-        // Round up: (size + 7) / 8
-        (Self::size_of() + 7) / 8
+        // Number of i64s needed to hold this struct (round up).
+        Self::size_of().div_ceil(8)
     }
 
     fn abi_types() -> Vec<cranelift_codegen::ir::Type> {

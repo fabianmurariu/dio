@@ -24,7 +24,7 @@ fn test_simple_struct_field_access() {
 
     // Create a function that reads the x field from a Point
     // fn get_x(pt: Point) -> i64  -- NOTE: Pass by VALUE!
-    let get_x = compiler.fun1("get_x", |_ctx, pt: Var<Point>| pt.get(PointType::x));
+    let get_x = compiler.fun1("get_x", |_ctx, pt: Var<Point>| pt.get(PointType::x()));
 
     let compiled = compiler.compile(get_x).expect("compilation failed");
     let f = compiled.as_fn();
@@ -42,8 +42,8 @@ fn test_struct_multiple_fields() {
 
     // fn sum_fields(pt: Point) -> i64
     let sum_fields = compiler.fun1("sum_fields", |_ctx, pt: Var<Point>| {
-        let x = pt.get(PointType::x);
-        let _y = pt.get(PointType::y); // Just to verify we can access y
+        let x = pt.get(PointType::x());
+        let _y = pt.get(PointType::y()); // Just to verify we can access y
 
         // Add 3 to x for testing
         x + 3i64
@@ -64,7 +64,7 @@ fn test_struct_pass_by_value_semantics() {
 
     // This test verifies that structs are truly passed by value
     // fn read_x(pt: Point) -> i64
-    let read_x = compiler.fun1("read_x", |_ctx, pt: Var<Point>| pt.get(PointType::x));
+    let read_x = compiler.fun1("read_x", |_ctx, pt: Var<Point>| pt.get(PointType::x()));
 
     let compiled = compiler.compile(read_x).expect("compilation failed");
     let f = compiled.as_fn();
@@ -101,7 +101,7 @@ fn test_nested_struct_access() {
     // Note: Outer is passed by VALUE, so we use .field() (not .get_ref())
     let get_inner_value = compiler.fun1("get_inner_value", |_ctx, outer: Var<Outer>| {
         // Navigate to inner field, then load its value
-        outer.field(OuterType::inner).get(InnerType::value)
+        outer.field(OuterType::inner()).get(InnerType::value())
     });
 
     let compiled = compiler
@@ -130,7 +130,7 @@ fn test_nested_struct_by_ref_access() {
         compiler.fun1("get_inner_value_by_ref", |_ctx, outer: Var<SRef<Outer>>| {
             // Get reference to inner field, then get its value
             // Note: Using get_ref (not get_ref_mut) since we have an immutable reference
-            outer.get_ref(OuterType::inner).get(InnerType::value)
+            outer.get_ref(OuterType::inner()).get(InnerType::value())
         });
 
     let compiled = compiler
@@ -156,8 +156,8 @@ fn test_nested_struct_multiple_access() {
     // Note: Using .field() instead of .get_ref() since outer is by-value
     // (can't return references from by-value parameters)
     let sum_outer = compiler.fun1("sum_outer", |_ctx, outer: Var<Outer>| {
-        let inner_val = outer.field(OuterType::inner).get(InnerType::value);
-        let extra = outer.get(OuterType::extra);
+        let inner_val = outer.field(OuterType::inner()).get(InnerType::value());
+        let extra = outer.get(OuterType::extra());
 
         inner_val + extra
     });
@@ -180,8 +180,8 @@ fn test_nested_struct_multiple_access_ref() {
     // fn sum_outer(outer: Outer) -> i64
     // Returns outer.inner.value + outer.extra
     let sum_outer = compiler.fun1("sum_outer", |_ctx, outer: Var<SRef<Outer>>| {
-        let inner_val = outer.get_ref(OuterType::inner).get(InnerType::value);
-        let extra = outer.get(OuterType::extra);
+        let inner_val = outer.get_ref(OuterType::inner()).get(InnerType::value());
+        let extra = outer.get(OuterType::extra());
 
         inner_val + extra
     });
@@ -205,7 +205,7 @@ fn test_struct_copy_semantics() {
     // Test that Point is CopyType and passed by value
     // fn double_x(pt: Point) -> i64
     let double_x = compiler.fun1("double_x", |_ctx, pt: Var<Point>| {
-        let x = pt.get(PointType::x);
+        let x = pt.get(PointType::x());
         x * 2i64
     });
 
@@ -225,7 +225,7 @@ fn test_outer_extra_field() {
 
     // fn get_extra(outer: Outer) -> i64  -- just get the extra field, no nesting
     let get_extra = compiler.fun1("get_extra", |_ctx, outer: Var<Outer>| {
-        outer.get(OuterType::extra)
+        outer.get(OuterType::extra())
     });
 
     let compiled = compiler.compile(get_extra).expect("compilation failed");
@@ -249,7 +249,7 @@ fn test_mixed_struct_read_f64_field() {
     let mut compiler = Compiler::new();
 
     // fn get_y(pt: Point) -> f64 -- read the f64 field from mixed struct
-    let get_y = compiler.fun1("get_y", |_ctx, pt: Var<Point>| pt.get(PointType::y));
+    let get_y = compiler.fun1("get_y", |_ctx, pt: Var<Point>| pt.get(PointType::y()));
 
     let compiled = compiler.compile(get_y).expect("compilation failed");
     let f = compiled.as_fn();
@@ -271,8 +271,8 @@ fn test_mixed_struct_read_i64_after_f64_access() {
     // Read y (f64), then read x (i64) and return it
     // This verifies both fields are accessible
     let read_both = compiler.fun1("read_both", |_ctx, pt: Var<Point>| {
-        let _y = pt.get(PointType::y); // Access f64 field
-        pt.get(PointType::x) // Return i64 field
+        let _y = pt.get(PointType::y()); // Access f64 field
+        pt.get(PointType::x()) // Return i64 field
     });
 
     let compiled = compiler.compile(read_both).expect("compilation failed");
@@ -312,7 +312,7 @@ fn test_float_first_struct() {
 
     // Struct with f64 as first field
     let get_a = compiler.fun1("get_a", |_ctx, s: Var<MixedStruct>| {
-        s.get(MixedStructType::a)
+        s.get(MixedStructType::a())
     });
 
     let compiled = compiler.compile(get_a).expect("compilation failed");
@@ -337,7 +337,7 @@ fn test_float_first_struct_read_int() {
     let mut compiler = Compiler::new();
 
     let get_b = compiler.fun1("get_b", |_ctx, s: Var<MixedStruct>| {
-        s.get(MixedStructType::b)
+        s.get(MixedStructType::b())
     });
 
     let compiled = compiler.compile(get_b).expect("compilation failed");
@@ -358,7 +358,9 @@ fn test_float_first_struct_read_int() {
 fn test_16byte_float_first_struct() {
     let mut compiler = Compiler::new();
 
-    let get_x = compiler.fun1("get_x", |_ctx, s: Var<FloatFirst>| s.get(FloatFirstType::x));
+    let get_x = compiler.fun1("get_x", |_ctx, s: Var<FloatFirst>| {
+        s.get(FloatFirstType::x())
+    });
 
     let compiled = compiler.compile(get_x).expect("compilation failed");
     let f = compiled.as_fn();
@@ -377,7 +379,9 @@ fn test_16byte_float_first_struct() {
 fn test_16byte_float_first_struct_read_int() {
     let mut compiler = Compiler::new();
 
-    let get_y = compiler.fun1("get_y", |_ctx, s: Var<FloatFirst>| s.get(FloatFirstType::y));
+    let get_y = compiler.fun1("get_y", |_ctx, s: Var<FloatFirst>| {
+        s.get(FloatFirstType::y())
+    });
 
     let compiled = compiler.compile(get_y).expect("compilation failed");
     let f = compiled.as_fn();
@@ -386,6 +390,87 @@ fn test_16byte_float_first_struct_read_int() {
     let result = f(s);
 
     assert_eq!(result, 42);
+}
+
+// =============================================================================
+// Generic structs: #[derive(StagedType)] over <A: StagedType, ...>
+// =============================================================================
+
+// The staged type of each field is *inferred* from its Rust type (no
+// `#[staged(..)]`), since `A`/`B` are themselves `StagedType`.
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct Pair<A: StagedType, B: StagedType> {
+    first: A,
+    second: B,
+}
+
+#[test]
+fn test_generic_struct_by_value() {
+    let mut compiler = Compiler::new();
+
+    // Pair<i64, i64>: the constructor fn's generics are inferred from the
+    // receiver, so `PairType::second()` resolves to Field<Parent = Pair<i64,i64>>.
+    let get_second = compiler.fun1("get_second", |_ctx, p: Var<Pair<i64, i64>>| {
+        p.get(PairType::second())
+    });
+
+    let f = compiler
+        .compile(get_second)
+        .expect("compilation failed")
+        .as_fn();
+    assert_eq!(
+        f(Pair {
+            first: 10i64,
+            second: 20i64
+        }),
+        20
+    );
+}
+
+#[test]
+fn test_generic_struct_distinct_monomorphizations() {
+    let mut compiler = Compiler::new();
+
+    // A different instantiation: Pair<i32, i64>. `first` is an i32 at offset 0 —
+    // exercises a per-monomorphization `offset_of!` and field type.
+    let get_first = compiler.fun1("get_first", |_ctx, p: Var<Pair<i32, i64>>| {
+        p.get(PairType::first())
+    });
+
+    let f = compiler
+        .compile(get_first)
+        .expect("compilation failed")
+        .as_fn();
+    assert_eq!(
+        f(Pair {
+            first: 7i32,
+            second: 99i64
+        }),
+        7
+    );
+}
+
+#[test]
+fn test_generic_struct_by_ref() {
+    let mut compiler = Compiler::new();
+
+    // By reference: get_ref into a field of a generic struct, then load it.
+    let read_second = compiler.fun1("read_second", |_ctx, p: Var<SRef<Pair<i64, i64>>>| {
+        load_ref(p.get_ref(PairType::second()))
+    });
+
+    let f = compiler
+        .compile(read_second)
+        .expect("compilation failed")
+        .as_fn();
+    assert_eq!(
+        f(&Pair {
+            first: 1i64,
+            second: 42i64
+        }),
+        42
+    );
 }
 
 #[test]
