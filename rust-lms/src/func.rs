@@ -286,6 +286,93 @@ impl Ctx {
     ///
     /// Emits a jump to the current loop's exit block. Typically used inside an
     /// `if_then` to exit early. Panics at codegen time if called outside a loop.
+    /// Drive a push loop over an opaque external iterator via `next`/`drop`.
+    ///
+    /// Emits the register-consume loop (see `iter::opaque`):
+    /// ```text
+    /// header: (tag, val) = next(it)     ; COption<Item> in two return regs
+    ///         brif tag, body, exit      ; tag: 1 = Some, 0 = None
+    /// body:   elem = val ; <consumer> ; jump header
+    /// exit:   drop(it)
+    /// ```
+    /// `drop` sits at the top of `exit`, which is reached both by the `None`
+    /// branch and by any `break_loop` from the body, so the handle is always
+    /// freed. The value register feeds the element `Var` directly — no stack
+    /// slot, no `COption` materialization.
+    ///
+    /// `Item` must be an integer no wider than 64 bits (the `COption` FFI ABI
+    /// returns the payload in an integer register). Float/compound items go via
+    /// the ExactSize path instead.
+    pub fn opaque_for_each<Item, F>(
+        &mut self,
+        handle: Var<crate::refer::SMutPtr<UnitType>>,
+        next_id: usize,
+        drop_id: usize,
+        consumer: F,
+    ) where
+        Item: StagedType + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+    {
+        // Element var: defined inside the body from `next`'s value register.
+        let elem: Var<Item> = unsafe { self.var_unchecked() };
+        let elem_id = elem.id;
+        let handle_id = handle.id;
+        let item_cty = Item::cranelift_type();
+
+        // Build the body into a child Ctx (same shape as `while_loop`).
+        let mut child = Ctx::new(self.next_var_id);
+        consumer(&mut child, elem);
+        self.next_var_id = child.next_var_id;
+        let body_actions = child.actions;
+
+        self.actions.push(Box::new(move |ctx| {
+            let header = ctx.builder.create_block();
+            let body = ctx.builder.create_block();
+            let exit = ctx.builder.create_block();
+
+            ctx.builder.ins().jump(header, &[]);
+
+            // header: call next(it); branch on the discriminant register.
+            ctx.builder.switch_to_block(header);
+            let it = ctx.var_map[&handle_id];
+            let it_val = ctx.builder.use_var(it);
+            let next_ref = ctx.get_extern_func_ref(next_id);
+            let call = ctx.builder.ins().call(next_ref, &[it_val]);
+            let (tag, val) = {
+                let r = ctx.builder.inst_results(call);
+                (r[0], r[1])
+            };
+            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+
+            // body: bind elem = value register, replay consumer, loop.
+            ctx.builder.switch_to_block(body);
+            ctx.builder.seal_block(body);
+            let elem_val = if item_cty == types::I64 {
+                val
+            } else {
+                // Narrow integer item (e.g. i32): take the low bits.
+                ctx.builder.ins().ireduce(item_cty, val)
+            };
+            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.var_map.insert(elem_id, elem_cv);
+            ctx.builder.def_var(elem_cv, elem_val);
+            ctx.loop_exit_stack.push(exit);
+            for action in body_actions {
+                action(ctx);
+            }
+            ctx.loop_exit_stack.pop();
+            ctx.builder.ins().jump(header, &[]);
+            ctx.builder.seal_block(header);
+
+            // exit: free the iterator (reached by None and by break_loop).
+            ctx.builder.switch_to_block(exit);
+            ctx.builder.seal_block(exit);
+            let it_val2 = ctx.builder.use_var(it);
+            let drop_ref = ctx.get_extern_func_ref(drop_id);
+            ctx.builder.ins().call(drop_ref, &[it_val2]);
+        }));
+    }
+
     pub fn break_loop(&mut self) {
         self.actions.push(Box::new(move |ctx| {
             let exit = *ctx

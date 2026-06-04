@@ -356,14 +356,19 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 }
             }
 
-            let inner_staged = rust_type_to_staged_type(elem_ty)?;
-
+            // A non-slice reference `&T` / `&mut T` is an *opaque* handle: the
+            // staged side only passes the pointer back to extern calls, so `T`
+            // need not be a `StagedType`. Wrap it in `Opaque<T>`.
             if type_ref.mutability.is_some() {
-                // &mut T -> SRefMut<T>
-                Ok(quote! { ::rust_lms::refer::SRefMut<#inner_staged> })
+                // &mut T -> SRefMut<Opaque<T>>
+                Ok(
+                    quote! { ::rust_lms::refer::SRefMut<'static, ::rust_lms::opaque::Opaque<#elem_ty>> },
+                )
             } else {
-                // &T -> SRef<T>
-                Ok(quote! { ::rust_lms::refer::SRef<#inner_staged> })
+                // &T -> SRef<Opaque<T>>
+                Ok(
+                    quote! { ::rust_lms::refer::SRef<'static, ::rust_lms::opaque::Opaque<#elem_ty>> },
+                )
             }
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => {

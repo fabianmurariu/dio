@@ -278,12 +278,21 @@ pub unsafe trait ExternFn {
 ///
 /// This is analogous to `FunRef` but for external functions. It stores the
 /// Cranelift FuncRef after the function has been imported into the module.
-#[derive(Clone, Copy)]
 pub struct ExternRef<S: ExternFn> {
     /// Index into the extern function table (assigned during compilation)
     pub(crate) extern_id: usize,
     _phantom: PhantomData<S>,
 }
+
+// A handle is just an index, so it is always Copy regardless of `S` (a `S: Copy`
+// bound from `#[derive]` would leak into every holder, and the generated extern
+// marker structs are not `Copy`).
+impl<S: ExternFn> Clone for ExternRef<S> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<S: ExternFn> Copy for ExternRef<S> {}
 
 impl<S: ExternFn> ExternRef<S> {
     pub(crate) fn new(extern_id: usize) -> Self {

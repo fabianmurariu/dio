@@ -106,6 +106,7 @@ pub(crate) mod func_def;
 pub(crate) mod func_impl;
 pub mod iter;
 pub mod num;
+pub mod opaque;
 pub mod option;
 pub mod refer;
 pub mod slice;
@@ -136,13 +137,15 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, range_step, Filter, FilterMap, IndexedSource, IndexedStagedIterator,
-        IntoStagedIterator, Map, MinMax, RangeIter, RangeStep, Scan, SkipWhile, SliceIter,
-        StagedIterator, TakeWhile, Zip,
+        range, range_step, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind,
+        Filter, FilterMap, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
+        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterKind, RangeIter, RangeStep, Scan,
+        SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
     };
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
     };
+    pub use crate::opaque::Opaque;
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
