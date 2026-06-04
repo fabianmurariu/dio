@@ -478,7 +478,7 @@ fn test_return_mixed_struct() {
     let mut compiler = Compiler::new();
 
     // Function that takes two values and returns a Point struct
-    let make_point = compiler.fun2("make_point", |ctx, x: Var<i64>, y: Var<F64Type>| {
+    let make_point = compiler.fun2("make_point", |_ctx, x: Var<i64>, _y: Var<F64Type>| {
         // We need to construct a Point - but we don't have struct construction yet
         // For now, just test that we can return the input x
         x

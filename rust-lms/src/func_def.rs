@@ -1,7 +1,9 @@
 //! FunDef construction helpers for function definitions.
 
 use crate::func::{Ctx, FunDef};
-use crate::func_impl::{TypeInfo, FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8};
+use crate::func_impl::{
+    FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8, TypeInfo,
+};
 use crate::staged::{Staged, Var};
 use crate::types::StagedType;
 
@@ -151,8 +153,43 @@ impl_make_fun!(0, make_fun0, make_fun0_rec, FunRef0);
 impl_make_fun!(1, make_fun1, make_fun1_rec, FunRef1, [A], [a]);
 impl_make_fun!(2, make_fun2, make_fun2_rec, FunRef2, [A, B], [a, b]);
 impl_make_fun!(3, make_fun3, make_fun3_rec, FunRef3, [A, B, C], [a, b, c]);
-impl_make_fun!(4, make_fun4, make_fun4_rec, FunRef4, [A, B, C, D], [a, b, c, d]);
-impl_make_fun!(5, make_fun5, make_fun5_rec, FunRef5, [A, B, C, D, E], [a, b, c, d, e]);
-impl_make_fun!(6, make_fun6, make_fun6_rec, FunRef6, [A, B, C, D, E, F], [a, b, c, d, e, f]);
-impl_make_fun!(7, make_fun7, make_fun7_rec, FunRef7, [A, B, C, D, E, F, G], [a, b, c, d, e, f, g]);
-impl_make_fun!(8, make_fun8, make_fun8_rec, FunRef8, [A, B, C, D, E, F, G, H], [a, b, c, d, e, f, g, h]);
+impl_make_fun!(
+    4,
+    make_fun4,
+    make_fun4_rec,
+    FunRef4,
+    [A, B, C, D],
+    [a, b, c, d]
+);
+impl_make_fun!(
+    5,
+    make_fun5,
+    make_fun5_rec,
+    FunRef5,
+    [A, B, C, D, E],
+    [a, b, c, d, e]
+);
+impl_make_fun!(
+    6,
+    make_fun6,
+    make_fun6_rec,
+    FunRef6,
+    [A, B, C, D, E, F],
+    [a, b, c, d, e, f]
+);
+impl_make_fun!(
+    7,
+    make_fun7,
+    make_fun7_rec,
+    FunRef7,
+    [A, B, C, D, E, F, G],
+    [a, b, c, d, e, f, g]
+);
+impl_make_fun!(
+    8,
+    make_fun8,
+    make_fun8_rec,
+    FunRef8,
+    [A, B, C, D, E, F, G, H],
+    [a, b, c, d, e, f, g, h]
+);

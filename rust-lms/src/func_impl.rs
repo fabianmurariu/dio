@@ -47,7 +47,11 @@ impl TypeInfo {
                 Some(StructInfo {
                     size: T::size_of() as u32,
                     alignment: T::align_of() as u32,
-                    num_abi_values: if pass_by_pointer { 1 } else { T::num_abi_values() },
+                    num_abi_values: if pass_by_pointer {
+                        1
+                    } else {
+                        T::num_abi_values()
+                    },
                 })
             } else {
                 None
@@ -375,4 +379,3 @@ impl_fun_n!(5, FunType5, FunRef5, Call5, call5, [A, B, C, D, E], [arg0: Arg0, ar
 impl_fun_n!(6, FunType6, FunRef6, Call6, call6, [A, B, C, D, E, F], [arg0: Arg0, arg1: Arg1, arg2: Arg2, arg3: Arg3, arg4: Arg4, arg5: Arg5], [0, 1, 2, 3, 4, 5]);
 impl_fun_n!(7, FunType7, FunRef7, Call7, call7, [A, B, C, D, E, F, G], [arg0: Arg0, arg1: Arg1, arg2: Arg2, arg3: Arg3, arg4: Arg4, arg5: Arg5, arg6: Arg6], [0, 1, 2, 3, 4, 5, 6]);
 impl_fun_n!(8, FunType8, FunRef8, Call8, call8, [A, B, C, D, E, F, G, H], [arg0: Arg0, arg1: Arg1, arg2: Arg2, arg3: Arg3, arg4: Arg4, arg5: Arg5, arg6: Arg6, arg7: Arg7], [0, 1, 2, 3, 4, 5, 6, 7]);
-

@@ -371,13 +371,13 @@ where
         if Out::is_copy_struct() && Out::num_abi_values() > 1 {
             // Create stack slot and store return values
             let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot = ctx.builder.create_sized_stack_slot(
-                cranelift_codegen::ir::StackSlotData::new(
-                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    Out::size_of() as u32,
-                    align_shift,
-                ),
-            );
+            let stack_slot =
+                ctx.builder
+                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                        Out::size_of() as u32,
+                        align_shift,
+                    ));
             let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
 
             let results = ctx.builder.inst_results(call).to_vec();
@@ -476,13 +476,13 @@ where
         // Handle struct return values
         if Out::is_copy_struct() && Out::num_abi_values() > 1 {
             let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot = ctx.builder.create_sized_stack_slot(
-                cranelift_codegen::ir::StackSlotData::new(
-                    cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                    Out::size_of() as u32,
-                    align_shift,
-                ),
-            );
+            let stack_slot =
+                ctx.builder
+                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                        Out::size_of() as u32,
+                        align_shift,
+                    ));
             let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
 
             let results = ctx.builder.inst_results(call).to_vec();

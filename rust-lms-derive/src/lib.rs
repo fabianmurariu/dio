@@ -90,87 +90,114 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     };
 
     let struct_name = &input.ident;
-    let _vis = &input.vis;
+
+    // Split the struct's generics so every generated impl/type carries them.
+    // `<'a, M: StagedType>` -> impl_generics (with bounds), ty_generics (`<'a, M>`),
+    // where_clause (the struct's own `where`, if any).
+    let generics = &input.generics;
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+
+    // A PhantomData tuple covering every generic param, so the (generic) field
+    // marker structs use all of them (no "unused parameter" error). Const params
+    // are out of scope and intentionally skipped.
+    let phantom_elems: Vec<proc_macro2::TokenStream> = generics
+        .params
+        .iter()
+        .filter_map(|p| match p {
+            syn::GenericParam::Lifetime(l) => {
+                let lt = &l.lifetime;
+                Some(quote! { & #lt () })
+            }
+            syn::GenericParam::Type(t) => {
+                let id = &t.ident;
+                Some(quote! { #id })
+            }
+            syn::GenericParam::Const(_) => None,
+        })
+        .collect();
+    let phantom_ty = quote! { ::core::marker::PhantomData<( #(#phantom_elems,)* )> };
 
     // Generate field token module name
-    let field_module_name = syn::Ident::new(&format!("{}Type", struct_name), struct_name.span());
+    let field_module_name = format_ident!("{}Type", struct_name);
 
-    // Collect field information
-    let field_tokens: Vec<_> = named_fields
-        .iter()
-        .enumerate()
-        .map(|(idx, field)| {
-            let field_name = field.ident.as_ref().unwrap();
-            let _field_ty = &field.ty;
+    // Resolve each field's staged type: explicit `#[staged(Ty)]`, else infer it
+    // from the field's own Rust type (which must itself be a `StagedType`).
+    let resolve_staged_ty = |field: &syn::Field| -> Type {
+        field
+            .attrs
+            .iter()
+            .find(|attr| attr.path().is_ident("staged"))
+            .and_then(|attr| {
+                attr.meta
+                    .require_list()
+                    .ok()
+                    .and_then(|ml| syn::parse2::<Type>(ml.tokens.clone()).ok())
+            })
+            .unwrap_or_else(|| field.ty.clone())
+    };
 
-            // Extract staged type from #[staged(Type)] attribute
-            let staged_ty = field
-                .attrs
-                .iter()
-                .find(|attr| attr.path().is_ident("staged"))
-                .and_then(|attr| {
-                    if let Ok(meta_list) = attr.meta.require_list() {
-                        let tokens = &meta_list.tokens;
-                        syn::parse2::<Type>(tokens.clone()).ok()
-                    } else {
-                        None
-                    }
-                })
-                .expect(&format!(
-                    "Field '{}' must have a #[staged(Type)] attribute",
-                    field_name
-                ));
+    // Per-field generated items: a marker type, its Copy/Clone + Field impls, and
+    // a constructor fn named after the field (the public call surface,
+    // `PointType::x()`), with generic params inferred from the receiver.
+    let staged_types: Vec<Type> = named_fields.iter().map(&resolve_staged_ty).collect();
+    let field_items = named_fields.iter().enumerate().map(|(idx, field)| {
+        let field_name = field.ident.as_ref().unwrap();
+        let marker = format_ident!("__field_{}", field_name);
+        let staged_ty = resolve_staged_ty(field);
 
-            // Calculate offset
-            let offset_calc = quote! {
-                memoffset::offset_of!(#struct_name, #field_name)
-            };
+        // The marker is a pure `PhantomData` handle, so it needs no bounds and
+        // no `where`; only the `Field` impl references the parent struct (as
+        // `Parent` and in `offset_of!`), so the struct's `where` goes there.
+        quote! {
+            pub struct #marker #ty_generics ( #phantom_ty );
 
-            quote! {
-                #[derive(Copy, Clone)]
-                pub struct #field_name;
-
-                impl ::rust_lms::_internal::Field for #field_name {
-                    type Parent = #struct_name;
-                    type Out = #staged_ty;
-                    const OFFSET: usize = #offset_calc;
-                    const INDEX: usize = #idx;
-                }
+            impl #impl_generics ::core::clone::Clone for #marker #ty_generics {
+                fn clone(&self) -> Self { *self }
             }
-        })
-        .collect();
+            impl #impl_generics ::core::marker::Copy for #marker #ty_generics {}
 
-    // Extract staged types for CopyType check
-    let staged_types: Vec<_> = named_fields
-        .iter()
-        .map(|field| {
-            field
-                .attrs
-                .iter()
-                .find(|attr| attr.path().is_ident("staged"))
-                .and_then(|attr| {
-                    if let Ok(meta_list) = attr.meta.require_list() {
-                        let tokens = &meta_list.tokens;
-                        syn::parse2::<Type>(tokens.clone()).ok()
-                    } else {
-                        None
-                    }
-                })
-                .expect("Field must have #[staged(Type)] attribute")
-        })
-        .collect();
+            impl #impl_generics ::rust_lms::_internal::Field for #marker #ty_generics #where_clause {
+                type Parent = #struct_name #ty_generics;
+                type Out = #staged_ty;
+                const OFFSET: usize = ::core::mem::offset_of!(#struct_name #ty_generics, #field_name);
+                const INDEX: usize = #idx;
+            }
+
+            pub fn #field_name #impl_generics () -> #marker #ty_generics {
+                #marker(::core::marker::PhantomData)
+            }
+        }
+    });
+
+    // CopyType is conditional: the struct is a staged `CopyType` exactly when all
+    // of its field staged types are (merged with the struct's own `where`).
+    let copy_where = {
+        // `Self: Copy` makes the `CopyType: Copy` supertrait provable for
+        // conditionally-`Copy` generic structs (where the inline bounds alone
+        // don't imply it), and is trivially true for plain `Copy` structs.
+        let mut preds: Vec<proc_macro2::TokenStream> = vec![quote! { Self: ::core::marker::Copy }];
+        if let Some(wc) = where_clause {
+            preds.extend(wc.predicates.iter().map(|p| quote! { #p }));
+        }
+        for ty in &staged_types {
+            preds.push(quote! { #ty: ::rust_lms::types::CopyType });
+        }
+        quote! { where #(#preds),* }
+    };
 
     // Generate the output
     let expanded = quote! {
-        // Field token module
+        // Field token module. The markers are internal (`__field_*`) and the
+        // module/marker names trip the case lints, so allow them here.
+        #[allow(non_camel_case_types, non_snake_case)]
         pub mod #field_module_name {
             use super::*;
 
-            #(#field_tokens)*
+            #(#field_items)*
         }
 
-        impl ::rust_lms::types::StagedType for #struct_name {
-            type RuntimeValue = #struct_name;
+        impl #impl_generics ::rust_lms::types::StagedType for #struct_name #ty_generics #where_clause {
+            type RuntimeValue = #struct_name #ty_generics;
 
             fn cranelift_type() -> ::cranelift_codegen::ir::Type {
                 // Internally we use I64 (pointer to stack slot)
@@ -178,11 +205,11 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             }
 
             fn size_of() -> usize {
-                ::std::mem::size_of::<#struct_name>()
+                ::std::mem::size_of::<#struct_name #ty_generics>()
             }
 
             fn align_of() -> usize {
-                ::std::mem::align_of::<#struct_name>()
+                ::std::mem::align_of::<#struct_name #ty_generics>()
             }
 
             fn is_copy_struct() -> bool {
@@ -190,30 +217,18 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             }
 
             fn num_abi_values() -> usize {
-                // Number of i64s needed to hold this struct
-                // Round up: (size + 7) / 8
-                (::std::mem::size_of::<#struct_name>() + 7) / 8
+                // Number of i64s needed to hold this struct (round up).
+                ::std::mem::size_of::<#struct_name #ty_generics>().div_ceil(8)
             }
 
             fn abi_types() -> Vec<::cranelift_codegen::ir::Type> {
                 // Return N x I64 where N = num_abi_values
-                let n = (::std::mem::size_of::<#struct_name>() + 7) / 8;
+                let n = ::std::mem::size_of::<#struct_name #ty_generics>().div_ceil(8);
                 vec![::cranelift_codegen::ir::types::I64; n]
             }
         }
 
-        // CopyType implementation - generated if all fields are CopyType
-        // We use a const check to avoid compile errors
-        const _: () = {
-            // Helper function to check if all fields implement CopyType
-            fn __check_copy_fields<T>()
-            where
-                #(#staged_types: ::rust_lms::types::CopyType,)*
-            {}
-
-            // If this compiles, all fields are CopyType
-            impl ::rust_lms::types::CopyType for #struct_name {}
-        };
+        impl #impl_generics ::rust_lms::types::CopyType for #struct_name #ty_generics #copy_where {}
     };
 
     TokenStream::from(expanded)

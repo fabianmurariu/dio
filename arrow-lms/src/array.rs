@@ -1,181 +1,96 @@
-//! Staged views over an Arrow column and the iterator-source glue.
+//! Staged views over an Arrow column.
 //!
-//! [`StagedArrowArrayI32`] binds an `&FfiArray` parameter's buffers into local
-//! variables and hands out [`ValuesI32`], a `rust-lms` iterator source over the
-//! values buffer. Because it implements the standard iterator traits, every
-//! combinator and terminal (`map`/`filter`/`sum`/`count_if`/`zip`/…) works
-//! against an Arrow column with no extra code here.
+//! The values buffer of an [`FfiArray`] is stored inline as a [`FatSlice`], so
+//! the *address* of that field is — bit for bit — a memory-resolved staged
+//! `Slice<M>` (a pointer to a `(ptr, len)` pair). [`AsSlice`] is the tiny
+//! adapter that re-types it as exactly that, after which **every** `rust-lms`
+//! combinator and terminal applies for free:
+//!
+//! ```ignore
+//! compiler.fun1("sum", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+//!     arr.values().filter(|x| lt(0i32, x)).sum(ctx)
+//! });
+//! ```
+//!
+//! There is no bespoke iterator source here anymore — `ValuesI32`/`ArrowGetI32`
+//! are gone; the work is done by `SliceIter` over the bridged slice.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::Value;
 use rust_lms::prelude::*;
+use std::marker::PhantomData;
 
 use crate::ffi::{FfiArray, FfiArrayType};
 
-/// Size of an `i32` value, in bytes (the stride between elements).
-const I32_STRIDE: i64 = 4;
-
 // =============================================================================
-// StagedNullBuffer
+// AsSlice: view an inline `FatSlice<M>` field as a staged `Slice<M>`
 // =============================================================================
 
-/// Staged view of an Arrow validity bitmap.
+/// Re-types a reference-to-`FatSliceType<M>` as a reference-to-`Slice<M>`.
 ///
-/// All three fields are bound into locals by [`StagedArrowArrayI32::load`]. A
-/// `validity` address of `0` means the array has no nulls (every element valid).
-/// The per-element validity test is not wired up yet — this carries the metadata
-/// end-to-end so null-aware operations can be layered on next.
-#[derive(Clone, Copy)]
-pub struct StagedNullBuffer {
-    /// Address of the bitmap's first byte, or `0` when the array has no nulls.
-    pub validity: Var<U64Type>,
-    /// Bit offset into the bitmap (Arrow slices validity by bit, not byte).
-    pub bit_offset: Var<U64Type>,
-    /// Number of null entries.
-    pub null_count: Var<U64Type>,
+/// The two share a representation — a memory-resolved slice *is* "a pointer to a
+/// `(ptr, len)` pair", which is exactly the address of an inline `FatSlice`
+/// field. So this forwards `codegen` unchanged and only changes the staged
+/// `Out` type; with no `var_id`, the slice ops take the memory-resolved path and
+/// load `ptr`/`len` from offsets 0/8.
+pub struct AsSlice<P, M> {
+    inner: P,
+    _elem: PhantomData<M>,
 }
 
-// =============================================================================
-// StagedArrowArrayI32
-// =============================================================================
-
-/// Staged view of an Arrow `Int32Array`: a values buffer plus a null buffer.
-///
-/// Construct with [`StagedArrowArrayI32::load`] from a `Var<SRef<FfiArray>>`
-/// function parameter, then iterate via [`StagedArrowArrayI32::values`].
-#[derive(Clone, Copy)]
-pub struct StagedArrowArrayI32 {
-    values: Var<U64Type>,
-    len: Var<U64Type>,
-    nulls: StagedNullBuffer,
-}
-
-impl StagedArrowArrayI32 {
-    /// Bind an `&FfiArray` parameter's fields into local variables.
-    pub fn load<'a>(ctx: &mut Ctx, arr: Var<SRef<'a, FfiArray>>) -> Self
-    where
-        'a: 'static,
-    {
-        let values = ctx.var(arr.get(FfiArrayType::values));
-        let len = ctx.var(arr.get(FfiArrayType::len));
-        let validity = ctx.var(arr.get(FfiArrayType::validity));
-        let bit_offset = ctx.var(arr.get(FfiArrayType::validity_bit_offset));
-        let null_count = ctx.var(arr.get(FfiArrayType::null_count));
-
-        StagedArrowArrayI32 {
-            values,
-            len,
-            nulls: StagedNullBuffer {
-                validity,
-                bit_offset,
-                null_count,
-            },
-        }
-    }
-
-    /// Logical element count as a staged value.
-    pub fn len(&self) -> Var<U64Type> {
-        self.len
-    }
-
-    /// The null buffer (validity bitmap address + null count).
-    pub fn null_buffer(&self) -> StagedNullBuffer {
-        self.nulls
-    }
-
-    /// An iterator source over the values buffer (does not yet skip nulls).
-    pub fn values(&self) -> ValuesI32 {
-        ValuesI32 {
-            base: self.values,
-            len: self.len,
+impl<P: Clone, M> Clone for AsSlice<P, M> {
+    fn clone(&self) -> Self {
+        AsSlice {
+            inner: self.inner.clone(),
+            _elem: PhantomData,
         }
     }
 }
 
-// =============================================================================
-// ArrowGetI32: load element `index` from a raw values base address
-// =============================================================================
+impl<P: Copy, M> Copy for AsSlice<P, M> {}
 
-/// Load the `i32` at `base + index * 4`. The single piece of custom codegen in
-/// this crate; everything else is built from `rust-lms` primitives.
-pub struct ArrowGetI32 {
-    base: Var<U64Type>,
-    index: Var<U64Type>,
-}
-
-impl Staged for ArrowGetI32 {
-    type Out = I32Type;
+impl<'a, P, M> Staged for AsSlice<P, M>
+where
+    P: Staged<Out = SRef<'a, FatSliceType<M>>>,
+    M: StagedType + 'a,
+{
+    type Out = SRef<'a, Slice<M>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let base = self.base.codegen(ctx);
-        let index = self.index.codegen(ctx);
-        let stride = ctx.builder.ins().iconst(types::I64, I32_STRIDE);
-        let byte_offset = ctx.builder.ins().imul(index, stride);
-        let addr = ctx.builder.ins().iadd(base, byte_offset);
-        ctx.builder
-            .ins()
-            .load(types::I32, MemFlags::trusted(), addr, 0)
+        self.inner.codegen(ctx)
     }
 }
 
 // =============================================================================
-// ValuesI32: the iterator source
+// ArrowArrayOps: the staged column API
 // =============================================================================
 
-/// Iterator source over the `i32` values of an Arrow column.
+/// Staged operations on an Arrow column parameter (`Var<SRef<FfiArray<M>>>`).
 ///
-/// Mirrors `rust-lms`'s `SliceIter`, but loads from a raw base address rather
-/// than a fat-pointer slice. Implements [`StagedIterator`],
-/// [`IndexedStagedIterator`], and [`IndexedSource`], so all combinators,
-/// terminals, and `zip` apply.
-#[derive(Clone, Copy)]
-pub struct ValuesI32 {
-    base: Var<U64Type>,
-    len: Var<U64Type>,
+/// [`values`](Self::values) is the entry point: a `Slice<M>` source that plugs
+/// straight into `SliceIter` and every combinator/terminal. `'r` is the staged
+/// reference's lifetime, `'a` the descriptor's borrow of the batch.
+pub trait ArrowArrayOps<'r, 'a, M: StagedType + 'r>: Sized {
+    /// The values buffer as a staged `Slice<M>` iterator source.
+    fn values(self) -> impl Staged<Out = SRef<'r, Slice<M>>> + Clone + 'r;
+
+    /// Number of null entries, as a staged value.
+    fn null_count(self) -> impl Staged<Out = U64Type>;
 }
 
-impl StagedIterator for ValuesI32 {
-    type Item = I32Type;
-
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<I32Type>) + 'static,
-    {
-        let i = ctx.var(0u64);
-        let me = self;
-        ctx.while_loop(lt(i, me.len), move |ctx| {
-            // Bind the element inside the loop so the frontend resolves it to the
-            // load with no extra copy (same shape SliceIter emits).
-            let elem = ctx.bind(ArrowGetI32 {
-                base: me.base,
-                index: i,
-            });
-            consumer(ctx, elem);
-            ctx.store(i, add(i, 1u64));
-        });
-    }
-}
-
-impl IndexedStagedIterator for ValuesI32 {
-    type LenExpr = Var<U64Type>;
-
-    fn len(&self) -> Self::LenExpr {
-        self.len
-    }
-}
-
-impl IndexedSource for ValuesI32 {
-    type Item = I32Type;
-    type LenExpr = Var<U64Type>;
-    type GetExpr = ArrowGetI32;
-
-    fn len(&self) -> Self::LenExpr {
-        self.len
-    }
-
-    fn get_at(self, index: Var<U64Type>) -> Self::GetExpr {
-        ArrowGetI32 {
-            base: self.base,
-            index,
+impl<'r, 'a, M> ArrowArrayOps<'r, 'a, M> for Var<SRef<'r, FfiArray<'a, M>>>
+where
+    M: StagedType + 'r,
+    M::RuntimeValue: 'a,
+    'a: 'r,
+{
+    fn values(self) -> impl Staged<Out = SRef<'r, Slice<M>>> + Clone + 'r {
+        AsSlice {
+            inner: self.get_ref(FfiArrayType::values()),
+            _elem: PhantomData,
         }
+    }
+
+    fn null_count(self) -> impl Staged<Out = U64Type> {
+        self.get(FfiArrayType::null_count())
     }
 }

@@ -172,17 +172,16 @@ pub struct Var<T: StagedType> {
     _phantom: std::marker::PhantomData<T>,
 }
 
-// Manually implement Clone and Copy to avoid requiring T: Clone
-impl<T: StagedType + Copy> Clone for Var<T> {
+// Manually implement Clone and Copy: a `Var` is just an id, so it is always
+// Copy regardless of `T` (no `T: Copy` bound — that would leak into every
+// generic that holds a `Var`).
+impl<T: StagedType> Clone for Var<T> {
     fn clone(&self) -> Self {
-        Var {
-            id: self.id,
-            _phantom: std::marker::PhantomData,
-        }
+        *self
     }
 }
 
-impl<T: StagedType + Copy> Copy for Var<T> {}
+impl<T: StagedType> Copy for Var<T> {}
 
 impl<T: StagedType> Var<T> {
     /// Create a new variable reference with the given ID

@@ -140,7 +140,6 @@ pub mod prelude {
         IntoStagedIterator, Map, MinMax, RangeIter, RangeStep, Scan, SkipWhile, SliceIter,
         StagedIterator, TakeWhile, Zip,
     };
-    pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
     };
@@ -163,9 +162,9 @@ pub mod prelude {
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
         Var,
     };
+    pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::types::{
-        BoolType, ConstantType, CopyType, F64Type, I32Type, StagedType, U32Type, U64Type,
-        UnitType,
+        BoolType, ConstantType, CopyType, F64Type, I32Type, StagedType, U32Type, U64Type, UnitType,
     };
     // Re-export derive macro
     #[cfg(feature = "derive")]

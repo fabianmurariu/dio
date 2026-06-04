@@ -49,5 +49,5 @@
 mod array;
 pub mod ffi;
 
-pub use array::{ArrowGetI32, StagedArrowArrayI32, StagedNullBuffer, ValuesI32};
+pub use array::{ArrowArrayOps, AsSlice};
 pub use ffi::{ffi_from_int32, get_primitive_i32, FfiArray};

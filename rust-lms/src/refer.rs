@@ -43,10 +43,19 @@ pub struct RustPtr;
 /// Note: The `T: StagedType` bound is only required on the `StagedType` impl,
 /// not on the struct itself. This allows `SRef<Slice<T>>` to work even though
 /// `Slice<T>` doesn't implement `StagedType` (since it's a DST marker).
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct SRef<'a, T, Tag = RustRef> {
     _phantom: PhantomData<&'a (T, Tag)>,
 }
+
+// A reference handle is just a phantom, so it is always Copy regardless of `T`
+// (a `T: Copy` bound from `#[derive]` would leak into every holder).
+impl<'a, T, Tag> Clone for SRef<'a, T, Tag> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, T, Tag> Copy for SRef<'a, T, Tag> {}
 
 impl<'a, T: StagedType> StagedType for SRef<'a, T, RustRef> {
     type RuntimeValue = &'a T::RuntimeValue;
@@ -74,10 +83,18 @@ impl<'a, T: StagedType> StagedType for SRef<'a, T, RustPtr> {
 /// The `Tag` parameter determines the runtime type:
 /// - `RustRef` (default): surfaces as `&mut T::RuntimeValue`
 /// - `RustPtr`: surfaces as `*mut T::RuntimeValue`
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct SRefMut<'a, T, Tag = RustRef> {
     _phantom: PhantomData<&'a mut (T, Tag)>,
 }
+
+// As with `SRef`, a mutable-reference handle is always Copy regardless of `T`.
+impl<'a, T, Tag> Clone for SRefMut<'a, T, Tag> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<'a, T, Tag> Copy for SRefMut<'a, T, Tag> {}
 
 impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustRef> {
     type RuntimeValue = &'a mut T::RuntimeValue;
