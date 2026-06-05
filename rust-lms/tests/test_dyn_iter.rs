@@ -5,20 +5,70 @@
 
 #![allow(clippy::missing_safety_doc)]
 
+use either::Either;
+use raphtory::{
+    core::entities::{EID, VID},
+    db::{
+        api::{
+            mutation::AdditionOps,
+            view::{EdgeViewOps, GraphViewOps, NodeViewOps},
+        },
+        graph::{edge::EdgeView, graph::Graph},
+    },
+    storage::{core_ops::CoreGraphOps, graph::edges::edge_storage_ops::EdgeStorageOps},
+};
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
-
-pub struct Graph {
-    ids: Vec<u64>,
-    weights: Vec<f64>,
-}
 
 // Producers: box a (borrowing) iterator into a thin `*mut ()` handle. The
 // library's DynIter<T> provides everything else.
 #[extern_fn]
 #[no_mangle]
 pub extern "C" fn g_ids(g: &Graph) -> *mut () {
-    box_dyn_iter(g.ids.iter().copied())
+    box_dyn_iter(g.nodes().iter().map(|node| node.node.as_u64()))
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn neighbours(g: &Graph, n: u64) -> *mut () {
+    let vid = VID(n as usize);
+    box_dyn_iter(
+        g.node(vid)
+            .into_iter()
+            .flat_map(|n| n.neighbours().into_iter().map(|n| n.node.0 as u64)),
+    )
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn edges(g: &Graph, n: u64) -> *mut () {
+    let vid = VID(n as usize);
+    box_dyn_iter(g.node(vid).into_iter().flat_map(|n| {
+        n.edges().into_iter().map(|e| {
+            (
+                e.edge.pid().0 as u64,
+                e.edge.src().0 as u64,
+                e.edge.dst().0 as u64,
+            )
+        })
+    }))
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn weight(g: &Graph, e: u64) -> COption<i32> {
+    let eid = EID(e as usize);
+    let edge_ref = g
+        .core_edge(Either::Left(eid))
+        .as_ref()
+        .edge_ref(raphtory::core::entities::edges::edge_ref::Dir::Out);
+    let edge_view = EdgeView::new(g, edge_ref);
+    let val = edge_view
+        .properties()
+        .temporal()
+        .get("weight")
+        .and_then(|props| props.latest().and_then(|p| p.cast_num::<i32>()));
+    val.into()
 }
 
 #[extern_fn]
@@ -34,10 +84,13 @@ pub extern "C" fn g_weights_exact(g: &Graph) -> *mut () {
 }
 
 fn graph() -> Graph {
-    Graph {
-        ids: vec![1, 2, 3, 4, 5],
-        weights: vec![1.5, 2.5, 3.0],
-    }
+    let g = Graph::new();
+    g.add_edge(-3, 1, 2, [("weight", 4i32)], None).unwrap();
+    g.add_edge(0, 2, 3, [("weight", 2i32)], None).unwrap();
+    g.add_edge(3, 1, 4, [("weight", 1i32)], None).unwrap();
+    g.add_edge(7, 4, 3, [("weight", 3i32)], None).unwrap();
+    g.add_edge(8, 1, 3, [("weight", 13i32)], None).unwrap();
+    g
 }
 
 #[test]

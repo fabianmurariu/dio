@@ -29,6 +29,8 @@ cranelift-module = { workspace = true }
 cranelift-wasm = "0.112"
 criterion = { version = "0.5", features = ["html_reports"] }
 rand = "0.8"
+raphtory = {path = "../../pometry-storage/Raphtory/raphtory"}
+either = {workspace = true}
 
 [[bench]]
 name = "filtered_sum_two_slices"
