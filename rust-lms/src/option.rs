@@ -24,7 +24,7 @@
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
-use crate::types::{BoolType, StagedType};
+use crate::types::StagedType;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
@@ -134,9 +134,9 @@ impl<T: StagedType> StagedType for COptionType<T> {
     }
 
     fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        // Return N x I64 where N = num_abi_values
-        // This matches the derive macro behavior and ensures all struct
-        // fields are passed as raw i64 bits through integer registers
+        // All-i64: the generic struct param/return paths reassemble through
+        // integer registers. (The opaque-iterator register-consume path declares
+        // its own type-correct return ABI; see `iter::opaque`.)
         vec![types::I64; Self::num_abi_values()]
     }
 }
@@ -383,7 +383,7 @@ pub struct IsSome<E> {
 }
 
 impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
@@ -413,7 +413,7 @@ pub struct IsNone<E> {
 }
 
 impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
@@ -446,7 +446,7 @@ pub struct IsRefSome<E> {
 }
 
 impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
@@ -471,7 +471,7 @@ pub struct IsRefNone<E> {
 }
 
 impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
@@ -497,7 +497,7 @@ pub struct IsMutRefSome<E> {
 }
 
 impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged for IsMutRefSome<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
@@ -520,7 +520,7 @@ pub struct IsMutRefNone<E> {
 }
 
 impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged for IsMutRefNone<E> {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
@@ -1178,7 +1178,7 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn unwrap_or_zero(opt: COption<f64>) -> f64
-        let unwrap_fn = compiler.fun1("unwrap_or_zero", |_ctx, opt: Var<COptionType<F64Type>>| {
+        let unwrap_fn = compiler.fun1("unwrap_or_zero", |_ctx, opt: Var<COptionType<f64>>| {
             unwrap_or(opt, 0.0f64)
         });
 
@@ -1196,7 +1196,7 @@ mod tests {
 
         // fn wrap_f64(x: f64) -> COption<f64>
         // Always returns Some(x)
-        let wrap = compiler.fun1("wrap_f64", |_ctx, x: Var<F64Type>| c_some::<F64Type, _>(x));
+        let wrap = compiler.fun1("wrap_f64", |_ctx, x: Var<f64>| c_some::<f64, _>(x));
 
         let compiled = compiler.compile(wrap).expect("compilation failed");
         let f = compiled.as_fn();
@@ -1388,13 +1388,13 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // fn square_if_some(opt: COption<f64>) -> COption<f64>
-        let square_fn = compiler.fun1("square_if_some", |ctx, opt: Var<COptionType<F64Type>>| {
+        let square_fn = compiler.fun1("square_if_some", |ctx, opt: Var<COptionType<f64>>| {
             use crate::num::mul;
             match_opt(
                 ctx,
                 opt,
-                |_ctx, val| c_some::<F64Type, _>(mul(val, val)),
-                c_none::<F64Type>(),
+                |_ctx, val| c_some::<f64, _>(mul(val, val)),
+                c_none::<f64>(),
             )
         });
 

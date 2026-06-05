@@ -11,7 +11,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::Module;
 use std::collections::HashMap;
 
-use crate::types::{ConstantType, StagedType, UnitType};
+use crate::types::{ConstantType, StagedType};
 use cranelift_codegen::ir::types;
 
 // =============================================================================
@@ -262,25 +262,25 @@ impl From<i64> for Const<i64> {
     }
 }
 
-impl From<u64> for Const<crate::types::U64Type> {
+impl From<u64> for Const<u64> {
     fn from(value: u64) -> Self {
         Const::new(value)
     }
 }
 
-impl From<f64> for Const<crate::types::F64Type> {
+impl From<f64> for Const<f64> {
     fn from(value: f64) -> Self {
         Const::new(value)
     }
 }
 
-impl From<bool> for Const<crate::types::BoolType> {
+impl From<bool> for Const<bool> {
     fn from(value: bool) -> Self {
         Const::new(value)
     }
 }
 
-impl From<()> for Const<crate::types::UnitType> {
+impl From<()> for Const<()> {
     fn from(value: ()) -> Self {
         Const::new(value)
     }
@@ -329,43 +329,43 @@ impl IntoStaged<i64> for i64 {
     }
 }
 
-impl IntoStaged<crate::types::U64Type> for u64 {
-    type Staged = Const<crate::types::U64Type>;
+impl IntoStaged<u64> for u64 {
+    type Staged = Const<u64>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
 }
 
-impl IntoStaged<crate::types::F64Type> for f64 {
-    type Staged = Const<crate::types::F64Type>;
+impl IntoStaged<f64> for f64 {
+    type Staged = Const<f64>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
 }
 
-impl IntoStaged<crate::types::BoolType> for bool {
-    type Staged = Const<crate::types::BoolType>;
+impl IntoStaged<bool> for bool {
+    type Staged = Const<bool>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
 }
 
-impl IntoStaged<crate::types::UnitType> for () {
-    type Staged = Const<crate::types::UnitType>;
+impl IntoStaged<()> for () {
+    type Staged = Const<()>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
 }
 
-impl IntoStaged<crate::types::I32Type> for i32 {
-    type Staged = Const<crate::types::I32Type>;
+impl IntoStaged<i32> for i32 {
+    type Staged = Const<i32>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
 }
 
-impl IntoStaged<crate::types::U32Type> for u32 {
-    type Staged = Const<crate::types::U32Type>;
+impl IntoStaged<u32> for u32 {
+    type Staged = Const<u32>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }
@@ -389,7 +389,7 @@ where
 
 /// Assignment expression: assigns a value to a variable.
 ///
-/// This is a side-effecting operation that returns `UnitType`.
+/// This is a side-effecting operation that returns `()`.
 /// Use with tuples to chain multiple assignments or continue with other expressions.
 ///
 /// # Example
@@ -408,7 +408,7 @@ where
     T: StagedType,
     EXPR: Staged<Out = T>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate code for the value expression
@@ -448,7 +448,7 @@ where
 }
 
 /// Create a unit constant
-pub fn unit() -> Const<UnitType> {
+pub fn unit() -> Const<()> {
     Const::new(())
 }
 
@@ -466,8 +466,8 @@ pub fn unit() -> Const<UnitType> {
 ///
 /// # Example
 /// ```ignore
-/// let i = compiler.let_var(0u64);  // Returns InitVar<U64Type, Const<U64Type>>
-/// let expr = (i, add(*i, 5i64));   // i initializes, *i gives Var<U64Type>
+/// let i = compiler.let_var(0u64);  // Returns InitVar<u64, Const<u64>>
+/// let expr = (i, add(*i, 5i64));   // i initializes, *i gives Var<u64>
 /// ```
 pub struct LetVar<T: StagedType, EXPR> {
     var: Var<T>,
@@ -517,7 +517,7 @@ where
     T: StagedType,
     EXPR: Staged<Out = T>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate code for the initialization value

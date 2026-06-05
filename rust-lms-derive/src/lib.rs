@@ -35,7 +35,7 @@ use syn::{parse_macro_input, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnTyp
 /// struct Point {
 ///     #[staged(i64)]
 ///     x: i64,
-///     #[staged(F64Type)]
+///     #[staged(f64)]
 ///     y: f64,
 /// }
 /// ```
@@ -260,28 +260,28 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 return Ok(quote! { ::rust_lms::types::U16Type });
             }
             if path.is_ident("i32") {
-                return Ok(quote! { ::rust_lms::types::I32Type });
+                return Ok(quote! { i32 });
             }
             if path.is_ident("u32") {
-                return Ok(quote! { ::rust_lms::types::U32Type });
+                return Ok(quote! { u32 });
             }
             if path.is_ident("i64") {
                 return Ok(quote! { i64 });
             }
             if path.is_ident("u64") {
-                return Ok(quote! { ::rust_lms::types::U64Type });
+                return Ok(quote! { u64 });
             }
             if path.is_ident("f32") {
-                return Ok(quote! { ::rust_lms::types::F32Type });
+                return Ok(quote! { f32 });
             }
             if path.is_ident("f64") {
-                return Ok(quote! { ::rust_lms::types::F64Type });
+                return Ok(quote! { f64 });
             }
             if path.is_ident("bool") {
-                return Ok(quote! { ::rust_lms::types::BoolType });
+                return Ok(quote! { bool });
             }
             if path.is_ident("usize") {
-                return Ok(quote! { ::rust_lms::types::U64Type });
+                return Ok(quote! { u64 });
             }
             if path.is_ident("isize") {
                 return Ok(quote! { i64 });
@@ -372,8 +372,8 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
             }
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => {
-            // () -> UnitType
-            Ok(quote! { ::rust_lms::types::UnitType })
+            // () -> ()
+            Ok(quote! { () })
         }
         _ => Err(format!(
             "Unsupported type for extern function: {:?}. \
@@ -496,12 +496,12 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Extract return type
     let return_staged_type = match &input.sig.output {
-        ReturnType::Default => quote! { ::rust_lms::types::UnitType },
+        ReturnType::Default => quote! { () },
         ReturnType::Type(_, ty) => match rust_type_to_staged_type(ty) {
             Ok(staged_type) => staged_type,
             Err(e) => {
                 errors.push(syn::Error::new_spanned(ty, e));
-                quote! { ::rust_lms::types::UnitType }
+                quote! { () }
             }
         },
     };

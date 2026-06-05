@@ -58,7 +58,7 @@
 
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::{CopyType, StagedType, U64Type, UnitType};
+use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
@@ -223,7 +223,7 @@ where
     S: Staged,
     S::Out: SliceType,
 {
-    type Out = U64Type;
+    type Out = u64;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.slice_len(&self.slice)
@@ -269,7 +269,7 @@ impl<S, I> Staged for SliceGetRefUnchecked<S, I>
 where
     S: Staged,
     S::Out: SliceType,
-    I: Staged<Out = U64Type>,
+    I: Staged<Out = u64>,
 {
     type Out = <S::Out as SliceType>::ElemRef;
 
@@ -296,7 +296,7 @@ where
     S: Staged,
     S::Out: SliceType,
     ElemOf<S>: CopyType,
-    I: Staged<Out = U64Type>,
+    I: Staged<Out = u64>,
 {
     type Out = ElemOf<S>;
 
@@ -330,10 +330,10 @@ impl<S, I, V> Staged for SliceSetUnchecked<S, I, V>
 where
     S: Staged,
     S::Out: MutSliceType,
-    I: Staged<Out = U64Type>,
+    I: Staged<Out = u64>,
     V: Staged<Out = ElemOf<S>>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
@@ -365,10 +365,10 @@ where
     S: Staged,
     S::Out: MutSliceType,
     ElemOf<S>: CopyType,
-    I: Staged<Out = U64Type>,
-    J: Staged<Out = U64Type>,
+    I: Staged<Out = u64>,
+    J: Staged<Out = u64>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let i = self.i.codegen(ctx);
@@ -407,8 +407,8 @@ impl<S, START, END> Staged for SliceSliceUnchecked<S, START, END>
 where
     S: Staged,
     S::Out: SliceType,
-    START: Staged<Out = U64Type>,
-    END: Staged<Out = U64Type>,
+    START: Staged<Out = u64>,
+    END: Staged<Out = u64>,
 {
     type Out = S::Out;
 
@@ -460,10 +460,10 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     ///
     /// Accepts any value that can be converted into a u64 staged expression for the index.
     /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
-    /// `arr.get_ref_unchecked(Const::<U64Type>::new(5))`.
+    /// `arr.get_ref_unchecked(Const::<u64>::new(5))`.
     fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
-        I: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
     {
         SliceGetRefUnchecked {
             slice: self,
@@ -476,7 +476,7 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     /// Only available for `CopyType` elements.
     fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
-        I: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
         T: CopyType,
     {
         SliceGetUnchecked {
@@ -492,8 +492,8 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
         end: END,
     ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
-        START: IntoStaged<U64Type>,
-        END: IntoStaged<U64Type>,
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
     {
         SliceSliceUnchecked {
             slice: self,
@@ -534,7 +534,7 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     /// Get a mutable reference to an element without bounds checking.
     fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
-        I: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
     {
         SliceGetRefUnchecked {
             slice: self,
@@ -545,7 +545,7 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     /// Get an element by value without bounds checking.
     fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
-        I: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
         T: CopyType,
     {
         SliceGetUnchecked {
@@ -564,7 +564,7 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
         value: V,
     ) -> SliceSetUnchecked<Self, I::Staged, V::Staged>
     where
-        I: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
         V: IntoStaged<T>,
     {
         SliceSetUnchecked {
@@ -581,8 +581,8 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
         end: END,
     ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
-        START: IntoStaged<U64Type>,
-        END: IntoStaged<U64Type>,
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
     {
         SliceSliceUnchecked {
             slice: self,
@@ -597,8 +597,8 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     /// `arr.swap_unchecked(0u64, lo + 1u64)`.
     fn swap_unchecked<I, J>(self, i: I, j: J) -> SliceSwapUnchecked<Self, I::Staged, J::Staged>
     where
-        I: IntoStaged<U64Type>,
-        J: IntoStaged<U64Type>,
+        I: IntoStaged<u64>,
+        J: IntoStaged<u64>,
         T: CopyType,
     {
         SliceSwapUnchecked {

@@ -20,7 +20,7 @@ use std::marker::PhantomData;
 
 use crate::func::Ctx;
 use crate::staged::{IntoStaged, Staged, Var};
-use crate::types::{BoolType, StagedType};
+use crate::types::StagedType;
 
 /// A staging-time optional consumed via [`eliminate`](StagedOpt::eliminate).
 pub trait StagedOpt {
@@ -51,7 +51,7 @@ pub struct When<C, V, T> {
 
 impl<C, V, T> StagedOpt for When<C, V, T>
 where
-    C: Staged<Out = BoolType> + 'static,
+    C: Staged<Out = bool> + 'static,
     V: Staged<Out = T> + 'static,
     T: StagedType + 'static,
 {
@@ -76,7 +76,7 @@ where
 }
 
 /// Extension giving every boolean staged expression a `then_some`.
-pub trait ThenSome: Staged<Out = BoolType> + Sized {
+pub trait ThenSome: Staged<Out = bool> + Sized {
     /// `self.then_some(value)` == `if self { Some(value) } else { None }` as a
     /// [`StagedOpt`]. `value` is lazy — only evaluated when `self` is true.
     fn then_some<T, E>(self, value: E) -> When<Self, E::Staged, T>
@@ -92,7 +92,7 @@ pub trait ThenSome: Staged<Out = BoolType> + Sized {
     }
 }
 
-impl<S: Staged<Out = BoolType>> ThenSome for S {}
+impl<S: Staged<Out = bool>> ThenSome for S {}
 
 // =============================================================================
 // SSome / SNone: static (unconditional) constructors — no branch

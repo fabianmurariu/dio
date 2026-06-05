@@ -26,7 +26,7 @@ fn test_iter_sum_i64() {
 fn test_iter_sum_f64() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+    let f = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<f64>>>| {
         arr.staged_iter().sum(ctx)
     });
 
@@ -124,7 +124,7 @@ fn test_iter_min_i64() {
 fn test_iter_max_f64() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("max_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+    let f = compiler.fun1("max_f64", |ctx, arr: Var<SRef<Slice<f64>>>| {
         arr.staged_iter().max(ctx)
     });
 
@@ -158,7 +158,7 @@ fn test_iter_min_max_filtered() {
 fn test_iter_fold_count_and_sum() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("count_and_sum", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+    let f = compiler.fun1("count_and_sum", |ctx, arr: Var<SRef<Slice<f64>>>| {
         // Declare accumulator vars BEFORE fold
         let count = ctx.var(0u64);
         let sum = ctx.var(0.0f64);
@@ -191,7 +191,7 @@ fn test_iter_zip_dot_product() {
     // Dot product: sum of a[i] * b[i]
     let f = compiler.fun2(
         "dot_product",
-        |ctx, a: Var<SRef<Slice<F64Type>>>, b: Var<SRef<Slice<F64Type>>>| {
+        |ctx, a: Var<SRef<Slice<f64>>>, b: Var<SRef<Slice<f64>>>| {
             let acc = ctx.var(0.0f64);
 
             a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
@@ -247,7 +247,7 @@ fn test_range_sum() {
     let mut compiler = Compiler::new();
 
     // Sum of range [0, n)
-    let f = compiler.fun1("range_sum", |ctx, n: Var<U64Type>| range(0u64, n).sum(ctx));
+    let f = compiler.fun1("range_sum", |ctx, n: Var<u64>| range(0u64, n).sum(ctx));
 
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
@@ -260,7 +260,7 @@ fn test_range_sum() {
 fn test_range_step_sum() {
     let mut compiler = Compiler::new();
     // Sum of [0, n) stepping by 2: 0 + 2 + 4 + ...
-    let f = compiler.fun1("range_step_sum", |ctx, n: Var<U64Type>| {
+    let f = compiler.fun1("range_step_sum", |ctx, n: Var<u64>| {
         range_step(0u64, n, 2u64).sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile failed");
@@ -282,7 +282,7 @@ fn test_range_i64_sum() {
 #[test]
 fn test_range_into_staged_iter() {
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("range_into_iter", |ctx, n: Var<U64Type>| {
+    let f = compiler.fun1("range_into_iter", |ctx, n: Var<u64>| {
         range(0u64, n).into_staged_iter().map(|x| x * 3u64).sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile failed");

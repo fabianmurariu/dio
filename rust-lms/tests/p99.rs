@@ -57,7 +57,7 @@ fn p99_05_reverse_in_place() {
             ctx.store(lo, lo + 1u64);
             ctx.store(hi_plus_1, hi);
         });
-        Const::<UnitType>::new(())
+        Const::<()>::new(())
     });
 
     let compiled = compiler.compile(f).expect("compile");

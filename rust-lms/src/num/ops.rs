@@ -3,7 +3,7 @@
 use cranelift_codegen::ir::{InstBuilder, Value};
 
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
-use crate::types::{BoolType, StagedType};
+use crate::types::StagedType;
 
 use super::traits::{IntNum, Num};
 
@@ -122,7 +122,7 @@ where
 }
 
 // =============================================================================
-// Comparison Operations (produce BoolType)
+// Comparison Operations (produce bool)
 // =============================================================================
 
 /// Less-than comparison.
@@ -138,7 +138,7 @@ where
     R: Staged<Out = T>,
     T: Num,
 {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -160,7 +160,7 @@ where
     R: Staged<Out = T>,
     T: Num,
 {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -182,7 +182,7 @@ where
     R: Staged<Out = T>,
     T: Num,
 {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
@@ -313,7 +313,7 @@ pub struct Select<C, T, F> {
 
 impl<C, T, F, Out> Staged for Select<C, T, F>
 where
-    C: Staged<Out = BoolType>,
+    C: Staged<Out = bool>,
     T: Staged<Out = Out>,
     F: Staged<Out = Out>,
     Out: StagedType,
@@ -334,7 +334,7 @@ pub fn select<C, T, F, Out>(
     if_false: F,
 ) -> Select<C::Staged, T::Staged, F::Staged>
 where
-    C: IntoStaged<BoolType>,
+    C: IntoStaged<bool>,
     T: IntoStaged<Out>,
     F: IntoStaged<Out>,
     Out: StagedType,

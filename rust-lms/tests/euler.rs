@@ -11,14 +11,14 @@
 //!     fresh `Compiler::new()`.
 //!   * `Compiled::as_fn` borrows the `Compiled`, so we always bind `compiled`
 //!     before extracting `as_fn()`.
-//!   * Slice indices/lengths are u64 (`SRefOps` requires `IntoStaged<U64Type>`);
+//!   * Slice indices/lengths are u64 (`SRefOps` requires `IntoStaged<u64>`);
 //!     loop counters that touch a slice are u64 too. Pure arithmetic uses i64.
 //!     There is no integer cast op yet, so the two worlds don't mix in a single
 //!     expression.
 //!   * Arithmetic uses Rust operators (`+ - * / %`) via `std::ops` impls.
 //!     Comparisons stay as `lt(a, b)` / `gt(a, b)` / `eq(a, b)` since
 //!     `PartialOrd::lt` would have to return a runtime `bool` rather than a
-//!     staged `BoolType`.
+//!     staged `bool`.
 //!   * Boolean flags use `Var<bool>` directly — no more `Var<i64>` 0/1 stand-ins.
 
 use rust_lms::prelude::*;
@@ -249,28 +249,25 @@ fn euler_07_nth_prime() {
 fn euler_08_largest_product_of_k_adjacent() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun2(
-        "e08",
-        |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<U64Type>| {
-            let n = ctx.var(0u64);
-            ctx.store(n, digits.len());
-            let i = ctx.var(0u64);
-            let best = ctx.var(0i64);
-            ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
-                let prod = ctx.var(1i64);
-                let j = ctx.var(0u64);
-                ctx.while_loop(lt(j, k), move |ctx| {
-                    ctx.store(prod, prod * digits.get_unchecked(i + j));
-                    ctx.store(j, j + 1u64);
-                });
-                ctx.if_then(gt(prod, best), move |ctx| {
-                    ctx.store(best, prod);
-                });
-                ctx.store(i, i + 1u64);
+    let f = compiler.fun2("e08", |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<u64>| {
+        let n = ctx.var(0u64);
+        ctx.store(n, digits.len());
+        let i = ctx.var(0u64);
+        let best = ctx.var(0i64);
+        ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
+            let prod = ctx.var(1i64);
+            let j = ctx.var(0u64);
+            ctx.while_loop(lt(j, k), move |ctx| {
+                ctx.store(prod, prod * digits.get_unchecked(i + j));
+                ctx.store(j, j + 1u64);
             });
-            best
-        },
-    );
+            ctx.if_then(gt(prod, best), move |ctx| {
+                ctx.store(best, prod);
+            });
+            ctx.store(i, i + 1u64);
+        });
+        best
+    });
 
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
@@ -471,7 +468,7 @@ fn euler_15_lattice_paths() {
 fn euler_21_amicable_sum() {
     let fill = {
         let mut compiler = Compiler::new();
-        let fill_sigma = compiler.fun1("e21_sigma", |ctx, sigma: Var<SRefMut<Slice<U64Type>>>| {
+        let fill_sigma = compiler.fun1("e21_sigma", |ctx, sigma: Var<SRefMut<Slice<u64>>>| {
             let n = ctx.var(0u64);
             ctx.store(n, sigma.len());
             let i = ctx.var(2u64);
@@ -492,14 +489,14 @@ fn euler_21_amicable_sum() {
                 ctx.emit(sigma.set_unchecked(i, s));
                 ctx.store(i, i + 1u64);
             });
-            Const::<UnitType>::new(())
+            Const::<()>::new(())
         });
         compiler.compile(fill_sigma).expect("compile fill")
     };
 
     let sum = {
         let mut compiler = Compiler::new();
-        let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<U64Type>>>| {
+        let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<u64>>>| {
             let n = ctx.var(0u64);
             ctx.store(n, sigma.len());
             let total = ctx.var(0u64);
@@ -616,7 +613,7 @@ fn euler_34_digit_factorials() {
 
     let f = compiler.fun2(
         "e34",
-        |ctx, upper: Var<U64Type>, fact: Var<SRef<Slice<U64Type>>>| {
+        |ctx, upper: Var<u64>, fact: Var<SRef<Slice<u64>>>| {
             let total = ctx.var(0u64);
             let n = ctx.var(3u64);
             ctx.while_loop(lt(n, upper), move |ctx| {
@@ -675,7 +672,7 @@ fn euler_67_max_path_sum_triangle() {
         |ctx,
          tri: Var<SRef<Slice<i64>>>,
          workspace: Var<SRefMut<Slice<i64>>>,
-         num_rows: Var<U64Type>| {
+         num_rows: Var<u64>| {
             // Seed workspace with the bottom row.
             let last_row_offset = ctx.var(0u64);
             ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);

@@ -14,7 +14,7 @@ use rust_lms::refer::SRef;
 pub struct Point {
     #[staged(i64)]
     x: i64,
-    #[staged(F64Type)]
+    #[staged(f64)]
     y: f64,
 }
 
@@ -287,11 +287,11 @@ fn test_mixed_struct_read_i64_after_f64_access() {
 #[derive(StagedType, Copy, Clone)]
 #[repr(C)]
 pub struct MixedStruct {
-    #[staged(F64Type)]
+    #[staged(f64)]
     a: f64,
     #[staged(i64)]
     b: i64,
-    #[staged(F64Type)]
+    #[staged(f64)]
     c: f64,
 }
 
@@ -299,7 +299,7 @@ pub struct MixedStruct {
 #[derive(StagedType, Copy, Clone)]
 #[repr(C)]
 pub struct FloatFirst {
-    #[staged(F64Type)]
+    #[staged(f64)]
     x: f64,
     #[staged(i64)]
     y: i64,
@@ -478,7 +478,7 @@ fn test_return_mixed_struct() {
     let mut compiler = Compiler::new();
 
     // Function that takes two values and returns a Point struct
-    let make_point = compiler.fun2("make_point", |_ctx, x: Var<i64>, _y: Var<F64Type>| {
+    let make_point = compiler.fun2("make_point", |_ctx, x: Var<i64>, _y: Var<f64>| {
         // We need to construct a Point - but we don't have struct construction yet
         // For now, just test that we can return the input x
         x

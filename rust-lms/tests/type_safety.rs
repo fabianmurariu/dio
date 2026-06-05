@@ -35,14 +35,14 @@ fn test_heterogeneous_operations() {
 
 #[test]
 fn test_bool_comparison() {
-    // Comparisons produce BoolType. To combine two booleans we use control
+    // Comparisons produce bool. To combine two booleans we use control
     // flow (`if_then_else`) rather than arithmetic — booleans are no longer
     // a `Num` so `eq(bool, bool)` is intentionally rejected at compile time.
     let compiler = Compiler::new();
     let x = Const::<i64>::new(5);
     let y = Const::<i64>::new(10);
 
-    // `lt` produces BoolType; `if_then_else` then yields an i64.
+    // `lt` produces bool; `if_then_else` then yields an i64.
     let expr = if_then_else(lt(x, y), Const::<i64>::new(1), Const::<i64>::new(0));
 
     let compiled = compiler.compile(expr).expect("compilation failed");
@@ -108,7 +108,7 @@ fn test_multiple_types_i64() {
 #[test]
 fn test_multiple_types_u64() {
     let compiler = Compiler::new();
-    let expr = mul(Const::<U64Type>::new(10), Const::new(20));
+    let expr = mul(Const::<u64>::new(10), Const::new(20));
     let compiled = compiler.compile(expr).expect("compilation failed");
     assert_eq!(compiled.run(), 200);
 }
@@ -116,7 +116,7 @@ fn test_multiple_types_u64() {
 #[test]
 fn test_multiple_types_f64() {
     let compiler = Compiler::new();
-    let expr = div(Const::<F64Type>::new(10.0), Const::new(4.0));
+    let expr = div(Const::<f64>::new(10.0), Const::new(4.0));
     let compiled = compiler.compile(expr).expect("compilation failed");
     assert!((compiled.run() - 2.5).abs() < 0.0001);
 }
@@ -158,7 +158,7 @@ fn test_function_reuse() {
 //     let x = Const::<i64>::new(5);
 //     let comparison = lt(x, Const::new(10));
 //
-//     // This should fail: can't add i64 and BoolType
+//     // This should fail: can't add i64 and bool
 //     let _bad = add(x, comparison);
 // }
 
@@ -166,8 +166,8 @@ fn test_function_reuse() {
 // fn test_mixed_numeric_types_fails() {
 //     let compiler = Compiler::new();
 //     let i64_val = Const::<i64>::new(5);
-//     let f64_val = Const::<F64Type>::new(3.14);
+//     let f64_val = Const::<f64>::new(3.14);
 //
-//     // This should fail: can't add i64 and F64Type
+//     // This should fail: can't add i64 and f64
 //     let _bad = add(i64_val, f64_val);
 // }

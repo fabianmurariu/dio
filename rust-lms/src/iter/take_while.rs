@@ -3,7 +3,7 @@
 use crate::control::not;
 use crate::func::Ctx;
 use crate::staged::{Staged, Var};
-use crate::types::{BoolType, CopyType};
+use crate::types::CopyType;
 
 use super::traits::StagedIterator;
 
@@ -25,7 +25,7 @@ where
     I: StagedIterator,
     I::Item: CopyType + 'static,
     P: Fn(Var<I::Item>) -> Cond + 'static,
-    Cond: Staged<Out = BoolType> + 'static,
+    Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
 

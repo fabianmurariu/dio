@@ -51,9 +51,9 @@
 //!
 //! ### Type Markers
 //!
-//! - [`i64`](types::i64), [`U64Type`](types::U64Type): Integer types
-//! - [`F64Type`](types::F64Type): Floating-point type
-//! - [`BoolType`](types::BoolType): Boolean type
+//! - [`i64`](types::i64), [`u64`](u64): Integer types
+//! - [`f64`](f64): Floating-point type
+//! - [`bool`](bool): Boolean type
 //!
 //! ### Operations
 //!
@@ -95,7 +95,7 @@
 //!     R: Staged<Out = T>,
 //!     T: StagedType + SupportsComparison,
 //! {
-//!     type Out = BoolType;  // Always returns Bool, not T!
+//!     type Out = bool;  // Always returns Bool, not T!
 //! }
 //! ```
 
@@ -137,9 +137,10 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        range, range_step, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind,
-        Filter, FilterMap, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
-        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterKind, RangeIter, RangeStep, Scan,
+        box_dyn_exact_iter, box_dyn_iter, range, range_step, DynExactIter, DynIter,
+        ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap,
+        IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OpaqueHandle,
+        OpaqueIter, OpaqueIterFns, OpaqueIterKind, RangeIter, RangeStep, RegisterScalar, Scan,
         SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
     };
     pub use crate::num::{
@@ -166,9 +167,7 @@ pub mod prelude {
         Var,
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
-    pub use crate::types::{
-        BoolType, ConstantType, CopyType, F64Type, I32Type, StagedType, U32Type, U64Type, UnitType,
-    };
+    pub use crate::types::{ConstantType, CopyType, StagedType};
     // Re-export derive macro
     #[cfg(feature = "derive")]
     pub use rust_lms_derive::StagedType;

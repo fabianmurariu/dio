@@ -54,7 +54,7 @@ pub unsafe extern "C" fn graph_nodes_drop(it: *mut ()) {
 /// The kind: bundles next/drop (and len/next_value for the ExactSize path).
 struct NodesKind;
 impl OpaqueIterKind for NodesKind {
-    type Item = U64Type;
+    type Item = u64;
     type Next = GraphNodesNextExtern;
     type Drop = GraphNodesDropExtern;
 }

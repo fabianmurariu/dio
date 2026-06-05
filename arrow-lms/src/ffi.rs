@@ -1,7 +1,7 @@
 //! FFI descriptor for an Arrow column and the host-side extraction helpers.
 //!
 //! [`FfiArray`] is a `#[repr(C)]` view of a single fixed-width Arrow array. It is
-//! generic over the staged element marker `M` (e.g. `I32Type`): the values
+//! generic over the staged element marker `M` (e.g. `i32`): the values
 //! buffer is carried *inline* as a [`FatSlice`] (a `(ptr, len)` fat pointer), so
 //! the staged side can read it back as a real `Slice<M>` and reuse every
 //! `rust-lms` iterator combinator — see [`crate::array`].
@@ -17,7 +17,7 @@ use rust_lms::prelude::*;
 
 /// A `#[repr(C)]` view of one fixed-width Arrow column, passed to JIT'd kernels.
 ///
-/// Generic over the staged element marker `M` (`I32Type`, …). The values buffer
+/// Generic over the staged element marker `M` (`i32`, …). The values buffer
 /// is an inline [`FatSlice`] so its field address is, bit-for-bit, a staged
 /// `Slice<M>` (see [`crate::array::ArrowArrayOps::values`]). The validity bitmap
 /// is still carried as raw metadata (null-aware iteration is a later milestone).
@@ -34,16 +34,16 @@ where
     #[staged(FatSliceType<M>)]
     values: FatSlice<M::RuntimeValue>,
     /// Validity bitmap's first byte, or null when every element is valid.
-    #[staged(U64Type)]
+    #[staged(u64)]
     validity: *const u8,
     /// Bit offset into the validity bitmap (Arrow slices validity by *bit*).
-    #[staged(U64Type)]
+    #[staged(u64)]
     validity_bit_offset: u64,
     /// Number of null entries in the (logical) array.
-    #[staged(U64Type)]
+    #[staged(u64)]
     null_count: u64,
     /// Ties the descriptor to the borrowed buffers (enforces batch outlives it).
-    #[staged(UnitType)]
+    #[staged(())]
     _borrow: PhantomData<&'a [M::RuntimeValue]>,
 }
 
@@ -71,7 +71,7 @@ where
 ///
 /// # Panics
 /// If the column is not an `Int32Array`.
-pub fn get_primitive_i32(rb: &RecordBatch, col: usize) -> FfiArray<'_, I32Type> {
+pub fn get_primitive_i32(rb: &RecordBatch, col: usize) -> FfiArray<'_, i32> {
     let array = rb
         .column(col)
         .as_any()
@@ -84,7 +84,7 @@ pub fn get_primitive_i32(rb: &RecordBatch, col: usize) -> FfiArray<'_, I32Type> 
 ///
 /// The returned descriptor borrows into `array`'s buffers; the `'_` lifetime ties
 /// it to `array`, so it cannot outlive the data it points at.
-pub fn ffi_from_int32(array: &Int32Array) -> FfiArray<'_, I32Type> {
+pub fn ffi_from_int32(array: &Int32Array) -> FfiArray<'_, i32> {
     // `values()` is already offset+length-correct for sliced arrays.
     let values = unsafe { FatSlice::from_raw_parts(array.values().as_ptr(), array.len()) };
 

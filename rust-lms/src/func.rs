@@ -19,7 +19,7 @@
 //! - Internally: pointer to stack slot for field access
 
 use crate::staged::{assign, CompilationContext, Staged, Var};
-use crate::types::{BoolType, StagedType, UnitType};
+use crate::types::StagedType;
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
 };
@@ -81,7 +81,7 @@ pub(crate) struct FunDef {
 ///
 /// # Example
 /// ```ignore
-/// compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+/// compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<f64>>>| {
 ///     let acc = ctx.var(0.0f64);
 ///     arr.staged_iter().for_each(ctx, |ctx, elem| {
 ///         ctx.assign(acc, add(acc, elem));
@@ -229,7 +229,7 @@ impl Ctx {
     }
 
     /// Emit any unit-typed staged expression (e.g. a store, an extern call).
-    pub fn emit<S: Staged<Out = UnitType> + 'static>(&mut self, stmt: S) {
+    pub fn emit<S: Staged<Out = ()> + 'static>(&mut self, stmt: S) {
         self.actions.push(Box::new(move |ctx| {
             stmt.codegen(ctx);
         }));
@@ -238,11 +238,11 @@ impl Ctx {
     /// Emit a while loop: `while cond { body }`.
     ///
     /// `body` is called once at staging time; the closure emits the per-iteration
-    /// side effects into a child `Ctx`. `cond` accepts `IntoStaged<BoolType>`
+    /// side effects into a child `Ctx`. `cond` accepts `IntoStaged<bool>`
     /// so `false` and `true` work directly.
     pub fn while_loop<C, F>(&mut self, cond: C, body: F)
     where
-        C: crate::staged::IntoStaged<BoolType>,
+        C: crate::staged::IntoStaged<bool>,
         C::Staged: 'static,
         F: FnOnce(&mut Ctx) + 'static,
     {
@@ -305,7 +305,7 @@ impl Ctx {
     /// the ExactSize path instead.
     pub fn opaque_for_each<Item, F>(
         &mut self,
-        handle: Var<crate::refer::SMutPtr<UnitType>>,
+        handle: Var<crate::refer::SMutPtr<()>>,
         next_id: usize,
         drop_id: usize,
         consumer: F,
@@ -344,18 +344,14 @@ impl Ctx {
             };
             ctx.builder.ins().brif(tag, body, &[], exit, &[]);
 
-            // body: bind elem = value register, replay consumer, loop.
+            // body: bind elem = value register (already the element's ABI type,
+            // since COption<Item> returns [tag, ...Item's abi...]), replay
+            // consumer, loop.
             ctx.builder.switch_to_block(body);
             ctx.builder.seal_block(body);
-            let elem_val = if item_cty == types::I64 {
-                val
-            } else {
-                // Narrow integer item (e.g. i32): take the low bits.
-                ctx.builder.ins().ireduce(item_cty, val)
-            };
             let elem_cv = ctx.builder.declare_var(item_cty);
             ctx.var_map.insert(elem_id, elem_cv);
-            ctx.builder.def_var(elem_cv, elem_val);
+            ctx.builder.def_var(elem_cv, val);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
@@ -391,7 +387,7 @@ impl Ctx {
     /// Emit a one-sided conditional: `if cond { then }`.
     pub fn if_then<C, F>(&mut self, cond: C, then: F)
     where
-        C: Staged<Out = BoolType> + 'static,
+        C: Staged<Out = bool> + 'static,
         F: FnOnce(&mut Ctx) + 'static,
     {
         let mut child = Ctx::new(self.next_var_id);
@@ -427,7 +423,7 @@ impl Ctx {
     /// if you need a result out.
     pub fn if_then_else<C, T, E>(&mut self, cond: C, then: T, els: E)
     where
-        C: Staged<Out = BoolType> + 'static,
+        C: Staged<Out = bool> + 'static,
         T: FnOnce(&mut Ctx) + 'static,
         E: FnOnce(&mut Ctx) + 'static,
     {
@@ -479,7 +475,9 @@ pub type VarBuilder = Ctx;
 
 /// Stored metadata for an external function
 pub(crate) struct ExternFnDef {
-    pub name: &'static str,
+    /// Unique link name (`NAME` + the fn pointer), so distinct monomorphizations
+    /// of a generic extern fn don't collide in cranelift's name-keyed symbol map.
+    pub name: String,
     pub param_abi_types: Vec<Vec<cranelift_codegen::ir::Type>>,
     pub return_abi_types: Vec<cranelift_codegen::ir::Type>,
     pub fn_ptr: *const u8,
@@ -541,7 +539,8 @@ impl<'a> Compiler<'a> {
         let extern_id = self.extern_functions.len();
 
         self.extern_functions.push(ExternFnDef {
-            name: S::NAME,
+            // Disambiguate generic instantiations (same NAME, different fn ptr).
+            name: format!("{}_{:x}", S::NAME, S::FN_PTR as usize),
             param_abi_types: S::param_abi_types(),
             return_abi_types: S::return_abi_types(),
             fn_ptr: S::FN_PTR,
@@ -968,7 +967,7 @@ impl<'a> Compiler<'a> {
 
         // Register external function symbols
         for extern_def in &self.extern_functions {
-            builder.symbol(extern_def.name, extern_def.fn_ptr as *const u8);
+            builder.symbol(extern_def.name.clone(), extern_def.fn_ptr as *const u8);
         }
 
         let mut module = JITModule::new(builder);
@@ -1031,7 +1030,7 @@ impl<'a> Compiler<'a> {
 
             // Declare the function (will be linked to the actual function pointer)
             let func_id = module
-                .declare_function(extern_def.name, Linkage::Import, &sig)
+                .declare_function(&extern_def.name, Linkage::Import, &sig)
                 .map_err(|e| CompileError::ModuleError(e.to_string()))?;
 
             extern_func_ids.insert(id, func_id);

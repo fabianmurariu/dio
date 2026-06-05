@@ -7,7 +7,7 @@ use crate::num::{add, lt};
 use crate::refer::SRef;
 use crate::slice::{Slice, SliceGetUnchecked, SliceLen, SliceRefOps};
 use crate::staged::Var;
-use crate::types::{ConstantType, CopyType, StagedType, U64Type};
+use crate::types::{ConstantType, CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
 
@@ -86,13 +86,13 @@ where
 {
     type Item = T;
     type LenExpr = SliceLen<S>;
-    type GetExpr = SliceGetUnchecked<S, Var<U64Type>>;
+    type GetExpr = SliceGetUnchecked<S, Var<u64>>;
 
     fn len(&self) -> Self::LenExpr {
         self.slice.clone().len()
     }
 
-    fn get_at(self, index: Var<U64Type>) -> Self::GetExpr {
+    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         SliceRefOps::get_unchecked(self.slice, index)
     }
 }
@@ -108,13 +108,13 @@ where
 {
     type Item = T;
     type LenExpr = SliceLen<Self>;
-    type GetExpr = SliceGetUnchecked<Self, Var<U64Type>>;
+    type GetExpr = SliceGetUnchecked<Self, Var<u64>>;
 
     fn len(&self) -> Self::LenExpr {
         SliceRefOps::len(*self)
     }
 
-    fn get_at(self, index: Var<U64Type>) -> Self::GetExpr {
+    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         SliceRefOps::get_unchecked(self, index)
     }
 }

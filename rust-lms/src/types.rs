@@ -3,7 +3,7 @@
 //! This module defines:
 //! - `StagedType`: Base trait for all types that can participate in staged computation
 //! - `ConstantType`: Trait for types that can be compile-time constants
-//! - Concrete type markers: `i64`, `U64Type`, `BoolType`, etc.
+//! - Concrete type markers: `i64`, `u64`, `bool`, etc.
 
 use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
@@ -109,24 +109,10 @@ pub trait CopyType: StagedType + Copy {}
 // =============================================================================
 // Concrete Type Markers
 // =============================================================================
-
-/// Marker type for u64 values
-pub type U64Type = u64;
-
-/// Marker type for i32 values
-pub type I32Type = i32;
-
-/// Marker type for u32 values
-pub type U32Type = u32;
-
-/// Marker type for boolean values
-pub type BoolType = bool;
-
-/// Marker type for f64 values
-pub type F64Type = f64;
-
-/// Marker type for unit (no value) - used for side-effect-only expressions
-pub type UnitType = ();
+//
+// The staged type markers ARE the Rust primitives themselves (`u64`, `i32`,
+// `f64`, `bool`, `()`, …) — there are no `XType` aliases. `StagedType` is
+// implemented directly on each primitive below.
 
 // =============================================================================
 // StagedType implementations
@@ -156,7 +142,7 @@ impl ConstantType for i64 {
 
 impl CopyType for i64 {}
 
-impl StagedType for U64Type {
+impl StagedType for u64 {
     type RuntimeValue = u64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -172,15 +158,15 @@ impl StagedType for U64Type {
     }
 }
 
-impl ConstantType for U64Type {
+impl ConstantType for u64 {
     fn codegen_constant(value: &u64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value as i64)
     }
 }
 
-impl CopyType for U64Type {}
+impl CopyType for u64 {}
 
-impl StagedType for I32Type {
+impl StagedType for i32 {
     type RuntimeValue = i32;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -196,15 +182,15 @@ impl StagedType for I32Type {
     }
 }
 
-impl ConstantType for I32Type {
+impl ConstantType for i32 {
     fn codegen_constant(value: &i32, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I32, *value as i64)
     }
 }
 
-impl CopyType for I32Type {}
+impl CopyType for i32 {}
 
-impl StagedType for U32Type {
+impl StagedType for u32 {
     type RuntimeValue = u32;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -220,15 +206,15 @@ impl StagedType for U32Type {
     }
 }
 
-impl ConstantType for U32Type {
+impl ConstantType for u32 {
     fn codegen_constant(value: &u32, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I32, *value as i64)
     }
 }
 
-impl CopyType for U32Type {}
+impl CopyType for u32 {}
 
-impl StagedType for BoolType {
+impl StagedType for bool {
     type RuntimeValue = bool;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -244,15 +230,15 @@ impl StagedType for BoolType {
     }
 }
 
-impl ConstantType for BoolType {
+impl ConstantType for bool {
     fn codegen_constant(value: &bool, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I8, if *value { 1 } else { 0 })
     }
 }
 
-impl CopyType for BoolType {}
+impl CopyType for bool {}
 
-impl StagedType for F64Type {
+impl StagedType for f64 {
     type RuntimeValue = f64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -268,15 +254,15 @@ impl StagedType for F64Type {
     }
 }
 
-impl ConstantType for F64Type {
+impl ConstantType for f64 {
     fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().f64const(*value)
     }
 }
 
-impl CopyType for F64Type {}
+impl CopyType for f64 {}
 
-impl StagedType for UnitType {
+impl StagedType for () {
     type RuntimeValue = ();
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -292,10 +278,10 @@ impl StagedType for UnitType {
     }
 }
 
-impl ConstantType for UnitType {
+impl ConstantType for () {
     fn codegen_constant(_value: &(), builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I8, 0)
     }
 }
 
-impl CopyType for UnitType {}
+impl CopyType for () {}

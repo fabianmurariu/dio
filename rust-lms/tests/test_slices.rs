@@ -74,7 +74,7 @@ fn test_slice_mutable_fill() {
             ctx.emit(arr.set_unchecked(i, 42i64));
             ctx.store(i, i + 1u64);
         });
-        Const::<UnitType>::new(())
+        Const::<()>::new(())
     });
     let compiled = compiler.compile(fill).expect("compilation failed");
     let f = compiled.as_fn();
@@ -201,7 +201,7 @@ fn test_slice_count_all_larger_than_3() {
 #[test]
 fn test_slice_f64() {
     let mut compiler = Compiler::new();
-    let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<F64Type>>>| {
+    let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<f64>>>| {
         let i = ctx.var(0u64);
         let total = ctx.var(0.0f64);
         ctx.while_loop(lt(i, arr.len()), move |ctx| {

@@ -240,7 +240,7 @@ where
     T: StagedType + 'a,
     Tag: 'a,
 {
-    type Out = crate::types::UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
@@ -451,7 +451,7 @@ mod tests {
     fn test_load_f64() {
         let mut compiler = Compiler::new();
 
-        let read_fn = compiler.fun1("read", |_ctx, ptr: Var<SRef<F64Type>>| load_ref(ptr));
+        let read_fn = compiler.fun1("read", |_ctx, ptr: Var<SRef<f64>>| load_ref(ptr));
 
         let compiled = compiler.compile(read_fn).expect("compilation failed");
         let f = compiled.as_fn();

@@ -5,8 +5,8 @@
 //! - `ctx.store(var, 42i64)` instead of `assign(var, Const::<i64>::new(42))`
 //! - `x + 5i64` instead of `add(x, Const::<i64>::new(5))`
 //! - `lt(x, 100i64)` instead of `lt(x, Const::<i64>::new(100))`
-//! - `while_loop(true, ...)` instead of `while_loop(Const::<BoolType>::new(true), ...)`
-//! - `arr.get_unchecked(0u64)` instead of `arr.get_unchecked(Const::<U64Type>::new(0))`
+//! - `while_loop(true, ...)` instead of `while_loop(Const::<bool>::new(true), ...)`
+//! - `arr.get_unchecked(0u64)` instead of `arr.get_unchecked(Const::<u64>::new(0))`
 
 use rust_lms::prelude::*;
 
@@ -161,7 +161,7 @@ fn test_ergonomic_mixed_operations() {
 fn test_ergonomic_f64_operations() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("compute", |_ctx, x: Var<F64Type>| x * 2.5f64 + 3.5f64);
+    let f = compiler.fun1("compute", |_ctx, x: Var<f64>| x * 2.5f64 + 3.5f64);
 
     let compiled = compiler.compile(f).expect("compilation failed");
     let compute = compiled.as_fn();

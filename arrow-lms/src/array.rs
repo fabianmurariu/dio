@@ -7,7 +7,7 @@
 //! combinator and terminal applies for free:
 //!
 //! ```ignore
-//! compiler.fun1("sum", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+//! compiler.fun1("sum", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
 //!     arr.values().filter(|x| lt(0i32, x)).sum(ctx)
 //! });
 //! ```
@@ -74,7 +74,7 @@ pub trait ArrowArrayOps<'r, 'a, M: StagedType + 'r>: Sized {
     fn values(self) -> impl Staged<Out = SRef<'r, Slice<M>>> + Clone + 'r;
 
     /// Number of null entries, as a staged value.
-    fn null_count(self) -> impl Staged<Out = U64Type>;
+    fn null_count(self) -> impl Staged<Out = u64>;
 }
 
 impl<'r, 'a, M> ArrowArrayOps<'r, 'a, M> for Var<SRef<'r, FfiArray<'a, M>>>
@@ -90,7 +90,7 @@ where
         }
     }
 
-    fn null_count(self) -> impl Staged<Out = U64Type> {
+    fn null_count(self) -> impl Staged<Out = u64> {
         self.get(FfiArrayType::null_count())
     }
 }

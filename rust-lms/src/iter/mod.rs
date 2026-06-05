@@ -33,8 +33,9 @@ pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use map::Map;
 pub use opaque::{
-    ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, OpaqueHandle, OpaqueIter,
-    OpaqueIterFns, OpaqueIterKind,
+    box_dyn_exact_iter, box_dyn_iter, DynExactIter, DynIter, ExactSizeOpaqueIter,
+    ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, OpaqueHandle, OpaqueIter, OpaqueIterFns,
+    OpaqueIterKind, RegisterScalar,
 };
 pub use range_iter::{range, range_step, RangeIter, RangeStep};
 pub use scan::Scan;

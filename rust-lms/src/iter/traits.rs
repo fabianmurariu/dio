@@ -5,7 +5,7 @@ use crate::func::Ctx;
 use crate::num::{add, gt, lt, select, Num};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
-use crate::types::{BoolType, ConstantType, CopyType, StagedType, U64Type};
+use crate::types::{ConstantType, CopyType, StagedType};
 
 use super::{Filter, FilterMap, Map, Scan, SkipWhile, TakeWhile, Zip};
 
@@ -104,7 +104,7 @@ pub trait StagedIterator: Sized {
     fn filter<P, Cond>(self, p: P) -> Filter<Self, P>
     where
         P: Fn(Var<Self::Item>) -> Cond,
-        Cond: Staged<Out = BoolType>,
+        Cond: Staged<Out = bool>,
     {
         Filter::new(self, p)
     }
@@ -140,7 +140,7 @@ pub trait StagedIterator: Sized {
     fn take_while<P, Cond>(self, p: P) -> TakeWhile<Self, P>
     where
         P: Fn(Var<Self::Item>) -> Cond,
-        Cond: Staged<Out = BoolType>,
+        Cond: Staged<Out = bool>,
     {
         TakeWhile::new(self, p)
     }
@@ -150,7 +150,7 @@ pub trait StagedIterator: Sized {
     fn skip_while<P, Cond>(self, p: P) -> SkipWhile<Self, P>
     where
         P: Fn(Var<Self::Item>) -> Cond,
-        Cond: Staged<Out = BoolType>,
+        Cond: Staged<Out = bool>,
     {
         SkipWhile::new(self, p)
     }
@@ -173,7 +173,7 @@ pub trait StagedIterator: Sized {
     }
 
     /// Count elements passing through (including any upstream filter).
-    fn count(self, ctx: &mut Ctx) -> Var<U64Type>
+    fn count(self, ctx: &mut Ctx) -> Var<u64>
     where
         Self::Item: 'static,
     {
@@ -189,11 +189,11 @@ pub trait StagedIterator: Sized {
     /// Equivalent to `self.filter(pred).count(ctx)` but adds a predicated
     /// `0/1` (via cmov) every iteration instead of branching — so the loop
     /// body has no data-dependent branch and stays vectorizable.
-    fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<U64Type>
+    fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
     where
         Self::Item: 'static,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
-        Cond: Staged<Out = BoolType> + 'static,
+        Cond: Staged<Out = bool> + 'static,
     {
         let acc = ctx.var(0u64);
         self.for_each(ctx, move |ctx, elem| {
@@ -211,7 +211,7 @@ pub trait StagedIterator: Sized {
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: Default,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
-        Cond: Staged<Out = BoolType> + 'static,
+        Cond: Staged<Out = bool> + 'static,
     {
         let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
         self.for_each(ctx, move |ctx, elem| {
@@ -296,7 +296,7 @@ pub trait StagedIterator: Sized {
     where
         Self::Item: 'static,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
-        Cond: Staged<Out = BoolType> + 'static,
+        Cond: Staged<Out = bool> + 'static,
     {
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
@@ -314,7 +314,7 @@ pub trait StagedIterator: Sized {
     where
         Self::Item: 'static,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
-        Cond: Staged<Out = BoolType> + 'static,
+        Cond: Staged<Out = bool> + 'static,
     {
         let result = ctx.var(true);
         self.for_each(ctx, move |ctx, elem| {
@@ -329,11 +329,11 @@ pub trait StagedIterator: Sized {
     /// Index (in this iterator's sequence, i.e. after any `filter`) of the
     /// first element satisfying `pred`, or the total element count if none
     /// match (short-circuits).
-    fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<U64Type>
+    fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
     where
         Self::Item: 'static,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
-        Cond: Staged<Out = BoolType> + 'static,
+        Cond: Staged<Out = bool> + 'static,
     {
         // `idx` counts elements seen; on a match we break *before* incrementing,
         // so it holds the match position. With no match it ends at the count.
@@ -383,7 +383,7 @@ pub trait StagedIterator: Sized {
 #[allow(clippy::len_without_is_empty)]
 pub trait IndexedStagedIterator: StagedIterator {
     /// The type of the length expression (e.g. `SliceLen<S>`, `Sub<End, Start>`).
-    type LenExpr: Staged<Out = U64Type> + Clone + 'static;
+    type LenExpr: Staged<Out = u64> + Clone + 'static;
 
     /// Return the number of elements as a staged expression.
     fn len(&self) -> Self::LenExpr;
@@ -413,11 +413,11 @@ pub trait IndexedStagedIterator: StagedIterator {
 /// the primary when it also implements `IndexedStagedIterator`.
 pub trait IndexedSource: Clone + 'static {
     type Item: StagedType;
-    type LenExpr: Staged<Out = U64Type> + Clone + 'static;
+    type LenExpr: Staged<Out = u64> + Clone + 'static;
     type GetExpr: Staged<Out = Self::Item> + 'static;
 
     fn len(&self) -> Self::LenExpr;
-    fn get_at(self, index: Var<U64Type>) -> Self::GetExpr;
+    fn get_at(self, index: Var<u64>) -> Self::GetExpr;
 }
 
 // =============================================================================

@@ -10,7 +10,7 @@
 use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::{BoolType, StagedType, UnitType};
+use crate::types::StagedType;
 
 // =============================================================================
 // IfThenElse<COND, THEN, ELSE> - Conditional Expression
@@ -34,7 +34,7 @@ pub struct IfThenElse<COND, THEN, ELSE> {
 
 impl<COND, THEN, ELSE, T> Staged for IfThenElse<COND, THEN, ELSE>
 where
-    COND: Staged<Out = BoolType>,
+    COND: Staged<Out = bool>,
     THEN: Staged<Out = T>,
     ELSE: Staged<Out = T>,
     T: StagedType,
@@ -88,14 +88,14 @@ where
 ///
 /// Accepts any value that can be converted into a bool staged expression for the condition.
 /// This allows ergonomic usage like `if_then_else(true, x, y)` instead of
-/// `if_then_else(Const::<BoolType>::new(true), x, y)`.
+/// `if_then_else(Const::<bool>::new(true), x, y)`.
 pub fn if_then_else<C, THEN, ELSE, T>(
     condition: C,
     then_branch: THEN,
     else_branch: ELSE,
 ) -> IfThenElse<C::Staged, THEN, ELSE>
 where
-    C: IntoStaged<BoolType>,
+    C: IntoStaged<bool>,
     THEN: Staged<Out = T>,
     ELSE: Staged<Out = T>,
     T: StagedType,
@@ -113,8 +113,8 @@ where
 
 /// Conditional for side effects: if condition then execute body, otherwise skip.
 ///
-/// Returns `UnitType` regardless of whether body was executed.
-/// Body must also produce `UnitType` (use for side-effect-only operations).
+/// Returns `()` regardless of whether body was executed.
+/// Body must also produce `()` (use for side-effect-only operations).
 ///
 /// # Example
 /// ```ignore
@@ -129,10 +129,10 @@ pub struct IfThen<COND, BODY> {
 
 impl<COND, BODY> Staged for IfThen<COND, BODY>
 where
-    COND: Staged<Out = BoolType>,
-    BODY: Staged<Out = UnitType>,
+    COND: Staged<Out = bool>,
+    BODY: Staged<Out = ()>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate condition code in current block
@@ -167,8 +167,8 @@ where
 /// Accepts any value that can be converted into a bool staged expression for the condition.
 pub fn if_then<C, BODY>(condition: C, body: BODY) -> IfThen<C::Staged, BODY>
 where
-    C: IntoStaged<BoolType>,
-    BODY: Staged<Out = UnitType>,
+    C: IntoStaged<bool>,
+    BODY: Staged<Out = ()>,
 {
     IfThen {
         condition: condition.into_staged(),
@@ -181,7 +181,7 @@ where
 
 /// While loop: execute body while condition is true.
 ///
-/// Returns `UnitType`. Both condition and body are re-evaluated each iteration.
+/// Returns `()`. Both condition and body are re-evaluated each iteration.
 /// The condition is checked at the start of each iteration (pre-check loop).
 ///
 /// # Example
@@ -213,10 +213,10 @@ pub struct While<COND, BODY> {
 
 impl<COND, BODY> Staged for While<COND, BODY>
 where
-    COND: Staged<Out = BoolType>,
-    BODY: Staged<Out = UnitType>,
+    COND: Staged<Out = bool>,
+    BODY: Staged<Out = ()>,
 {
-    type Out = UnitType;
+    type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Create the blocks for the loop structure
@@ -259,11 +259,11 @@ where
 ///
 /// Accepts any value that can be converted into a bool staged expression for the condition.
 /// This allows ergonomic usage like `while_loop(true, body)` instead of
-/// `while_loop(Const::<BoolType>::new(true), body)`.
+/// `while_loop(Const::<bool>::new(true), body)`.
 pub fn while_loop<C, BODY>(condition: C, body: BODY) -> While<C::Staged, BODY>
 where
-    C: IntoStaged<BoolType>,
-    BODY: Staged<Out = UnitType>,
+    C: IntoStaged<bool>,
+    BODY: Staged<Out = ()>,
 {
     While {
         condition: condition.into_staged(),
@@ -283,9 +283,9 @@ pub struct Not<C> {
 
 impl<C> Staged for Not<C>
 where
-    C: Staged<Out = BoolType>,
+    C: Staged<Out = bool>,
 {
-    type Out = BoolType;
+    type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let v = self.cond.codegen(ctx);
@@ -299,7 +299,7 @@ where
 /// Negate a boolean staged expression: `not(cond)`.
 pub fn not<C>(cond: C) -> Not<C::Staged>
 where
-    C: IntoStaged<BoolType>,
+    C: IntoStaged<bool>,
 {
     Not {
         cond: cond.into_staged(),

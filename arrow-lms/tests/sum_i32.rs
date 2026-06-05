@@ -26,7 +26,7 @@ fn sum_i32_column() {
     // `arr.values()` is a real staged `Slice<i32>`, so `.staged_iter()` and the
     // whole `rust-lms` iterator stack apply with no Arrow-specific codegen.
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
         arr.values().staged_iter().sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");
@@ -46,7 +46,7 @@ fn empty_column_sums_to_zero() {
     let ffi = get_primitive_i32(&rb, 0);
 
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
         arr.values().staged_iter().sum(ctx)
     });
     let sum = compiler.compile(f).unwrap().as_fn();
@@ -62,14 +62,14 @@ fn combinators_compose_over_a_column() {
     // Count elements > 3 (branchless), and sum the squares of the even ones.
     let mut compiler = Compiler::new();
 
-    let count_gt3 = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+    let count_gt3 = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
         arr.values().staged_iter().count_if(ctx, |x| gt(x, 3i32))
     });
     let count = compiler.compile(count_gt3).unwrap().as_fn();
     assert_eq!(count(&ffi), 3); // 4, 5, 6
 
     let mut compiler = Compiler::new();
-    let sum_even_sq = compiler.fun1("sum_even_sq", |ctx, arr: Var<SRef<FfiArray<I32Type>>>| {
+    let sum_even_sq = compiler.fun1("sum_even_sq", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
         arr.values()
             .staged_iter()
             .filter(|x| eq(x % 2i32, 0i32))
