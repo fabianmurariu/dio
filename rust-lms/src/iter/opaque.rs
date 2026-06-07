@@ -381,3 +381,174 @@ impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
     type Len = DynLen<T>;
     type NextValue = DynNextValue<T>;
 }
+
+// =============================================================================
+// Reused-storage opaque iterators (no per-call allocation in nested loops)
+// =============================================================================
+//
+// For `for n in nodes { for dst in neighbours(g, n) { .. } }`, the inner
+// iterator is created once *per outer element*. Instead of boxing each time, we
+// reserve one slot per nesting level (a JIT stack slot) and reconstruct the
+// iterator in place. Because the slot is type-erased, it carries its own
+// 2-entry vtable (`next`/`drop` fn pointers) that the producer fills — see the
+// module/`OpaqueIterSlot` docs.
+
+use crate::staged::CompilationContext;
+use cranelift_codegen::ir::{InstBuilder, Value};
+use std::mem::MaybeUninit;
+
+/// Inline storage budget (bytes) for a reused-storage iterator. Iterators that
+/// fit live in the slot (zero allocation); larger ones fall back to one heap box.
+pub const OPAQUE_ITER_INLINE_CAP: usize = 256;
+
+/// Reused per-nesting-level storage for one type-erased iterator.
+///
+/// Layout (`#[repr(C)]`, storage first so it gets the 16-byte alignment):
+/// `[ storage: [u8; CAP] | next: fn | drop: fn | data: *mut u8 ]`.
+/// `next`/`drop` are the hand-rolled mini-vtable filled by [`emplace_iter`];
+/// `data` points into `storage` (inline) or at a heap box (fallback).
+#[repr(C, align(16))]
+pub struct OpaqueIterSlot<T> {
+    storage: [MaybeUninit<u8>; OPAQUE_ITER_INLINE_CAP],
+    next: Option<unsafe extern "C" fn(*mut u8) -> COption<T>>,
+    drop: Option<unsafe extern "C" fn(*mut u8)>,
+    data: *mut u8,
+}
+
+/// Build `it` into `slot`: placed inline if it fits [`OPAQUE_ITER_INLINE_CAP`],
+/// else one heap box. Fills the slot's mini-vtable with monomorphic `next`/`drop`
+/// for `it`'s concrete type. Call this from a producer's `init` extern fn.
+///
+/// # Safety
+/// `slot` must point to a live, otherwise-uninitialized `OpaqueIterSlot<T>`.
+pub unsafe fn emplace_iter<T, I>(slot: *mut OpaqueIterSlot<T>, it: I)
+where
+    T: Copy,
+    I: Iterator<Item = T>,
+{
+    // Monomorphic mini-vtable thunks for the concrete `I` (known here in the
+    // producer, type-erased on the staged side). Non-capturing → coerce to fn.
+    unsafe extern "C" fn next_thunk<T: Copy, I: Iterator<Item = T>>(data: *mut u8) -> COption<T> {
+        (*(data as *mut I)).next().into()
+    }
+    unsafe extern "C" fn drop_inline<I>(data: *mut u8) {
+        std::ptr::drop_in_place(data as *mut I);
+    }
+    unsafe extern "C" fn drop_heap<I>(data: *mut u8) {
+        drop(Box::from_raw(data as *mut I));
+    }
+
+    let slot = &mut *slot;
+    slot.next = Some(next_thunk::<T, I>);
+    if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
+        && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
+    {
+        let dst = slot.storage.as_mut_ptr() as *mut I;
+        std::ptr::write(dst, it);
+        slot.data = dst as *mut u8;
+        slot.drop = Some(drop_inline::<I>);
+    } else {
+        slot.data = Box::into_raw(Box::new(it)) as *mut u8;
+        slot.drop = Some(drop_heap::<I>);
+    }
+}
+
+/// A reused-storage opaque-iterator kind: just the `init` extern that builds the
+/// iterator into a caller-provided slot (`init(args.., slot: *mut ())`).
+pub trait ReusedOpaqueIterKind: 'static {
+    /// Element type (scalar; `T == T::RuntimeValue`).
+    type Item: StagedType + Copy + 'static;
+    /// `init(args.., slot: *mut ())` — calls [`emplace_iter`].
+    type Init: ExternFn;
+}
+
+/// The resolved `init` ref for a kind, via [`Compiler::reused_opaque_iter_fns`].
+pub struct ReusedOpaqueIterFns<K: ReusedOpaqueIterKind> {
+    init: ExternRef<K::Init>,
+}
+
+impl<K: ReusedOpaqueIterKind> Clone for ReusedOpaqueIterFns<K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K: ReusedOpaqueIterKind> Copy for ReusedOpaqueIterFns<K> {}
+
+impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
+    /// One-argument producer, e.g. `nodes(g)`.
+    pub fn iter1<A>(self, a: A) -> ReusedOpaqueIter<K>
+    where
+        A: Staged + 'static,
+    {
+        ReusedOpaqueIter {
+            init: self.init,
+            args: Box::new(move |c| vec![a.codegen(c)]),
+        }
+    }
+
+    /// Two-argument producer, e.g. `neighbours(g, n)`.
+    pub fn iter2<A, B>(self, a: A, b: B) -> ReusedOpaqueIter<K>
+    where
+        A: Staged + 'static,
+        B: Staged + 'static,
+    {
+        ReusedOpaqueIter {
+            init: self.init,
+            args: Box::new(move |c| vec![a.codegen(c), b.codegen(c)]),
+        }
+    }
+}
+
+impl Compiler<'_> {
+    /// Register a reused-storage kind's `init` extern.
+    pub fn reused_opaque_iter_fns<K: ReusedOpaqueIterKind>(&mut self) -> ReusedOpaqueIterFns<K> {
+        ReusedOpaqueIterFns {
+            init: self.extern_fn::<K::Init>(),
+        }
+    }
+}
+
+/// A [`StagedIterator`] backed by reused per-level storage. Each `for_each`
+/// reserves one slot, so nested traversals allocate `O(depth)` (or zero, when
+/// the iterators fit the inline budget) rather than once per inner set.
+/// Codegens a producer's args (everything before the slot ptr) at compile time.
+type ArgsCodegen = Box<dyn Fn(&mut CompilationContext) -> Vec<Value>>;
+
+pub struct ReusedOpaqueIter<K: ReusedOpaqueIterKind> {
+    init: ExternRef<K::Init>,
+    args: ArgsCodegen,
+}
+
+impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
+    type Item = K::Item;
+
+    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
+    where
+        F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
+    {
+        type Slot<K> =
+            OpaqueIterSlot<<<K as ReusedOpaqueIterKind>::Item as StagedType>::RuntimeValue>;
+        let slot_size = std::mem::size_of::<Slot<K>>() as u32;
+        let align_shift = std::mem::align_of::<Slot<K>>().trailing_zeros() as u8;
+        let next_off = std::mem::offset_of!(Slot<K>, next) as i32;
+        let drop_off = std::mem::offset_of!(Slot<K>, drop) as i32;
+        let data_off = std::mem::offset_of!(Slot<K>, data) as i32;
+
+        let init_id = self.init.extern_id;
+        let args = self.args;
+        ctx.reused_opaque_for_each::<K::Item, _, F>(
+            slot_size,
+            align_shift,
+            next_off,
+            drop_off,
+            data_off,
+            move |cctx, slot_ptr| {
+                let mut a = (args)(cctx);
+                a.push(slot_ptr);
+                let init_ref = cctx.get_extern_func_ref(init_id);
+                cctx.builder.ins().call(init_ref, &a);
+            },
+            consumer,
+        );
+    }
+}

@@ -24,7 +24,7 @@ use rust_lms_derive::extern_fn;
 // library's DynIter<T> provides everything else.
 #[extern_fn]
 #[no_mangle]
-pub extern "C" fn g_ids(g: &Graph) -> *mut () {
+pub extern "C" fn all_node_internal_ids(g: &Graph) -> *mut () {
     box_dyn_iter(g.nodes().iter().map(|node| node.node.as_u64()))
 }
 
@@ -71,16 +71,19 @@ pub extern "C" fn weight(g: &Graph, e: u64) -> COption<i32> {
     val.into()
 }
 
+// Raphtory edge weights are `i32` (see `weight`); these synthetic f64 producers
+// only exist to keep the COption<f64> register-consume / ExactSize ABI coverage
+// (the real weight path is exercised by the traversal work).
 #[extern_fn]
 #[no_mangle]
-pub extern "C" fn g_weights(g: &Graph) -> *mut () {
-    box_dyn_iter(g.weights.iter().copied())
+pub extern "C" fn g_weights(_g: &Graph) -> *mut () {
+    box_dyn_iter([1.5f64, 2.5, 3.0].into_iter())
 }
 
 #[extern_fn]
 #[no_mangle]
-pub extern "C" fn g_weights_exact(g: &Graph) -> *mut () {
-    box_dyn_exact_iter(g.weights.iter().copied())
+pub extern "C" fn g_weights_exact(_g: &Graph) -> *mut () {
+    box_dyn_exact_iter([1.5f64, 2.5, 3.0].into_iter())
 }
 
 fn graph() -> Graph {
@@ -96,7 +99,7 @@ fn graph() -> Graph {
 #[test]
 fn dyn_iter_u64_sum_and_filter() {
     let mut compiler = Compiler::new();
-    let producer = compiler.extern_fn::<GIdsExtern>();
+    let producer = compiler.extern_fn::<AllNodeInternalIdsExtern>();
     let nodes = compiler.opaque_iter_fns::<DynIter<u64>>();
 
     let f = compiler.fun1("sum_ids_gt2", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
@@ -108,7 +111,17 @@ fn dyn_iter_u64_sum_and_filter() {
             .sum(ctx)
     });
     let kernel = compiler.compile(f).expect("compile").as_fn();
-    assert_eq!(kernel(&graph()), 3 + 4 + 5);
+
+    // Compare the JIT'd traversal against the same computation run host-side
+    // (node VIDs > 2, summed), so it's correct regardless of raphtory's VID map.
+    let g = graph();
+    let expected: u64 = g
+        .nodes()
+        .iter()
+        .map(|n| n.node.as_u64())
+        .filter(|&x| x > 2)
+        .sum();
+    assert_eq!(kernel(&g), expected);
 }
 
 #[test]

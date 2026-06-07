@@ -21,7 +21,7 @@
 use crate::staged::{assign, CompilationContext, Staged, Var};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+    types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
 };
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
@@ -366,6 +366,130 @@ impl Ctx {
             let it_val2 = ctx.builder.use_var(it);
             let drop_ref = ctx.get_extern_func_ref(drop_id);
             ctx.builder.ins().call(drop_ref, &[it_val2]);
+        }));
+    }
+
+    /// Drive a push loop over a *reused-storage* opaque iterator (see
+    /// `iter::opaque`): reserve one per-level slot in the JIT frame, let the
+    /// producer build the iterator into it (`init_call`), then drive it through
+    /// the slot's hand-rolled mini-vtable with indirect calls:
+    /// ```text
+    /// reserve slot[size]            ; once, reused every outer iteration
+    /// init(args.., &slot)           ; producer fills next/drop ptrs + storage
+    /// header: data = slot.data
+    ///         (tag, val) = call_indirect slot.next (data)   ; COption in regs
+    ///         brif tag, body, exit
+    /// body:   elem = val ; <consumer> ; jump header
+    /// exit:   call_indirect slot.drop (slot.data)
+    /// ```
+    /// The slot is a function-level stack slot, so nesting just reserves one per
+    /// level; `drop` runs on every exit (None and `break_loop`).
+    #[allow(clippy::too_many_arguments)]
+    pub fn reused_opaque_for_each<Item, InitFn, F>(
+        &mut self,
+        slot_size: u32,
+        slot_align_shift: u8,
+        next_off: i32,
+        drop_off: i32,
+        data_off: i32,
+        init_call: InitFn,
+        consumer: F,
+    ) where
+        Item: StagedType + 'static,
+        InitFn: FnOnce(&mut CompilationContext, Value) + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+    {
+        let elem: Var<Item> = unsafe { self.var_unchecked() };
+        let elem_id = elem.id;
+        let item_cty = Item::cranelift_type();
+
+        let mut child = Ctx::new(self.next_var_id);
+        consumer(&mut child, elem);
+        self.next_var_id = child.next_var_id;
+        let body_actions = child.actions;
+
+        self.actions.push(Box::new(move |ctx| {
+            let call_conv = if cfg!(target_os = "windows") {
+                cranelift_codegen::isa::CallConv::WindowsFastcall
+            } else {
+                cranelift_codegen::isa::CallConv::SystemV
+            };
+
+            // One per-level slot, reserved once in the frame and reused.
+            let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                slot_size,
+                slot_align_shift,
+            ));
+            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+
+            // Producer builds the iterator into the slot (fills the mini-vtable).
+            init_call(ctx, slot_ptr);
+
+            // `extern "C"` signatures for the indirect next/drop calls.
+            let mut next_sig = Signature::new(call_conv);
+            next_sig.params.push(AbiParam::new(types::I64)); // data ptr
+            next_sig.returns.push(AbiParam::new(types::I64)); // COption tag
+            next_sig.returns.push(AbiParam::new(item_cty)); // COption value
+            let next_sigref = ctx.builder.import_signature(next_sig);
+
+            let mut drop_sig = Signature::new(call_conv);
+            drop_sig.params.push(AbiParam::new(types::I64));
+            let drop_sigref = ctx.builder.import_signature(drop_sig);
+
+            let header = ctx.builder.create_block();
+            let body = ctx.builder.create_block();
+            let exit = ctx.builder.create_block();
+            ctx.builder.ins().jump(header, &[]);
+
+            // header: load data + next ptr, call it, branch on the tag register.
+            ctx.builder.switch_to_block(header);
+            let data = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
+            let next_fn =
+                ctx.builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), slot_ptr, next_off);
+            let call = ctx
+                .builder
+                .ins()
+                .call_indirect(next_sigref, next_fn, &[data]);
+            let (tag, val) = {
+                let r = ctx.builder.inst_results(call);
+                (r[0], r[1])
+            };
+            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+
+            // body: bind elem = value register, replay consumer, loop.
+            ctx.builder.switch_to_block(body);
+            ctx.builder.seal_block(body);
+            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.var_map.insert(elem_id, elem_cv);
+            ctx.builder.def_var(elem_cv, val);
+            ctx.loop_exit_stack.push(exit);
+            for action in body_actions {
+                action(ctx);
+            }
+            ctx.loop_exit_stack.pop();
+            ctx.builder.ins().jump(header, &[]);
+            ctx.builder.seal_block(header);
+
+            // exit: drop the iterator (frees only if it was heap-boxed).
+            ctx.builder.switch_to_block(exit);
+            ctx.builder.seal_block(exit);
+            let data2 = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
+            let drop_fn =
+                ctx.builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), slot_ptr, drop_off);
+            ctx.builder
+                .ins()
+                .call_indirect(drop_sigref, drop_fn, &[data2]);
         }));
     }
 
@@ -967,7 +1091,7 @@ impl<'a> Compiler<'a> {
 
         // Register external function symbols
         for extern_def in &self.extern_functions {
-            builder.symbol(extern_def.name.clone(), extern_def.fn_ptr as *const u8);
+            builder.symbol(extern_def.name.clone(), extern_def.fn_ptr);
         }
 
         let mut module = JITModule::new(builder);

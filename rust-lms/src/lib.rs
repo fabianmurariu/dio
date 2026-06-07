@@ -137,11 +137,12 @@ pub mod prelude {
         FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
-        box_dyn_exact_iter, box_dyn_iter, range, range_step, DynExactIter, DynIter,
+        box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step, DynExactIter, DynIter,
         ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap,
         IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OpaqueHandle,
-        OpaqueIter, OpaqueIterFns, OpaqueIterKind, RangeIter, RangeStep, RegisterScalar, Scan,
-        SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
+        OpaqueIter, OpaqueIterFns, OpaqueIterKind, OpaqueIterSlot, RangeIter, RangeStep,
+        RegisterScalar, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan,
+        SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, OPAQUE_ITER_INLINE_CAP,
     };
     pub use crate::num::{
         add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
