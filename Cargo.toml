@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust-lms", "rust-lms-derive", "arrow-lms", "sql-gen"]
+members = ["rust-lms", "rust-lms-derive", "arrow-lms", "sql-gen", "graph-gql"]
 resolver = "2"
 
 [workspace.dependencies]

@@ -1,0 +1,21 @@
+[package]
+name = "graph-gql"
+version = "0.1.0"
+edition = "2024"
+
+[dependencies]
+raphtory = { path = "../../pometry-storage/Raphtory/raphtory" }
+async-graphql = "7"
+async-graphql-value = "7"
+thiserror = { workspace = true }
+axum = "0.7"
+tokio = { version = "1", features = ["rt-multi-thread", "macros", "net"] }
+tokio-stream = "0.1"
+bytes = "1"
+serde = { workspace = true }
+serde_json = { workspace = true }
+
+[dev-dependencies]
+gql_client = "1"
+serde = { workspace = true }
+tokio = { version = "1", features = ["rt-multi-thread", "macros"] }
