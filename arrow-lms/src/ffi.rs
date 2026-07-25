@@ -1,13 +1,11 @@
 //! FFI descriptors for read-only primitive Arrow arrays.
 //!
-//! Host code prepares a [`PreparedFfiBatch`] from a [`RecordBatch`] or borrowed
-//! Arrow arrays, then passes the borrowed [`FfiArrayBatch`] view to a JIT'd
-//! kernel. The staged side type-specializes columns by position; schema binding
-//! is expected to guarantee that `batch.primitive::<T>(idx)` uses the right `T`.
+//! The layout is deliberately small: an erased `(ptr, len)` buffer, a validity
+//! bitmap built from that buffer, and an erased array batch. Staged code
+//! reinterprets these buffers as ordinary `rust-lms` slices.
 
 use std::fmt;
 use std::marker::PhantomData;
-use std::slice;
 
 use arrow::array::types::ArrowPrimitiveType;
 use arrow::array::{
@@ -19,68 +17,11 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-/// FFI-safe borrowed slice layout.
+/// Erased FFI slice/buffer layout.
 ///
-/// This is the public replacement name for the old "fat slice" concept: a
-/// pointer plus a length in elements of `T`.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiSlice<'a, T: 'a> {
-    #[staged(u64)]
-    pub ptr: *const T,
-    #[staged(u64)]
-    pub len: usize,
-    #[staged(())]
-    _borrow: PhantomData<&'a [T]>,
-}
-
-impl<'a, T> FfiSlice<'a, T> {
-    /// Create a borrowed slice descriptor from raw parts.
-    ///
-    /// # Safety
-    /// `ptr` must be valid for `len` elements for the lifetime represented by
-    /// this descriptor.
-    pub const unsafe fn from_raw_parts(ptr: *const T, len: usize) -> Self {
-        Self {
-            ptr,
-            len,
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Create a descriptor from a Rust slice.
-    pub fn from_slice(slice: &'a [T]) -> Self {
-        Self {
-            ptr: slice.as_ptr(),
-            len: slice.len(),
-            _borrow: PhantomData,
-        }
-    }
-
-    /// Convert the descriptor back into a Rust slice.
-    ///
-    /// # Safety
-    /// The pointed-to memory must still be valid and obey Rust aliasing rules.
-    pub unsafe fn as_slice(&self) -> &'a [T] {
-        slice::from_raw_parts(self.ptr, self.len)
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.len == 0
-    }
-}
-
-impl<'a, T> From<&'a [T]> for FfiSlice<'a, T> {
-    fn from(value: &'a [T]) -> Self {
-        Self::from_slice(value)
-    }
-}
-
-/// Erased primitive values buffer.
-///
-/// `ptr` points at the first logical primitive value. `len` is the number of
-/// primitive elements, not the number of bytes. The staged typed view supplies
-/// the element width when loading values.
+/// The meaning of `len` belongs to the owner: primitive values store element
+/// count for the eventual typed interpretation, while bitmap buffers store byte
+/// count.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiBuffer<'a> {
@@ -101,11 +42,11 @@ impl<'a> FfiBuffer<'a> {
         }
     }
 
-    /// Create an erased primitive values descriptor from raw parts.
+    /// Create an erased descriptor from raw parts.
     ///
     /// # Safety
-    /// `ptr` must point at at least `len` primitive elements of the type that
-    /// staged code will later use to read this buffer.
+    /// `ptr` must be valid for the interpretation attached to `len` by the
+    /// owning descriptor.
     pub const unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> Self {
         Self {
             ptr,
@@ -113,53 +54,65 @@ impl<'a> FfiBuffer<'a> {
             _borrow: PhantomData,
         }
     }
+
+    pub fn from_bytes(bytes: &'a [u8]) -> Self {
+        Self {
+            ptr: bytes.as_ptr(),
+            len: bytes.len(),
+            _borrow: PhantomData,
+        }
+    }
+
+    pub fn from_typed_slice<T>(slice: &'a [T]) -> Self {
+        Self {
+            ptr: slice.as_ptr().cast::<u8>(),
+            len: slice.len(),
+            _borrow: PhantomData,
+        }
+    }
 }
 
-/// FFI-safe Arrow validity bitmap descriptor.
+/// Arrow validity descriptor.
 ///
-/// Arrow validity uses `1 = valid` and `0 = null`. A null `ptr` means the
-/// entire logical array is valid.
+/// Arrow validity uses `1 = valid` and `0 = null`. `null_count == 0` means the
+/// bitmap can be ignored.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiValidity<'a> {
-    #[staged(u64)]
-    pub ptr: *const u8,
+    #[staged(FfiBuffer<'a>)]
+    pub bytes: FfiBuffer<'a>,
     #[staged(u64)]
     pub bit_offset: u64,
     #[staged(u64)]
-    pub len: u64,
+    pub bit_len: u64,
     #[staged(u64)]
     pub null_count: u64,
-    #[staged(())]
-    _borrow: PhantomData<&'a [u8]>,
 }
 
 impl<'a> FfiValidity<'a> {
     pub const fn all_valid(len: usize) -> Self {
         Self {
-            ptr: std::ptr::null(),
+            bytes: FfiBuffer::empty(),
             bit_offset: 0,
-            len: len as u64,
+            bit_len: len as u64,
             null_count: 0,
-            _borrow: PhantomData,
         }
     }
 
     pub fn from_nulls(nulls: Option<&'a NullBuffer>, len: usize) -> Self {
         match nulls {
             Some(nulls) if nulls.null_count() != 0 => Self {
-                ptr: nulls.inner().values().as_ptr(),
+                bytes: FfiBuffer::from_bytes(nulls.inner().values()),
                 bit_offset: nulls.offset() as u64,
-                len: nulls.len() as u64,
+                bit_len: nulls.len() as u64,
                 null_count: nulls.null_count() as u64,
-                _borrow: PhantomData,
             },
             _ => Self::all_valid(len),
         }
     }
 
     pub fn all_valid_host(&self) -> bool {
-        self.ptr.is_null()
+        self.null_count == 0
     }
 }
 
@@ -191,12 +144,14 @@ impl<'a> FfiArray<'a> {
     }
 }
 
-/// Borrowed vector of erased primitive array descriptors.
+/// Erased batch descriptor: a buffer of [`FfiArray`] descriptors.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiArrayBatch<'arrays, 'data: 'arrays> {
-    #[staged(FfiSlice<'arrays, FfiArray<'data>>)]
-    pub arrays: FfiSlice<'arrays, FfiArray<'data>>,
+    #[staged(FfiBuffer<'arrays>)]
+    pub arrays: FfiBuffer<'arrays>,
+    #[staged(())]
+    _borrow: PhantomData<&'arrays [FfiArray<'data>]>,
 }
 
 impl<'arrays, 'data> FfiArrayBatch<'arrays, 'data> {
@@ -205,14 +160,11 @@ impl<'arrays, 'data> FfiArrayBatch<'arrays, 'data> {
     }
 
     pub fn is_empty(&self) -> bool {
-        self.arrays.is_empty()
+        self.arrays.len == 0
     }
 }
 
 /// Host-owned prepared descriptors.
-///
-/// The descriptors borrow Arrow buffers for `'data`; [`Self::as_ffi`] creates
-/// the short-lived batch view that borrows this vector of descriptors.
 #[derive(Debug)]
 pub struct PreparedFfiBatch<'data> {
     arrays: Vec<FfiArray<'data>>,
@@ -221,7 +173,8 @@ pub struct PreparedFfiBatch<'data> {
 impl<'data> PreparedFfiBatch<'data> {
     pub fn as_ffi(&self) -> FfiArrayBatch<'_, 'data> {
         FfiArrayBatch {
-            arrays: FfiSlice::from_slice(&self.arrays),
+            arrays: FfiBuffer::from_typed_slice(&self.arrays),
+            _borrow: PhantomData,
         }
     }
 
@@ -277,9 +230,7 @@ where
     A: ArrowPrimitiveType,
 {
     FfiArray {
-        values: unsafe {
-            FfiBuffer::from_raw_parts(array.values().as_ptr().cast::<u8>(), array.len())
-        },
+        values: FfiBuffer::from_typed_slice(array.values()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
     }
 }
@@ -287,6 +238,17 @@ where
 /// Build an erased FFI descriptor from an Arrow `Int32Array`.
 pub fn ffi_from_int32(array: &Int32Array) -> FfiArray<'_> {
     ffi_from_primitive(array)
+}
+
+/// Extract column `col` of `rb` as an erased primitive descriptor, expecting an
+/// `Int32` column.
+pub fn get_primitive_i32(rb: &RecordBatch, col: usize) -> FfiArray<'_> {
+    let array = rb
+        .column(col)
+        .as_any()
+        .downcast_ref::<Int32Array>()
+        .expect("column is not an Int32Array");
+    ffi_from_int32(array)
 }
 
 /// Prepare a `RecordBatch` for a compiled kernel.

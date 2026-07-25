@@ -1,91 +1,16 @@
 //! Staged views over read-only primitive Arrow arrays.
 //!
-//! The host FFI layout is intentionally erased. Staged code regains the typed
-//! primitive view with `batch.primitive::<T>(idx)`, relying on schema binding to
-//! guarantee that `T` and `idx` match the prepared Arrow batch.
+//! Arrow's FFI descriptors are erased `(ptr, len)` buffers. This module
+//! recovers typed staged slices with the reusable `rust-lms` repr-slice adapter
+//! and keeps Arrow-specific code limited to validity bitmap interpretation.
 
 use std::marker::PhantomData;
 
-use cranelift_codegen::ir::condcodes::IntCC;
-use cranelift_codegen::ir::{types, BlockArg, InstBuilder, MemFlags, Value};
 use rust_lms::prelude::*;
 
-use crate::ffi::{FfiArray, FfiArrayBatch, FfiBuffer, FfiSlice, FfiValidity};
-
-fn load_i64(ctx: &mut CompilationContext, base: Value, offset: usize) -> Value {
-    ctx.builder
-        .ins()
-        .load(types::I64, MemFlags::trusted(), base, offset as i32)
-}
-
-fn static_array_values_ptr_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, values) + std::mem::offset_of!(FfiBuffer<'static>, ptr)
-}
-
-fn static_array_values_len_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, values) + std::mem::offset_of!(FfiBuffer<'static>, len)
-}
-
-fn static_array_validity_ptr_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, validity)
-        + std::mem::offset_of!(FfiValidity<'static>, ptr)
-}
-
-fn static_array_validity_bit_offset_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, validity)
-        + std::mem::offset_of!(FfiValidity<'static>, bit_offset)
-}
-
-fn static_array_validity_len_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, validity)
-        + std::mem::offset_of!(FfiValidity<'static>, len)
-}
-
-fn static_array_validity_null_count_offset() -> usize {
-    std::mem::offset_of!(FfiArray<'static>, validity)
-        + std::mem::offset_of!(FfiValidity<'static>, null_count)
-}
-
-fn static_batch_arrays_ptr_offset() -> usize {
-    std::mem::offset_of!(FfiArrayBatch<'static, 'static>, arrays)
-        + std::mem::offset_of!(FfiSlice<'static, FfiArray<'static>>, ptr)
-}
-
-/// Staged operation for extracting a column descriptor pointer from a batch.
-pub struct BatchColumn<B> {
-    batch: B,
-    index: usize,
-}
-
-impl<B: Clone> Clone for BatchColumn<B> {
-    fn clone(&self) -> Self {
-        Self {
-            batch: self.batch.clone(),
-            index: self.index,
-        }
-    }
-}
-
-impl<B: Copy> Copy for BatchColumn<B> {}
-
-impl<'r, 'arrays, 'data, B> Staged for BatchColumn<B>
-where
-    'data: 'arrays,
-    'arrays: 'r,
-    B: Staged<Out = SRef<'r, FfiArrayBatch<'arrays, 'data>>>,
-{
-    type Out = SRef<'r, FfiArray<'data>>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let batch_ptr = self.batch.codegen(ctx);
-        let arrays_ptr = load_i64(ctx, batch_ptr, static_batch_arrays_ptr_offset());
-        let byte_offset = ctx.builder.ins().iconst(
-            types::I64,
-            (self.index * std::mem::size_of::<FfiArray<'static>>()) as i64,
-        );
-        ctx.builder.ins().iadd(arrays_ptr, byte_offset)
-    }
-}
+use crate::ffi::{
+    FfiArray, FfiArrayBatch, FfiArrayBatchType, FfiArrayType, FfiValidity, FfiValidityType,
+};
 
 /// Typed staged primitive array view.
 pub struct PrimitiveArrayView<P, M> {
@@ -105,32 +30,88 @@ impl<P: Clone, M> Clone for PrimitiveArrayView<P, M> {
 impl<P: Copy, M> Copy for PrimitiveArrayView<P, M> {}
 
 impl<P, M> PrimitiveArrayView<P, M> {
-    pub fn physical_values(self) -> PhysicalValues<P, M> {
-        PhysicalValues { array: self }
-    }
-
-    pub fn non_null_values(self) -> NonNullValues<P, M> {
-        NonNullValues { array: self }
-    }
-
-    pub fn validity(self) -> ValidityView<P> {
-        ValidityView { array: self.array }
-    }
-
-    pub fn len(self) -> ArrayLen<P> {
-        ArrayLen { array: self.array }
-    }
-
-    pub fn value_unchecked<I>(self, index: I) -> PrimitiveValueAt<P, I::Staged, M>
+    pub fn values<'r, 'data>(
+        &self,
+    ) -> impl Staged<Out = SRef<'r, Slice<M>>> + Clone + 'r + use<'r, 'data, P, M>
     where
-        I: IntoStaged<u64>,
+        'data: 'r,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        M: StagedType + 'r,
     {
-        PrimitiveValueAt {
-            array: self.array,
-            index: index.into_staged(),
-            _elem: PhantomData,
+        field_addr(self.array.clone(), FfiArrayType::values()).as_slice::<M>()
+    }
+
+    pub fn physical_values<'r, 'data>(
+        &self,
+    ) -> impl IndexedStagedIterator<Item = M> + IndexedSource<Item = M> + 'r + use<'r, 'data, P, M>
+    where
+        'r: 'static,
+        'data: 'static,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+        M: StagedType + CopyType + ConstantType + 'static,
+        M::RuntimeValue: Default,
+    {
+        self.values().staged_iter()
+    }
+
+    pub fn non_null_values(&self) -> NonNullValues<P, M>
+    where
+        P: Clone,
+    {
+        NonNullValues {
+            array: self.clone(),
         }
     }
+
+    pub fn validity<'r, 'data>(
+        &self,
+    ) -> ValidityView<
+        impl Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r + use<'r, 'data, P, M>,
+    >
+    where
+        'data: 'r,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+    {
+        ValidityView {
+            validity: field_addr(self.array.clone(), FfiArrayType::validity()),
+        }
+    }
+
+    pub fn len<'r, 'data>(&self) -> impl Staged<Out = u64> + Clone + 'r + use<'r, 'data, P, M>
+    where
+        'data: 'r,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        M: StagedType + 'r,
+    {
+        self.values().len()
+    }
+
+    pub fn value_unchecked<'r, 'data, I>(
+        &self,
+        index: I,
+    ) -> impl Staged<Out = M> + Clone + 'r + use<'r, 'data, P, M, I>
+    where
+        'data: 'r,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        M: StagedType + CopyType + 'r,
+        I: IntoStaged<u64>,
+        I::Staged: Clone + 'r,
+    {
+        self.values().get_unchecked(index)
+    }
+
+    // pub fn staged_iter<'r, 'data>(&self) -> impl IndexedStagedIterator
+    // where
+    //     'r: 'static,
+    //     'data: 'static,
+    //     P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+    //     M: StagedType + CopyType + ConstantType + 'static,
+    //     M::RuntimeValue: Default,
+    // {
+    //     let values = self.physical_values();
+    //     let nulls = self.validity().iter();
+    //     values.zip(nulls)
+    // }
 }
 
 /// Staged operations on a prepared FFI array batch.
@@ -140,12 +121,23 @@ where
     'data: 'arrays,
     'arrays: 'r,
 {
-    fn primitive<M>(self, index: usize) -> PrimitiveArrayView<BatchColumn<Self>, M>
+    fn arrays(self) -> impl Staged<Out = SRef<'r, Slice<FfiArray<'data>>>> + Clone + 'r
     where
-        M: StagedType,
+        Self: Clone + 'r,
+    {
+        field_addr(self, FfiArrayBatchType::arrays()).as_slice::<FfiArray<'data>>()
+    }
+
+    fn primitive<M>(
+        self,
+        index: usize,
+    ) -> PrimitiveArrayView<impl Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r, M>
+    where
+        Self: Clone + 'r,
+        M: StagedType + 'r,
     {
         PrimitiveArrayView {
-            array: BatchColumn { batch: self, index },
+            array: self.arrays().get_ref_unchecked(index as u64),
             _elem: PhantomData,
         }
     }
@@ -180,148 +172,6 @@ where
     'data: 'r,
     A: Staged<Out = SRef<'r, FfiArray<'data>>> + Sized,
 {
-}
-
-/// Staged length load for a primitive array.
-pub struct ArrayLen<P> {
-    array: P,
-}
-
-impl<P: Clone> Clone for ArrayLen<P> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy> Copy for ArrayLen<P> {}
-
-impl<'r, 'data, P> Staged for ArrayLen<P>
-where
-    'data: 'r,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>>,
-{
-    type Out = u64;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let array_ptr = self.array.codegen(ctx);
-        load_i64(ctx, array_ptr, static_array_values_len_offset())
-    }
-}
-
-/// Staged primitive value load by physical row index.
-pub struct PrimitiveValueAt<P, I, M> {
-    array: P,
-    index: I,
-    _elem: PhantomData<M>,
-}
-
-impl<P: Clone, I: Clone, M> Clone for PrimitiveValueAt<P, I, M> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-            index: self.index.clone(),
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<P: Copy, I: Copy, M> Copy for PrimitiveValueAt<P, I, M> {}
-
-impl<'r, 'data, P, I, M> Staged for PrimitiveValueAt<P, I, M>
-where
-    'data: 'r,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>>,
-    I: Staged<Out = u64>,
-    M: StagedType,
-{
-    type Out = M;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let array_ptr = self.array.codegen(ctx);
-        let values_ptr = load_i64(ctx, array_ptr, static_array_values_ptr_offset());
-        let index = self.index.codegen(ctx);
-        let scale = ctx.builder.ins().iconst(types::I64, M::size_of() as i64);
-        let byte_offset = ctx.builder.ins().imul(index, scale);
-        let value_ptr = ctx.builder.ins().iadd(values_ptr, byte_offset);
-        ctx.builder
-            .ins()
-            .load(M::cranelift_type(), MemFlags::trusted(), value_ptr, 0)
-    }
-}
-
-/// Row-preserving physical values iterator.
-pub struct PhysicalValues<P, M> {
-    array: PrimitiveArrayView<P, M>,
-}
-
-impl<P: Clone, M> Clone for PhysicalValues<P, M> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy, M> Copy for PhysicalValues<P, M> {}
-
-impl<'r, 'data, P, M> StagedIterator for PhysicalValues<P, M>
-where
-    'r: 'static,
-    'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
-    M: StagedType + CopyType + 'static,
-{
-    type Item = M;
-
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
-    {
-        let i = ctx.var(0u64);
-        let array = self.array;
-
-        ctx.while_loop(lt(i, array.clone().len()), move |ctx| {
-            let elem = ctx.bind(array.clone().value_unchecked(i));
-            consumer(ctx, elem);
-            ctx.store(i, add(i, 1u64));
-        });
-    }
-}
-
-impl<'r, 'data, P, M> IndexedStagedIterator for PhysicalValues<P, M>
-where
-    'r: 'static,
-    'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
-    M: StagedType + CopyType + 'static,
-{
-    type LenExpr = ArrayLen<P>;
-
-    fn len(&self) -> Self::LenExpr {
-        self.array.clone().len()
-    }
-}
-
-impl<'r, 'data, P, M> IndexedSource for PhysicalValues<P, M>
-where
-    'r: 'static,
-    'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
-    M: StagedType + CopyType + 'static,
-{
-    type Item = M;
-    type LenExpr = ArrayLen<P>;
-    type GetExpr = PrimitiveValueAt<P, Var<u64>, M>;
-
-    fn len(&self) -> Self::LenExpr {
-        self.array.clone().len()
-    }
-
-    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
-        self.array.value_unchecked(index)
-    }
 }
 
 /// Null-skipping primitive values iterator.
@@ -368,180 +218,12 @@ where
     }
 }
 
-/// Staged validity bitmap view for an array.
-pub struct ValidityView<P> {
-    array: P,
+/// Staged validity bitmap view.
+pub struct ValidityView<V> {
+    validity: V,
 }
 
-impl<P: Clone> Clone for ValidityView<P> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy> Copy for ValidityView<P> {}
-
-impl<P> ValidityView<P> {
-    pub fn len(self) -> ValidityLen<P> {
-        ValidityLen { array: self.array }
-    }
-
-    pub fn null_count(self) -> ValidityNullCount<P> {
-        ValidityNullCount { array: self.array }
-    }
-
-    pub fn is_valid<I>(self, index: I) -> ValidityIsValid<P, I::Staged>
-    where
-        I: IntoStaged<u64>,
-    {
-        ValidityIsValid {
-            array: self.array,
-            index: index.into_staged(),
-        }
-    }
-
-    pub fn iter(self) -> ValidityIter<P> {
-        ValidityIter { validity: self }
-    }
-}
-
-pub struct ValidityLen<P> {
-    array: P,
-}
-
-impl<P: Clone> Clone for ValidityLen<P> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy> Copy for ValidityLen<P> {}
-
-impl<'r, 'data, P> Staged for ValidityLen<P>
-where
-    'data: 'r,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>>,
-{
-    type Out = u64;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let array_ptr = self.array.codegen(ctx);
-        load_i64(ctx, array_ptr, static_array_validity_len_offset())
-    }
-}
-
-pub struct ValidityNullCount<P> {
-    array: P,
-}
-
-impl<P: Clone> Clone for ValidityNullCount<P> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy> Copy for ValidityNullCount<P> {}
-
-impl<'r, 'data, P> Staged for ValidityNullCount<P>
-where
-    'data: 'r,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>>,
-{
-    type Out = u64;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let array_ptr = self.array.codegen(ctx);
-        load_i64(ctx, array_ptr, static_array_validity_null_count_offset())
-    }
-}
-
-/// Staged validity bitmap random access.
-pub struct ValidityIsValid<P, I> {
-    array: P,
-    index: I,
-}
-
-impl<P: Clone, I: Clone> Clone for ValidityIsValid<P, I> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-            index: self.index.clone(),
-        }
-    }
-}
-
-impl<P: Copy, I: Copy> Copy for ValidityIsValid<P, I> {}
-
-impl<'r, 'data, P, I> Staged for ValidityIsValid<P, I>
-where
-    'data: 'r,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>>,
-    I: Staged<Out = u64>,
-{
-    type Out = bool;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let array_ptr = self.array.codegen(ctx);
-        let validity_ptr = load_i64(ctx, array_ptr, static_array_validity_ptr_offset());
-        let ptr_is_null = ctx.builder.ins().icmp_imm(IntCC::Equal, validity_ptr, 0);
-
-        let all_valid_block = ctx.builder.create_block();
-        let bitmap_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
-        let bool_ty = ctx.builder.func.dfg.value_type(ptr_is_null);
-        ctx.builder.append_block_param(merge_block, bool_ty);
-
-        ctx.builder
-            .ins()
-            .brif(ptr_is_null, all_valid_block, &[], bitmap_block, &[]);
-
-        ctx.builder.switch_to_block(all_valid_block);
-        ctx.builder.seal_block(all_valid_block);
-        let true_value = ctx
-            .builder
-            .ins()
-            .icmp(IntCC::Equal, validity_ptr, validity_ptr);
-        let true_args = [BlockArg::Value(true_value)];
-        ctx.builder.ins().jump(merge_block, &true_args);
-
-        ctx.builder.switch_to_block(bitmap_block);
-        ctx.builder.seal_block(bitmap_block);
-        let bit_offset = load_i64(ctx, array_ptr, static_array_validity_bit_offset_offset());
-        let index = self.index.codegen(ctx);
-        let logical_bit = ctx.builder.ins().iadd(bit_offset, index);
-        let byte_index = ctx.builder.ins().ushr_imm(logical_bit, 3);
-        let bit_in_byte = ctx.builder.ins().band_imm(logical_bit, 7);
-        let byte_ptr = ctx.builder.ins().iadd(validity_ptr, byte_index);
-        let byte = ctx
-            .builder
-            .ins()
-            .load(types::I8, MemFlags::trusted(), byte_ptr, 0);
-        let byte64 = ctx.builder.ins().uextend(types::I64, byte);
-        let one = ctx.builder.ins().iconst(types::I64, 1);
-        let mask = ctx.builder.ins().ishl(one, bit_in_byte);
-        let masked = ctx.builder.ins().band(byte64, mask);
-        let bit_is_set = ctx.builder.ins().icmp_imm(IntCC::NotEqual, masked, 0);
-        let bitmap_args = [BlockArg::Value(bit_is_set)];
-        ctx.builder.ins().jump(merge_block, &bitmap_args);
-
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
-        ctx.builder.block_params(merge_block)[0]
-    }
-}
-
-/// Row-preserving validity iterator.
-pub struct ValidityIter<P> {
-    validity: ValidityView<P>,
-}
-
-impl<P: Clone> Clone for ValidityIter<P> {
+impl<V: Clone> Clone for ValidityView<V> {
     fn clone(&self) -> Self {
         Self {
             validity: self.validity.clone(),
@@ -549,13 +231,188 @@ impl<P: Clone> Clone for ValidityIter<P> {
     }
 }
 
-impl<P: Copy> Copy for ValidityIter<P> {}
+impl<V: Copy> Copy for ValidityView<V> {}
 
-impl<'r, 'data, P> StagedIterator for ValidityIter<P>
+impl<V> ValidityView<V> {
+    pub fn bytes<'r, 'data>(
+        &self,
+    ) -> impl Staged<Out = SRef<'r, Slice<u8>>> + Clone + 'r + use<'r, 'data, V>
+    where
+        'data: 'r,
+        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    {
+        field_addr(self.validity.clone(), FfiValidityType::bytes()).as_slice::<u8>()
+    }
+
+    pub fn len<'r, 'data>(&self) -> ValidityLen<V>
+    where
+        'data: 'r,
+        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    {
+        ValidityLen {
+            validity: self.validity.clone(),
+        }
+    }
+
+    pub fn null_count<'r, 'data>(&self) -> ValidityNullCount<V>
+    where
+        'data: 'r,
+        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    {
+        ValidityNullCount {
+            validity: self.validity.clone(),
+        }
+    }
+
+    pub fn bit_offset<'r, 'data>(&self) -> impl Staged<Out = u64> + Clone + 'r + use<'r, 'data, V>
+    where
+        'data: 'r,
+        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    {
+        load_field(self.validity.clone(), FfiValidityType::bit_offset())
+    }
+
+    pub fn is_valid<I>(&self, index: I) -> ValidityIsValid<V, I::Staged>
+    where
+        V: Clone,
+        I: IntoStaged<u64>,
+    {
+        ValidityIsValid {
+            validity: self.validity.clone(),
+            index: index.into_staged(),
+        }
+    }
+
+    pub fn iter(&self) -> ValidityIter<V>
+    where
+        V: Clone,
+    {
+        ValidityIter {
+            validity: self.clone(),
+        }
+    }
+}
+
+/// Staged validity bitmap length.
+pub struct ValidityLen<V> {
+    validity: V,
+}
+
+impl<V: Clone> Clone for ValidityLen<V> {
+    fn clone(&self) -> Self {
+        Self {
+            validity: self.validity.clone(),
+        }
+    }
+}
+
+impl<V: Copy> Copy for ValidityLen<V> {}
+
+impl<'r, 'data, V> Staged for ValidityLen<V>
+where
+    'data: 'r,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+{
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        load_field(self.validity.clone(), FfiValidityType::bit_len()).codegen(ctx)
+    }
+}
+
+/// Staged validity null count.
+pub struct ValidityNullCount<V> {
+    validity: V,
+}
+
+impl<V: Clone> Clone for ValidityNullCount<V> {
+    fn clone(&self) -> Self {
+        Self {
+            validity: self.validity.clone(),
+        }
+    }
+}
+
+impl<V: Copy> Copy for ValidityNullCount<V> {}
+
+impl<'r, 'data, V> Staged for ValidityNullCount<V>
+where
+    'data: 'r,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+{
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        load_field(self.validity.clone(), FfiValidityType::null_count()).codegen(ctx)
+    }
+}
+
+/// Staged validity bitmap random access.
+pub struct ValidityIsValid<V, I> {
+    validity: V,
+    index: I,
+}
+
+impl<V: Clone, I: Clone> Clone for ValidityIsValid<V, I> {
+    fn clone(&self) -> Self {
+        Self {
+            validity: self.validity.clone(),
+            index: self.index.clone(),
+        }
+    }
+}
+
+impl<V: Copy, I: Copy> Copy for ValidityIsValid<V, I> {}
+
+impl<'r, 'data, V, I> Staged for ValidityIsValid<V, I>
+where
+    'data: 'r,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    I: Staged<Out = u64> + Clone + 'r,
+{
+    type Out = bool;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        let view = ValidityView {
+            validity: self.validity.clone(),
+        };
+        let bit_index = add::<u64, _, _>(view.clone().bit_offset(), self.index.clone());
+        let byte_index = shr::<u64, _, _>(bit_index.clone(), 3u64);
+        let bit_in_byte = bitand::<u64, _, _>(bit_index, 7u64);
+        let byte = view.clone().bytes().get_unchecked(byte_index);
+        let byte64 = int_cast::<u64, u8, _>(byte);
+        let mask = shl::<u64, _, _>(Const::<u64>::new(1), bit_in_byte);
+        let bit_is_set = not(eq(bitand::<u64, _, _>(byte64, mask), 0u64));
+
+        if_then_else(
+            eq(view.null_count(), 0u64),
+            Const::<bool>::new(true),
+            bit_is_set,
+        )
+        .codegen(ctx)
+    }
+}
+
+/// Row-preserving validity iterator.
+pub struct ValidityIter<V> {
+    validity: ValidityView<V>,
+}
+
+impl<V: Clone> Clone for ValidityIter<V> {
+    fn clone(&self) -> Self {
+        Self {
+            validity: self.validity.clone(),
+        }
+    }
+}
+
+impl<V: Copy> Copy for ValidityIter<V> {}
+
+impl<'r, 'data, V> StagedIterator for ValidityIter<V>
 where
     'r: 'static,
     'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
 {
     type Item = bool;
 
@@ -574,28 +431,28 @@ where
     }
 }
 
-impl<'r, 'data, P> IndexedStagedIterator for ValidityIter<P>
+impl<'r, 'data, V> IndexedStagedIterator for ValidityIter<V>
 where
     'r: 'static,
     'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
 {
-    type LenExpr = ValidityLen<P>;
+    type LenExpr = ValidityLen<V>;
 
     fn len(&self) -> Self::LenExpr {
         self.validity.clone().len()
     }
 }
 
-impl<'r, 'data, P> IndexedSource for ValidityIter<P>
+impl<'r, 'data, V> IndexedSource for ValidityIter<V>
 where
     'r: 'static,
     'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
 {
     type Item = bool;
-    type LenExpr = ValidityLen<P>;
-    type GetExpr = ValidityIsValid<P, Var<u64>>;
+    type LenExpr = ValidityLen<V>;
+    type GetExpr = ValidityIsValid<V, Var<u64>>;
 
     fn len(&self) -> Self::LenExpr {
         self.validity.clone().len()

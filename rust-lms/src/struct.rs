@@ -106,6 +106,17 @@ pub struct LoadField<P, F> {
     _field: PhantomData<F>,
 }
 
+impl<P: Clone, F> Clone for LoadField<P, F> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+            _field: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, F> Copy for LoadField<P, F> {}
+
 impl<P, F> Staged for LoadField<P, F>
 where
     P: Staged,

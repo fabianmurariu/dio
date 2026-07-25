@@ -118,6 +118,39 @@ pub trait CopyType: StagedType + Copy {}
 // StagedType implementations
 // =============================================================================
 
+macro_rules! impl_int_staged_type {
+    ($ty:ty, $ir_ty:expr) => {
+        impl StagedType for $ty {
+            type RuntimeValue = $ty;
+
+            fn cranelift_type() -> cranelift_codegen::ir::Type {
+                $ir_ty
+            }
+
+            fn size_of() -> usize {
+                std::mem::size_of::<$ty>()
+            }
+
+            fn align_of() -> usize {
+                std::mem::align_of::<$ty>()
+            }
+        }
+
+        impl ConstantType for $ty {
+            fn codegen_constant(value: &$ty, builder: &mut FunctionBuilder) -> Value {
+                builder.ins().iconst($ir_ty, *value as i64)
+            }
+        }
+
+        impl CopyType for $ty {}
+    };
+}
+
+impl_int_staged_type!(i8, types::I8);
+impl_int_staged_type!(u8, types::I8);
+impl_int_staged_type!(i16, types::I16);
+impl_int_staged_type!(u16, types::I16);
+
 impl StagedType for i64 {
     type RuntimeValue = i64;
 
@@ -213,6 +246,30 @@ impl ConstantType for u32 {
 }
 
 impl CopyType for u32 {}
+
+impl StagedType for f32 {
+    type RuntimeValue = f32;
+
+    fn cranelift_type() -> cranelift_codegen::ir::Type {
+        types::F32
+    }
+
+    fn size_of() -> usize {
+        4
+    }
+
+    fn align_of() -> usize {
+        4
+    }
+}
+
+impl ConstantType for f32 {
+    fn codegen_constant(value: &f32, builder: &mut FunctionBuilder) -> Value {
+        builder.ins().f32const(*value)
+    }
+}
+
+impl CopyType for f32 {}
 
 impl StagedType for bool {
     type RuntimeValue = bool;

@@ -11,7 +11,12 @@
 mod ops;
 mod traits;
 
-pub use ops::{Add, Div, Eq, Gt, Lt, Mul, Rem, Select, Sub};
+pub use ops::{
+    Add, BitAnd, BitOr, BitXor, Div, Eq, Gt, IntCast, Lt, Mul, Rem, Select, Shl, Shr, Sub,
+};
 pub use traits::{FloatNum, IntNum, Num};
 
-pub use ops::{add, div, eq, gt, lt, max, min, mul, rem, select, sub};
+pub use ops::{
+    add, bitand, bitor, bitxor, div, eq, gt, int_cast, lt, max, min, mul, rem, select, shl, shr,
+    sub,
+};

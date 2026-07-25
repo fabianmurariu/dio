@@ -268,6 +268,48 @@ impl From<u64> for Const<u64> {
     }
 }
 
+impl From<i8> for Const<i8> {
+    fn from(value: i8) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<u8> for Const<u8> {
+    fn from(value: u8) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<i16> for Const<i16> {
+    fn from(value: i16) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<u16> for Const<u16> {
+    fn from(value: u16) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<i32> for Const<i32> {
+    fn from(value: i32) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<u32> for Const<u32> {
+    fn from(value: u32) -> Self {
+        Const::new(value)
+    }
+}
+
+impl From<f32> for Const<f32> {
+    fn from(value: f32) -> Self {
+        Const::new(value)
+    }
+}
+
 impl From<f64> for Const<f64> {
     fn from(value: f64) -> Self {
         Const::new(value)
@@ -336,6 +378,55 @@ impl IntoStaged<u64> for u64 {
     }
 }
 
+impl IntoStaged<i8> for i8 {
+    type Staged = Const<i8>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<u8> for u8 {
+    type Staged = Const<u8>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<i16> for i16 {
+    type Staged = Const<i16>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<u16> for u16 {
+    type Staged = Const<u16>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<i32> for i32 {
+    type Staged = Const<i32>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<u32> for u32 {
+    type Staged = Const<u32>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<f32> for f32 {
+    type Staged = Const<f32>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
 impl IntoStaged<f64> for f64 {
     type Staged = Const<f64>;
     fn into_staged(self) -> Self::Staged {
@@ -352,20 +443,6 @@ impl IntoStaged<bool> for bool {
 
 impl IntoStaged<()> for () {
     type Staged = Const<()>;
-    fn into_staged(self) -> Self::Staged {
-        Const::new(self)
-    }
-}
-
-impl IntoStaged<i32> for i32 {
-    type Staged = Const<i32>;
-    fn into_staged(self) -> Self::Staged {
-        Const::new(self)
-    }
-}
-
-impl IntoStaged<u32> for u32 {
-    type Staged = Const<u32>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }

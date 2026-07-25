@@ -82,6 +82,70 @@ pub struct Slice<T: StagedType> {
 }
 
 // =============================================================================
+// AsSlice: view any repr-compatible `(ptr, len)` value as a staged slice
+// =============================================================================
+
+/// Re-types a reference to a repr-compatible `(ptr, len)` value as a staged
+/// `Slice<T>`.
+///
+/// This emits no code of its own: it forwards the address of the representation
+/// unchanged and lets the normal slice operations load `ptr` and `len` from
+/// offsets 0 and 8. Use it for `#[repr(C)]` FFI descriptors whose first two
+/// fields are pointer-sized `ptr` and `len` values.
+pub struct AsSlice<P, T> {
+    repr: P,
+    _elem: PhantomData<T>,
+}
+
+impl<P: Clone, T> Clone for AsSlice<P, T> {
+    fn clone(&self) -> Self {
+        Self {
+            repr: self.repr.clone(),
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, T> Copy for AsSlice<P, T> {}
+
+impl<'a, P, R, T> Staged for AsSlice<P, T>
+where
+    P: Staged<Out = SRef<'a, R>>,
+    R: StagedType + 'a,
+    T: StagedType + 'a,
+{
+    type Out = SRef<'a, Slice<T>>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.repr.codegen(ctx)
+    }
+}
+
+/// Extension trait for values that point at a repr-compatible `(ptr, len)`.
+pub trait ReprSliceOps<'a, R>: Staged<Out = SRef<'a, R>> + Sized
+where
+    R: StagedType + 'a,
+{
+    /// Reinterpret the pointed-to representation as a staged slice of `T`.
+    fn as_slice<T>(self) -> AsSlice<Self, T>
+    where
+        T: StagedType + 'a,
+    {
+        AsSlice {
+            repr: self,
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<'a, R, S> ReprSliceOps<'a, R> for S
+where
+    R: StagedType + 'a,
+    S: Staged<Out = SRef<'a, R>> + Sized,
+{
+}
+
+// =============================================================================
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================
 

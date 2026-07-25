@@ -263,6 +263,11 @@ impl RegisterScalar for u64 {}
 impl RegisterScalar for i64 {}
 impl RegisterScalar for u32 {}
 impl RegisterScalar for i32 {}
+impl RegisterScalar for u16 {}
+impl RegisterScalar for i16 {}
+impl RegisterScalar for u8 {}
+impl RegisterScalar for i8 {}
+impl RegisterScalar for f32 {}
 impl RegisterScalar for f64 {}
 impl RegisterScalar for bool {}
 

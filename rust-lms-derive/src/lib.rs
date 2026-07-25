@@ -248,16 +248,16 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 
             // Handle primitive types
             if path.is_ident("i8") {
-                return Ok(quote! { ::rust_lms::types::I8Type });
+                return Ok(quote! { i8 });
             }
             if path.is_ident("u8") {
-                return Ok(quote! { ::rust_lms::types::U8Type });
+                return Ok(quote! { u8 });
             }
             if path.is_ident("i16") {
-                return Ok(quote! { ::rust_lms::types::I16Type });
+                return Ok(quote! { i16 });
             }
             if path.is_ident("u16") {
-                return Ok(quote! { ::rust_lms::types::U16Type });
+                return Ok(quote! { u16 });
             }
             if path.is_ident("i32") {
                 return Ok(quote! { i32 });

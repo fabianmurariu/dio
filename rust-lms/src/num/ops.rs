@@ -1,6 +1,7 @@
 //! Operation structs for numeric staged computations.
 
 use cranelift_codegen::ir::{InstBuilder, Value};
+use std::marker::PhantomData;
 
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
 use crate::types::StagedType;
@@ -118,6 +119,161 @@ where
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_rem(lv, rv, ctx.builder)
+    }
+}
+
+// =============================================================================
+// Integer Bit Operations
+// =============================================================================
+
+/// Bitwise AND operation.
+#[derive(Clone)]
+pub struct BitAnd<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for BitAnd<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_bitand(lv, rv, ctx.builder)
+    }
+}
+
+/// Bitwise OR operation.
+#[derive(Clone)]
+pub struct BitOr<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for BitOr<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_bitor(lv, rv, ctx.builder)
+    }
+}
+
+/// Bitwise XOR operation.
+#[derive(Clone)]
+pub struct BitXor<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for BitXor<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_bitxor(lv, rv, ctx.builder)
+    }
+}
+
+/// Left shift operation.
+#[derive(Clone)]
+pub struct Shl<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for Shl<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_shl(lv, rv, ctx.builder)
+    }
+}
+
+/// Right shift operation.
+#[derive(Clone)]
+pub struct Shr<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R, T> Staged for Shr<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_shr(lv, rv, ctx.builder)
+    }
+}
+
+/// Integer cast with Rust-like truncation on narrowing and signedness-aware
+/// extension on widening.
+pub struct IntCast<E, TO> {
+    expr: E,
+    _to: PhantomData<TO>,
+}
+
+impl<E: Clone, TO> Clone for IntCast<E, TO> {
+    fn clone(&self) -> Self {
+        Self {
+            expr: self.expr.clone(),
+            _to: PhantomData,
+        }
+    }
+}
+
+impl<E: Copy, TO> Copy for IntCast<E, TO> {}
+
+impl<E, FROM, TO> Staged for IntCast<E, TO>
+where
+    E: Staged<Out = FROM>,
+    FROM: IntNum,
+    TO: IntNum,
+{
+    type Out = TO;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let value = self.expr.codegen(ctx);
+        let from_bits = FROM::size_of() * 8;
+        let to_bits = TO::size_of() * 8;
+        let to_ty = TO::cranelift_type();
+
+        match from_bits.cmp(&to_bits) {
+            std::cmp::Ordering::Equal => value,
+            std::cmp::Ordering::Less if FROM::SIGNED => ctx.builder.ins().sextend(to_ty, value),
+            std::cmp::Ordering::Less => ctx.builder.ins().uextend(to_ty, value),
+            std::cmp::Ordering::Greater => ctx.builder.ins().ireduce(to_ty, value),
+        }
     }
 }
 
@@ -257,6 +413,84 @@ where
     Rem {
         left: left.into_staged(),
         right: right.into_staged(),
+    }
+}
+
+/// Build a staged bitwise AND.
+pub fn bitand<T, L, R>(left: L, right: R) -> BitAnd<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    BitAnd {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged bitwise OR.
+pub fn bitor<T, L, R>(left: L, right: R) -> BitOr<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    BitOr {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged bitwise XOR.
+pub fn bitxor<T, L, R>(left: L, right: R) -> BitXor<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    BitXor {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged left shift.
+pub fn shl<T, L, R>(left: L, right: R) -> Shl<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Shl {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged right shift.
+pub fn shr<T, L, R>(left: L, right: R) -> Shr<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Shr {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged integer cast.
+pub fn int_cast<TO, FROM, E>(expr: E) -> IntCast<E::Staged, TO>
+where
+    TO: IntNum,
+    FROM: IntNum,
+    E: IntoStaged<FROM>,
+{
+    IntCast {
+        expr: expr.into_staged(),
+        _to: PhantomData,
     }
 }
 
@@ -472,57 +706,168 @@ macro_rules! impl_rem_op_for {
     };
 }
 
+/// Impls `core::ops::{BitAnd, BitOr, BitXor, Shl, Shr}` for the given staged
+/// carrier. Operands must have the same staged integer type.
+macro_rules! impl_bit_ops_for {
+    ([$($gen:tt)*] $self:ty) => {
+        impl<$($gen)*, __Out, __R> ::core::ops::BitAnd<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = BitAnd<Self, __R::Staged>;
+            fn bitand(self, rhs: __R) -> Self::Output {
+                bitand::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::BitOr<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = BitOr<Self, __R::Staged>;
+            fn bitor(self, rhs: __R) -> Self::Output {
+                bitor::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::BitXor<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = BitXor<Self, __R::Staged>;
+            fn bitxor(self, rhs: __R) -> Self::Output {
+                bitxor::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::Shl<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Shl<Self, __R::Staged>;
+            fn shl(self, rhs: __R) -> Self::Output {
+                shl::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*, __Out, __R> ::core::ops::Shr<__R> for $self
+        where
+            $self: Staged<Out = __Out> + 'static,
+            __Out: IntNum + 'static,
+            __R: IntoStaged<__Out>,
+            __R::Staged: 'static,
+        {
+            type Output = Shr<Self, __R::Staged>;
+            fn shr(self, rhs: __R) -> Self::Output {
+                shr::<__Out, _, _>(self, rhs)
+            }
+        }
+    };
+}
+
 // Carriers: Var<T>, Const<T>, and the op structs themselves.
 impl_num_ops_for!([T: StagedType] Var<T>);
 impl_rem_op_for!([T: StagedType] Var<T>);
+impl_bit_ops_for!([T: StagedType] Var<T>);
 
 impl_num_ops_for!([T: crate::types::ConstantType] Const<T>);
 impl_rem_op_for!([T: crate::types::ConstantType] Const<T>);
+impl_bit_ops_for!([T: crate::types::ConstantType] Const<T>);
 
 impl_num_ops_for!([L, R] Add<L, R>);
 impl_rem_op_for!([L, R] Add<L, R>);
+impl_bit_ops_for!([L, R] Add<L, R>);
 
 impl_num_ops_for!([L, R] Sub<L, R>);
 impl_rem_op_for!([L, R] Sub<L, R>);
+impl_bit_ops_for!([L, R] Sub<L, R>);
 
 impl_num_ops_for!([L, R] Mul<L, R>);
 impl_rem_op_for!([L, R] Mul<L, R>);
+impl_bit_ops_for!([L, R] Mul<L, R>);
 
 impl_num_ops_for!([L, R] Div<L, R>);
 impl_rem_op_for!([L, R] Div<L, R>);
+impl_bit_ops_for!([L, R] Div<L, R>);
 
 impl_num_ops_for!([L, R] Rem<L, R>);
 impl_rem_op_for!([L, R] Rem<L, R>);
+impl_bit_ops_for!([L, R] Rem<L, R>);
+
+impl_num_ops_for!([L, R] BitAnd<L, R>);
+impl_rem_op_for!([L, R] BitAnd<L, R>);
+impl_bit_ops_for!([L, R] BitAnd<L, R>);
+
+impl_num_ops_for!([L, R] BitOr<L, R>);
+impl_rem_op_for!([L, R] BitOr<L, R>);
+impl_bit_ops_for!([L, R] BitOr<L, R>);
+
+impl_num_ops_for!([L, R] BitXor<L, R>);
+impl_rem_op_for!([L, R] BitXor<L, R>);
+impl_bit_ops_for!([L, R] BitXor<L, R>);
+
+impl_num_ops_for!([L, R] Shl<L, R>);
+impl_rem_op_for!([L, R] Shl<L, R>);
+impl_bit_ops_for!([L, R] Shl<L, R>);
+
+impl_num_ops_for!([L, R] Shr<L, R>);
+impl_rem_op_for!([L, R] Shr<L, R>);
+impl_bit_ops_for!([L, R] Shr<L, R>);
+
+impl_num_ops_for!([E, TO] IntCast<E, TO>);
+impl_rem_op_for!([E, TO] IntCast<E, TO>);
+impl_bit_ops_for!([E, TO] IntCast<E, TO>);
 
 // Conditional select carries through operators too.
 impl_num_ops_for!([C, T, F] Select<C, T, F>);
 impl_rem_op_for!([C, T, F] Select<C, T, F>);
+impl_bit_ops_for!([C, T, F] Select<C, T, F>);
 
 // LetVar acts like a Var when used in expressions.
 impl_num_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
 impl_rem_op_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
+impl_bit_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
 
 // Slice access carriers (length, element reads). The carriers are now unified
 // across immutable and mutable slices, so one impl each covers both.
 impl_num_ops_for!([S] crate::slice::SliceLen<S>);
 impl_rem_op_for!([S] crate::slice::SliceLen<S>);
+impl_bit_ops_for!([S] crate::slice::SliceLen<S>);
 
 impl_num_ops_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
 impl_rem_op_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
+impl_bit_ops_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
 
 // Reference-load carriers.
 impl_num_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);
 impl_rem_op_for!(['a, P] crate::refer::LoadRef<'a, P>);
+impl_bit_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);
 
 impl_num_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
 impl_rem_op_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
+impl_bit_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
 
 impl_num_ops_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
 impl_rem_op_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
+impl_bit_ops_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
 
 // Struct field accessors.
 impl_num_ops_for!([P, F] crate::r#struct::LoadField<P, F>);
 impl_rem_op_for!([P, F] crate::r#struct::LoadField<P, F>);
+impl_bit_ops_for!([P, F] crate::r#struct::LoadField<P, F>);
 
 impl_num_ops_for!([P, F] crate::r#struct::FieldPath<P, F>);
 impl_rem_op_for!([P, F] crate::r#struct::FieldPath<P, F>);
+impl_bit_ops_for!([P, F] crate::r#struct::FieldPath<P, F>);

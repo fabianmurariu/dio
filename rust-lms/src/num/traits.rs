@@ -34,7 +34,14 @@ pub trait Num: StagedType + ConstantType + CopyType + 'static {
 
 /// Integer-typed numbers — additionally support remainder (modulo).
 pub trait IntNum: Num {
+    const SIGNED: bool;
+
     fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_bitand(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_bitor(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_bitxor(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_shl(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_shr(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
 }
 
 /// Floating-point numbers — marker; reserved for future float-only ops.
@@ -70,8 +77,25 @@ macro_rules! impl_int_num {
             }
         }
         impl IntNum for $ty {
+            const SIGNED: bool = true;
+
             fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
                 b.ins().srem(l, r)
+            }
+            fn codegen_bitand(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().band(l, r)
+            }
+            fn codegen_bitor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().bor(l, r)
+            }
+            fn codegen_bitxor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().bxor(l, r)
+            }
+            fn codegen_shl(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().ishl(l, r)
+            }
+            fn codegen_shr(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().sshr(l, r)
             }
         }
     };
@@ -100,13 +124,34 @@ macro_rules! impl_int_num {
             }
         }
         impl IntNum for $ty {
+            const SIGNED: bool = false;
+
             fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
                 b.ins().urem(l, r)
+            }
+            fn codegen_bitand(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().band(l, r)
+            }
+            fn codegen_bitor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().bor(l, r)
+            }
+            fn codegen_bitxor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().bxor(l, r)
+            }
+            fn codegen_shl(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().ishl(l, r)
+            }
+            fn codegen_shr(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+                b.ins().ushr(l, r)
             }
         }
     };
 }
 
+impl_int_num!(i8, signed);
+impl_int_num!(u8, unsigned);
+impl_int_num!(i16, signed);
+impl_int_num!(u16, unsigned);
 impl_int_num!(i64, signed);
 impl_int_num!(u64, unsigned);
 impl_int_num!(i32, signed);
@@ -141,3 +186,29 @@ impl Num for f64 {
 }
 
 impl FloatNum for f64 {}
+
+impl Num for f32 {
+    fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fadd(l, r)
+    }
+    fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fsub(l, r)
+    }
+    fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fmul(l, r)
+    }
+    fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fdiv(l, r)
+    }
+    fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::LessThan, l, r)
+    }
+    fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::GreaterThan, l, r)
+    }
+    fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
+        b.ins().fcmp(FloatCC::Equal, l, r)
+    }
+}
+
+impl FloatNum for f32 {}

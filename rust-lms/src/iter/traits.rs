@@ -26,12 +26,52 @@ impl MinMax for i64 {
         i64::MAX
     }
 }
+impl MinMax for i8 {
+    fn min_sentinel() -> Self {
+        i8::MIN
+    }
+    fn max_sentinel() -> Self {
+        i8::MAX
+    }
+}
+impl MinMax for u8 {
+    fn min_sentinel() -> Self {
+        u8::MIN
+    }
+    fn max_sentinel() -> Self {
+        u8::MAX
+    }
+}
+impl MinMax for i16 {
+    fn min_sentinel() -> Self {
+        i16::MIN
+    }
+    fn max_sentinel() -> Self {
+        i16::MAX
+    }
+}
+impl MinMax for u16 {
+    fn min_sentinel() -> Self {
+        u16::MIN
+    }
+    fn max_sentinel() -> Self {
+        u16::MAX
+    }
+}
 impl MinMax for u64 {
     fn min_sentinel() -> Self {
         u64::MIN
     }
     fn max_sentinel() -> Self {
         u64::MAX
+    }
+}
+impl MinMax for f32 {
+    fn min_sentinel() -> Self {
+        f32::NEG_INFINITY
+    }
+    fn max_sentinel() -> Self {
+        f32::INFINITY
     }
 }
 impl MinMax for f64 {

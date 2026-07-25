@@ -130,7 +130,8 @@ pub mod prelude {
     };
     pub use crate::ffi::{
         call_extern0, call_extern1, call_extern2, call_extern3, ExternFn, ExternRef, FatSlice,
-        FatSliceMut, FatSliceMutType, FatSliceType,
+        FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice, FfiSliceMut, FfiSliceMutType,
+        FfiSliceType,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,
@@ -145,7 +146,8 @@ pub mod prelude {
         SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, OPAQUE_ITER_INLINE_CAP,
     };
     pub use crate::num::{
-        add, div, eq, gt, lt, max, min, mul, rem, select, sub, FloatNum, IntNum, Num,
+        add, bitand, bitor, bitxor, div, eq, gt, int_cast, lt, max, min, mul, rem, select, shl,
+        shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, Num, Shl, Shr,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{
@@ -162,7 +164,9 @@ pub mod prelude {
         store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset, PtrOffsetMut, RustPtr, RustRef,
         SMutPtr, SPtr, SRef, SRefMut, Store,
     };
-    pub use crate::slice::{Slice, SliceLen, SliceMutOps, SliceRefOps, SliceType};
+    pub use crate::slice::{
+        AsSlice, ReprSliceOps, Slice, SliceLen, SliceMutOps, SliceRefOps, SliceType,
+    };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
         Var,

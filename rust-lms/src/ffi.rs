@@ -155,6 +155,16 @@ impl<T> From<&mut [T]> for FatSliceMut<T> {
     }
 }
 
+/// ABI-facing name for [`FatSlice`].
+///
+/// `FfiSlice<T>` is the concrete runtime `(ptr, len)` value passed across
+/// function boundaries. `SRef<Slice<T>>` is the staged view over the same
+/// representation inside generated code.
+pub type FfiSlice<T> = FatSlice<T>;
+
+/// ABI-facing name for [`FatSliceMut`].
+pub type FfiSliceMut<T> = FatSliceMut<T>;
+
 // =============================================================================
 // StagedType implementations for FatSlice
 // =============================================================================
@@ -199,6 +209,12 @@ impl<T: StagedType> StagedType for FatSliceType<T> {
 pub struct FatSliceMutType<T> {
     _phantom: PhantomData<T>,
 }
+
+/// Staged type marker for [`FfiSlice`].
+pub type FfiSliceType<T> = FatSliceType<T>;
+
+/// Staged type marker for [`FfiSliceMut`].
+pub type FfiSliceMutType<T> = FatSliceMutType<T>;
 
 impl<T: StagedType> StagedType for FatSliceMutType<T> {
     type RuntimeValue = FatSliceMut<T::RuntimeValue>;

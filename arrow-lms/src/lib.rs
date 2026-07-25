@@ -17,12 +17,11 @@ mod array;
 pub mod ffi;
 
 pub use array::{
-    ArrayLen, BatchColumn, FfiArrayBatchOps, FfiArrayOps, NonNullValues, PhysicalValues,
-    PrimitiveArrayView, PrimitiveValueAt, ValidityIsValid, ValidityIter, ValidityLen,
-    ValidityNullCount, ValidityView,
+    FfiArrayBatchOps, FfiArrayOps, NonNullValues, PrimitiveArrayView, ValidityIsValid,
+    ValidityIter, ValidityLen, ValidityNullCount, ValidityView,
 };
 pub use ffi::{
-    ffi_from_int32, ffi_from_primitive, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
-    prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError, FfiSlice, FfiValidity,
-    PreparedFfiBatch,
+    ffi_from_int32, ffi_from_primitive, get_primitive_i32, prepare_array_refs, prepare_arrays,
+    prepare_dyn_arrays, prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError,
+    FfiValidity, PreparedFfiBatch,
 };

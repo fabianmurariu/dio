@@ -3,12 +3,12 @@
 
 use std::sync::Arc;
 
-use arrow::array::Int32Array;
+use arrow::array::{Array, Int16Array, Int32Array};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use arrow_lms::{prepare_record_batch, FfiArrayBatch, FfiArrayBatchOps};
+use arrow_lms::{prepare_dyn_arrays, prepare_record_batch, FfiArrayBatch, FfiArrayBatchOps};
 use rust_lms::prelude::*;
 
 fn batch(values: Vec<i32>) -> RecordBatch {
@@ -156,4 +156,21 @@ fn validity_iter_respects_sliced_bitmap_offsets() {
     let count_valid = compiler.compile(f).unwrap().as_fn();
 
     assert_eq!(count_valid(&ffi), 1);
+}
+
+#[test]
+fn primitive_view_works_from_erased_dyn_arrays() {
+    let col = Int16Array::from(vec![2i16, 3, 5]);
+    let arrays: [&dyn Array; 1] = [&col];
+    let prepared = prepare_dyn_arrays(&arrays).unwrap();
+    let ffi = prepared.as_ffi();
+
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("sum_i16", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        let total = batch.primitive::<i16>(0).physical_values().sum(ctx);
+        int_cast::<i64, i16, _>(total)
+    });
+    let sum = compiler.compile(f).unwrap().as_fn();
+
+    assert_eq!(sum(&ffi), 10);
 }
