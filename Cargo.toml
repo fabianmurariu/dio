@@ -30,7 +30,8 @@ petgraph = "0.6"
 ahash = "0.8"
 
 # Testing
-either = "1.16.0"
+# Pinned to match raphtory's exact `=1.15.0` requirement (used via its API in tests).
+either = "=1.15.0"
 proptest = "1.4"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"

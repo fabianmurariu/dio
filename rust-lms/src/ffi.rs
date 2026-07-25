@@ -533,6 +533,119 @@ where
     }
 }
 
+/// Append `arg`'s ABI value(s) to `args` (flattening a copy-struct passed by
+/// pointer into its register-sized parts), mirroring the per-arg handling in
+/// `CallExtern1`/`CallExtern2`.
+fn push_extern_arg<AType: StagedType>(
+    ctx: &mut CompilationContext,
+    args: &mut Vec<Value>,
+    arg_val: Value,
+) {
+    if AType::is_copy_struct() && AType::num_abi_values() > 1 {
+        for i in 0..AType::num_abi_values() {
+            let offset = (i * 8) as i32;
+            let val = ctx.builder.ins().load(
+                types::I64,
+                cranelift_codegen::ir::MemFlags::trusted(),
+                arg_val,
+                offset,
+            );
+            args.push(val);
+        }
+    } else {
+        args.push(arg_val);
+    }
+}
+
+/// Call an external function with 3 arguments.
+pub struct CallExtern3<S: ExternFn, A, B, C, Out: StagedType> {
+    func: ExternRef<S>,
+    arg0: A,
+    arg1: B,
+    arg2: C,
+    _phantom: PhantomData<Out>,
+}
+
+impl<S, A, B, C, AType, BType, CType, Out> Staged for CallExtern3<S, A, B, C, Out>
+where
+    S: ExternFn,
+    A: Staged<Out = AType>,
+    B: Staged<Out = BType>,
+    C: Staged<Out = CType>,
+    AType: StagedType,
+    BType: StagedType,
+    CType: StagedType,
+    Out: StagedType,
+{
+    type Out = Out;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let arg0_val = self.arg0.codegen(ctx);
+        let arg1_val = self.arg1.codegen(ctx);
+        let arg2_val = self.arg2.codegen(ctx);
+
+        let mut args = Vec::new();
+        push_extern_arg::<AType>(ctx, &mut args, arg0_val);
+        push_extern_arg::<BType>(ctx, &mut args, arg1_val);
+        push_extern_arg::<CType>(ctx, &mut args, arg2_val);
+
+        let call = ctx.builder.ins().call(func_ref, &args);
+
+        if Out::is_copy_struct() && Out::num_abi_values() > 1 {
+            let align_shift = Out::align_of().trailing_zeros() as u8;
+            let stack_slot =
+                ctx.builder
+                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
+                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
+                        Out::size_of() as u32,
+                        align_shift,
+                    ));
+            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+            let results = ctx.builder.inst_results(call).to_vec();
+            for (i, val) in results.iter().enumerate() {
+                let offset = (i * 8) as i32;
+                ctx.builder.ins().store(
+                    cranelift_codegen::ir::MemFlags::trusted(),
+                    *val,
+                    slot_ptr,
+                    offset,
+                );
+            }
+            slot_ptr
+        } else {
+            ctx.builder.inst_results(call)[0]
+        }
+    }
+}
+
+/// Create a call to an external function with 3 arguments.
+#[allow(clippy::too_many_arguments)]
+pub fn call_extern3<S, A, B, C, AType, BType, CType, Out>(
+    func: ExternRef<S>,
+    arg0: A,
+    arg1: B,
+    arg2: C,
+) -> CallExtern3<S, A, B, C, Out>
+where
+    S: ExternFn,
+    A: Staged<Out = AType>,
+    B: Staged<Out = BType>,
+    C: Staged<Out = CType>,
+    AType: StagedType,
+    BType: StagedType,
+    CType: StagedType,
+    Out: StagedType,
+{
+    CallExtern3 {
+        func,
+        arg0,
+        arg1,
+        arg2,
+        _phantom: PhantomData,
+    }
+}
+
 // Additional CallExternN types can be generated via macro if needed
 
 #[cfg(test)]
