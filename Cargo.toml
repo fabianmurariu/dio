@@ -1,5 +1,5 @@
 [workspace]
-members = ["rust-lms", "rust-lms-derive", "arrow-lms", "sql-gen", "graph-gql"]
+members = ["rust-lms", "rust-lms-derive", "arrow-lms", "sql-gen"]
 resolver = "2"
 
 [workspace.dependencies]
@@ -30,7 +30,6 @@ petgraph = "0.6"
 ahash = "0.8"
 
 # Testing
-# Pinned to match raphtory's exact `=1.15.0` requirement (used via its API in tests).
 either = "=1.15.0"
 proptest = "1.4"
 serde = { version = "1.0", features = ["derive"] }

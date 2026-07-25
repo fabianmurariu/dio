@@ -103,7 +103,7 @@ pub fn codegen_call(
     let cranelift_func_id = ctx
         .func_map
         .get(&func_id)
-        .expect(&format!("Function {} not found in func_map", func_id));
+        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
 
     // Declare the function for calling
     let func_ref = ctx
@@ -183,7 +183,7 @@ pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> Value 
     let cranelift_func_id = ctx
         .func_map
         .get(&func_id)
-        .expect(&format!("Function {} not found in func_map", func_id));
+        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
 
     let func_ref = ctx
         .module
