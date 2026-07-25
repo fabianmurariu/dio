@@ -1,40 +1,43 @@
-//! End-to-end prototype: pass an Arrow `RecordBatch` column into a JIT'd kernel
-//! and operate on it through the `rust-lms` iterator framework.
+//! End-to-end prototype: pass Arrow primitive arrays into JIT'd kernels and
+//! operate on them through the `rust-lms` iterator framework.
 
 use std::sync::Arc;
 
 use arrow::array::Int32Array;
+use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use arrow_lms::{get_primitive_i32, ArrowArrayOps, FfiArray};
+use arrow_lms::{prepare_record_batch, FfiArrayBatch, FfiArrayBatchOps};
 use rust_lms::prelude::*;
 
-/// Build a single-column `Int32` RecordBatch.
 fn batch(values: Vec<i32>) -> RecordBatch {
     let col = Int32Array::from(values);
     let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, false)]));
     RecordBatch::try_new(schema, vec![Arc::new(col)]).unwrap()
 }
 
-#[test]
-fn sum_i32_column() {
-    let rb = batch(vec![1, 2, 3, 4, 5]);
-    let ffi = get_primitive_i32(&rb, 0);
+fn nullable_batch(values: Vec<i32>, validity: Vec<bool>) -> RecordBatch {
+    let col = Int32Array::new(values.into(), Some(NullBuffer::from(validity)));
+    let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+    RecordBatch::try_new(schema, vec![Arc::new(col)]).unwrap()
+}
 
-    // JIT: fn(&FfiArray) -> i32 that sums the column via the iterator framework.
-    // `arr.values()` is a real staged `Slice<i32>`, so `.staged_iter()` and the
-    // whole `rust-lms` iterator stack apply with no Arrow-specific codegen.
+#[test]
+fn sum_i32_column_from_batch() {
+    let rb = batch(vec![1, 2, 3, 4, 5]);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
+
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
-        arr.values().staged_iter().sum(ctx)
+    let f = compiler.fun1("sum_i32", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        batch.primitive::<i32>(0).physical_values().sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");
     let sum = compiled.as_fn();
 
     assert_eq!(sum(&ffi), 15);
 
-    // Cross-check against Arrow's own aggregate kernel.
     let arrow_sum =
         arrow::compute::sum(rb.column(0).as_any().downcast_ref::<Int32Array>().unwrap()).unwrap();
     assert_eq!(sum(&ffi), arrow_sum);
@@ -43,11 +46,12 @@ fn sum_i32_column() {
 #[test]
 fn empty_column_sums_to_zero() {
     let rb = batch(vec![]);
-    let ffi = get_primitive_i32(&rb, 0);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
 
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("sum_i32", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
-        arr.values().staged_iter().sum(ctx)
+    let f = compiler.fun1("sum_i32", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        batch.primitive::<i32>(0).physical_values().sum(ctx)
     });
     let sum = compiler.compile(f).unwrap().as_fn();
 
@@ -55,27 +59,101 @@ fn empty_column_sums_to_zero() {
 }
 
 #[test]
-fn combinators_compose_over_a_column() {
+fn combinators_compose_over_physical_values() {
     let rb = batch(vec![1, 2, 3, 4, 5, 6]);
-    let ffi = get_primitive_i32(&rb, 0);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
 
-    // Count elements > 3 (branchless), and sum the squares of the even ones.
     let mut compiler = Compiler::new();
-
-    let count_gt3 = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
-        arr.values().staged_iter().count_if(ctx, |x| gt(x, 3i32))
+    let count_gt3 = compiler.fun1("count_gt3", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        batch
+            .primitive::<i32>(0)
+            .physical_values()
+            .count_if(ctx, |x| gt(x, 3i32))
     });
     let count = compiler.compile(count_gt3).unwrap().as_fn();
-    assert_eq!(count(&ffi), 3); // 4, 5, 6
+    assert_eq!(count(&ffi), 3);
 
     let mut compiler = Compiler::new();
-    let sum_even_sq = compiler.fun1("sum_even_sq", |ctx, arr: Var<SRef<FfiArray<i32>>>| {
-        arr.values()
-            .staged_iter()
+    let sum_even_sq = compiler.fun1("sum_even_sq", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        batch
+            .primitive::<i32>(0)
+            .physical_values()
             .filter(|x| eq(x % 2i32, 0i32))
             .map(|x| x * x)
             .sum(ctx)
     });
     let sum = compiler.compile(sum_even_sq).unwrap().as_fn();
-    assert_eq!(sum(&ffi), 4 + 16 + 36); // 2² + 4² + 6²
+    assert_eq!(sum(&ffi), 4 + 16 + 36);
+}
+
+#[test]
+fn non_null_values_skip_invalid_rows() {
+    let rb = nullable_batch(vec![10, 999, 30], vec![true, false, true]);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
+
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1(
+        "sum_non_null_i32",
+        |ctx, batch: Var<SRef<FfiArrayBatch>>| batch.primitive::<i32>(0).non_null_values().sum(ctx),
+    );
+    let sum = compiler.compile(f).unwrap().as_fn();
+
+    assert_eq!(sum(&ffi), 40);
+}
+
+#[test]
+fn validity_iter_zips_with_physical_values() {
+    let rb = nullable_batch(vec![10, 999, 30, 777], vec![true, false, true, false]);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
+
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1(
+        "manual_valid_sum",
+        |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+            let arr = batch.primitive::<i32>(0);
+            let acc = ctx.var(0i32);
+
+            arr.physical_values().zip(arr.validity().iter()).for_each(
+                ctx,
+                move |ctx, value, is_valid| {
+                    ctx.if_then(is_valid, move |ctx| {
+                        ctx.store(acc, acc + value);
+                    });
+                },
+            );
+
+            acc
+        },
+    );
+    let sum = compiler.compile(f).unwrap().as_fn();
+
+    assert_eq!(sum(&ffi), 40);
+}
+
+#[test]
+fn validity_iter_respects_sliced_bitmap_offsets() {
+    let col = Int32Array::new(
+        vec![5, 10, 20, 30, 40].into(),
+        Some(NullBuffer::from(vec![true, false, true, false, true])),
+    );
+    let sliced = col.slice(1, 3);
+    let schema = Arc::new(Schema::new(vec![Field::new("a", DataType::Int32, true)]));
+    let rb = RecordBatch::try_new(schema, vec![Arc::new(sliced)]).unwrap();
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
+
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("count_valid", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+        batch
+            .primitive::<i32>(0)
+            .validity()
+            .iter()
+            .count_if(ctx, |is_valid| is_valid)
+    });
+    let count_valid = compiler.compile(f).unwrap().as_fn();
+
+    assert_eq!(count_valid(&ffi), 1);
 }
