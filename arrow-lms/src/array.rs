@@ -100,18 +100,23 @@ impl<P, M> PrimitiveArrayView<P, M> {
         self.values().get_unchecked(index)
     }
 
-    // pub fn staged_iter<'r, 'data>(&self) -> impl IndexedStagedIterator
-    // where
-    //     'r: 'static,
-    //     'data: 'static,
-    //     P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
-    //     M: StagedType + CopyType + ConstantType + 'static,
-    //     M::RuntimeValue: Default,
-    // {
-    //     let values = self.physical_values();
-    //     let nulls = self.validity().iter();
-    //     values.zip(nulls)
-    // }
+    pub fn staged_iter<'r, 'data>(
+        &self,
+    ) -> impl IndexedStagedIterator<Item = ZipItem<M, bool>>
+           + IndexedSource<Item = ZipItem<M, bool>>
+           + 'r
+           + use<'r, 'data, P, M>
+    where
+        'r: 'static,
+        'data: 'static,
+        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+        M: StagedType + CopyType + ConstantType + 'static,
+        M::RuntimeValue: Default,
+    {
+        let values = self.physical_values();
+        let nulls = self.validity().iter();
+        values.zip(nulls)
+    }
 }
 
 /// Staged operations on a prepared FFI array batch.

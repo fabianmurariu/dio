@@ -104,6 +104,29 @@ fn non_null_values_skip_invalid_rows() {
 }
 
 #[test]
+fn primitive_staged_iter_composes_with_standard_combinators() {
+    let rb = nullable_batch(vec![10, 999, 30], vec![true, false, true]);
+    let prepared = prepare_record_batch(&rb).unwrap();
+    let ffi = prepared.as_ffi();
+
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1(
+        "sum_staged_iter_i32",
+        |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+            batch
+                .primitive::<i32>(0)
+                .staged_iter()
+                .filter(|row| row.second())
+                .map(|row| row.first())
+                .sum(ctx)
+        },
+    );
+    let sum = compiler.compile(f).unwrap().as_fn();
+
+    assert_eq!(sum(&ffi), 40);
+}
+
+#[test]
 fn validity_iter_zips_with_physical_values() {
     let rb = nullable_batch(vec![10, 999, 30, 777], vec![true, false, true, false]);
     let prepared = prepare_record_batch(&rb).unwrap();

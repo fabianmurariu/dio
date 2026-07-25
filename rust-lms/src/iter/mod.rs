@@ -46,4 +46,4 @@ pub use take_while::TakeWhile;
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
-pub use zip::Zip;
+pub use zip::{Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType};

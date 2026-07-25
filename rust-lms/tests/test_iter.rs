@@ -238,6 +238,84 @@ fn test_iter_zip_element_wise_sum() {
     assert_eq!(f(&a[..], &b[..]), 110);
 }
 
+#[test]
+fn test_iter_zip_composes_with_map_and_sum() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun2(
+        "zip_map_sum",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
+            a.staged_iter()
+                .zip(b)
+                .map(|pair| pair.first() * pair.second())
+                .sum(ctx)
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let a: [i64; 4] = [1, 2, 3, 4];
+    let b: [i64; 4] = [10, 20, 30, 40];
+    assert_eq!(f(&a[..], &b[..]), 300);
+}
+
+#[test]
+fn test_iter_zip_for_each_yields_pair_item() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun2(
+        "zip_pair_for_each",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
+            let total = ctx.var(0i64);
+
+            StagedIterator::for_each(a.staged_iter().zip(b), ctx, move |ctx, pair| {
+                ctx.store(total, total + pair.first() + pair.second());
+            });
+
+            total
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let a: [i64; 3] = [1, 2, 3];
+    let b: [i64; 3] = [10, 20, 30];
+    assert_eq!(f(&a[..], &b[..]), 66);
+}
+
+#[test]
+fn test_iter_zip_is_indexed_source_for_nested_zip() {
+    let mut compiler = Compiler::new();
+
+    let f = compiler.fun3(
+        "nested_zip_sum",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>, c: Var<SRef<Slice<i64>>>| {
+            let total = ctx.var(0i64);
+
+            a.staged_iter()
+                .zip(b)
+                .zip(c)
+                .for_each(ctx, move |ctx, ab, c_value| {
+                    let a_value = ctx.bind(ab.first());
+                    let b_value = ctx.bind(ab.second());
+                    ctx.store(total, total + a_value + b_value + c_value);
+                });
+
+            total
+        },
+    );
+
+    let compiled = compiler.compile(f).expect("compile failed");
+    let f = compiled.as_fn();
+
+    let a: [i64; 3] = [1, 2, 3];
+    let b: [i64; 3] = [10, 20, 30];
+    let c: [i64; 3] = [100, 200, 300];
+    assert_eq!(f(&a[..], &b[..], &c[..]), 666);
+}
+
 // =============================================================================
 // range iterator with sum
 // =============================================================================

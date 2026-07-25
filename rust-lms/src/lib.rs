@@ -143,7 +143,8 @@ pub mod prelude {
         IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OpaqueHandle,
         OpaqueIter, OpaqueIterFns, OpaqueIterKind, OpaqueIterSlot, RangeIter, RangeStep,
         RegisterScalar, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan,
-        SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, OPAQUE_ITER_INLINE_CAP,
+        SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess,
+        ZipItemType, OPAQUE_ITER_INLINE_CAP,
     };
     pub use crate::num::{
         add, bitand, bitor, bitxor, div, eq, gt, int_cast, lt, max, min, mul, rem, select, shl,

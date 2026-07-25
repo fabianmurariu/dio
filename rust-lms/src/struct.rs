@@ -129,12 +129,17 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
         let offset = F::OFFSET as i32;
-        ctx.builder.ins().load(
-            F::Out::cranelift_type(),
-            MemFlags::trusted(),
-            base_ptr,
-            offset,
-        )
+        if F::Out::is_copy_struct() {
+            let offset = ctx.builder.ins().iconst(types::I64, F::OFFSET as i64);
+            ctx.builder.ins().iadd(base_ptr, offset)
+        } else {
+            ctx.builder.ins().load(
+                F::Out::cranelift_type(),
+                MemFlags::trusted(),
+                base_ptr,
+                offset,
+            )
+        }
     }
 }
 
