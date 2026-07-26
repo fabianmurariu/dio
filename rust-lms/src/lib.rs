@@ -99,6 +99,10 @@
 //! }
 //! ```
 
+// Let `#[derive(StagedType)]`'s absolute `::rust_lms::…` paths resolve when the
+// derive is used *inside* this crate (e.g. iter::zip::ZipItem), not just downstream.
+extern crate self as rust_lms;
+
 pub mod control;
 pub mod ffi;
 pub mod func;

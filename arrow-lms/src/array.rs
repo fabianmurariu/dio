@@ -12,6 +12,37 @@ use crate::ffi::{
     FfiArray, FfiArrayBatch, FfiArrayBatchType, FfiArrayType, FfiValidity, FfiValidityType,
 };
 
+/// A staged expression yielding a borrowed [`FfiArray`] descriptor — the source
+/// every column view reads from. A trait alias so the `where` clauses across the
+/// view methods stay short (`P: ArraySource<'r, 'data>`).
+pub trait ArraySource<'r, 'data>: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r
+where
+    'data: 'r,
+{
+}
+
+impl<'r, 'data, T> ArraySource<'r, 'data> for T
+where
+    'data: 'r,
+    T: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+{
+}
+
+/// A staged expression yielding a borrowed [`FfiValidity`] descriptor.
+pub trait ValiditySource<'r, 'data>:
+    Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r
+where
+    'data: 'r,
+{
+}
+
+impl<'r, 'data, T> ValiditySource<'r, 'data> for T
+where
+    'data: 'r,
+    T: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+{
+}
+
 /// Typed staged primitive array view.
 pub struct PrimitiveArrayView<P, M> {
     array: P,
@@ -35,7 +66,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     ) -> impl Staged<Out = SRef<'r, Slice<M>>> + Clone + 'r + use<'r, 'data, P, M>
     where
         'data: 'r,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        P: ArraySource<'r, 'data>,
         M: StagedType + 'r,
     {
         field_addr(self.array.clone(), FfiArrayType::values()).as_slice::<M>()
@@ -47,7 +78,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     where
         'r: 'static,
         'data: 'static,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+        P: ArraySource<'r, 'data>,
         M: StagedType + CopyType + ConstantType + 'static,
         M::RuntimeValue: Default,
     {
@@ -70,7 +101,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     >
     where
         'data: 'r,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        P: ArraySource<'r, 'data>,
     {
         ValidityView {
             validity: field_addr(self.array.clone(), FfiArrayType::validity()),
@@ -80,7 +111,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     pub fn len<'r, 'data>(&self) -> impl Staged<Out = u64> + Clone + 'r + use<'r, 'data, P, M>
     where
         'data: 'r,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        P: ArraySource<'r, 'data>,
         M: StagedType + 'r,
     {
         self.values().len()
@@ -92,7 +123,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     ) -> impl Staged<Out = M> + Clone + 'r + use<'r, 'data, P, M, I>
     where
         'data: 'r,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'r,
+        P: ArraySource<'r, 'data>,
         M: StagedType + CopyType + 'r,
         I: IntoStaged<u64>,
         I::Staged: Clone + 'r,
@@ -109,7 +140,7 @@ impl<P, M> PrimitiveArrayView<P, M> {
     where
         'r: 'static,
         'data: 'static,
-        P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+        P: ArraySource<'r, 'data>,
         M: StagedType + CopyType + ConstantType + 'static,
         M::RuntimeValue: Default,
     {
@@ -201,7 +232,7 @@ impl<'r, 'data, P, M> StagedIterator for NonNullValues<P, M>
 where
     'r: 'static,
     'data: 'static,
-    P: Staged<Out = SRef<'r, FfiArray<'data>>> + Clone + 'static,
+    P: ArraySource<'r, 'data>,
     M: StagedType + CopyType + 'static,
 {
     type Item = M;
@@ -244,35 +275,31 @@ impl<V> ValidityView<V> {
     ) -> impl Staged<Out = SRef<'r, Slice<u8>>> + Clone + 'r + use<'r, 'data, V>
     where
         'data: 'r,
-        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+        V: ValiditySource<'r, 'data>,
     {
         field_addr(self.validity.clone(), FfiValidityType::bytes()).as_slice::<u8>()
     }
 
-    pub fn len<'r, 'data>(&self) -> ValidityLen<V>
+    pub fn len<'r, 'data>(&self) -> ValidityLen<'data, V>
     where
         'data: 'r,
-        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+        V: ValiditySource<'r, 'data>,
     {
-        ValidityLen {
-            validity: self.validity.clone(),
-        }
+        load_field(self.validity.clone(), FfiValidityType::bit_len())
     }
 
-    pub fn null_count<'r, 'data>(&self) -> ValidityNullCount<V>
+    pub fn null_count<'r, 'data>(&self) -> ValidityNullCount<'data, V>
     where
         'data: 'r,
-        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+        V: ValiditySource<'r, 'data>,
     {
-        ValidityNullCount {
-            validity: self.validity.clone(),
-        }
+        load_field(self.validity.clone(), FfiValidityType::null_count())
     }
 
     pub fn bit_offset<'r, 'data>(&self) -> impl Staged<Out = u64> + Clone + 'r + use<'r, 'data, V>
     where
         'data: 'r,
-        V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+        V: ValiditySource<'r, 'data>,
     {
         load_field(self.validity.clone(), FfiValidityType::bit_offset())
     }
@@ -298,59 +325,14 @@ impl<V> ValidityView<V> {
     }
 }
 
-/// Staged validity bitmap length.
-pub struct ValidityLen<V> {
-    validity: V,
-}
+/// Staged validity bitmap length — a load of the `bit_len` field.
+///
+/// A plain [`LoadField`] alias: the field-token machinery already gives us a
+/// nameable `Staged<Out = u64>`, so no hand-written struct is needed.
+pub type ValidityLen<'data, V> = LoadField<V, FfiValidityType::__field_bit_len<'data>>;
 
-impl<V: Clone> Clone for ValidityLen<V> {
-    fn clone(&self) -> Self {
-        Self {
-            validity: self.validity.clone(),
-        }
-    }
-}
-
-impl<V: Copy> Copy for ValidityLen<V> {}
-
-impl<'r, 'data, V> Staged for ValidityLen<V>
-where
-    'data: 'r,
-    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
-{
-    type Out = u64;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        load_field(self.validity.clone(), FfiValidityType::bit_len()).codegen(ctx)
-    }
-}
-
-/// Staged validity null count.
-pub struct ValidityNullCount<V> {
-    validity: V,
-}
-
-impl<V: Clone> Clone for ValidityNullCount<V> {
-    fn clone(&self) -> Self {
-        Self {
-            validity: self.validity.clone(),
-        }
-    }
-}
-
-impl<V: Copy> Copy for ValidityNullCount<V> {}
-
-impl<'r, 'data, V> Staged for ValidityNullCount<V>
-where
-    'data: 'r,
-    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
-{
-    type Out = u64;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        load_field(self.validity.clone(), FfiValidityType::null_count()).codegen(ctx)
-    }
-}
+/// Staged validity null count — a load of the `null_count` field.
+pub type ValidityNullCount<'data, V> = LoadField<V, FfiValidityType::__field_null_count<'data>>;
 
 /// Staged validity bitmap random access.
 pub struct ValidityIsValid<V, I> {
@@ -372,7 +354,7 @@ impl<V: Copy, I: Copy> Copy for ValidityIsValid<V, I> {}
 impl<'r, 'data, V, I> Staged for ValidityIsValid<V, I>
 where
     'data: 'r,
-    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'r,
+    V: ValiditySource<'r, 'data>,
     I: Staged<Out = u64> + Clone + 'r,
 {
     type Out = bool;
@@ -417,7 +399,7 @@ impl<'r, 'data, V> StagedIterator for ValidityIter<V>
 where
     'r: 'static,
     'data: 'static,
-    V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
+    V: ValiditySource<'r, 'data>,
 {
     type Item = bool;
 
@@ -436,13 +418,16 @@ where
     }
 }
 
+// These two impls name `'data` in `LenExpr`, so they need the projection form of
+// the bound (`Out = SRef<'r, FfiValidity<'data>>`) to *constrain* `'data` — a
+// plain `V: ValiditySource<'r, 'data>` alias bound does not (RFC 447).
 impl<'r, 'data, V> IndexedStagedIterator for ValidityIter<V>
 where
     'r: 'static,
     'data: 'static,
     V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
 {
-    type LenExpr = ValidityLen<V>;
+    type LenExpr = ValidityLen<'data, V>;
 
     fn len(&self) -> Self::LenExpr {
         self.validity.clone().len()
@@ -456,7 +441,7 @@ where
     V: Staged<Out = SRef<'r, FfiValidity<'data>>> + Clone + 'static,
 {
     type Item = bool;
-    type LenExpr = ValidityLen<V>;
+    type LenExpr = ValidityLen<'data, V>;
     type GetExpr = ValidityIsValid<V, Var<u64>>;
 
     fn len(&self) -> Self::LenExpr {

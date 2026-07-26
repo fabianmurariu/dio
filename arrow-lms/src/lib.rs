@@ -21,7 +21,7 @@ pub use array::{
     ValidityIter, ValidityLen, ValidityNullCount, ValidityView,
 };
 pub use ffi::{
-    ffi_from_int32, ffi_from_primitive, get_primitive_i32, prepare_array_refs, prepare_arrays,
-    prepare_dyn_arrays, prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError,
-    FfiValidity, PreparedFfiBatch,
+    ffi_from_primitive, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
+    prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError, FfiValidity,
+    PreparedFfiBatch,
 };

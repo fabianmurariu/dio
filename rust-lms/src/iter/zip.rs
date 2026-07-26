@@ -1,8 +1,8 @@
 //! Zip combinator — pairs elements from two sources at the same index.
 
-use std::marker::PhantomData;
-
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+
+use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
@@ -13,13 +13,20 @@ use crate::types::{CopyType, StagedType};
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
 
 /// Element yielded by a zipped iterator.
+///
+/// The `StagedType`/`CopyType` impls and the `ZipItemType` field-token module
+/// are macro-generated. `Copy`/`Clone` are hand-written so the bounds land on
+/// `A::RuntimeValue`/`B::RuntimeValue` rather than the marker types `A`/`B`.
+#[derive(StagedType)]
 #[repr(C)]
 pub struct ZipItem<A, B>
 where
     A: StagedType,
     B: StagedType,
 {
+    #[staged(A)]
     pub first: A::RuntimeValue,
+    #[staged(B)]
     pub second: B::RuntimeValue,
 }
 
@@ -42,101 +49,6 @@ where
     A::RuntimeValue: Copy,
     B::RuntimeValue: Copy,
 {
-}
-
-impl<A, B> StagedType for ZipItem<A, B>
-where
-    A: StagedType,
-    B: StagedType,
-{
-    type RuntimeValue = Self;
-
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
-    }
-
-    fn size_of() -> usize {
-        std::mem::size_of::<Self>()
-    }
-
-    fn align_of() -> usize {
-        std::mem::align_of::<Self>()
-    }
-
-    fn is_copy_struct() -> bool {
-        true
-    }
-
-    fn num_abi_values() -> usize {
-        Self::size_of().div_ceil(8)
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![types::I64; Self::num_abi_values()]
-    }
-}
-
-impl<A, B> CopyType for ZipItem<A, B>
-where
-    A: StagedType,
-    B: StagedType,
-    Self: Copy,
-{
-}
-
-#[allow(non_camel_case_types, non_snake_case)]
-pub mod ZipItemType {
-    use super::*;
-
-    pub struct __field_first<A: StagedType, B: StagedType>(PhantomData<(A, B)>);
-
-    impl<A: StagedType, B: StagedType> Clone for __field_first<A, B> {
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-
-    impl<A: StagedType, B: StagedType> Copy for __field_first<A, B> {}
-
-    impl<A, B> Field for __field_first<A, B>
-    where
-        A: StagedType,
-        B: StagedType,
-    {
-        type Parent = ZipItem<A, B>;
-        type Out = A;
-        const OFFSET: usize = std::mem::offset_of!(ZipItem<A, B>, first);
-        const INDEX: usize = 0;
-    }
-
-    pub fn first<A: StagedType, B: StagedType>() -> __field_first<A, B> {
-        __field_first(PhantomData)
-    }
-
-    pub struct __field_second<A: StagedType, B: StagedType>(PhantomData<(A, B)>);
-
-    impl<A: StagedType, B: StagedType> Clone for __field_second<A, B> {
-        fn clone(&self) -> Self {
-            *self
-        }
-    }
-
-    impl<A: StagedType, B: StagedType> Copy for __field_second<A, B> {}
-
-    impl<A, B> Field for __field_second<A, B>
-    where
-        A: StagedType,
-        B: StagedType,
-    {
-        type Parent = ZipItem<A, B>;
-        type Out = B;
-        const OFFSET: usize = std::mem::offset_of!(ZipItem<A, B>, second);
-        const INDEX: usize = 1;
-    }
-
-    pub fn second<A: StagedType, B: StagedType>() -> __field_second<A, B> {
-        __field_second(PhantomData)
-    }
 }
 
 /// Convenience field access for staged zipped items.

@@ -235,22 +235,6 @@ where
     }
 }
 
-/// Build an erased FFI descriptor from an Arrow `Int32Array`.
-pub fn ffi_from_int32(array: &Int32Array) -> FfiArray<'_> {
-    ffi_from_primitive(array)
-}
-
-/// Extract column `col` of `rb` as an erased primitive descriptor, expecting an
-/// `Int32` column.
-pub fn get_primitive_i32(rb: &RecordBatch, col: usize) -> FfiArray<'_> {
-    let array = rb
-        .column(col)
-        .as_any()
-        .downcast_ref::<Int32Array>()
-        .expect("column is not an Int32Array");
-    ffi_from_int32(array)
-}
-
 /// Prepare a `RecordBatch` for a compiled kernel.
 pub fn prepare_record_batch(rb: &RecordBatch) -> Result<PreparedFfiBatch<'_>, FfiError> {
     prepare_arrays(rb.columns().iter().map(|array| array.as_ref()))
@@ -337,7 +321,7 @@ mod tests {
     #[test]
     fn descriptor_matches_arrow() {
         let array = Int32Array::from(vec![10, 20, 30]);
-        let ffi = ffi_from_int32(&array);
+        let ffi = ffi_from_primitive(&array);
 
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 0);
@@ -348,7 +332,7 @@ mod tests {
     fn descriptor_tracks_nulls() {
         let nulls = NullBuffer::from(vec![true, false, true]);
         let array = Int32Array::new(vec![1, 99, 3].into(), Some(nulls));
-        let ffi = ffi_from_int32(&array);
+        let ffi = ffi_from_primitive(&array);
 
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 1);
