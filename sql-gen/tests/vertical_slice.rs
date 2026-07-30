@@ -1,83 +1,92 @@
-//! End-to-end vertical slice: build an `Operator` plan, JIT it against an Arrow
-//! `RecordBatch`, and check the result matches the plain-Rust reference
-//! interpreter (the Futamura equivalence).
+//! End-to-end vertical slice: parse SQL with datafusion, lower it to our push
+//! operators, JIT a `count(*)` kernel, and check the result matches the
+//! plain-Rust reference interpreter (the Futamura equivalence).
 
 use std::sync::Arc;
 
-use arrow::array::Int32Array;
+use arrow::array::{Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use arrow_lms::{FfiArrayBatch, prepare_record_batch};
 use rust_lms::prelude::*;
 use sql_gen::exec::exec_count;
-use sql_gen::{Expr, Operator, Predicate, Schema, gen_count};
+use sql_gen::{Operator, gen_count, sql_to_operator};
 
-fn one_col_i32(vals: Vec<i32>) -> RecordBatch {
-    let col = Int32Array::from(vals);
-    let schema = Arc::new(ArrowSchema::new(vec![Field::new(
-        "a",
-        DataType::Int32,
-        false,
-    )]));
-    RecordBatch::try_new(schema, vec![Arc::new(col)]).unwrap()
+/// Two columns: `a: Int32`, `b: Int64`.
+fn batch(a: Vec<i32>, b: Vec<i64>) -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("a", DataType::Int32, false),
+        Field::new("b", DataType::Int64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![Arc::new(Int32Array::from(a)), Arc::new(Int64Array::from(b))],
+    )
+    .unwrap()
 }
 
-/// Compile `plan` into a `count(*)` kernel and run it over `rb`.
-fn jit_count(plan: &Operator, rb: &RecordBatch) -> i64 {
-    let schema = Schema::from_record_batch(rb);
+/// Compile `op` into a `count(*)` kernel and run it over `rb`.
+fn jit_count(op: &Operator, rb: &RecordBatch) -> i64 {
     let prepared = prepare_record_batch(rb).unwrap();
     let ffi = prepared.as_ffi();
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("q", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
-        gen_count(ctx, batch, plan, &schema)
+        gen_count(ctx, batch, op)
     });
     let compiled = compiler.compile(f).expect("compile");
     compiled.as_fn()(&ffi)
 }
 
-/// Assert the JIT and the reference interpreter agree, and (optionally) match an
-/// expected count.
-fn assert_agree(plan: &Operator, rb: &RecordBatch, expected: i64) {
-    let reference = exec_count(plan, rb);
-    let jit = jit_count(plan, rb);
-    assert_eq!(reference, expected, "reference interpreter");
-    assert_eq!(jit, expected, "JIT kernel");
+/// Run `sql` end-to-end, asserting the JIT and reference interpreter agree, and
+/// return the row count.
+fn run_sql(sql: &str, rb: &RecordBatch) -> i64 {
+    let op = sql_to_operator(sql, "t", rb.schema()).expect("lower sql");
+    let reference = exec_count(&op, rb);
+    let jit = jit_count(&op, rb);
+    assert_eq!(jit, reference, "jit vs reference for `{sql}`");
+    jit
 }
 
 #[test]
-fn scan_counts_all_rows() {
-    let rb = one_col_i32(vec![1, 2, 3, 4, 5]);
-    assert_agree(&Operator::Scan, &rb, 5);
+fn select_star_counts_all_rows() {
+    let rb = batch(vec![1, 2, 3, 4, 5], vec![10, 20, 30, 40, 50]);
+    assert_eq!(run_sql("SELECT * FROM t", &rb), 5);
 }
 
 #[test]
-fn filter_lt_counts_matches() {
-    let rb = one_col_i32(vec![1, 2, 3, 4, 5, 6]);
-    // where a < 4
-    let plan = Operator::Filter(
-        Predicate::Lt(Expr::Col(0), Expr::LitI32(4)),
-        Box::new(Operator::Scan),
-    );
-    assert_agree(&plan, &rb, 3);
+fn filter_on_i32_column() {
+    let rb = batch(vec![1, 2, 3, 4, 5, 6], vec![0, 0, 0, 0, 0, 0]);
+    assert_eq!(run_sql("SELECT * FROM t WHERE a < 4", &rb), 3);
 }
 
 #[test]
-fn filter_eq_then_project() {
-    let rb = one_col_i32(vec![7, 7, 1, 7, 2]);
-    // select a where a = 7
-    let plan = Operator::Project(
-        vec![0],
-        Box::new(Operator::Filter(
-            Predicate::Eq(Expr::Col(0), Expr::LitI32(7)),
-            Box::new(Operator::Scan),
-        )),
-    );
-    assert_agree(&plan, &rb, 3);
+fn filter_on_i64_column() {
+    let rb = batch(vec![0, 0, 0, 0], vec![10, 25, 30, 100]);
+    assert_eq!(run_sql("SELECT * FROM t WHERE b >= 30", &rb), 2);
 }
 
 #[test]
-fn empty_batch_counts_zero() {
-    let rb = one_col_i32(vec![]);
-    assert_agree(&Operator::Scan, &rb, 0);
+fn conjunction_across_columns() {
+    let rb = batch(vec![1, 5, 5, 9, 5], vec![10, 20, 40, 40, 40]);
+    // a = 5 AND b > 30
+    assert_eq!(run_sql("SELECT a FROM t WHERE a = 5 AND b > 30", &rb), 2);
+}
+
+#[test]
+fn disjunction() {
+    let rb = batch(vec![1, 2, 3, 4, 5], vec![0, 0, 0, 0, 0]);
+    assert_eq!(run_sql("SELECT * FROM t WHERE a = 1 OR a = 5", &rb), 2);
+}
+
+#[test]
+fn not_equal() {
+    let rb = batch(vec![7, 7, 1, 7, 2], vec![0, 0, 0, 0, 0]);
+    assert_eq!(run_sql("SELECT * FROM t WHERE a <> 7", &rb), 2);
+}
+
+#[test]
+fn empty_result() {
+    let rb = batch(vec![1, 2, 3], vec![0, 0, 0]);
+    assert_eq!(run_sql("SELECT * FROM t WHERE a > 100", &rb), 0);
 }

@@ -21,8 +21,8 @@ cranelift-frontend = "0.127.1"
 cranelift-codegen = "0.127.1"
 cranelift-native = "0.127.1"
 
-arrow = "57.2.0"
-datafusion-sql = "52.0.0"
+arrow = "58.3.0"
+datafusion-sql = "54.1.0"
 
 # Graph algorithms for SSA
 petgraph = "0.6"

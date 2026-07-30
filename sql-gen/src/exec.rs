@@ -1,22 +1,25 @@
-//! Plain-Rust reference interpreter — the un-staged twin of [`crate::gen`].
+//! Plain-Rust reference interpreter — the un-staged twin of [`crate::codegen`].
 //!
-//! It runs the same `Operator` tree directly over a `RecordBatch`. Its only job
-//! is to give tests an independent oracle: the JIT kernel must produce the same
-//! result (the Futamura equivalence). `gen.rs` mirrors this file one-to-one.
+//! It runs the same [`Operator`] tree directly over a `RecordBatch`, evaluating
+//! the same datafusion [`Expr`] subset. Its only job is to be an independent
+//! oracle for tests: the JIT kernel must agree with it (Futamura equivalence).
+//! Temporary — it will be dropped once codegen is trusted / too costly to mirror.
 
 use arrow::array::{Array, Float64Array, Int32Array, Int64Array};
-use arrow::datatypes::DataType;
+use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
+use datafusion_common::ScalarValue;
+use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 
-use crate::plan::{Expr, Operator, Predicate};
+use crate::plan::Operator;
 
-/// A host-side (un-staged) column value — the reference twin of
-/// [`crate::value::ColVal`].
+/// A host-side (un-staged) value — the reference twin of [`crate::value::ColVal`].
 #[derive(Clone, Copy, PartialEq, Debug)]
 pub enum Val {
     I32(i32),
     I64(i64),
     F64(f64),
+    Bool(bool),
 }
 
 /// Count the rows produced by `plan` over `rb`.
@@ -28,31 +31,36 @@ pub fn exec_count(plan: &Operator, rb: &RecordBatch) -> i64 {
 
 fn exec_op(op: &Operator, rb: &RecordBatch, yld: &mut dyn FnMut(&[Val])) {
     match op {
-        Operator::Scan => {
+        Operator::Scan { schema } => {
             for i in 0..rb.num_rows() {
-                let row: Vec<Val> = (0..rb.num_columns()).map(|c| read(rb, c, i)).collect();
+                let row: Vec<Val> = (0..schema.fields().len())
+                    .map(|c| read(rb, c, schema.field(c).data_type(), i))
+                    .collect();
                 yld(&row);
             }
         }
-        Operator::Filter(pred, parent) => {
-            exec_op(parent, rb, &mut |row| {
-                if eval_pred(pred, row) {
+        Operator::Filter { predicate, input } => {
+            let schema = input.output_schema();
+            exec_op(input, rb, &mut |row| {
+                if as_bool(eval_expr(predicate, &schema, row)) {
                     yld(row);
                 }
             });
         }
-        Operator::Project(cols, parent) => {
-            exec_op(parent, rb, &mut |row| {
-                let projected: Vec<Val> = cols.iter().map(|&c| row[c]).collect();
+        Operator::Project { exprs, input } => {
+            let schema = input.output_schema();
+            exec_op(input, rb, &mut |row| {
+                let projected: Vec<Val> =
+                    exprs.iter().map(|e| eval_expr(e, &schema, row)).collect();
                 yld(&projected);
             });
         }
     }
 }
 
-fn read(rb: &RecordBatch, col: usize, i: usize) -> Val {
+fn read(rb: &RecordBatch, col: usize, dt: &DataType, i: usize) -> Val {
     let a = rb.column(col);
-    match a.data_type() {
+    match dt {
         DataType::Int32 => Val::I32(a.as_any().downcast_ref::<Int32Array>().unwrap().value(i)),
         DataType::Int64 => Val::I64(a.as_any().downcast_ref::<Int64Array>().unwrap().value(i)),
         DataType::Float64 => Val::F64(a.as_any().downcast_ref::<Float64Array>().unwrap().value(i)),
@@ -60,23 +68,67 @@ fn read(rb: &RecordBatch, col: usize, i: usize) -> Val {
     }
 }
 
-fn eval_expr(e: &Expr, row: &[Val]) -> Val {
+fn eval_expr(e: &Expr, schema: &SchemaRef, row: &[Val]) -> Val {
     match e {
-        Expr::Col(c) => row[*c],
-        Expr::LitI32(v) => Val::I32(*v),
+        Expr::Column(c) => {
+            let idx = schema
+                .index_of(&c.name)
+                .unwrap_or_else(|_| panic!("unknown column: {}", c.name));
+            row[idx]
+        }
+        Expr::Literal(sv, _) => literal(sv),
+        Expr::BinaryExpr(be) => binary(be, schema, row),
+        other => panic!("unsupported expression: {other:?}"),
     }
 }
 
-fn eval_pred(p: &Predicate, row: &[Val]) -> bool {
-    match p {
-        Predicate::Eq(a, b) => as_i32(eval_expr(a, row)) == as_i32(eval_expr(b, row)),
-        Predicate::Lt(a, b) => as_i32(eval_expr(a, row)) < as_i32(eval_expr(b, row)),
+fn literal(sv: &ScalarValue) -> Val {
+    match sv {
+        ScalarValue::Int32(Some(v)) => Val::I32(*v),
+        ScalarValue::Int64(Some(v)) => Val::I64(*v),
+        ScalarValue::Float64(Some(v)) => Val::F64(*v),
+        ScalarValue::Boolean(Some(v)) => Val::Bool(*v),
+        other => panic!("unsupported literal: {other:?}"),
     }
 }
 
-fn as_i32(v: Val) -> i32 {
+fn binary(be: &BinaryExpr, schema: &SchemaRef, row: &[Val]) -> Val {
+    let l = eval_expr(&be.left, schema, row);
+    let r = eval_expr(&be.right, schema, row);
+    let out = match be.op {
+        DfOp::Eq => num_cmp(l, r, |o| o == std::cmp::Ordering::Equal),
+        DfOp::NotEq => num_cmp(l, r, |o| o != std::cmp::Ordering::Equal),
+        DfOp::Lt => num_cmp(l, r, |o| o == std::cmp::Ordering::Less),
+        DfOp::Gt => num_cmp(l, r, |o| o == std::cmp::Ordering::Greater),
+        DfOp::LtEq => num_cmp(l, r, |o| o != std::cmp::Ordering::Greater),
+        DfOp::GtEq => num_cmp(l, r, |o| o != std::cmp::Ordering::Less),
+        DfOp::And => as_bool(l) && as_bool(r),
+        DfOp::Or => as_bool(l) || as_bool(r),
+        other => panic!("unsupported binary operator: {other:?}"),
+    };
+    Val::Bool(out)
+}
+
+fn num_cmp(l: Val, r: Val, pred: impl Fn(std::cmp::Ordering) -> bool) -> bool {
+    let ord = if let (Val::F64(x), Val::F64(y)) = (l, r) {
+        x.partial_cmp(&y).expect("NaN comparison")
+    } else {
+        to_i64(l).cmp(&to_i64(r))
+    };
+    pred(ord)
+}
+
+fn to_i64(v: Val) -> i64 {
     match v {
-        Val::I32(x) => x,
-        other => panic!("slice: expected i32, got {other:?}"),
+        Val::I64(x) => x,
+        Val::I32(x) => x as i64,
+        other => panic!("expected integer operand, got {other:?}"),
+    }
+}
+
+fn as_bool(v: Val) -> bool {
+    match v {
+        Val::Bool(b) => b,
+        other => panic!("expected bool operand, got {other:?}"),
     }
 }

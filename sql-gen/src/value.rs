@@ -14,11 +14,15 @@
 use rust_lms::prelude::*;
 
 /// A staged column value: the physical-type tag is static, the `Var` is dynamic.
+///
+/// `Bool` is the result type of comparison/logical expressions; it is not a
+/// storable column type (Arrow bool columns are not read here yet).
 #[derive(Clone, Copy)]
 pub enum ColVal {
     I32(Var<i32>),
     I64(Var<i64>),
     F64(Var<f64>),
+    Bool(Var<bool>),
 }
 
 /// A row: one [`ColVal`] per column, positional (the [`crate::plan::Schema`]
