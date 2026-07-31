@@ -163,6 +163,12 @@ impl<V: Clone> Clone for ValidityView<V> {
 impl<V: Copy> Copy for ValidityView<V> {}
 
 impl<V> ValidityView<V> {
+    /// Wrap a staged `&FfiValidity` / `&mut FfiValidity`. Lets a validity bitmap
+    /// be manipulated on its own, independent of any primitive array.
+    pub fn new(validity: V) -> Self {
+        Self { validity }
+    }
+
     pub fn bytes<'r>(&self) -> impl Staged<Out = SRef<'r, Slice<u8>>> + Clone + 'r + use<'r, V>
     where
         V: ValiditySource<'r>,

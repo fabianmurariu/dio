@@ -215,7 +215,8 @@ fn write_null<P, M>(
     // Only nullable outputs need validity writes, and only nullable values can
     // be null (the bitmap starts all-valid, so non-null rows need no write).
     if let (true, Nullness::Nullable(valid)) = (field.is_nullable(), cv.nullness()) {
-        ctx.if_then(not(valid), move |ctx| view.set_null(ctx, n));
+        let validity = view.validity_mut();
+        ctx.if_then(not(valid), move |ctx| validity.set_null(ctx, n));
     }
 }
 

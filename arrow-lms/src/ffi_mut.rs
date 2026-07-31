@@ -20,7 +20,7 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-use crate::array::{bit_location, PrimitiveArrayView};
+use crate::array::{bit_location, PrimitiveArrayView, ValidityView};
 use crate::ffi::{FfiArray, FfiArrayType, FfiBuffer, FfiValidity, FfiValidityType};
 
 // =============================================================================
@@ -58,19 +58,43 @@ where
         ctx.emit(values.set_unchecked(n, value));
     }
 
-    /// Clear the validity bit at output row `n` (mark it null). Assumes the
-    /// bitmap was default-initialized all-valid; shares `bit_location` with the
-    /// read-side `is_valid`.
-    pub fn set_null(&self, ctx: &mut Ctx, n: Var<u64>) {
-        let validity = field_addr(self.array.clone(), FfiArrayType::validity());
-        let bytes = field_addr(validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
-        let (byte_index, mask) = bit_location(validity, n);
+    /// A mutable view of this column's validity bitmap (for `set_null` etc.).
+    pub fn validity_mut(
+        &self,
+    ) -> ValidityView<impl Staged<Out = SRefMut<'static, FfiValidity>> + Clone + 'static> {
+        ValidityView::new(field_addr(self.array.clone(), FfiArrayType::validity()))
+    }
+}
+
+/// Mutable validity-bitmap ops — the write twin of the read-side `is_valid`.
+/// They live on [`ValidityView`] (the staged counterpart of `FfiValidity`), so a
+/// bitmap can be updated independently of any primitive array, and share
+/// `bit_location` with `is_valid` so the bit arithmetic exists in one place.
+impl<V> ValidityView<V>
+where
+    V: Staged<Out = SRefMut<'static, FfiValidity>> + Clone + 'static,
+{
+    /// Mark row `i` null (clear its validity bit): `byte &= ~mask`.
+    pub fn set_null(&self, ctx: &mut Ctx, i: Var<u64>) {
+        let bytes =
+            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
+        let (byte_index, mask) = bit_location(self.validity.clone(), i);
         let byte_index = ctx.bind(byte_index);
-        // clear = old & ~mask   (~x computed as x ^ all-ones)
         let old = int_cast::<u64, u8, _>(bytes.clone().get_unchecked(byte_index));
         let not_mask = bitxor::<u64, _, _>(mask, Const::<u64>::new(u64::MAX));
         let cleared = int_cast::<u8, u64, _>(bitand::<u64, _, _>(old, not_mask));
         ctx.emit(bytes.set_unchecked(byte_index, cleared));
+    }
+
+    /// Mark row `i` valid (set its validity bit): `byte |= mask`.
+    pub fn set_valid(&self, ctx: &mut Ctx, i: Var<u64>) {
+        let bytes =
+            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
+        let (byte_index, mask) = bit_location(self.validity.clone(), i);
+        let byte_index = ctx.bind(byte_index);
+        let old = int_cast::<u64, u8, _>(bytes.clone().get_unchecked(byte_index));
+        let set = int_cast::<u8, u64, _>(bitor::<u64, _, _>(old, mask));
+        ctx.emit(bytes.set_unchecked(byte_index, set));
     }
 }
 
