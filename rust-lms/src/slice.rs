@@ -145,6 +145,65 @@ where
 {
 }
 
+/// Extension trait for *mutable* references to a repr-compatible `(ptr, len)`.
+///
+/// The mutable twin of [`ReprSliceOps`]: given a `&mut` to an FFI descriptor
+/// whose first two fields are `ptr`/`len`, reinterpret it as a `&mut [T]`.
+pub trait ReprSliceMutOps<'a, R>: Staged<Out = SRefMut<'a, R>> + Sized
+where
+    R: StagedType + 'a,
+{
+    /// Reinterpret the pointed-to representation as a staged *mutable* slice.
+    fn as_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    where
+        T: StagedType + 'a,
+    {
+        AsMutSlice {
+            repr: self,
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<'a, R, S> ReprSliceMutOps<'a, R> for S
+where
+    R: StagedType + 'a,
+    S: Staged<Out = SRefMut<'a, R>> + Sized,
+{
+}
+
+/// Re-types a *mutable* reference to a repr-compatible `(ptr, len)` value as a
+/// staged `&mut [T]`. Like [`AsSlice`] it emits no code — it forwards the
+/// address and lets the slice ops load `ptr`/`len` from offsets 0/8.
+pub struct AsMutSlice<P, T> {
+    repr: P,
+    _elem: PhantomData<T>,
+}
+
+impl<P: Clone, T> Clone for AsMutSlice<P, T> {
+    fn clone(&self) -> Self {
+        Self {
+            repr: self.repr.clone(),
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
+
+impl<'a, P, R, T> Staged for AsMutSlice<P, T>
+where
+    P: Staged<Out = SRefMut<'a, R>>,
+    R: StagedType + 'a,
+    T: StagedType + 'a,
+{
+    type Out = SRefMut<'a, Slice<T>>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.repr.codegen(ctx)
+    }
+}
+
 // =============================================================================
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================

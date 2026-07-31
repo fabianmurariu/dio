@@ -2,6 +2,8 @@
 //! plan into our (push-based) [`Operator`] tree, reusing datafusion `Expr`
 //! verbatim inside `Filter`/`Project`.
 
+use std::sync::Arc;
+
 use arrow::datatypes::SchemaRef;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::LogicalPlan;
@@ -35,6 +37,7 @@ fn lower(plan: &LogicalPlan) -> Result<Operator> {
         }),
         LogicalPlan::Projection(projection) => Ok(Operator::Project {
             exprs: projection.expr.clone(),
+            schema: Arc::new(projection.schema.as_arrow().clone()),
             input: Box::new(lower(projection.input.as_ref())?),
         }),
         other => Err(DataFusionError::NotImplemented(format!(

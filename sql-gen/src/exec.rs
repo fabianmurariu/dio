@@ -47,7 +47,7 @@ fn exec_op(op: &Operator, rb: &RecordBatch, yld: &mut dyn FnMut(&[Val])) {
                 }
             });
         }
-        Operator::Project { exprs, input } => {
+        Operator::Project { exprs, input, .. } => {
             let schema = input.output_schema();
             exec_op(input, rb, &mut |row| {
                 let projected: Vec<Val> =

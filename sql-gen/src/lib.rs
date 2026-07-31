@@ -20,7 +20,7 @@ pub mod sql;
 pub mod value;
 
 pub use catalog::Catalog;
-pub use codegen::{BatchSource, gen_count};
+pub use codegen::{BatchSource, OutSink, gen_collect, gen_count};
 pub use plan::Operator;
 pub use sql::sql_to_operator;
-pub use value::{ColVal, Row};
+pub use value::{ColVal, Nullness, Row};

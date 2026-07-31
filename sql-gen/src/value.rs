@@ -1,30 +1,38 @@
 //! The mixed-stage row — a static schema paired with dynamic (stage-1) fields.
 //!
-//! This is the Rust translation of the paper's `Record(Vector[Rep[T]], Schema)`.
-//! Because the query is *interpreted at runtime*, the row's arity and column
-//! types are stage-0-dynamic, so the fields cannot be a compile-time tuple; they
-//! are a type-erased `Vec<ColVal>`. Each `ColVal` carries its physical type as a
-//! (static) enum tag and a `Copy` `Var` handle as the (dynamic) value.
-//!
-//! Crucially the row lives entirely in stage-0 Rust and never becomes a *staged*
-//! aggregate, so it can be moved by value through `'static` staged closures
-//! (`while_loop`/`if_then` bodies) — sidestepping the single-register limit of
-//! the opaque-iterator item ABI.
+//! Rust translation of the paper's `Record(Vector[Rep[T]], Schema)`. Because the
+//! query is interpreted at runtime, fields are a type-erased `Vec<ColVal>` rather
+//! than a compile-time tuple. Each `ColVal` carries its physical type as a static
+//! enum tag, a `Copy` `Var` value, and a static-nullability tag: non-nullable
+//! columns/exprs carry **no** validity `Var` at all (zero overhead), nullable
+//! ones carry an `is_valid` bit that propagates through expression evaluation.
 
 use rust_lms::prelude::*;
 
-/// A staged column value: the physical-type tag is static, the `Var` is dynamic.
-///
-/// `Bool` is the result type of comparison/logical expressions; it is not a
-/// storable column type (Arrow bool columns are not read here yet).
+/// Static-nullability tag. `NonNull` emits no validity IR; `Nullable` carries a
+/// stage-1 `is_valid` bit.
 #[derive(Clone, Copy)]
-pub enum ColVal {
-    I32(Var<i32>),
-    I64(Var<i64>),
-    F64(Var<f64>),
-    Bool(Var<bool>),
+pub enum Nullness {
+    NonNull,
+    Nullable(Var<bool>),
 }
 
-/// A row: one [`ColVal`] per column, positional (the [`crate::plan::Schema`]
-/// supplies the types/order).
+/// A staged column value: static physical-type tag + `Var` value + nullness.
+#[derive(Clone, Copy)]
+pub enum ColVal {
+    I32(Var<i32>, Nullness),
+    I64(Var<i64>, Nullness),
+    F64(Var<f64>, Nullness),
+    Bool(Var<bool>, Nullness),
+}
+
+impl ColVal {
+    pub fn nullness(self) -> Nullness {
+        match self {
+            ColVal::I32(_, n) | ColVal::I64(_, n) | ColVal::F64(_, n) | ColVal::Bool(_, n) => n,
+        }
+    }
+}
+
+/// A row: one [`ColVal`] per column, positional.
 pub type Row = Vec<ColVal>;

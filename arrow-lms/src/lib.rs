@@ -15,6 +15,7 @@
 
 mod array;
 pub mod ffi;
+pub mod ffi_mut;
 
 pub use array::{
     FfiArrayBatchOps, FfiArrayOps, NonNullValues, PrimitiveArrayView, ValidityIsValid,
@@ -24,4 +25,8 @@ pub use ffi::{
     ffi_from_primitive, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
     prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError, FfiValidity,
     PreparedFfiBatch,
+};
+pub use ffi_mut::{
+    FfiMutBuffer, FfiMutableArray, FfiMutableArrays, FfiMutableArraysOps, MutablePrimitiveView,
+    PreparedOutput,
 };

@@ -170,7 +170,8 @@ pub mod prelude {
         SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
-        AsSlice, ReprSliceOps, Slice, SliceLen, SliceMutOps, SliceRefOps, SliceType,
+        AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,
+        SliceRefOps, SliceType,
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
