@@ -1,20 +1,15 @@
-//! Write side: mutable FFI descriptors for materializing output columns.
+//! Write side: host output allocation + staged writes.
 //!
-//! The mirror of [`crate::ffi`]. Host code pre-allocates a [`PreparedOutput`]
-//! (one value buffer per output column, plus a validity bitmap for nullable
-//! ones), hands the JIT kernel an `&mut FfiMutableArrays`, and afterwards turns
-//! the filled buffers into a `RecordBatch`. Staged code writes through
-//! [`MutablePrimitiveView::set`] / [`MutablePrimitiveView::set_null`].
+//! There are **no** mutable descriptor types — the write path uses the same
+//! lifetime-free [`FfiArray`] as the read path, reached through `SRefMut`. Host
+//! code allocates a [`PreparedOutput`] (one value buffer per output column, plus
+//! a validity bitmap for nullable ones), hands the kernel `&mut [FfiArray]`, and
+//! afterwards assembles a `RecordBatch`. Staged writes go through
+//! [`PrimitiveArrayView::set`] / [`set_null`](PrimitiveArrayView::set_null),
+//! reached via [`MutBatchOps::column_mut`].
 //!
-//! Unlike the read descriptors these are **lifetime-free** (raw pointers, no
-//! `PhantomData` borrow). A `&mut` is invariant in its pointee's lifetimes, so
-//! carrying `'a` here would make `&mut FfiMutableArrays<'a>` un-passable to a
-//! kernel whose ABI type is `'static`; a lifetime-free pointee coerces cleanly
-//! (exactly like `&mut [i64]`). Safety is the caller's contract: the
-//! `PreparedOutput` must outlive the kernel call.
-//!
-//! Buffers are sized to the worst case (input row count); the kernel fills the
-//! first `n` rows and returns `n`, and the host slices to `n`. No growth yet.
+//! Buffers are sized to the worst case (input rows); the kernel fills the first
+//! `n` and returns `n`, and the host slices to `n`. No growth yet.
 
 use std::marker::PhantomData;
 use std::sync::Arc;
@@ -25,43 +20,58 @@ use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-/// Erased *mutable* `(ptr, len)` buffer — the write-side twin of
-/// [`crate::ffi::FfiBuffer`].
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiMutBuffer {
-    #[staged(u64)]
-    pub ptr: *mut u8,
-    #[staged(u64)]
-    pub len: usize,
-}
+use crate::array::{bit_location, PrimitiveArrayView};
+use crate::ffi::{FfiArray, FfiArrayType, FfiBuffer, FfiValidity, FfiValidityType};
 
-impl FfiMutBuffer {
-    /// # Safety
-    /// `ptr` must be valid for writes of `len` elements under the interpretation
-    /// attached by the owning descriptor, for as long as the descriptor is used.
-    pub const unsafe fn from_raw_parts(ptr: *mut u8, len: usize) -> Self {
-        Self { ptr, len }
+// =============================================================================
+// Staged writes (SRefMut flavor of the shared view)
+// =============================================================================
+
+/// Staged write operations on a mutable batch (`&mut [FfiArray]`).
+pub trait MutBatchOps<'r>: Staged<Out = SRefMut<'r, Slice<FfiArray>>> + Sized {
+    /// A writable typed view of output column `index`.
+    fn column_mut<M>(
+        self,
+        index: usize,
+    ) -> PrimitiveArrayView<impl Staged<Out = SRefMut<'r, FfiArray>> + Clone + 'r, M>
+    where
+        Self: Clone + 'r,
+        M: StagedType + 'r,
+    {
+        PrimitiveArrayView {
+            array: self.get_mut_unchecked(index as u64),
+            _elem: PhantomData,
+        }
     }
 }
 
-/// Erased writable primitive output array: a values buffer plus a validity
-/// bitmap (`len == 0` for non-nullable columns).
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiMutableArray {
-    #[staged(FfiMutBuffer)]
-    pub values: FfiMutBuffer,
-    #[staged(FfiMutBuffer)]
-    pub validity: FfiMutBuffer,
-}
+impl<'r, B> MutBatchOps<'r> for B where B: Staged<Out = SRefMut<'r, Slice<FfiArray>>> + Sized {}
 
-/// Erased writable batch: a buffer of [`FfiMutableArray`] descriptors.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiMutableArrays {
-    #[staged(FfiMutBuffer)]
-    pub arrays: FfiMutBuffer,
+impl<P, M> PrimitiveArrayView<P, M>
+where
+    P: Staged<Out = SRefMut<'static, FfiArray>> + Clone + 'static,
+    M: StagedType + 'static,
+{
+    /// Write `value` at output row `n`.
+    pub fn set(&self, ctx: &mut Ctx, n: Var<u64>, value: Var<M>) {
+        let values = field_addr(self.array.clone(), FfiArrayType::values()).as_mut_slice::<M>();
+        ctx.emit(values.set_unchecked(n, value));
+    }
+
+    /// Clear the validity bit at output row `n` (mark it null). Assumes the
+    /// bitmap was default-initialized all-valid; shares `bit_location` with the
+    /// read-side `is_valid`.
+    pub fn set_null(&self, ctx: &mut Ctx, n: Var<u64>) {
+        let validity = field_addr(self.array.clone(), FfiArrayType::validity());
+        let bytes = field_addr(validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
+        let (byte_index, mask) = bit_location(validity, n);
+        let byte_index = ctx.bind(byte_index);
+        // clear = old & ~mask   (~x computed as x ^ all-ones)
+        let old = int_cast::<u64, u8, _>(bytes.clone().get_unchecked(byte_index));
+        let not_mask = bitxor::<u64, _, _>(mask, Const::<u64>::new(u64::MAX));
+        let cleared = int_cast::<u8, u64, _>(bitand::<u64, _, _>(old, not_mask));
+        ctx.emit(bytes.set_unchecked(byte_index, cleared));
+    }
 }
 
 // =============================================================================
@@ -119,7 +129,7 @@ pub struct PreparedOutput {
     /// Per-column validity bitmap (all-valid `0xFF` init); `None` when the
     /// output field is non-nullable.
     validity: Vec<Option<Vec<u8>>>,
-    descriptors: Vec<FfiMutableArray>,
+    descriptors: Vec<FfiArray>,
 }
 
 impl PreparedOutput {
@@ -132,21 +142,26 @@ impl PreparedOutput {
 
         for field in schema.fields() {
             let mut col = OutColumn::alloc(field.data_type(), capacity);
-            let values_ptr = col.values_ptr();
+            let values = unsafe { FfiBuffer::from_raw_parts(col.values_ptr(), capacity) };
 
             let mut valid = field
                 .is_nullable()
                 .then(|| vec![0xFFu8; capacity.div_ceil(8)]);
-            let (validity_ptr, validity_len) = match &mut valid {
-                Some(bytes) => (bytes.as_mut_ptr(), bytes.len()),
-                None => (std::ptr::null_mut(), 0),
+            let validity_desc = match &mut valid {
+                Some(bytes) => FfiValidity {
+                    bytes: unsafe { FfiBuffer::from_raw_parts(bytes.as_mut_ptr(), bytes.len()) },
+                    bit_offset: 0,
+                    bit_len: capacity as u64,
+                    null_count: 0,
+                },
+                None => FfiValidity::all_valid(capacity),
             };
 
             // SAFETY: `col`/`valid` heap buffers stay put once allocated (never
             // grown), and `PreparedOutput` keeps them alive for the call.
-            descriptors.push(FfiMutableArray {
-                values: unsafe { FfiMutBuffer::from_raw_parts(values_ptr, capacity) },
-                validity: unsafe { FfiMutBuffer::from_raw_parts(validity_ptr, validity_len) },
+            descriptors.push(FfiArray {
+                values,
+                validity: validity_desc,
             });
             columns.push(col);
             validity.push(valid);
@@ -160,14 +175,10 @@ impl PreparedOutput {
         }
     }
 
-    /// The output descriptor handed to the kernel (raw-pointer-backed; borrows
-    /// nothing, so it does not conflict with [`Self::into_record_batch`]).
-    pub fn as_ffi_mut(&mut self) -> FfiMutableArrays {
-        let ptr = self.descriptors.as_mut_ptr().cast::<u8>();
-        let len = self.descriptors.len();
-        FfiMutableArrays {
-            arrays: unsafe { FfiMutBuffer::from_raw_parts(ptr, len) },
-        }
+    /// The mutable batch handed to the kernel: `SRefMut<Slice<FfiArray>>` at
+    /// runtime (`&mut [FfiArray]`).
+    pub fn as_ffi_mut(&mut self) -> &mut [FfiArray] {
+        &mut self.descriptors
     }
 
     /// Assemble the first `n` rows into a `RecordBatch`.
@@ -184,80 +195,5 @@ impl PreparedOutput {
             })
             .collect::<Vec<_>>();
         RecordBatch::try_new(self.schema, arrays).expect("output columns match schema")
-    }
-}
-
-// =============================================================================
-// Staged write views
-// =============================================================================
-
-/// Staged operations on the `&mut FfiMutableArrays` output parameter.
-pub trait FfiMutableArraysOps<'r>: Staged<Out = SRefMut<'r, FfiMutableArrays>> + Sized {
-    /// A writable view of output column `index`, typed as `M`.
-    fn column_mut<M>(
-        self,
-        index: usize,
-    ) -> MutablePrimitiveView<impl Staged<Out = SRefMut<'r, FfiMutableArray>> + Clone + 'r, M>
-    where
-        Self: Clone + 'r,
-        M: StagedType + 'r,
-    {
-        let array = field_addr(self, FfiMutableArraysType::arrays())
-            .as_mut_slice::<FfiMutableArray>()
-            .get_mut_unchecked(index as u64);
-        MutablePrimitiveView {
-            array,
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<'r, B> FfiMutableArraysOps<'r> for B where
-    B: Staged<Out = SRefMut<'r, FfiMutableArrays>> + Sized
-{
-}
-
-/// A writable view of one primitive output column.
-pub struct MutablePrimitiveView<P, M> {
-    array: P,
-    _elem: PhantomData<M>,
-}
-
-impl<P: Clone, M> Clone for MutablePrimitiveView<P, M> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<P: Copy, M> Copy for MutablePrimitiveView<P, M> {}
-
-impl<P, M> MutablePrimitiveView<P, M>
-where
-    P: Staged<Out = SRefMut<'static, FfiMutableArray>> + Clone + 'static,
-    M: StagedType + 'static,
-{
-    /// Write `value` at output row `n`.
-    pub fn set(&self, ctx: &mut Ctx, n: Var<u64>, value: Var<M>) {
-        let values =
-            field_addr(self.array.clone(), FfiMutableArrayType::values()).as_mut_slice::<M>();
-        ctx.emit(values.set_unchecked(n, value));
-    }
-
-    /// Clear the validity bit at output row `n` (mark it null). Assumes the
-    /// bitmap was default-initialized all-valid.
-    pub fn set_null(&self, ctx: &mut Ctx, n: Var<u64>) {
-        let bitmap =
-            field_addr(self.array.clone(), FfiMutableArrayType::validity()).as_mut_slice::<u8>();
-        let byte_idx = ctx.bind(shr::<u64, _, _>(n, 3u64));
-        let bit = bitand::<u64, _, _>(n, 7u64);
-        // clear = old & ~(1 << bit)   (~x computed as x ^ all-ones)
-        let old = int_cast::<u64, u8, _>(bitmap.clone().get_unchecked(byte_idx));
-        let mask = shl::<u64, _, _>(Const::<u64>::new(1), bit);
-        let not_mask = bitxor::<u64, _, _>(mask, Const::<u64>::new(u64::MAX));
-        let cleared = int_cast::<u8, u64, _>(bitand::<u64, _, _>(old, not_mask));
-        ctx.emit(bitmap.set_unchecked(byte_idx, cleared));
     }
 }

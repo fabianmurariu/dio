@@ -7,7 +7,7 @@ use std::sync::Arc;
 use arrow::array::{Int32Array, Int64Array};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArrayBatch, prepare_record_batch};
+use arrow_lms::{FfiArray, prepare_record_batch};
 use rust_lms::prelude::*;
 use sql_gen::exec::exec_count;
 use sql_gen::{Operator, gen_count, sql_to_operator};
@@ -28,14 +28,13 @@ fn batch(a: Vec<i32>, b: Vec<i64>) -> RecordBatch {
 /// Compile `op` into a `count(*)` kernel and run it over `rb`.
 fn jit_count(op: &Operator, rb: &RecordBatch) -> i64 {
     let prepared = prepare_record_batch(rb).unwrap();
-    let ffi = prepared.as_ffi();
 
     let mut compiler = Compiler::new();
-    let f = compiler.fun1("q", |ctx, batch: Var<SRef<FfiArrayBatch>>| {
+    let f = compiler.fun1("q", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
         gen_count(ctx, batch, op)
     });
     let compiled = compiler.compile(f).expect("compile");
-    compiled.as_fn()(&ffi)
+    compiled.as_fn()(prepared.arrays())
 }
 
 /// Run `sql` end-to-end, asserting the JIT and reference interpreter agree, and

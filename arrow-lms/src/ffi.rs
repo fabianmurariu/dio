@@ -1,8 +1,17 @@
-//! FFI descriptors for read-only primitive Arrow arrays.
+//! FFI descriptors for primitive Arrow arrays — read *and* write.
 //!
-//! The layout is deliberately small: an erased `(ptr, len)` buffer, a validity
-//! bitmap built from that buffer, and an erased array batch. Staged code
-//! reinterprets these buffers as ordinary `rust-lms` slices.
+//! The layout is deliberately small and **lifetime-free**: an erased `(ptr,
+//! len)` buffer, a validity bitmap over one, and the array = values + validity.
+//! Staged code reinterprets these as ordinary `rust-lms` slices. A *batch* is
+//! just a slice of [`FfiArray`] — there is no wrapper type: read code takes
+//! `SRef<Slice<FfiArray>>` (`&[FfiArray]`), write code `SRefMut<Slice<FfiArray>>`
+//! (`&mut [FfiArray]`). Mutability is the reference flavor, not a second type.
+//!
+//! Descriptors carry no lifetime (raw pointers): a `&mut` is invariant in its
+//! pointee's lifetimes, so a lifetimed descriptor could not be handed to a
+//! kernel whose ABI type is `'static`. Host safety lives at the *slice* border —
+//! `&[FfiArray]` / `&mut [FfiArray]` cannot outlive the `Prepared*` owner — and
+//! the raw pointers' "arrow data must outlive the call" is the caller contract.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -17,70 +26,55 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-/// Erased FFI slice/buffer layout.
-///
-/// The meaning of `len` belongs to the owner: primitive values store element
-/// count for the eventual typed interpretation, while bitmap buffers store byte
-/// count.
+/// Erased `(ptr, len)` buffer. `ptr` is `*mut` to serve both flavors; the read
+/// path only ever reaches it through an `SRef`, which emits no writes.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiBuffer<'a> {
+pub struct FfiBuffer {
     #[staged(u64)]
-    pub ptr: *const u8,
+    pub ptr: *mut u8,
     #[staged(u64)]
     pub len: usize,
-    #[staged(())]
-    _borrow: PhantomData<&'a [u8]>,
 }
 
-impl<'a> FfiBuffer<'a> {
+impl FfiBuffer {
     pub const fn empty() -> Self {
         Self {
-            ptr: std::ptr::null(),
+            ptr: std::ptr::null_mut(),
             len: 0,
-            _borrow: PhantomData,
         }
     }
 
-    /// Create an erased descriptor from raw parts.
-    ///
     /// # Safety
-    /// `ptr` must be valid for the interpretation attached to `len` by the
-    /// owning descriptor.
-    pub const unsafe fn from_raw_parts(ptr: *const u8, len: usize) -> Self {
-        Self {
-            ptr,
-            len,
-            _borrow: PhantomData,
-        }
+    /// `ptr` must be valid for the interpretation `len` names, for as long as the
+    /// owning descriptor is used.
+    pub const unsafe fn from_raw_parts(ptr: *mut u8, len: usize) -> Self {
+        Self { ptr, len }
     }
 
-    pub fn from_bytes(bytes: &'a [u8]) -> Self {
+    pub fn from_bytes(bytes: &[u8]) -> Self {
         Self {
-            ptr: bytes.as_ptr(),
+            ptr: bytes.as_ptr() as *mut u8,
             len: bytes.len(),
-            _borrow: PhantomData,
         }
     }
 
-    pub fn from_typed_slice<T>(slice: &'a [T]) -> Self {
+    pub fn from_typed_slice<T>(slice: &[T]) -> Self {
         Self {
-            ptr: slice.as_ptr().cast::<u8>(),
+            ptr: slice.as_ptr() as *mut u8,
             len: slice.len(),
-            _borrow: PhantomData,
         }
     }
 }
 
-/// Arrow validity descriptor.
-///
-/// Arrow validity uses `1 = valid` and `0 = null`. `null_count == 0` means the
-/// bitmap can be ignored.
+/// Arrow validity bitmap descriptor (`1 = valid`, `0 = null`; `null_count == 0`
+/// means the bitmap can be ignored). Shared by read (`is_valid`) and write
+/// (`set_null`) — see `array.rs` for the staged bit ops.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiValidity<'a> {
-    #[staged(FfiBuffer<'a>)]
-    pub bytes: FfiBuffer<'a>,
+pub struct FfiValidity {
+    #[staged(FfiBuffer)]
+    pub bytes: FfiBuffer,
     #[staged(u64)]
     pub bit_offset: u64,
     #[staged(u64)]
@@ -89,7 +83,7 @@ pub struct FfiValidity<'a> {
     pub null_count: u64,
 }
 
-impl<'a> FfiValidity<'a> {
+impl FfiValidity {
     pub const fn all_valid(len: usize) -> Self {
         Self {
             bytes: FfiBuffer::empty(),
@@ -99,7 +93,7 @@ impl<'a> FfiValidity<'a> {
         }
     }
 
-    pub fn from_nulls(nulls: Option<&'a NullBuffer>, len: usize) -> Self {
+    pub fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
         match nulls {
             Some(nulls) if nulls.null_count() != 0 => Self {
                 bytes: FfiBuffer::from_bytes(nulls.inner().values()),
@@ -116,17 +110,17 @@ impl<'a> FfiValidity<'a> {
     }
 }
 
-/// Erased read-only primitive Arrow array descriptor.
+/// Erased primitive Arrow array descriptor: values + validity.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiArray<'a> {
-    #[staged(FfiBuffer<'a>)]
-    pub values: FfiBuffer<'a>,
-    #[staged(FfiValidity<'a>)]
-    pub validity: FfiValidity<'a>,
+pub struct FfiArray {
+    #[staged(FfiBuffer)]
+    pub values: FfiBuffer,
+    #[staged(FfiValidity)]
+    pub validity: FfiValidity,
 }
 
-impl<'a> FfiArray<'a> {
+impl FfiArray {
     pub fn len(&self) -> usize {
         self.values.len
     }
@@ -144,41 +138,17 @@ impl<'a> FfiArray<'a> {
     }
 }
 
-/// Erased batch descriptor: a buffer of [`FfiArray`] descriptors.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiArrayBatch<'arrays, 'data: 'arrays> {
-    #[staged(FfiBuffer<'arrays>)]
-    pub arrays: FfiBuffer<'arrays>,
-    #[staged(())]
-    _borrow: PhantomData<&'arrays [FfiArray<'data>]>,
-}
-
-impl<'arrays, 'data> FfiArrayBatch<'arrays, 'data> {
-    pub fn len(&self) -> usize {
-        self.arrays.len
-    }
-
-    pub fn is_empty(&self) -> bool {
-        self.arrays.len == 0
-    }
-}
-
-/// Host-owned prepared descriptors.
+/// Host-owned read descriptors borrowing an Arrow source. The `'data` borrow
+/// keeps the source alive; [`arrays`](Self::arrays) hands the kernel `&[FfiArray]`.
 #[derive(Debug)]
 pub struct PreparedFfiBatch<'data> {
-    arrays: Vec<FfiArray<'data>>,
+    arrays: Vec<FfiArray>,
+    _borrow: PhantomData<&'data [u8]>,
 }
 
 impl<'data> PreparedFfiBatch<'data> {
-    pub fn as_ffi(&self) -> FfiArrayBatch<'_, 'data> {
-        FfiArrayBatch {
-            arrays: FfiBuffer::from_typed_slice(&self.arrays),
-            _borrow: PhantomData,
-        }
-    }
-
-    pub fn arrays(&self) -> &[FfiArray<'data>] {
+    /// The read batch handed to the kernel: `SRef<Slice<FfiArray>>` at runtime.
+    pub fn arrays(&self) -> &[FfiArray] {
         &self.arrays
     }
 }
@@ -204,31 +174,24 @@ pub enum FfiError {
 impl fmt::Display for FfiError {
     fn fmt(&self, f: &mut fmt::Formatter<'_>) -> fmt::Result {
         match self {
-            Self::UnsupportedDataType { index, data_type } => {
-                write!(
-                    f,
-                    "array {index} has unsupported data type {data_type}; only primitive arrays are supported"
-                )
-            }
+            Self::UnsupportedDataType { index, data_type } => write!(
+                f,
+                "array {index} has unsupported data type {data_type}; only primitive arrays are supported"
+            ),
             Self::Downcast { index, data_type } => {
                 write!(f, "array {index} could not be downcast as {data_type}")
             }
-            Self::MismatchedLength {
-                index,
-                expected,
-                actual,
-            } => write!(f, "array {index} has length {actual}, expected {expected}"),
+            Self::MismatchedLength { index, expected, actual } => {
+                write!(f, "array {index} has length {actual}, expected {expected}")
+            }
         }
     }
 }
 
 impl std::error::Error for FfiError {}
 
-/// Build an erased FFI descriptor from an Arrow primitive array.
-pub fn ffi_from_primitive<A>(array: &PrimitiveArray<A>) -> FfiArray<'_>
-where
-    A: ArrowPrimitiveType,
-{
+/// Build an erased descriptor from an Arrow primitive array.
+pub fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.values()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
@@ -241,7 +204,7 @@ pub fn prepare_record_batch(rb: &RecordBatch) -> Result<PreparedFfiBatch<'_>, Ff
 }
 
 /// Prepare borrowed Arrow [`ArrayRef`] values for a compiled kernel.
-pub fn prepare_array_refs<'a>(arrays: &'a [ArrayRef]) -> Result<PreparedFfiBatch<'a>, FfiError> {
+pub fn prepare_array_refs(arrays: &[ArrayRef]) -> Result<PreparedFfiBatch<'_>, FfiError> {
     prepare_arrays(arrays.iter().map(|array| array.as_ref()))
 }
 
@@ -277,10 +240,13 @@ where
         })
         .collect::<Result<Vec<_>, _>>()?;
 
-    Ok(PreparedFfiBatch { arrays })
+    Ok(PreparedFfiBatch {
+        arrays,
+        _borrow: PhantomData,
+    })
 }
 
-fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray<'_>, FfiError> {
+fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError> {
     macro_rules! downcast_primitive {
         ($array_ty:ty) => {{
             let primitive =
@@ -316,13 +282,11 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray<'_>, FfiEr
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::buffer::NullBuffer;
 
     #[test]
     fn descriptor_matches_arrow() {
         let array = Int32Array::from(vec![10, 20, 30]);
         let ffi = ffi_from_primitive(&array);
-
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 0);
         assert!(ffi.all_valid());
@@ -333,7 +297,6 @@ mod tests {
         let nulls = NullBuffer::from(vec![true, false, true]);
         let array = Int32Array::new(vec![1, 99, 3].into(), Some(nulls));
         let ffi = ffi_from_primitive(&array);
-
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 1);
         assert!(!ffi.all_valid());

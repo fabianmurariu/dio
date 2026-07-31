@@ -9,7 +9,7 @@
 //! through evaluation; non-nullable ones emit no validity IR.
 
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use arrow_lms::{FfiArray, FfiArrayBatch, FfiArrayBatchOps, FfiMutableArrays, FfiMutableArraysOps};
+use arrow_lms::{ArrayBatchOps, FfiArray, MutBatchOps, PrimitiveArrayView};
 use datafusion_common::ScalarValue;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
@@ -17,19 +17,13 @@ use rust_lms::prelude::*;
 use crate::plan::Operator;
 use crate::value::{ColVal, Nullness, Row};
 
-/// A staged expression yielding the read-only input batch descriptor.
-pub trait BatchSource:
-    Staged<Out = SRef<'static, FfiArrayBatch<'static, 'static>>> + Copy + 'static
-{
-}
-impl<T> BatchSource for T where
-    T: Staged<Out = SRef<'static, FfiArrayBatch<'static, 'static>>> + Copy + 'static
-{
-}
+/// A staged expression yielding the read-only input batch (`&[FfiArray]`).
+pub trait BatchSource: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
+impl<T> BatchSource for T where T: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
 
-/// A staged expression yielding the `&mut` output batch descriptor.
-pub trait OutSink: Staged<Out = SRefMut<'static, FfiMutableArrays>> + Copy + 'static {}
-impl<T> OutSink for T where T: Staged<Out = SRefMut<'static, FfiMutableArrays>> + Copy + 'static {}
+/// A staged expression yielding the `&mut` output batch (`&mut [FfiArray]`).
+pub trait OutSink: Staged<Out = SRefMut<'static, Slice<FfiArray>>> + Copy + 'static {}
+impl<T> OutSink for T where T: Staged<Out = SRefMut<'static, Slice<FfiArray>>> + Copy + 'static {}
 
 /// Downstream continuation, invoked once per emitted row at code-generation
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
@@ -165,12 +159,12 @@ fn gen_read<B: BatchSource>(
 
 fn read_nullness<P, M>(
     ctx: &mut Ctx,
-    view: arrow_lms::PrimitiveArrayView<P, M>,
+    view: PrimitiveArrayView<P, M>,
     nullable: bool,
     i: Var<u64>,
 ) -> Nullness
 where
-    P: Staged<Out = SRef<'static, FfiArray<'static>>> + Clone + 'static,
+    P: Staged<Out = SRef<'static, FfiArray>> + Clone + 'static,
     M: StagedType + 'static,
 {
     if nullable {
@@ -210,12 +204,12 @@ fn write_col<O: OutSink>(ctx: &mut Ctx, out: O, c: usize, field: &Field, n: Var<
 
 fn write_null<P, M>(
     ctx: &mut Ctx,
-    view: arrow_lms::MutablePrimitiveView<P, M>,
+    view: PrimitiveArrayView<P, M>,
     field: &Field,
     n: Var<u64>,
     cv: ColVal,
 ) where
-    P: Staged<Out = SRefMut<'static, arrow_lms::FfiMutableArray>> + Clone + 'static,
+    P: Staged<Out = SRefMut<'static, FfiArray>> + Clone + 'static,
     M: StagedType + 'static,
 {
     // Only nullable outputs need validity writes, and only nullable values can

@@ -1,13 +1,12 @@
 //! # arrow-lms: staged Apache Arrow interop for `rust-lms`
 //!
-//! This crate bridges read-only primitive Apache Arrow arrays into staged
-//! `rust-lms` kernels. Host code prepares an erased [`FfiArrayBatch`]; staged
-//! code recovers typed primitive views with `batch.primitive::<T>(idx)`.
+//! Bridges primitive Apache Arrow arrays into staged `rust-lms` kernels. A batch
+//! is a `Slice<FfiArray>`: host code prepares one with [`prepare_record_batch`]
+//! (read) or [`PreparedOutput`] (write), and staged code recovers typed columns
+//! with `batch.primitive::<T>(idx)`. Mutability is the reference flavor — `SRef`
+//! reads, `SRefMut` writes — over one lifetime-free [`FfiArray`] type.
 //!
-//! The current scope is intentionally narrow: primitive arrays only, read-only
-//! access only. Validity is represented as a first-class staged view, so callers
-//! can either iterate non-null values directly or zip physical values with row
-//! validity.
+//! Scope: primitive arrays only. Validity is a first-class staged view.
 
 // `#[derive(StagedType)]` generates field-token modules with lowercase field
 // names, which trips the case lints.
@@ -18,15 +17,11 @@ pub mod ffi;
 pub mod ffi_mut;
 
 pub use array::{
-    FfiArrayBatchOps, FfiArrayOps, NonNullValues, PrimitiveArrayView, ValidityIsValid,
-    ValidityIter, ValidityLen, ValidityNullCount, ValidityView,
+    ArrayBatchOps, ArraySource, FfiArrayOps, PrimitiveArrayView, ValidityIsValid, ValidityLen,
+    ValidityNullCount, ValiditySource, ValidityView,
 };
 pub use ffi::{
     ffi_from_primitive, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
-    prepare_record_batch, FfiArray, FfiArrayBatch, FfiBuffer, FfiError, FfiValidity,
-    PreparedFfiBatch,
+    prepare_record_batch, FfiArray, FfiBuffer, FfiError, FfiValidity, PreparedFfiBatch,
 };
-pub use ffi_mut::{
-    FfiMutBuffer, FfiMutableArray, FfiMutableArrays, FfiMutableArraysOps, MutablePrimitiveView,
-    PreparedOutput,
-};
+pub use ffi_mut::{MutBatchOps, PreparedOutput};

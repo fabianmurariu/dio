@@ -7,7 +7,7 @@ use arrow::array::{Array, Int32Array, Int64Array};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArrayBatch, FfiMutableArrays, PreparedOutput, prepare_record_batch};
+use arrow_lms::{FfiArray, PreparedOutput, prepare_record_batch};
 use rust_lms::prelude::*;
 use sql_gen::{gen_collect, sql_to_operator};
 
@@ -25,20 +25,18 @@ fn jit_collect(sql: &str, rb: &RecordBatch) -> RecordBatch {
     let out_schema = op.output_schema();
 
     let prepared_in = prepare_record_batch(rb).unwrap();
-    let ffi_in = prepared_in.as_ffi();
     let mut out = PreparedOutput::alloc(out_schema, rb.num_rows());
 
     let mut compiler = Compiler::new();
     let f = compiler.fun2(
         "q",
-        |ctx, batch: Var<SRef<FfiArrayBatch>>, sink: Var<SRefMut<FfiMutableArrays>>| {
+        |ctx, batch: Var<SRef<Slice<FfiArray>>>, sink: Var<SRefMut<Slice<FfiArray>>>| {
             gen_collect(ctx, batch, sink, &op, &op.output_schema())
         },
     );
     let compiled = compiler.compile(f).expect("compile");
 
-    let mut ffi_out = out.as_ffi_mut();
-    let n = compiled.as_fn()(&ffi_in, &mut ffi_out);
+    let n = compiled.as_fn()(prepared_in.arrays(), out.as_ffi_mut());
     out.into_record_batch(n as usize)
 }
 
