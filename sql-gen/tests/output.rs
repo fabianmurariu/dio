@@ -1,5 +1,6 @@
-//! Output materialization: parse SQL, JIT a kernel that writes surviving rows
-//! into pre-allocated Arrow buffers, and check the resulting `RecordBatch`.
+//! End-to-end: run SQL through `exec_jit` (parse → lower → JIT → run) and check
+//! the resulting `RecordBatch`, for both row materialization and scalar
+//! aggregates.
 
 use std::sync::Arc;
 
@@ -7,10 +8,9 @@ use arrow::array::{Array, Int32Array, Int64Array};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArray, PreparedOutput, prepare_record_batch};
-use rust_lms::prelude::*;
-use sql_gen::{gen_collect, sql_to_operator};
+use sql_gen::exec_jit;
 
+/// Two columns: `a: Int32`, `b: Int64` (nullability inferred from the arrays).
 fn batch(a: Int32Array, b: Int64Array) -> RecordBatch {
     let schema = Arc::new(ArrowSchema::new(vec![
         Field::new("a", DataType::Int32, a.null_count() > 0),
@@ -19,25 +19,8 @@ fn batch(a: Int32Array, b: Int64Array) -> RecordBatch {
     RecordBatch::try_new(schema, vec![Arc::new(a), Arc::new(b)]).unwrap()
 }
 
-/// Parse `sql`, JIT a materializing kernel, and return the output `RecordBatch`.
-fn jit_collect(sql: &str, rb: &RecordBatch) -> RecordBatch {
-    let op = sql_to_operator(sql, "t", rb.schema()).expect("lower sql");
-    let out_schema = op.output_schema();
-
-    let prepared_in = prepare_record_batch(rb).unwrap();
-    let mut out = PreparedOutput::alloc(out_schema, rb.num_rows());
-
-    let mut compiler = Compiler::new();
-    let f = compiler.fun2(
-        "q",
-        |ctx, batch: Var<SRef<Slice<FfiArray>>>, sink: Var<SRefMut<Slice<FfiArray>>>| {
-            gen_collect(ctx, batch, sink, &op, &op.output_schema())
-        },
-    );
-    let compiled = compiler.compile(f).expect("compile");
-
-    let n = compiled.as_fn()(prepared_in.arrays(), out.as_ffi_mut());
-    out.into_record_batch(n as usize)
+fn run(sql: &str, rb: &RecordBatch) -> RecordBatch {
+    exec_jit(sql, "t", rb).expect("exec_jit")
 }
 
 fn i32s(rb: &RecordBatch, col: usize) -> &Int32Array {
@@ -47,13 +30,17 @@ fn i64s(rb: &RecordBatch, col: usize) -> &Int64Array {
     rb.column(col).as_any().downcast_ref().unwrap()
 }
 
+// -----------------------------------------------------------------------------
+// Row materialization
+// -----------------------------------------------------------------------------
+
 #[test]
 fn filter_then_passthrough_columns() {
     let rb = batch(
         Int32Array::from(vec![1, 2, 3, 4]),
         Int64Array::from(vec![10, 20, 30, 40]),
     );
-    let out = jit_collect("SELECT a, b FROM t WHERE a < 3", &rb);
+    let out = run("SELECT a, b FROM t WHERE a < 3", &rb);
 
     assert_eq!(out.num_rows(), 2);
     assert_eq!(i32s(&out, 0).values(), &[1, 2]);
@@ -67,9 +54,8 @@ fn nullable_column_preserves_nulls() {
         Some(NullBuffer::from(vec![true, false, true])),
     );
     let rb = batch(a, Int64Array::from(vec![0, 0, 0]));
-    let out = jit_collect("SELECT a FROM t", &rb);
+    let out = run("SELECT a FROM t", &rb);
 
-    assert_eq!(out.num_rows(), 3);
     let col = i32s(&out, 0);
     assert_eq!(col.null_count(), 1);
     assert!(col.is_valid(0) && col.is_null(1) && col.is_valid(2));
@@ -79,13 +65,12 @@ fn nullable_column_preserves_nulls() {
 
 #[test]
 fn null_predicate_drops_row() {
-    // a > 15 with a = [10, null, 30]: the null row's predicate is unknown -> dropped.
     let a = Int32Array::new(
         vec![10, 0, 30].into(),
         Some(NullBuffer::from(vec![true, false, true])),
     );
     let rb = batch(a, Int64Array::from(vec![0, 0, 0]));
-    let out = jit_collect("SELECT a FROM t WHERE a > 15", &rb);
+    let out = run("SELECT a FROM t WHERE a > 15", &rb);
 
     assert_eq!(out.num_rows(), 1);
     assert_eq!(i32s(&out, 0).value(0), 30);
@@ -97,9 +82,95 @@ fn computed_projection() {
         Int32Array::from(vec![1, 2, 3]),
         Int64Array::from(vec![0, 0, 0]),
     );
-    // a + 1 -> datafusion types this as Int64 (widened literal).
-    let out = jit_collect("SELECT a + 1 FROM t", &rb);
-
-    assert_eq!(out.num_rows(), 3);
+    let out = run("SELECT a + 1 FROM t", &rb); // datafusion types a+1 as Int64
     assert_eq!(i64s(&out, 0).values(), &[2, 3, 4]);
+}
+
+// -----------------------------------------------------------------------------
+// Scalar aggregates (one-row output)
+// -----------------------------------------------------------------------------
+
+#[test]
+fn count_star() {
+    let rb = batch(
+        Int32Array::from(vec![1, 2, 3, 4, 5]),
+        Int64Array::from(vec![0, 0, 0, 0, 0]),
+    );
+    let out = run("SELECT count(*) FROM t", &rb);
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(i64s(&out, 0).value(0), 5);
+}
+
+#[test]
+fn count_with_filter() {
+    let rb = batch(
+        Int32Array::from(vec![1, 2, 3, 4, 5, 6]),
+        Int64Array::from(vec![0, 0, 0, 0, 0, 0]),
+    );
+    let out = run("SELECT count(*) FROM t WHERE a < 4", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 3);
+}
+
+#[test]
+fn count_col_skips_nulls() {
+    let a = Int32Array::new(
+        vec![10, 0, 30, 0].into(),
+        Some(NullBuffer::from(vec![true, false, true, false])),
+    );
+    let rb = batch(a, Int64Array::from(vec![0, 0, 0, 0]));
+    let out = run("SELECT count(a) FROM t", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 2);
+}
+
+#[test]
+fn min_max_sum() {
+    let rb = batch(
+        Int32Array::from(vec![3, 1, 4, 1, 5]),
+        Int64Array::from(vec![10, 20, 30, 40, 50]),
+    );
+    let out = run("SELECT min(a), max(a), sum(b) FROM t", &rb);
+    assert_eq!(out.num_rows(), 1);
+    // min(a) / max(a) keep a's Int32 type; sum(b) widens to Int64.
+    assert_eq!(i32s(&out, 0).value(0), 1);
+    assert_eq!(i32s(&out, 1).value(0), 5);
+    assert_eq!(i64s(&out, 2).value(0), 150);
+}
+
+#[test]
+fn sum_over_expr() {
+    let rb = batch(
+        Int32Array::from(vec![3, 1, 4, 1, 5]),
+        Int64Array::from(vec![10, 20, 30, 40, 50]),
+    );
+    let out = run("SELECT min(a), max(a), sum(b+1) FROM t", &rb);
+    assert_eq!(out.num_rows(), 1);
+    // min(a) / max(a) keep a's Int32 type; sum(b) widens to Int64.
+    assert_eq!(i32s(&out, 0).value(0), 1);
+    assert_eq!(i32s(&out, 1).value(0), 5);
+    assert_eq!(i64s(&out, 2).value(0), 155);
+}
+
+#[test]
+fn aggregate_over_empty_input() {
+    let rb = batch(
+        Int32Array::from(Vec::<i32>::new()),
+        Int64Array::from(Vec::<i64>::new()),
+    );
+    // count -> 0 (non-null); min/sum -> NULL over empty input.
+    let out = run("SELECT count(*), min(a), sum(b) FROM t", &rb);
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(i64s(&out, 0).value(0), 0);
+    assert!(i32s(&out, 1).is_null(0));
+    assert!(i64s(&out, 2).is_null(0));
+}
+
+#[test]
+fn min_skips_nulls() {
+    let a = Int32Array::new(
+        vec![9, 0, 2, 0].into(),
+        Some(NullBuffer::from(vec![true, false, true, false])),
+    );
+    let rb = batch(a, Int64Array::from(vec![0, 0, 0, 0]));
+    let out = run("SELECT min(a) FROM t", &rb);
+    assert_eq!(i32s(&out, 0).value(0), 2);
 }

@@ -10,3 +10,4 @@ rust-lms.workspace = true
 arrow-lms.workspace = true
 datafusion-common.workspace = true
 datafusion-expr.workspace = true
+datafusion-functions-aggregate.workspace = true

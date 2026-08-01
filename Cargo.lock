@@ -2794,6 +2794,7 @@ dependencies = [
  "arrow-lms",
  "datafusion-common",
  "datafusion-expr",
+ "datafusion-functions-aggregate",
  "datafusion-sql",
  "rust-lms",
 ]

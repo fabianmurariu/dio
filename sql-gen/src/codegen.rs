@@ -1,7 +1,8 @@
-//! The staged twin of [`crate::exec`]: `gen_*` mirrors `exec_*` but *emits*
-//! rust-lms staged ops. Specializing this interpreter to an [`Operator`] tree
-//! yields a JIT kernel — the first Futamura projection for relational algebra
-//! (per `docs/sql_to_c.pdf`).
+//! Staged code generation: walk an [`Operator`] tree and *emit* rust-lms staged
+//! ops that JIT-compile to a kernel — the first Futamura projection for
+//! relational algebra (per `docs/sql_to_c.pdf`). One entry, [`gen_collect`],
+//! writes results into an output batch: surviving rows for `Scan`/`Filter`/
+//! `Project`, a single folded row for a scalar `Aggregate`.
 //!
 //! Scalar expressions are datafusion [`Expr`] values (columns, literals,
 //! comparison / boolean / arithmetic operators). Nulls follow static
@@ -29,20 +30,9 @@ impl<T> OutSink for T where T: Staged<Out = SRefMut<'static, Slice<FfiArray>>> +
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
 type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
 
-/// Emit a `count(*)` kernel: number of rows `plan` produces over `batch`.
-pub fn gen_count<B: BatchSource>(ctx: &mut Ctx, batch: B, plan: &Operator) -> Var<i64> {
-    let acc = ctx.var(0i64);
-    gen_op(
-        plan,
-        ctx,
-        batch,
-        Box::new(move |ctx, _row| ctx.store(acc, add(acc, 1i64))),
-    );
-    acc
-}
-
-/// Emit a materializing kernel: write each surviving projected row into `out`
-/// and return the row count. `out_schema` is the output schema (from the plan).
+/// Emit a kernel that writes `plan`'s emitted rows into `out` at a running
+/// cursor and returns the row count. The single entry point — a scalar
+/// `Aggregate` is just a push operator that emits one row (see [`gen_op`]).
 pub fn gen_collect<B: BatchSource, O: OutSink>(
     ctx: &mut Ctx,
     batch: B,
@@ -99,6 +89,37 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
                     yld(ctx, projected);
                 }),
             );
+        }
+
+        // Scalar aggregate: fold every input row into accumulators, then emit
+        // exactly one result row downstream (after the loop).
+        Operator::Aggregate {
+            aggs,
+            input,
+            schema,
+        } => {
+            let fields = schema.fields().clone();
+            let accs: Vec<Agg> = aggs
+                .iter()
+                .enumerate()
+                .map(|(c, e)| Agg::init(ctx, e, &fields[c]))
+                .collect();
+
+            let loop_accs = accs.clone();
+            let input_schema = input.output_schema();
+            gen_op(
+                input,
+                ctx,
+                batch,
+                Box::new(move |ctx, row| {
+                    for agg in &loop_accs {
+                        agg.update(ctx, &row, &input_schema);
+                    }
+                }),
+            );
+
+            let result: Row = accs.iter().map(Agg::result).collect();
+            yld(ctx, result);
         }
     }
 }
@@ -402,5 +423,151 @@ fn tag(cv: ColVal) -> &'static str {
         ColVal::I64(..) => "i64",
         ColVal::F64(..) => "f64",
         ColVal::Bool(..) => "bool",
+    }
+}
+
+// =============================================================================
+// Scalar aggregation (no GROUP BY): accumulators folded by `gen_op`'s Aggregate
+// arm, which emits one result row.
+// =============================================================================
+
+#[derive(Clone, Copy)]
+enum AggKind {
+    Count,
+    Sum,
+    Min,
+    Max,
+}
+
+#[derive(Clone, Copy)]
+enum AccVar {
+    I64(Var<i64>),
+    F64(Var<f64>),
+}
+
+/// A resolved aggregate plus its accumulator variable(s).
+#[derive(Clone)]
+struct Agg {
+    kind: AggKind,
+    /// The aggregated argument (`None` / a literal for `count(*)`).
+    arg: Option<Expr>,
+    acc: AccVar,
+    /// Whether any non-null value has been folded — min/max/sum are NULL if not.
+    seen: Var<bool>,
+}
+
+impl Agg {
+    // `Expr::Wildcard` is deprecated in datafusion but still appears as
+    // `count(*)`'s argument, so we match it deliberately.
+    #[allow(deprecated)]
+    fn init(ctx: &mut Ctx, expr: &Expr, out_field: &Field) -> Agg {
+        let (name, arg) = match expr {
+            Expr::AggregateFunction(af) => (
+                af.func.name().to_ascii_lowercase(),
+                // `count(*)`'s arg is a `Wildcard` — not evaluable; treat as
+                // "no argument", i.e. count every row.
+                af.params
+                    .args
+                    .first()
+                    .cloned()
+                    .filter(|e| !matches!(e, Expr::Wildcard { .. })),
+            ),
+            other => panic!("expected aggregate function, got {other:?}"),
+        };
+        let kind = match name.as_str() {
+            "count" => AggKind::Count,
+            "sum" => AggKind::Sum,
+            "min" => AggKind::Min,
+            "max" => AggKind::Max,
+            other => panic!("unsupported aggregate: {other}"),
+        };
+        // Accumulator domain from the output type; min/max seed with the extreme.
+        let is_float = matches!(out_field.data_type(), DataType::Float64);
+        let acc = match (kind, is_float) {
+            (AggKind::Count, _) => AccVar::I64(ctx.var(0i64)),
+            (AggKind::Sum, false) => AccVar::I64(ctx.var(0i64)),
+            (AggKind::Sum, true) => AccVar::F64(ctx.var(0.0f64)),
+            (AggKind::Min, false) => AccVar::I64(ctx.var(i64::MAX)),
+            (AggKind::Min, true) => AccVar::F64(ctx.var(f64::MAX)),
+            (AggKind::Max, false) => AccVar::I64(ctx.var(i64::MIN)),
+            (AggKind::Max, true) => AccVar::F64(ctx.var(f64::MIN)),
+        };
+        // count is never null; min/max/sum start "unseen".
+        let seen = ctx.var(Const::<bool>::new(matches!(kind, AggKind::Count)));
+        Agg {
+            kind,
+            arg,
+            acc,
+            seen,
+        }
+    }
+
+    fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef) {
+        let arg = self.arg.as_ref().map(|e| gen_expr(ctx, e, schema, row));
+        // The row contributes iff its argument is non-null (always, for count(*)).
+        let row_valid = match arg.map(|cv| cv.nullness()) {
+            Some(Nullness::Nullable(b)) => b,
+            _ => ctx.bind(Const::<bool>::new(true)),
+        };
+
+        match (self.kind, self.acc) {
+            (AggKind::Count, AccVar::I64(acc)) => {
+                let one = select(row_valid, Const::<i64>::new(1), Const::<i64>::new(0));
+                ctx.store(acc, add(acc, one));
+            }
+            (AggKind::Sum, AccVar::I64(acc)) => {
+                let v = to_i64(ctx, arg.unwrap());
+                let contrib = select(row_valid, v, Const::<i64>::new(0));
+                ctx.store(acc, add(acc, contrib));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Sum, AccVar::F64(acc)) => {
+                let v = coerce_f64(ctx, arg.unwrap());
+                let contrib = select(row_valid, v, Const::<f64>::new(0.0));
+                ctx.store(acc, add(acc, contrib));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Min, AccVar::I64(acc)) => {
+                let v = to_i64(ctx, arg.unwrap());
+                ctx.store(acc, select(row_valid, min(acc, v), acc));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Min, AccVar::F64(acc)) => {
+                let v = coerce_f64(ctx, arg.unwrap());
+                ctx.store(acc, select(row_valid, min(acc, v), acc));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Max, AccVar::I64(acc)) => {
+                let v = to_i64(ctx, arg.unwrap());
+                ctx.store(acc, select(row_valid, max(acc, v), acc));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Max, AccVar::F64(acc)) => {
+                let v = coerce_f64(ctx, arg.unwrap());
+                ctx.store(acc, select(row_valid, max(acc, v), acc));
+                self.mark_seen(ctx, row_valid);
+            }
+            (AggKind::Count, AccVar::F64(_)) => unreachable!("count accumulates in i64"),
+        }
+    }
+
+    fn mark_seen(&self, ctx: &mut Ctx, row_valid: Var<bool>) {
+        ctx.store(
+            self.seen,
+            select(self.seen, Const::<bool>::new(true), row_valid),
+        );
+    }
+
+    /// The accumulator as the output row's `ColVal`: `count` is never null; the
+    /// others are null when nothing was folded (`seen == false`).
+    fn result(&self) -> ColVal {
+        let null = match self.kind {
+            AggKind::Count => Nullness::NonNull,
+            _ => Nullness::Nullable(self.seen),
+        };
+        match self.acc {
+            AccVar::I64(v) => ColVal::I64(v, null),
+            AccVar::F64(v) => ColVal::F64(v, null),
+        }
     }
 }

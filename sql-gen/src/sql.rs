@@ -6,7 +6,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::SchemaRef;
 use datafusion_common::{DataFusionError, Result};
-use datafusion_expr::LogicalPlan;
+use datafusion_expr::{Expr, LogicalPlan};
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::SqlToRel;
 
@@ -40,9 +40,32 @@ fn lower(plan: &LogicalPlan) -> Result<Operator> {
             schema: Arc::new(projection.schema.as_arrow().clone()),
             input: Box::new(lower(projection.input.as_ref())?),
         }),
+        LogicalPlan::Aggregate(aggregate) => {
+            if !aggregate.group_expr.is_empty() {
+                return Err(DataFusionError::NotImplemented("GROUP BY".into()));
+            }
+            Ok(Operator::Aggregate {
+                // aggr_expr items are `AggregateFunction` or `Alias` — unwrap.
+                aggs: aggregate
+                    .aggr_expr
+                    .iter()
+                    .map(unwrap_alias)
+                    .cloned()
+                    .collect(),
+                schema: Arc::new(aggregate.schema.as_arrow().clone()),
+                input: Box::new(lower(aggregate.input.as_ref())?),
+            })
+        }
         other => Err(DataFusionError::NotImplemented(format!(
             "unsupported logical operator: {}",
             other.display()
         ))),
+    }
+}
+
+fn unwrap_alias(expr: &Expr) -> &Expr {
+    match expr {
+        Expr::Alias(alias) => &alias.expr,
+        other => other,
     }
 }

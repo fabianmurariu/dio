@@ -1,6 +1,5 @@
 //! A minimal [`ContextProvider`] so datafusion's `SqlToRel` can resolve table
-//! names to schemas. It knows nothing else — no functions, no variables — which
-//! is all our "very simple queries" need.
+//! names to schemas and the aggregate functions we support (count/min/max/sum).
 
 use std::collections::HashMap;
 use std::sync::Arc;
@@ -11,12 +10,30 @@ use datafusion_common::{DataFusionError, Result, TableReference};
 use datafusion_expr::logical_plan::builder::LogicalTableSource;
 use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_functions_aggregate::count::count_udaf;
+use datafusion_functions_aggregate::min_max::{max_udaf, min_udaf};
+use datafusion_functions_aggregate::sum::sum_udaf;
 
-/// Maps table names to arrow schemas for logical planning.
-#[derive(Default)]
+/// Maps table names to arrow schemas + the supported aggregate UDFs, for
+/// logical planning.
 pub struct Catalog {
     tables: HashMap<String, SchemaRef>,
+    aggregates: HashMap<String, Arc<AggregateUDF>>,
     options: ConfigOptions,
+}
+
+impl Default for Catalog {
+    fn default() -> Self {
+        let aggregates = [count_udaf(), sum_udaf(), min_udaf(), max_udaf()]
+            .into_iter()
+            .map(|udaf| (udaf.name().to_string(), udaf))
+            .collect();
+        Self {
+            tables: HashMap::new(),
+            aggregates,
+            options: ConfigOptions::default(),
+        }
+    }
 }
 
 impl Catalog {
@@ -45,8 +62,8 @@ impl ContextProvider for Catalog {
         None
     }
 
-    fn get_aggregate_meta(&self, _name: &str) -> Option<Arc<AggregateUDF>> {
-        None
+    fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
+        self.aggregates.get(name).cloned()
     }
 
     fn get_window_meta(&self, _name: &str) -> Option<Arc<WindowUDF>> {
@@ -70,7 +87,7 @@ impl ContextProvider for Catalog {
     }
 
     fn udaf_names(&self) -> Vec<String> {
-        Vec::new()
+        self.aggregates.keys().cloned().collect()
     }
 
     fn udwf_names(&self) -> Vec<String> {

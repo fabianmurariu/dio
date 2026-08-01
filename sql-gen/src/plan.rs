@@ -11,8 +11,9 @@ use datafusion_expr::Expr;
 /// Push-model relational operators (a starter subset).
 ///
 /// `Scan` is the single input batch; `Filter`/`Project` transform the row
-/// stream. Each carries the arrow schema of the rows it emits, so the operator
-/// above resolves column references and output types against it.
+/// stream; `Aggregate` (no GROUP BY) folds the stream into a single row. Each
+/// carries the arrow schema of the rows it emits, so the operator above resolves
+/// column references and output types against it.
 #[derive(Clone, Debug)]
 pub enum Operator {
     Scan {
@@ -24,8 +25,15 @@ pub enum Operator {
     },
     Project {
         exprs: Vec<Expr>,
-        /// Output schema (types + nullability), taken from datafusion's
-        /// `Projection` node so we don't re-infer expression types.
+        /// Output schema (types + nullability), from datafusion's `Projection`.
+        schema: SchemaRef,
+        input: Box<Operator>,
+    },
+    /// Scalar aggregation without GROUP BY — emits exactly one row. Each `agg`
+    /// is a datafusion `Expr::AggregateFunction` (count/min/max/sum/…).
+    Aggregate {
+        aggs: Vec<Expr>,
+        /// Output schema (one field per aggregate), from datafusion's `Aggregate`.
         schema: SchemaRef,
         input: Box<Operator>,
     },
@@ -37,7 +45,20 @@ impl Operator {
         match self {
             Operator::Scan { schema } => schema.clone(),
             Operator::Filter { input, .. } => input.output_schema(),
-            Operator::Project { schema, .. } => schema.clone(),
+            Operator::Project { schema, .. } | Operator::Aggregate { schema, .. } => schema.clone(),
+        }
+    }
+
+    /// Upper bound on emitted rows, given the input row count — the output
+    /// buffer size. A scalar aggregate emits exactly one row (even for empty
+    /// input); filters/projections emit at most one per input row.
+    pub fn max_output_rows(&self, input_rows: usize) -> usize {
+        match self {
+            Operator::Aggregate { .. } => 1,
+            Operator::Scan { .. } => input_rows,
+            Operator::Filter { input, .. } | Operator::Project { input, .. } => {
+                input.max_output_rows(input_rows)
+            }
         }
     }
 }
