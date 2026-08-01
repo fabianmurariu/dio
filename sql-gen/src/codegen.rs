@@ -18,6 +18,66 @@ use rust_lms::prelude::*;
 use crate::plan::Operator;
 use crate::value::{ColVal, Nullness, Row};
 
+/// Dispatch a runtime arrow `DataType` to the matching [`Prim`] type parameter,
+/// running `$body` (in which `$m` is a type alias for the primitive) once for the
+/// selected type. Turns the per-type `match dt` into one place.
+macro_rules! dispatch_prim {
+    ($dt:expr, $m:ident => $body:expr) => {
+        match $dt {
+            DataType::Int32 => {
+                type $m = i32;
+                $body
+            }
+            DataType::Int64 => {
+                type $m = i64;
+                $body
+            }
+            DataType::Float64 => {
+                type $m = f64;
+                $body
+            }
+            other => panic!("unsupported column type: {other}"),
+        }
+    };
+}
+
+/// A primitive column type: the staged type used to read/write it, plus how it
+/// maps to and from the type-erased [`ColVal`]. Adding a type is one `impl` here
+/// and one arm in [`dispatch_prim!`].
+trait Prim: StagedType + CopyType + 'static {
+    /// Wrap a staged value of this type into a `ColVal`.
+    fn wrap(value: Var<Self>, null: Nullness) -> ColVal;
+    /// Coerce any numeric `ColVal` to a staged value of this type.
+    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self>;
+}
+
+impl Prim for i32 {
+    fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
+        ColVal::I32(value, null)
+    }
+    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+        coerce_i32(ctx, cv)
+    }
+}
+
+impl Prim for i64 {
+    fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
+        ColVal::I64(value, null)
+    }
+    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+        to_i64(ctx, cv)
+    }
+}
+
+impl Prim for f64 {
+    fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
+        ColVal::F64(value, null)
+    }
+    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+        coerce_f64(ctx, cv)
+    }
+}
+
 /// A staged expression yielding the read-only input batch (`&[FfiArray]`).
 pub trait BatchSource: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
 impl<T> BatchSource for T where T: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
@@ -144,12 +204,7 @@ fn gen_scan<B: BatchSource>(ctx: &mut Ctx, batch: B, schema: SchemaRef, yld: Yld
 }
 
 fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
-    match dt {
-        DataType::Int32 => ctx.bind(batch.primitive::<i32>(0).len()),
-        DataType::Int64 => ctx.bind(batch.primitive::<i64>(0).len()),
-        DataType::Float64 => ctx.bind(batch.primitive::<f64>(0).len()),
-        other => panic!("unsupported column type: {other}"),
-    }
+    dispatch_prim!(dt, M => ctx.bind(batch.primitive::<M>(0).len()))
 }
 
 /// Read column `col` at row `i`, attaching validity iff the field is nullable.
@@ -161,24 +216,11 @@ fn gen_read<B: BatchSource>(
     i: Var<u64>,
 ) -> ColVal {
     let nullable = field.is_nullable();
-    match field.data_type() {
-        DataType::Int32 => {
-            let view = batch.primitive::<i32>(col);
-            let value = ctx.bind(view.value_unchecked(i));
-            ColVal::I32(value, read_nullness(ctx, view, nullable, i))
-        }
-        DataType::Int64 => {
-            let view = batch.primitive::<i64>(col);
-            let value = ctx.bind(view.value_unchecked(i));
-            ColVal::I64(value, read_nullness(ctx, view, nullable, i))
-        }
-        DataType::Float64 => {
-            let view = batch.primitive::<f64>(col);
-            let value = ctx.bind(view.value_unchecked(i));
-            ColVal::F64(value, read_nullness(ctx, view, nullable, i))
-        }
-        other => panic!("unsupported column type: {other}"),
-    }
+    dispatch_prim!(field.data_type(), M => {
+        let view = batch.primitive::<M>(col);
+        let value = ctx.bind(view.value_unchecked(i));
+        M::wrap(value, read_nullness(ctx, view, nullable, i))
+    })
 }
 
 fn read_nullness<P, M>(
@@ -203,27 +245,12 @@ where
 // =============================================================================
 
 fn write_col<O: OutSink>(ctx: &mut Ctx, out: O, c: usize, field: &Field, n: Var<u64>, cv: ColVal) {
-    match field.data_type() {
-        DataType::Int32 => {
-            let view = out.column_mut::<i32>(c);
-            let v = coerce_i32(ctx, cv);
-            view.set(ctx, n, v);
-            write_null(ctx, view, field, n, cv);
-        }
-        DataType::Int64 => {
-            let view = out.column_mut::<i64>(c);
-            let v = coerce_i64(ctx, cv);
-            view.set(ctx, n, v);
-            write_null(ctx, view, field, n, cv);
-        }
-        DataType::Float64 => {
-            let view = out.column_mut::<f64>(c);
-            let v = coerce_f64(ctx, cv);
-            view.set(ctx, n, v);
-            write_null(ctx, view, field, n, cv);
-        }
-        other => panic!("unsupported output column type: {other}"),
-    }
+    dispatch_prim!(field.data_type(), M => {
+        let view = out.column_mut::<M>(c);
+        let v = M::coerce(ctx, cv);
+        view.set(ctx, n, v);
+        write_null(ctx, view, field, n, cv);
+    })
 }
 
 fn write_null<P, M>(
@@ -400,10 +427,6 @@ fn coerce_i32(ctx: &mut Ctx, cv: ColVal) -> Var<i32> {
         ColVal::I64(v, _) => ctx.bind(int_cast::<i32, i64, _>(v)),
         other => panic!("cannot coerce {} to i32", tag(other)),
     }
-}
-
-fn coerce_i64(ctx: &mut Ctx, cv: ColVal) -> Var<i64> {
-    to_i64(ctx, cv)
 }
 
 fn coerce_f64(_ctx: &mut Ctx, cv: ColVal) -> Var<f64> {

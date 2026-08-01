@@ -102,46 +102,36 @@ where
 // Host side: allocation + RecordBatch assembly
 // =============================================================================
 
-/// Typed value storage for one output column (len = capacity).
-enum OutColumn {
-    I32(Vec<i32>),
-    I64(Vec<i64>),
-    F64(Vec<f64>),
+/// Host value storage for one output column: a typed `Vec` that hands the kernel
+/// a raw pointer and builds an Arrow array afterwards. Adding a type is one arm
+/// in `out_column!` + one in [`alloc_column`].
+trait OutColumn {
+    fn values_ptr(&mut self) -> *mut u8;
+    fn into_array(self: Box<Self>, n: usize, nulls: Option<NullBuffer>) -> ArrayRef;
 }
 
-impl OutColumn {
-    fn alloc(dt: &DataType, capacity: usize) -> Self {
-        match dt {
-            DataType::Int32 => OutColumn::I32(vec![0; capacity]),
-            DataType::Int64 => OutColumn::I64(vec![0; capacity]),
-            DataType::Float64 => OutColumn::F64(vec![0.0; capacity]),
-            other => panic!("unsupported output column type: {other}"),
+macro_rules! out_column {
+    ($($native:ty => $array:ty),+ $(,)?) => {$(
+        impl OutColumn for Vec<$native> {
+            fn values_ptr(&mut self) -> *mut u8 {
+                self.as_mut_ptr().cast()
+            }
+            fn into_array(mut self: Box<Self>, n: usize, nulls: Option<NullBuffer>) -> ArrayRef {
+                self.truncate(n);
+                Arc::new(<$array>::new(ScalarBuffer::from(*self), nulls))
+            }
         }
-    }
+    )+};
+}
 
-    fn values_ptr(&mut self) -> *mut u8 {
-        match self {
-            OutColumn::I32(v) => v.as_mut_ptr().cast(),
-            OutColumn::I64(v) => v.as_mut_ptr().cast(),
-            OutColumn::F64(v) => v.as_mut_ptr().cast(),
-        }
-    }
+out_column!(i32 => Int32Array, i64 => Int64Array, f64 => Float64Array);
 
-    fn into_array(self, n: usize, nulls: Option<NullBuffer>) -> ArrayRef {
-        match self {
-            OutColumn::I32(mut v) => {
-                v.truncate(n);
-                Arc::new(Int32Array::new(ScalarBuffer::from(v), nulls))
-            }
-            OutColumn::I64(mut v) => {
-                v.truncate(n);
-                Arc::new(Int64Array::new(ScalarBuffer::from(v), nulls))
-            }
-            OutColumn::F64(mut v) => {
-                v.truncate(n);
-                Arc::new(Float64Array::new(ScalarBuffer::from(v), nulls))
-            }
-        }
+fn alloc_column(dt: &DataType, capacity: usize) -> Box<dyn OutColumn> {
+    match dt {
+        DataType::Int32 => Box::new(vec![0i32; capacity]),
+        DataType::Int64 => Box::new(vec![0i64; capacity]),
+        DataType::Float64 => Box::new(vec![0.0f64; capacity]),
+        other => panic!("unsupported output column type: {other}"),
     }
 }
 
@@ -149,7 +139,7 @@ impl OutColumn {
 /// pointers in `descriptors` stay valid for the JIT call; must outlive it.
 pub struct PreparedOutput {
     schema: SchemaRef,
-    columns: Vec<OutColumn>,
+    columns: Vec<Box<dyn OutColumn>>,
     /// Per-column validity bitmap (all-valid `0xFF` init); `None` when the
     /// output field is non-nullable.
     validity: Vec<Option<Vec<u8>>>,
@@ -165,7 +155,7 @@ impl PreparedOutput {
         let mut descriptors = Vec::with_capacity(n);
 
         for field in schema.fields() {
-            let mut col = OutColumn::alloc(field.data_type(), capacity);
+            let mut col = alloc_column(field.data_type(), capacity);
             let values = unsafe { FfiBuffer::from_raw_parts(col.values_ptr(), capacity) };
 
             let mut valid = field
