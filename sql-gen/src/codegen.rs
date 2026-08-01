@@ -118,7 +118,10 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
                 }),
             );
 
-            let result: Row = accs.iter().map(Agg::result).collect();
+            let mut result: Row = Vec::with_capacity(accs.len());
+            for agg in &accs {
+                result.push(agg.finalize(ctx));
+            }
             yld(ctx, result);
         }
     }
@@ -410,6 +413,16 @@ fn coerce_f64(_ctx: &mut Ctx, cv: ColVal) -> Var<f64> {
     }
 }
 
+/// Convert any numeric column value to `f64` (int → float). Used by `avg`.
+fn to_f64(ctx: &mut Ctx, cv: ColVal) -> Var<f64> {
+    match cv {
+        ColVal::F64(v, _) => v,
+        ColVal::I64(v, _) => ctx.bind(int_to_float::<f64, i64, _>(v)),
+        ColVal::I32(v, _) => ctx.bind(int_to_float::<f64, i32, _>(v)),
+        other => panic!("cannot convert {} to f64", tag(other)),
+    }
+}
+
 fn as_bool(cv: ColVal) -> Var<bool> {
     match cv {
         ColVal::Bool(v, _) => v,
@@ -437,12 +450,18 @@ enum AggKind {
     Sum,
     Min,
     Max,
+    Avg,
 }
 
 #[derive(Clone, Copy)]
 enum AccVar {
     I64(Var<i64>),
     F64(Var<f64>),
+    /// `avg` folds a running sum and count (both `f64`) and divides at the end.
+    Avg {
+        sum: Var<f64>,
+        count: Var<f64>,
+    },
 }
 
 /// A resolved aggregate plus its accumulator variable(s).
@@ -479,6 +498,7 @@ impl Agg {
             "sum" => AggKind::Sum,
             "min" => AggKind::Min,
             "max" => AggKind::Max,
+            "avg" => AggKind::Avg,
             other => panic!("unsupported aggregate: {other}"),
         };
         // Accumulator domain from the output type; min/max seed with the extreme.
@@ -491,6 +511,10 @@ impl Agg {
             (AggKind::Min, true) => AccVar::F64(ctx.var(f64::MAX)),
             (AggKind::Max, false) => AccVar::I64(ctx.var(i64::MIN)),
             (AggKind::Max, true) => AccVar::F64(ctx.var(f64::MIN)),
+            (AggKind::Avg, _) => AccVar::Avg {
+                sum: ctx.var(0.0f64),
+                count: ctx.var(0.0f64),
+            },
         };
         // count is never null; min/max/sum start "unseen".
         let seen = ctx.var(Const::<bool>::new(matches!(kind, AggKind::Count)));
@@ -547,7 +571,14 @@ impl Agg {
                 ctx.store(acc, select(row_valid, max(acc, v), acc));
                 self.mark_seen(ctx, row_valid);
             }
-            (AggKind::Count, AccVar::F64(_)) => unreachable!("count accumulates in i64"),
+            (AggKind::Avg, AccVar::Avg { sum, count }) => {
+                let v = to_f64(ctx, arg.unwrap());
+                ctx.store(sum, add(sum, select(row_valid, v, Const::<f64>::new(0.0))));
+                let inc = select(row_valid, Const::<f64>::new(1.0), Const::<f64>::new(0.0));
+                ctx.store(count, add(count, inc));
+                self.mark_seen(ctx, row_valid);
+            }
+            _ => unreachable!("mismatched aggregate kind / accumulator"),
         }
     }
 
@@ -558,9 +589,10 @@ impl Agg {
         );
     }
 
-    /// The accumulator as the output row's `ColVal`: `count` is never null; the
-    /// others are null when nothing was folded (`seen == false`).
-    fn result(&self) -> ColVal {
+    /// Finalize into the output row's `ColVal`: `count` is never null; the others
+    /// are null when nothing was folded (`seen == false`). `avg` divides its
+    /// running sum by its count here (once, for the single output row).
+    fn finalize(&self, ctx: &mut Ctx) -> ColVal {
         let null = match self.kind {
             AggKind::Count => Nullness::NonNull,
             _ => Nullness::Nullable(self.seen),
@@ -568,6 +600,9 @@ impl Agg {
         match self.acc {
             AccVar::I64(v) => ColVal::I64(v, null),
             AccVar::F64(v) => ColVal::F64(v, null),
+            // sum/count = NaN when count == 0, but `seen == false` there masks it
+            // with a NULL, so the divide is safe.
+            AccVar::Avg { sum, count } => ColVal::F64(ctx.bind(div(sum, count)), null),
         }
     }
 }

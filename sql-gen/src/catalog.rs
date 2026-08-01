@@ -10,6 +10,7 @@ use datafusion_common::{DataFusionError, Result, TableReference};
 use datafusion_expr::logical_plan::builder::LogicalTableSource;
 use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_functions_aggregate::average::avg_udaf;
 use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion_functions_aggregate::sum::sum_udaf;
@@ -24,7 +25,7 @@ pub struct Catalog {
 
 impl Default for Catalog {
     fn default() -> Self {
-        let aggregates = [count_udaf(), sum_udaf(), min_udaf(), max_udaf()]
+        let aggregates = [count_udaf(), sum_udaf(), min_udaf(), max_udaf(), avg_udaf()]
             .into_iter()
             .map(|udaf| (udaf.name().to_string(), udaf))
             .collect();

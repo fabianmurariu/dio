@@ -151,8 +151,9 @@ pub mod prelude {
         ZipItemType, OPAQUE_ITER_INLINE_CAP,
     };
     pub use crate::num::{
-        add, bitand, bitor, bitxor, div, eq, gt, int_cast, lt, max, min, mul, rem, select, shl,
-        shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, Num, Shl, Shr,
+        add, bitand, bitor, bitxor, div, eq, gt, int_cast, int_to_float, lt, max, min, mul, rem,
+        select, shl, shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, IntToFloat, Num,
+        Shl, Shr,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{

@@ -4,7 +4,7 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Int32Array, Int64Array};
+use arrow::array::{Array, Float64Array, Int32Array, Int64Array};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
@@ -27,6 +27,9 @@ fn i32s(rb: &RecordBatch, col: usize) -> &Int32Array {
     rb.column(col).as_any().downcast_ref().unwrap()
 }
 fn i64s(rb: &RecordBatch, col: usize) -> &Int64Array {
+    rb.column(col).as_any().downcast_ref().unwrap()
+}
+fn f64s(rb: &RecordBatch, col: usize) -> &Float64Array {
     rb.column(col).as_any().downcast_ref().unwrap()
 }
 
@@ -173,4 +176,38 @@ fn min_skips_nulls() {
     let rb = batch(a, Int64Array::from(vec![0, 0, 0, 0]));
     let out = run("SELECT min(a) FROM t", &rb);
     assert_eq!(i32s(&out, 0).value(0), 2);
+}
+
+#[test]
+fn avg_of_int_column() {
+    let rb = batch(
+        Int32Array::from(vec![3, 1, 4, 1, 5]),
+        Int64Array::from(vec![0, 1, 2, 13, 40]),
+    );
+    // avg(a) = 14 / 5 = 2.8 (Float64, even over an integer column)
+    let out = run("SELECT avg(a), sum(b) FROM t", &rb);
+    assert_eq!(f64s(&out, 0).value(0), 2.8);
+    assert_eq!(i64s(&out, 1).value(0), 56);
+}
+
+#[test]
+fn avg_skips_nulls() {
+    let a = Int32Array::new(
+        vec![9, 0, 2, 0].into(),
+        Some(NullBuffer::from(vec![true, false, true, false])),
+    );
+    let rb = batch(a, Int64Array::from(vec![0, 0, 0, 0]));
+    // avg over the two valid values (9, 2) = 5.5
+    let out = run("SELECT avg(a) FROM t", &rb);
+    assert_eq!(f64s(&out, 0).value(0), 5.5);
+}
+
+#[test]
+fn avg_over_empty_is_null() {
+    let rb = batch(
+        Int32Array::from(Vec::<i32>::new()),
+        Int64Array::from(Vec::<i64>::new()),
+    );
+    let out = run("SELECT avg(a) FROM t", &rb);
+    assert!(f64s(&out, 0).is_null(0));
 }

@@ -6,7 +6,7 @@ use std::marker::PhantomData;
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
 use crate::types::StagedType;
 
-use super::traits::{IntNum, Num};
+use super::traits::{FloatNum, IntNum, Num};
 
 // =============================================================================
 // Arithmetic Operations
@@ -277,6 +277,42 @@ where
     }
 }
 
+/// Convert an integer to a floating-point value (e.g. `i64 -> f64`).
+pub struct IntToFloat<E, TO> {
+    expr: E,
+    _to: PhantomData<TO>,
+}
+
+impl<E: Clone, TO> Clone for IntToFloat<E, TO> {
+    fn clone(&self) -> Self {
+        Self {
+            expr: self.expr.clone(),
+            _to: PhantomData,
+        }
+    }
+}
+
+impl<E: Copy, TO> Copy for IntToFloat<E, TO> {}
+
+impl<E, FROM, TO> Staged for IntToFloat<E, TO>
+where
+    E: Staged<Out = FROM>,
+    FROM: IntNum,
+    TO: FloatNum,
+{
+    type Out = TO;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let value = self.expr.codegen(ctx);
+        let to_ty = TO::cranelift_type();
+        if FROM::SIGNED {
+            ctx.builder.ins().fcvt_from_sint(to_ty, value)
+        } else {
+            ctx.builder.ins().fcvt_from_uint(to_ty, value)
+        }
+    }
+}
+
 // =============================================================================
 // Comparison Operations (produce bool)
 // =============================================================================
@@ -489,6 +525,19 @@ where
     E: IntoStaged<FROM>,
 {
     IntCast {
+        expr: expr.into_staged(),
+        _to: PhantomData,
+    }
+}
+
+/// Build a staged integer-to-float conversion (e.g. `int_to_float::<f64, i64, _>(x)`).
+pub fn int_to_float<TO, FROM, E>(expr: E) -> IntToFloat<E::Staged, TO>
+where
+    TO: FloatNum,
+    FROM: IntNum,
+    E: IntoStaged<FROM>,
+{
+    IntToFloat {
         expr: expr.into_staged(),
         _to: PhantomData,
     }
