@@ -21,7 +21,8 @@ pub use array::{
     ValidityNullCount, ValiditySource, ValidityView,
 };
 pub use ffi::{
-    ffi_from_primitive, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
-    prepare_record_batch, FfiArray, FfiBuffer, FfiError, FfiValidity, PreparedFfiBatch,
+    ffi_from_primitive, ffi_from_string_view, prepare_array_refs, prepare_arrays,
+    prepare_dyn_arrays, prepare_record_batch, FfiArray, FfiBuffer, FfiError, FfiValidity,
+    PreparedFfiBatch,
 };
 pub use ffi_mut::{MutBatchOps, PreparedOutput};

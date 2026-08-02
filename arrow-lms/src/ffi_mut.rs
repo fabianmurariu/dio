@@ -176,6 +176,8 @@ impl PreparedOutput {
             descriptors.push(FfiArray {
                 values,
                 validity: validity_desc,
+                // Output columns are fixed-width for now — no originating array.
+                array: std::ptr::null(),
             });
             columns.push(col);
             validity.push(valid);

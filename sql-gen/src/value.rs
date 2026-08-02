@@ -18,18 +18,24 @@ pub enum Nullness {
 }
 
 /// A staged column value: static physical-type tag + `Var` value + nullness.
+///
+/// `Str` is a `Utf8View` string. For now it carries only its octet length (the
+/// low 32 bits of the view) — enough for `octet_length` and null-aware ops; it
+/// will grow to carry the view/data pointers when byte access lands.
 #[derive(Clone, Copy)]
 pub enum ColVal {
     I32(Var<i32>, Nullness),
     I64(Var<i64>, Nullness),
     F64(Var<f64>, Nullness),
     Bool(Var<bool>, Nullness),
+    Str { len: Var<u64>, null: Nullness },
 }
 
 impl ColVal {
     pub fn nullness(self) -> Nullness {
         match self {
             ColVal::I32(_, n) | ColVal::I64(_, n) | ColVal::F64(_, n) | ColVal::Bool(_, n) => n,
+            ColVal::Str { null, .. } => null,
         }
     }
 }

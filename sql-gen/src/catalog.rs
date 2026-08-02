@@ -10,27 +10,34 @@ use datafusion_common::{DataFusionError, Result, TableReference};
 use datafusion_expr::logical_plan::builder::LogicalTableSource;
 use datafusion_expr::planner::ContextProvider;
 use datafusion_expr::{AggregateUDF, HigherOrderUDF, ScalarUDF, TableSource, WindowUDF};
+use datafusion_functions::string::octet_length;
 use datafusion_functions_aggregate::average::avg_udaf;
 use datafusion_functions_aggregate::count::count_udaf;
 use datafusion_functions_aggregate::min_max::{max_udaf, min_udaf};
 use datafusion_functions_aggregate::sum::sum_udaf;
 
-/// Maps table names to arrow schemas + the supported aggregate UDFs, for
-/// logical planning.
+/// Maps table names to arrow schemas + the supported scalar / aggregate UDFs,
+/// for logical planning.
 pub struct Catalog {
     tables: HashMap<String, SchemaRef>,
+    functions: HashMap<String, Arc<ScalarUDF>>,
     aggregates: HashMap<String, Arc<AggregateUDF>>,
     options: ConfigOptions,
 }
 
 impl Default for Catalog {
     fn default() -> Self {
+        let functions = [octet_length()]
+            .into_iter()
+            .map(|udf| (udf.name().to_string(), udf))
+            .collect();
         let aggregates = [count_udaf(), sum_udaf(), min_udaf(), max_udaf(), avg_udaf()]
             .into_iter()
             .map(|udaf| (udaf.name().to_string(), udaf))
             .collect();
         Self {
             tables: HashMap::new(),
+            functions,
             aggregates,
             options: ConfigOptions::default(),
         }
@@ -59,8 +66,8 @@ impl ContextProvider for Catalog {
         }
     }
 
-    fn get_function_meta(&self, _name: &str) -> Option<Arc<ScalarUDF>> {
-        None
+    fn get_function_meta(&self, name: &str) -> Option<Arc<ScalarUDF>> {
+        self.functions.get(name).cloned()
     }
 
     fn get_aggregate_meta(&self, name: &str) -> Option<Arc<AggregateUDF>> {
@@ -84,7 +91,7 @@ impl ContextProvider for Catalog {
     }
 
     fn udf_names(&self) -> Vec<String> {
-        Vec::new()
+        self.functions.keys().cloned().collect()
     }
 
     fn udaf_names(&self) -> Vec<String> {

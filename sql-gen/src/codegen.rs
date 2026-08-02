@@ -12,6 +12,7 @@
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use arrow_lms::{ArrayBatchOps, FfiArray, MutBatchOps, PrimitiveArrayView};
 use datafusion_common::ScalarValue;
+use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
 
@@ -204,6 +205,11 @@ fn gen_scan<B: BatchSource>(ctx: &mut Ctx, batch: B, schema: SchemaRef, yld: Yld
 }
 
 fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
+    // A `Utf8View` column's `values` holds one 16-byte view per row, so its
+    // element count (read via any type) is the row count.
+    if matches!(dt, DataType::Utf8View) {
+        return ctx.bind(batch.primitive::<u64>(0).len());
+    }
     dispatch_prim!(dt, M => ctx.bind(batch.primitive::<M>(0).len()))
 }
 
@@ -215,12 +221,32 @@ fn gen_read<B: BatchSource>(
     field: &Field,
     i: Var<u64>,
 ) -> ColVal {
+    if matches!(field.data_type(), DataType::Utf8View) {
+        return gen_read_str(ctx, batch, col, field, i);
+    }
     let nullable = field.is_nullable();
     dispatch_prim!(field.data_type(), M => {
         let view = batch.primitive::<M>(col);
         let value = ctx.bind(view.value_unchecked(i));
         M::wrap(value, read_nullness(ctx, view, nullable, i))
     })
+}
+
+/// Read a `Utf8View` string at row `i`. The views buffer is reinterpreted as
+/// `u64` pairs (view `i` = elements `2i`/`2i+1`); the octet length is the low 32
+/// bits of the first half — no data-buffer access needed.
+fn gen_read_str<B: BatchSource>(
+    ctx: &mut Ctx,
+    batch: B,
+    col: usize,
+    field: &Field,
+    i: Var<u64>,
+) -> ColVal {
+    let views = batch.primitive::<u64>(col);
+    let lo = ctx.bind(views.value_unchecked(mul(i, 2u64)));
+    let len = ctx.bind(bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64));
+    let null = read_nullness(ctx, views, field.is_nullable(), i);
+    ColVal::Str { len, null }
 }
 
 fn read_nullness<P, M>(
@@ -295,7 +321,18 @@ fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> ColVal {
         }
         Expr::Literal(sv, _) => gen_literal(ctx, sv),
         Expr::BinaryExpr(be) => gen_binary(ctx, be, schema, row),
+        Expr::ScalarFunction(f) => gen_scalar_fn(ctx, f, schema, row),
         other => panic!("unsupported expression: {other:?}"),
+    }
+}
+
+fn gen_scalar_fn(ctx: &mut Ctx, f: &ScalarFunction, schema: &SchemaRef, row: &Row) -> ColVal {
+    match f.func.name().to_ascii_lowercase().as_str() {
+        "octet_length" => match gen_expr(ctx, &f.args[0], schema, row) {
+            ColVal::Str { len, null } => ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(len)), null),
+            other => panic!("octet_length expects a string, got {}", tag(other)),
+        },
+        other => panic!("unsupported scalar function: {other}"),
     }
 }
 
@@ -459,6 +496,7 @@ fn tag(cv: ColVal) -> &'static str {
         ColVal::I64(..) => "i64",
         ColVal::F64(..) => "f64",
         ColVal::Bool(..) => "bool",
+        ColVal::Str { .. } => "str",
     }
 }
 

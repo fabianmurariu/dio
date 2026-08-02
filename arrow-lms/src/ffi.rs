@@ -19,7 +19,7 @@ use std::marker::PhantomData;
 use arrow::array::types::ArrowPrimitiveType;
 use arrow::array::{
     Array, ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-    PrimitiveArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    PrimitiveArray, StringViewArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
 };
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
@@ -110,7 +110,13 @@ impl FfiValidity {
     }
 }
 
-/// Erased primitive Arrow array descriptor: values + validity.
+/// Erased Arrow array descriptor: values + validity, plus an opaque pointer back
+/// to the originating arrow array.
+///
+/// `array` is a type-erased pointer to the concrete arrow array (e.g. a
+/// `*const StringViewArray`); it is `null` for fixed-width columns and is passed
+/// to extern runtime functions that need the array's own API (e.g. `&str`
+/// access, `substring`). It borrows the source, which must outlive the call.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiArray {
@@ -118,6 +124,8 @@ pub struct FfiArray {
     pub values: FfiBuffer,
     #[staged(FfiValidity)]
     pub validity: FfiValidity,
+    #[staged(u64)]
+    pub array: *const u8,
 }
 
 impl FfiArray {
@@ -195,6 +203,22 @@ pub fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> F
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.values()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        array: std::ptr::null(),
+    }
+}
+
+/// Build an erased descriptor from an Arrow `StringViewArray`.
+///
+/// `values` holds the **views** buffer (one `u128` per row: `[len:u32][…]`).
+/// Staged code reads a view as two `u64` halves; `octet_length` needs only the
+/// low 32 bits of the first. The data buffers are not referenced here — that
+/// comes with actual byte access (which will `gc` to a single buffer first).
+pub fn ffi_from_string_view(array: &StringViewArray) -> FfiArray {
+    FfiArray {
+        values: FfiBuffer::from_typed_slice(array.views().as_ref()),
+        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        // Opaque pointer to the array itself, for extern `&str`/transform calls.
+        array: (array as *const StringViewArray).cast::<u8>(),
     }
 }
 
@@ -272,6 +296,16 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError>
         DataType::UInt64 => downcast_primitive!(UInt64Array),
         DataType::Float32 => downcast_primitive!(Float32Array),
         DataType::Float64 => downcast_primitive!(Float64Array),
+        DataType::Utf8View => {
+            let view = array
+                .as_any()
+                .downcast_ref::<StringViewArray>()
+                .ok_or_else(|| FfiError::Downcast {
+                    index,
+                    data_type: array.data_type().clone(),
+                })?;
+            Ok(ffi_from_string_view(view))
+        }
         data_type => Err(FfiError::UnsupportedDataType {
             index,
             data_type: data_type.clone(),
