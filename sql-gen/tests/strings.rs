@@ -68,3 +68,44 @@ fn count_reads_string_validity() {
     // count(col) counts non-null strings
     assert_eq!(i64s(&out, 0).value(0), 2);
 }
+
+#[test]
+fn equality_short_literal_filter() {
+    // `active` (6 bytes) is inline; equality is a pure staged view compare.
+    let rb = batch(StringViewArray::from(vec![
+        "active",
+        "idle",
+        "active",
+        "a-much-longer-status-value", // indirect, must NOT match
+        "active",
+    ]));
+    let out = run("SELECT count(*) FROM t WHERE name = 'active'", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 3);
+}
+
+#[test]
+fn not_equal_short_literal() {
+    let rb = batch(StringViewArray::from(vec!["ok", "no", "ok", "maybe"]));
+    let out = run("SELECT count(*) FROM t WHERE name <> 'ok'", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 2);
+}
+
+#[test]
+fn equality_null_row_dropped() {
+    // NULL = 'x' is unknown -> the null row is filtered out.
+    let rb = batch(StringViewArray::from(vec![
+        Some("x"),
+        None,
+        Some("x"),
+        Some("y"),
+    ]));
+    let out = run("SELECT count(*) FROM t WHERE name = 'x'", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 2);
+}
+
+#[test]
+fn octet_length_with_string_filter() {
+    let rb = batch(StringViewArray::from(vec!["ok", "fail", "ok"]));
+    let out = run("SELECT octet_length(name) FROM t WHERE name = 'ok'", &rb);
+    assert_eq!(i32s(&out, 0).values(), &[2, 2]);
+}

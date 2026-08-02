@@ -19,16 +19,22 @@ pub enum Nullness {
 
 /// A staged column value: static physical-type tag + `Var` value + nullness.
 ///
-/// `Str` is a `Utf8View` string. For now it carries only its octet length (the
-/// low 32 bits of the view) — enough for `octet_length` and null-aware ops; it
-/// will grow to carry the view/data pointers when byte access lands.
+/// `Str` is a `Utf8View` string, carried as its 16-byte view split into two
+/// `u64` halves (`lo` = `[len:u32][…]`, `hi` = the rest). That's enough for
+/// `octet_length` (`lo & 0xFFFF_FFFF`) and short-string equality (compare both
+/// halves). String literals encode the same way (an inline view). Byte access to
+/// long strings will add the array pointer + row later.
 #[derive(Clone, Copy)]
 pub enum ColVal {
     I32(Var<i32>, Nullness),
     I64(Var<i64>, Nullness),
     F64(Var<f64>, Nullness),
     Bool(Var<bool>, Nullness),
-    Str { len: Var<u64>, null: Nullness },
+    Str {
+        lo: Var<u64>,
+        hi: Var<u64>,
+        null: Nullness,
+    },
 }
 
 impl ColVal {

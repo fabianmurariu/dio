@@ -243,10 +243,11 @@ fn gen_read_str<B: BatchSource>(
     i: Var<u64>,
 ) -> ColVal {
     let views = batch.primitive::<u64>(col);
-    let lo = ctx.bind(views.value_unchecked(mul(i, 2u64)));
-    let len = ctx.bind(bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64));
+    let base = ctx.bind(mul(i, 2u64));
+    let lo = ctx.bind(views.value_unchecked(base));
+    let hi = ctx.bind(views.value_unchecked(add(base, 1u64)));
     let null = read_nullness(ctx, views, field.is_nullable(), i);
-    ColVal::Str { len, null }
+    ColVal::Str { lo, hi, null }
 }
 
 fn read_nullness<P, M>(
@@ -328,12 +329,67 @@ fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> ColVal {
 
 fn gen_scalar_fn(ctx: &mut Ctx, f: &ScalarFunction, schema: &SchemaRef, row: &Row) -> ColVal {
     match f.func.name().to_ascii_lowercase().as_str() {
+        // Octet length is the low 32 bits of the view's first half.
         "octet_length" => match gen_expr(ctx, &f.args[0], schema, row) {
-            ColVal::Str { len, null } => ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(len)), null),
+            ColVal::Str { lo, null, .. } => {
+                let len = bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64);
+                ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(len)), null)
+            }
             other => panic!("octet_length expects a string, got {}", tag(other)),
         },
         other => panic!("unsupported scalar function: {other}"),
     }
+}
+
+/// Whole-view equality: two strings are equal iff their 16-byte views match.
+/// Correct for *all* rows against a `≤12`-byte (inline) literal — differing
+/// lengths differ in `lo`; equal lengths mean both are inline, so the bytes are
+/// in the view. (Long-literal equality will fall back to an extern.)
+fn str_eq(ctx: &mut Ctx, l: ColVal, r: ColVal) -> Var<bool> {
+    match (l, r) {
+        (
+            ColVal::Str {
+                lo: a_lo, hi: a_hi, ..
+            },
+            ColVal::Str {
+                lo: b_lo, hi: b_hi, ..
+            },
+        ) => {
+            let lo_eq = ctx.bind(eq(a_lo, b_lo));
+            let hi_eq = ctx.bind(eq(a_hi, b_hi));
+            ctx.bind(select(lo_eq, hi_eq, Const::<bool>::new(false)))
+        }
+        _ => panic!("string equality expects two strings"),
+    }
+}
+
+fn is_str(cv: ColVal) -> bool {
+    matches!(cv, ColVal::Str { .. })
+}
+
+/// Equality: string operands compare by view, numeric operands by value.
+fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal) -> Var<bool> {
+    if is_str(l) || is_str(r) {
+        str_eq(ctx, l, r)
+    } else {
+        num_cmp(ctx, Cmp::Eq, l, r)
+    }
+}
+
+/// Encode a `≤12`-byte string as an inline `Utf8View` (its two `u64` halves) —
+/// the on-wire form arrow uses, so it compares bit-identically to a row's view.
+fn inline_view_halves(s: &str) -> (u64, u64) {
+    let bytes = s.as_bytes();
+    assert!(
+        bytes.len() <= 12,
+        "string literals > 12 bytes not supported yet (needs the extern fallback)"
+    );
+    let mut view = [0u8; 16];
+    view[0..4].copy_from_slice(&(bytes.len() as u32).to_le_bytes());
+    view[4..4 + bytes.len()].copy_from_slice(bytes);
+    let lo = u64::from_le_bytes(view[0..8].try_into().unwrap());
+    let hi = u64::from_le_bytes(view[8..16].try_into().unwrap());
+    (lo, hi)
 }
 
 fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue) -> ColVal {
@@ -344,6 +400,17 @@ fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue) -> ColVal {
         ScalarValue::Boolean(Some(v)) => {
             ColVal::Bool(ctx.bind(Const::<bool>::new(*v)), Nullness::NonNull)
         }
+        // String literals encode as an inline Utf8View (≤12 bytes for now).
+        ScalarValue::Utf8(Some(s))
+        | ScalarValue::Utf8View(Some(s))
+        | ScalarValue::LargeUtf8(Some(s)) => {
+            let (lo, hi) = inline_view_halves(s);
+            ColVal::Str {
+                lo: ctx.var(lo),
+                hi: ctx.var(hi),
+                null: Nullness::NonNull,
+            }
+        }
         other => panic!("unsupported literal: {other:?}"),
     }
 }
@@ -353,9 +420,9 @@ fn gen_binary(ctx: &mut Ctx, be: &BinaryExpr, schema: &SchemaRef, row: &Row) -> 
     let r = gen_expr(ctx, &be.right, schema, row);
     let null = combine_null(ctx, l.nullness(), r.nullness());
     match be.op {
-        DfOp::Eq => ColVal::Bool(num_cmp(ctx, Cmp::Eq, l, r), null),
+        DfOp::Eq => ColVal::Bool(gen_eq(ctx, l, r), null),
         DfOp::NotEq => {
-            let e = num_cmp(ctx, Cmp::Eq, l, r);
+            let e = gen_eq(ctx, l, r);
             ColVal::Bool(ctx.bind(not(e)), null)
         }
         DfOp::Lt => ColVal::Bool(num_cmp(ctx, Cmp::Lt, l, r), null),
