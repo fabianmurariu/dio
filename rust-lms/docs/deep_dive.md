@@ -467,7 +467,7 @@ pub extern "C" fn sum_array(data: FatSlice<i64>) -> i64 {
 }
 
 let f = compiler.extern_fn::<SumArrayExtern>();          // ExternRef
-let r = call_extern1::<_, _, FatSliceType<i64>, i64>(f, slice_arg);
+let r = call_extern1(f, slice_arg);
 ```
 
 `#[extern_fn]` generates a `…Extern` zero-sized type implementing the `ExternFn`

@@ -657,7 +657,7 @@ impl<'a> Compiler<'a> {
     ///
     /// let mut compiler = Compiler::new();
     /// let my_add = compiler.extern_fn::<MyAddExtern>();
-    /// let result = call_extern2::<_, _, _, i64, i64, i64>(my_add, x, y);
+    /// let result = call_extern2(my_add, x, y);
     /// ```
     pub fn extern_fn<S: crate::ffi::ExternFn>(&mut self) -> crate::ffi::ExternRef<S> {
         let extern_id = self.extern_functions.len();

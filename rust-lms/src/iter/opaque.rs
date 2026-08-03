@@ -23,7 +23,7 @@ use std::marker::PhantomData;
 use crate::ffi::{call_extern1, ExternFn, ExternRef};
 use crate::func::{Compiler, Ctx};
 use crate::num::{add, lt};
-use crate::option::COption;
+use crate::option::{COption, COptionType};
 use crate::refer::SMutPtr;
 use crate::staged::{Staged, Var};
 use crate::types::StagedType;
@@ -50,7 +50,7 @@ pub trait OpaqueIterKind: 'static {
     /// `next(it) -> COption<Item>`.
     type Next: ExternFn;
     /// `drop(it)`.
-    type Drop: ExternFn;
+    type Drop: ExternFn<Ret = ()>;
 }
 
 /// An [`OpaqueIterKind`] that also knows its length, enabling a tighter counted
@@ -60,9 +60,9 @@ pub trait OpaqueIterKind: 'static {
 /// - `NextValue`: `extern "C" fn(*mut ()) -> Item` (valid for `len` calls)
 pub trait ExactSizeOpaqueIterKind: OpaqueIterKind {
     /// `len(it) -> u64`.
-    type Len: ExternFn;
+    type Len: ExternFn<Ret = u64>;
     /// `next_value(it) -> Item`, called exactly `len` times (no `Option`).
-    type NextValue: ExternFn;
+    type NextValue: ExternFn<Ret = Self::Item>;
 }
 
 // =============================================================================
@@ -206,12 +206,8 @@ where
     /// O(1) element count: `len(it)`, then `drop(it)` — no iteration.
     pub fn count(self, ctx: &mut Ctx) -> Var<u64> {
         let handle = ctx.bind(self.handle);
-        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle, u64>(
-            self.len, handle,
-        ));
-        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle, ()>(
-            self.drop, handle,
-        ));
+        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle>(self.len, handle));
+        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle>(self.drop, handle));
         n
     }
 }
@@ -228,21 +224,17 @@ where
         F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
     {
         let handle = ctx.bind(self.handle);
-        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle, u64>(
-            self.len, handle,
-        ));
+        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle>(self.len, handle));
         let i = ctx.var(0u64);
         let next_value = self.next_value;
         ctx.while_loop(lt(i, n), move |ctx| {
-            let v = ctx.bind(call_extern1::<K::NextValue, _, OpaqueHandle, K::Item>(
+            let v = ctx.bind(call_extern1::<K::NextValue, _, OpaqueHandle>(
                 next_value, handle,
             ));
             consumer(ctx, v);
             ctx.store(i, add(i, 1u64));
         });
-        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle, ()>(
-            self.drop, handle,
-        ));
+        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle>(self.drop, handle));
     }
 }
 
@@ -322,7 +314,7 @@ unsafe extern "C" fn dyn_exact_drop<T>(it: *mut ()) {
 /// fns. The link name is disambiguated by the fn pointer at registration, so the
 /// shared `NAME` across monomorphizations is fine. Every fn takes one `*mut ()`.
 macro_rules! dyn_extern {
-    ($Marker:ident, $func:ident, $ret:expr) => {
+    ($Marker:ident, $func:ident, $ret_ty:ty, $ret_abi:expr) => {
         #[doc(hidden)]
         pub struct $Marker<T>(PhantomData<T>);
         unsafe impl<T> ExternFn for $Marker<T>
@@ -330,6 +322,7 @@ macro_rules! dyn_extern {
             T: StagedType + Copy + 'static,
             T::RuntimeValue: Copy,
         {
+            type Ret = $ret_ty;
             const NAME: &'static str = stringify!($func);
             const NUM_PARAMS: usize = 1;
             const FN_PTR: *const u8 = $func::<T::RuntimeValue> as *const u8;
@@ -337,7 +330,7 @@ macro_rules! dyn_extern {
                 vec![vec![cranelift_codegen::ir::types::I64]]
             }
             fn return_abi_types() -> Vec<cranelift_codegen::ir::Type> {
-                $ret
+                $ret_abi
             }
         }
     };
@@ -353,16 +346,27 @@ fn coption_return_abi<T: StagedType>() -> Vec<cranelift_codegen::ir::Type> {
     v
 }
 
-dyn_extern!(DynNext, dyn_next, coption_return_abi::<T>());
-dyn_extern!(DynDrop, dyn_drop, <() as StagedType>::abi_types());
-dyn_extern!(DynExactNext, dyn_exact_next, coption_return_abi::<T>());
+dyn_extern!(DynNext, dyn_next, COptionType<T>, coption_return_abi::<T>());
+dyn_extern!(DynDrop, dyn_drop, (), <() as StagedType>::abi_types());
+dyn_extern!(
+    DynExactNext,
+    dyn_exact_next,
+    COptionType<T>,
+    coption_return_abi::<T>()
+);
 dyn_extern!(
     DynExactDrop,
     dyn_exact_drop,
+    (),
     <() as StagedType>::abi_types()
 );
-dyn_extern!(DynLen, dyn_len, <u64 as StagedType>::abi_types());
-dyn_extern!(DynNextValue, dyn_next_value, <T as StagedType>::abi_types());
+dyn_extern!(DynLen, dyn_len, u64, <u64 as StagedType>::abi_types());
+dyn_extern!(
+    DynNextValue,
+    dyn_next_value,
+    T,
+    <T as StagedType>::abi_types()
+);
 
 /// Kind for a `Box<dyn Iterator<Item = T>>` (scalar `T`). Drive it with
 /// [`Compiler::opaque_iter_fns`] over the producer's handle.

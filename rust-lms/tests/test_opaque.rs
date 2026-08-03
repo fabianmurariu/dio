@@ -32,7 +32,7 @@ fn opaque_ref_param_round_trips() {
 
     // fn(&Graph) -> u64 : just delegate to the extern.
     let f = compiler.fun1("count_nodes", move |_ctx, g: Var<SRef<Opaque<Graph>>>| {
-        call_extern1::<_, _, SRef<Opaque<Graph>>, u64>(node_count, g)
+        call_extern1(node_count, g)
     });
     let kernel = compiler.compile(f).expect("compile").as_fn();
 
@@ -52,12 +52,8 @@ fn opaque_mut_ref_param() {
     let f = compiler.fun1(
         "push_and_count",
         move |ctx, g: Var<SRefMut<Opaque<Graph>>>| {
-            ctx.emit(call_extern2::<_, _, _, SRefMut<Opaque<Graph>>, u64, ()>(
-                push,
-                g,
-                Const::<u64>::new(99),
-            ));
-            call_extern1::<_, _, SRefMut<Opaque<Graph>>, u64>(node_count, g)
+            ctx.emit(call_extern2(push, g, Const::<u64>::new(99)));
+            call_extern1(node_count, g)
         },
     );
     let kernel = compiler.compile(f).expect("compile").as_fn();

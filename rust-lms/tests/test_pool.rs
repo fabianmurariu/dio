@@ -19,15 +19,12 @@ fn kernel_appends_into_pool() {
     let append = compiler.extern_fn::<PoolAppendExtern>();
 
     // fn(&mut BytesPool) -> u64 : append "hi" then "world", return the 2nd ptr.
+    // The return type is derived from `pool_append`'s own signature — no turbofish.
     let f = compiler.fun1("append_two", move |ctx, pool: Var<PoolRef>| {
         let hi = lit(ctx, b"hi");
-        let _a = ctx.bind(call_extern2::<_, _, _, PoolRef, FatSliceType<u8>, u64>(
-            append, pool, hi,
-        ));
+        let _a = ctx.bind(call_extern2(append, pool, hi));
         let world = lit(ctx, b"world");
-        ctx.bind(call_extern2::<_, _, _, PoolRef, FatSliceType<u8>, u64>(
-            append, pool, world,
-        ))
+        ctx.bind(call_extern2(append, pool, world))
     });
     let compiled = compiler.compile(f).expect("compile");
 

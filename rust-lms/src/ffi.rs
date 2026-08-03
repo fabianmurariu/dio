@@ -385,6 +385,10 @@ pub fn stack_bytes(bytes: &[u8]) -> StackBytes {
 /// - `PARAM_TYPES` and `RETURN_TYPE` accurately reflect the function signature
 /// - `FN_PTR` points to a valid `extern "C"` function with the declared signature
 pub unsafe trait ExternFn {
+    /// The staged return type. Lets `call_externN` derive its `Out` from the
+    /// function's own signature, so callers never restate it.
+    type Ret: StagedType;
+
     /// Function name (for debugging and symbol resolution)
     const NAME: &'static str;
 
@@ -449,230 +453,108 @@ impl<S: ExternFn> ExternRef<S> {
 // CallExtern - Expression for calling external functions
 // =============================================================================
 
-/// Call an external function with 0 arguments
-pub struct CallExtern0<S: ExternFn, Out: StagedType> {
+/// Call an external function with 0 arguments. `Out` is the function's own
+/// return type (`S::Ret`), so callers never restate it.
+pub struct CallExtern0<S: ExternFn> {
     func: ExternRef<S>,
-    _phantom: PhantomData<Out>,
 }
 
-impl<S: ExternFn, Out: StagedType> Staged for CallExtern0<S, Out> {
-    type Out = Out;
+impl<S: ExternFn> Staged for CallExtern0<S> {
+    type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
         let call = ctx.builder.ins().call(func_ref, &[]);
-        ctx.builder.inst_results(call)[0]
+        finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
 /// Create a call to an external function with 0 arguments
-pub fn call_extern0<S, Out>(func: ExternRef<S>) -> CallExtern0<S, Out>
-where
-    S: ExternFn,
-    Out: StagedType,
-{
-    CallExtern0 {
-        func,
-        _phantom: PhantomData,
-    }
+pub fn call_extern0<S: ExternFn>(func: ExternRef<S>) -> CallExtern0<S> {
+    CallExtern0 { func }
 }
 
-/// Call an external function with 1 argument
-pub struct CallExtern1<S: ExternFn, A, Out: StagedType> {
+/// Call an external function with 1 argument. `Out` is `S::Ret`.
+pub struct CallExtern1<S: ExternFn, A> {
     func: ExternRef<S>,
     arg: A,
-    _phantom: PhantomData<Out>,
 }
 
-impl<S, A, AType, Out> Staged for CallExtern1<S, A, Out>
+impl<S, A, AType> Staged for CallExtern1<S, A>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
     AType: StagedType,
-    Out: StagedType,
 {
-    type Out = Out;
+    type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
         let arg_val = self.arg.codegen(ctx);
 
-        // Handle struct arguments that need multiple ABI values
-        let args = if AType::is_copy_struct() && AType::num_abi_values() > 1 {
-            // Load multiple i64 values from the struct pointer
-            let mut vals = Vec::with_capacity(AType::num_abi_values());
-            for i in 0..AType::num_abi_values() {
-                let offset = (i * 8) as i32;
-                let val = ctx.builder.ins().load(
-                    types::I64,
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    arg_val,
-                    offset,
-                );
-                vals.push(val);
-            }
-            vals
-        } else {
-            vec![arg_val]
-        };
+        let mut args = Vec::new();
+        push_extern_arg::<AType>(ctx, &mut args, arg_val);
 
         let call = ctx.builder.ins().call(func_ref, &args);
-
-        // Handle struct return values
-        if Out::is_copy_struct() && Out::num_abi_values() > 1 {
-            // Create stack slot and store return values
-            let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot =
-                ctx.builder
-                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                        Out::size_of() as u32,
-                        align_shift,
-                    ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-            let results = ctx.builder.inst_results(call).to_vec();
-            for (i, val) in results.iter().enumerate() {
-                let offset = (i * 8) as i32;
-                ctx.builder.ins().store(
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    *val,
-                    slot_ptr,
-                    offset,
-                );
-            }
-            slot_ptr
-        } else {
-            ctx.builder.inst_results(call)[0]
-        }
+        finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
 /// Create a call to an external function with 1 argument
-pub fn call_extern1<S, A, AType, Out>(func: ExternRef<S>, arg: A) -> CallExtern1<S, A, Out>
+pub fn call_extern1<S, A, AType>(func: ExternRef<S>, arg: A) -> CallExtern1<S, A>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
     AType: StagedType,
-    Out: StagedType,
 {
-    CallExtern1 {
-        func,
-        arg,
-        _phantom: PhantomData,
-    }
+    CallExtern1 { func, arg }
 }
 
-/// Call an external function with 2 arguments
-pub struct CallExtern2<S: ExternFn, A, B, Out: StagedType> {
+/// Call an external function with 2 arguments. `Out` is `S::Ret`.
+pub struct CallExtern2<S: ExternFn, A, B> {
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
-    _phantom: PhantomData<Out>,
 }
 
-impl<S, A, B, AType, BType, Out> Staged for CallExtern2<S, A, B, Out>
+impl<S, A, B, AType, BType> Staged for CallExtern2<S, A, B>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
     B: Staged<Out = BType>,
     AType: StagedType,
     BType: StagedType,
-    Out: StagedType,
 {
-    type Out = Out;
+    type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
         let arg0_val = self.arg0.codegen(ctx);
         let arg1_val = self.arg1.codegen(ctx);
 
-        // Collect all ABI values
         let mut args = Vec::new();
-
-        // Handle first argument
-        if AType::is_copy_struct() && AType::num_abi_values() > 1 {
-            for i in 0..AType::num_abi_values() {
-                let offset = (i * 8) as i32;
-                let val = ctx.builder.ins().load(
-                    types::I64,
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    arg0_val,
-                    offset,
-                );
-                args.push(val);
-            }
-        } else {
-            args.push(arg0_val);
-        }
-
-        // Handle second argument
-        if BType::is_copy_struct() && BType::num_abi_values() > 1 {
-            for i in 0..BType::num_abi_values() {
-                let offset = (i * 8) as i32;
-                let val = ctx.builder.ins().load(
-                    types::I64,
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    arg1_val,
-                    offset,
-                );
-                args.push(val);
-            }
-        } else {
-            args.push(arg1_val);
-        }
+        push_extern_arg::<AType>(ctx, &mut args, arg0_val);
+        push_extern_arg::<BType>(ctx, &mut args, arg1_val);
 
         let call = ctx.builder.ins().call(func_ref, &args);
-
-        // Handle struct return values
-        if Out::is_copy_struct() && Out::num_abi_values() > 1 {
-            let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot =
-                ctx.builder
-                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                        Out::size_of() as u32,
-                        align_shift,
-                    ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-            let results = ctx.builder.inst_results(call).to_vec();
-            for (i, val) in results.iter().enumerate() {
-                let offset = (i * 8) as i32;
-                ctx.builder.ins().store(
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    *val,
-                    slot_ptr,
-                    offset,
-                );
-            }
-            slot_ptr
-        } else {
-            ctx.builder.inst_results(call)[0]
-        }
+        finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
 /// Create a call to an external function with 2 arguments
-pub fn call_extern2<S, A, B, AType, BType, Out>(
+pub fn call_extern2<S, A, B, AType, BType>(
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
-) -> CallExtern2<S, A, B, Out>
+) -> CallExtern2<S, A, B>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
     B: Staged<Out = BType>,
     AType: StagedType,
     BType: StagedType,
-    Out: StagedType,
 {
-    CallExtern2 {
-        func,
-        arg0,
-        arg1,
-        _phantom: PhantomData,
-    }
+    CallExtern2 { func, arg0, arg1 }
 }
 
 /// Append `arg`'s ABI value(s) to `args` (flattening a copy-struct passed by
@@ -699,16 +581,42 @@ fn push_extern_arg<AType: StagedType>(
     }
 }
 
-/// Call an external function with 3 arguments.
-pub struct CallExtern3<S: ExternFn, A, B, C, Out: StagedType> {
+/// Materialize an extern call's result: a multi-value copy-struct return is
+/// spilled to a stack slot (whose address is returned); any other return is the
+/// single result value. Shared by every `CallExternN::codegen`.
+fn finish_extern_call<Ret: StagedType>(
+    ctx: &mut CompilationContext,
+    call: cranelift_codegen::ir::Inst,
+) -> Value {
+    if Ret::is_copy_struct() && Ret::num_abi_values() > 1 {
+        let align_shift = Ret::align_of().trailing_zeros() as u8;
+        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            Ret::size_of() as u32,
+            align_shift,
+        ));
+        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let results = ctx.builder.inst_results(call).to_vec();
+        for (i, val) in results.iter().enumerate() {
+            ctx.builder
+                .ins()
+                .store(MemFlags::trusted(), *val, slot_ptr, (i * 8) as i32);
+        }
+        slot_ptr
+    } else {
+        ctx.builder.inst_results(call)[0]
+    }
+}
+
+/// Call an external function with 3 arguments. `Out` is `S::Ret`.
+pub struct CallExtern3<S: ExternFn, A, B, C> {
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
     arg2: C,
-    _phantom: PhantomData<Out>,
 }
 
-impl<S, A, B, C, AType, BType, CType, Out> Staged for CallExtern3<S, A, B, C, Out>
+impl<S, A, B, C, AType, BType, CType> Staged for CallExtern3<S, A, B, C>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
@@ -717,9 +625,8 @@ where
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
-    Out: StagedType,
 {
-    type Out = Out;
+    type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
@@ -733,42 +640,17 @@ where
         push_extern_arg::<CType>(ctx, &mut args, arg2_val);
 
         let call = ctx.builder.ins().call(func_ref, &args);
-
-        if Out::is_copy_struct() && Out::num_abi_values() > 1 {
-            let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot =
-                ctx.builder
-                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                        Out::size_of() as u32,
-                        align_shift,
-                    ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-            let results = ctx.builder.inst_results(call).to_vec();
-            for (i, val) in results.iter().enumerate() {
-                let offset = (i * 8) as i32;
-                ctx.builder.ins().store(
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    *val,
-                    slot_ptr,
-                    offset,
-                );
-            }
-            slot_ptr
-        } else {
-            ctx.builder.inst_results(call)[0]
-        }
+        finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
 /// Create a call to an external function with 3 arguments.
-#[allow(clippy::too_many_arguments)]
-pub fn call_extern3<S, A, B, C, AType, BType, CType, Out>(
+pub fn call_extern3<S, A, B, C, AType, BType, CType>(
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
     arg2: C,
-) -> CallExtern3<S, A, B, C, Out>
+) -> CallExtern3<S, A, B, C>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
@@ -777,28 +659,25 @@ where
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
-    Out: StagedType,
 {
     CallExtern3 {
         func,
         arg0,
         arg1,
         arg2,
-        _phantom: PhantomData,
     }
 }
 
-/// Call an external function with 4 arguments.
-pub struct CallExtern4<S: ExternFn, A, B, C, D, Out: StagedType> {
+/// Call an external function with 4 arguments. `Out` is `S::Ret`.
+pub struct CallExtern4<S: ExternFn, A, B, C, D> {
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
     arg2: C,
     arg3: D,
-    _phantom: PhantomData<Out>,
 }
 
-impl<S, A, B, C, D, AType, BType, CType, DType, Out> Staged for CallExtern4<S, A, B, C, D, Out>
+impl<S, A, B, C, D, AType, BType, CType, DType> Staged for CallExtern4<S, A, B, C, D>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
@@ -809,9 +688,8 @@ where
     BType: StagedType,
     CType: StagedType,
     DType: StagedType,
-    Out: StagedType,
 {
-    type Out = Out;
+    type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
@@ -827,43 +705,19 @@ where
         push_extern_arg::<DType>(ctx, &mut args, arg3_val);
 
         let call = ctx.builder.ins().call(func_ref, &args);
-
-        if Out::is_copy_struct() && Out::num_abi_values() > 1 {
-            let align_shift = Out::align_of().trailing_zeros() as u8;
-            let stack_slot =
-                ctx.builder
-                    .create_sized_stack_slot(cranelift_codegen::ir::StackSlotData::new(
-                        cranelift_codegen::ir::StackSlotKind::ExplicitSlot,
-                        Out::size_of() as u32,
-                        align_shift,
-                    ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-            let results = ctx.builder.inst_results(call).to_vec();
-            for (i, val) in results.iter().enumerate() {
-                let offset = (i * 8) as i32;
-                ctx.builder.ins().store(
-                    cranelift_codegen::ir::MemFlags::trusted(),
-                    *val,
-                    slot_ptr,
-                    offset,
-                );
-            }
-            slot_ptr
-        } else {
-            ctx.builder.inst_results(call)[0]
-        }
+        finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
 /// Create a call to an external function with 4 arguments.
 #[allow(clippy::too_many_arguments)]
-pub fn call_extern4<S, A, B, C, D, AType, BType, CType, DType, Out>(
+pub fn call_extern4<S, A, B, C, D, AType, BType, CType, DType>(
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
     arg2: C,
     arg3: D,
-) -> CallExtern4<S, A, B, C, D, Out>
+) -> CallExtern4<S, A, B, C, D>
 where
     S: ExternFn,
     A: Staged<Out = AType>,
@@ -874,7 +728,6 @@ where
     BType: StagedType,
     CType: StagedType,
     DType: StagedType,
-    Out: StagedType,
 {
     CallExtern4 {
         func,
@@ -882,7 +735,6 @@ where
         arg1,
         arg2,
         arg3,
-        _phantom: PhantomData,
     }
 }
 

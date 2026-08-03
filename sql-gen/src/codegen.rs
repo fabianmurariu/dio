@@ -402,16 +402,7 @@ fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, rt: Runtime) -> Var<bool> {
                 ctx.bind(select(lo_eq, hi_eq, Const::<bool>::new(false)))
             } else {
                 // Long literal: let Rust do the full byte compare.
-                ctx.bind(call_extern3::<
-                    _,
-                    _,
-                    _,
-                    _,
-                    SRef<Opaque<StringViewArray>>,
-                    u64,
-                    FatSliceType<u8>,
-                    bool,
-                >(
+                ctx.bind(call_extern3(
                     rt.string_view_eq,
                     opaque_ref::<StringViewArray, _>(array),
                     row,
@@ -442,18 +433,7 @@ fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, rt: Runtime) -> Var<bool> {
                 row: b_row,
                 ..
             },
-        ) => ctx.bind(call_extern4::<
-            _,
-            _,
-            _,
-            _,
-            _,
-            SRef<Opaque<StringViewArray>>,
-            u64,
-            SRef<Opaque<StringViewArray>>,
-            u64,
-            bool,
-        >(
+        ) => ctx.bind(call_extern4(
             rt.string_view_eq_cols,
             opaque_ref::<StringViewArray, _>(a_arr),
             a_row,

@@ -77,7 +77,7 @@ fn test_extern_fn_simple_add() {
 
     // Create a staged function that calls the external function
     let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
-        call_extern2::<_, _, _, i64, i64, i64>(add_fn, x, y)
+        call_extern2(add_fn, x, y)
     });
 
     let compiled = compiler.compile(test_fn).expect("compilation failed");
@@ -94,9 +94,7 @@ fn test_extern_fn_simple_square() {
 
     let square_fn = compiler.extern_fn::<ExtSquareExtern>();
 
-    let test_fn = compiler.fun1("test", |_ctx, x: Var<i64>| {
-        call_extern1::<_, _, i64, i64>(square_fn, x)
-    });
+    let test_fn = compiler.fun1("test", |_ctx, x: Var<i64>| call_extern1(square_fn, x));
 
     let compiled = compiler.compile(test_fn).expect("compilation failed");
     let f = compiled.as_fn();
@@ -115,8 +113,8 @@ fn test_extern_fn_chained() {
 
     // Compute square(x + y)
     let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
-        let sum = call_extern2::<_, _, _, i64, i64, i64>(add_fn, x, y);
-        call_extern1::<_, _, i64, i64>(square_fn, sum)
+        let sum = call_extern2(add_fn, x, y);
+        call_extern1(square_fn, sum)
     });
 
     let compiled = compiler.compile(test_fn).expect("compilation failed");
@@ -139,7 +137,7 @@ fn test_extern_fn_with_internal() {
 
     let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
         // double(ext_add(x, y))
-        let sum = call_extern2::<_, _, _, i64, i64, i64>(ext_add, x, y);
+        let sum = call_extern2(ext_add, x, y);
         call1(internal_double, sum)
     });
 
@@ -158,7 +156,7 @@ fn test_extern_fn_sum_slice() {
 
     // Function that takes a FatSlice and returns the sum
     let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
-        call_extern1::<_, _, FatSliceType<i64>, i64>(sum_fn, data)
+        call_extern1(sum_fn, data)
     });
 
     let compiled = compiler.compile(test_fn).expect("compilation failed");
@@ -180,7 +178,7 @@ fn test_extern_fn_slice_len() {
     let len_fn = compiler.extern_fn::<ExtSliceLenExtern>();
 
     let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
-        call_extern1::<_, _, FatSliceType<i64>, i64>(len_fn, data)
+        call_extern1(len_fn, data)
     });
 
     let compiled = compiler.compile(test_fn).expect("compilation failed");
