@@ -112,6 +112,7 @@ pub mod iter;
 pub mod num;
 pub mod opaque;
 pub mod option;
+pub mod pool;
 pub mod refer;
 pub mod slice;
 pub mod staged;
@@ -155,12 +156,13 @@ pub mod prelude {
         select, shl, shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, IntToFloat, Num,
         Shl, Shr,
     };
-    pub use crate::opaque::{opaque_ref, Opaque, OpaqueRef};
+    pub use crate::opaque::{opaque_ref, opaque_ref_mut, Opaque, OpaqueRef, OpaqueRefMut};
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
         opt_ref_none, opt_ref_some, unwrap_or, COption, COptionType, OptMutRefType, OptRefType,
     };
+    pub use crate::pool::{pool_append, BytesPool, PoolAppendExtern};
     pub use crate::r#struct::{
         field_addr, field_path, load_field, CopyFieldAccess, Field, FieldAddr, FieldPath,
         FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,

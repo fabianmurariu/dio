@@ -23,7 +23,7 @@
 
 use std::marker::PhantomData;
 
-use crate::refer::SRef;
+use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, Value};
@@ -78,6 +78,45 @@ where
 /// Reinterpret a staged raw address as an opaque `&T` (`SRef<Opaque<T>>`).
 pub fn opaque_ref<T: 'static, E: IntoStaged<u64>>(addr: E) -> OpaqueRef<E::Staged, T> {
     OpaqueRef {
+        addr: addr.into_staged(),
+        _t: PhantomData,
+    }
+}
+
+/// Mutable twin of [`OpaqueRef`]: reinterpret a raw address as
+/// `SRefMut<'static, Opaque<T>>` — an opaque `&mut T` — for an extern fn taking
+/// `&mut T`. Like `OpaqueRef`, emits no code (a reference *is* the pointer).
+pub struct OpaqueRefMut<E, T> {
+    addr: E,
+    _t: PhantomData<T>,
+}
+
+impl<E: Clone, T> Clone for OpaqueRefMut<E, T> {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl<E: Copy, T> Copy for OpaqueRefMut<E, T> {}
+
+impl<E, T> Staged for OpaqueRefMut<E, T>
+where
+    E: Staged<Out = u64>,
+    T: 'static,
+{
+    type Out = SRefMut<'static, Opaque<T>>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.addr.codegen(ctx)
+    }
+}
+
+/// Reinterpret a staged raw address as an opaque `&mut T` (`SRefMut<Opaque<T>>`).
+pub fn opaque_ref_mut<T: 'static, E: IntoStaged<u64>>(addr: E) -> OpaqueRefMut<E::Staged, T> {
+    OpaqueRefMut {
         addr: addr.into_staged(),
         _t: PhantomData,
     }
