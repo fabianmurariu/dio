@@ -23,8 +23,10 @@
 
 use std::marker::PhantomData;
 
+use crate::refer::SRef;
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
-use cranelift_codegen::ir::types;
+use cranelift_codegen::ir::{types, Value};
 
 /// Marker for an opaque, externally-owned value of type `T`, handled only
 /// behind `SRef`/`SRefMut`. See the [module docs](self).
@@ -39,5 +41,44 @@ impl<T> StagedType for Opaque<T> {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         // Only ever materialized behind a reference, which is pointer-sized.
         types::I64
+    }
+}
+
+/// Reinterpret a raw address (a staged `u64`) as `SRef<'static, Opaque<T>>` — an
+/// opaque `&T` — for handing a stored pointer to an extern fn that takes `&T`.
+/// Emits no code: a reference *is* the pointer value.
+pub struct OpaqueRef<E, T> {
+    addr: E,
+    _t: PhantomData<T>,
+}
+
+impl<E: Clone, T> Clone for OpaqueRef<E, T> {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl<E: Copy, T> Copy for OpaqueRef<E, T> {}
+
+impl<E, T> Staged for OpaqueRef<E, T>
+where
+    E: Staged<Out = u64>,
+    T: 'static,
+{
+    type Out = SRef<'static, Opaque<T>>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.addr.codegen(ctx)
+    }
+}
+
+/// Reinterpret a staged raw address as an opaque `&T` (`SRef<Opaque<T>>`).
+pub fn opaque_ref<T: 'static, E: IntoStaged<u64>>(addr: E) -> OpaqueRef<E::Staged, T> {
+    OpaqueRef {
+        addr: addr.into_staged(),
+        _t: PhantomData,
     }
 }

@@ -133,9 +133,9 @@ pub mod prelude {
         if_then, if_then_else, not, while_loop, IfThen, IfThenElse, Not, While,
     };
     pub use crate::ffi::{
-        call_extern0, call_extern1, call_extern2, call_extern3, ExternFn, ExternRef, FatSlice,
-        FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice, FfiSliceMut, FfiSliceMutType,
-        FfiSliceType,
+        call_extern0, call_extern1, call_extern2, call_extern3, slice_from_raw_parts, stack_bytes,
+        ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice,
+        FfiSliceMut, FfiSliceMutType, FfiSliceType, SliceFromRawParts, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,
@@ -155,7 +155,7 @@ pub mod prelude {
         select, shl, shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, IntToFloat, Num,
         Shl, Shr,
     };
-    pub use crate::opaque::Opaque;
+    pub use crate::opaque::{opaque_ref, Opaque, OpaqueRef};
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
@@ -182,5 +182,5 @@ pub mod prelude {
     pub use crate::types::{ConstantType, CopyType, StagedType};
     // Re-export derive macro
     #[cfg(feature = "derive")]
-    pub use rust_lms_derive::StagedType;
+    pub use rust_lms_derive::{extern_fn, StagedType};
 }

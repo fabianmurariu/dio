@@ -16,6 +16,7 @@ pub mod catalog;
 pub mod codegen;
 pub mod plan;
 pub mod run;
+pub mod runtime;
 pub mod sql;
 pub mod value;
 

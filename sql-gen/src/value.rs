@@ -18,30 +18,58 @@ pub enum Nullness {
 }
 
 /// A staged column value: static physical-type tag + `Var` value + nullness.
-///
-/// `Str` is a `Utf8View` string, carried as its 16-byte view split into two
-/// `u64` halves (`lo` = `[len:u32][…]`, `hi` = the rest). That's enough for
-/// `octet_length` (`lo & 0xFFFF_FFFF`) and short-string equality (compare both
-/// halves). String literals encode the same way (an inline view). Byte access to
-/// long strings will add the array pointer + row later.
+/// `Str` is a `Utf8View` string (see [`StrVal`]).
 #[derive(Clone, Copy)]
 pub enum ColVal {
     I32(Var<i32>, Nullness),
     I64(Var<i64>, Nullness),
     F64(Var<f64>, Nullness),
     Bool(Var<bool>, Nullness),
-    Str {
+    Str(StrVal, Nullness),
+}
+
+/// A staged `Utf8View` string. The 16-byte view is carried as two `u64` halves
+/// (`lo` = `[len:u32][…]`, `hi` = the rest) — enough for `octet_length`
+/// (`lo & 0xFFFF_FFFF`) and inline-string equality (compare both halves).
+///
+/// A `Column` string also carries the originating array pointer + row so the
+/// extern fallback can read its bytes. A `Literal` carries its baked bytes
+/// (`bytes`/`blen`) for that fallback; `inline` (stage-0) says whether it fits in
+/// a view (`≤12` bytes), so `str_eq` can pick the pure-staged path.
+#[derive(Clone, Copy)]
+pub enum StrVal {
+    Column {
         lo: Var<u64>,
         hi: Var<u64>,
-        null: Nullness,
+        array: Var<u64>,
+        row: Var<u64>,
     },
+    Literal {
+        lo: Var<u64>,
+        hi: Var<u64>,
+        bytes: Var<u64>,
+        blen: Var<u64>,
+        inline: bool,
+    },
+}
+
+impl StrVal {
+    /// The view's first half (`[len:u32][…]`) — present in both variants.
+    pub fn lo(self) -> Var<u64> {
+        match self {
+            StrVal::Column { lo, .. } | StrVal::Literal { lo, .. } => lo,
+        }
+    }
 }
 
 impl ColVal {
     pub fn nullness(self) -> Nullness {
         match self {
-            ColVal::I32(_, n) | ColVal::I64(_, n) | ColVal::F64(_, n) | ColVal::Bool(_, n) => n,
-            ColVal::Str { null, .. } => null,
+            ColVal::I32(_, n)
+            | ColVal::I64(_, n)
+            | ColVal::F64(_, n)
+            | ColVal::Bool(_, n)
+            | ColVal::Str(_, n) => n,
         }
     }
 }

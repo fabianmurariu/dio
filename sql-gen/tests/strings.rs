@@ -109,3 +109,36 @@ fn octet_length_with_string_filter() {
     let out = run("SELECT octet_length(name) FROM t WHERE name = 'ok'", &rb);
     assert_eq!(i32s(&out, 0).values(), &[2, 2]);
 }
+
+#[test]
+fn equality_long_literal_uses_extern() {
+    // 'in-progress-status' is 18 bytes (> 12) -> indirect view -> extern fallback.
+    let rb = batch(StringViewArray::from(vec![
+        "in-progress-status",
+        "done", // inline, no match
+        "in-progress-status",
+        "in-progress-statuz", // same length + prefix, differs at the end
+        "in-progress-status",
+    ]));
+    let out = run(
+        "SELECT count(*) FROM t WHERE name = 'in-progress-status'",
+        &rb,
+    );
+    // exactly the 3 exact matches; the near-miss must be rejected by the extern
+    assert_eq!(i64s(&out, 0).value(0), 3);
+}
+
+#[test]
+fn long_literal_octet_length_and_filter() {
+    let rb = batch(StringViewArray::from(vec![
+        "alpha",
+        "a-fairly-long-name-value",
+        "a-fairly-long-name-value",
+    ]));
+    let out = run(
+        "SELECT octet_length(name) FROM t WHERE name = 'a-fairly-long-name-value'",
+        &rb,
+    );
+    // both surviving rows are 24 bytes
+    assert_eq!(i32s(&out, 0).values(), &[24, 24]);
+}

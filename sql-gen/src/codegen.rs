@@ -9,7 +9,9 @@
 //! nullability: only nullable columns/exprs carry an `is_valid` bit, propagated
 //! through evaluation; non-nullable ones emit no validity IR.
 
+use arrow::array::StringViewArray;
 use arrow::datatypes::{DataType, Field, SchemaRef};
+use arrow_lms::ffi::FfiArrayType;
 use arrow_lms::{ArrayBatchOps, FfiArray, MutBatchOps, PrimitiveArrayView};
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
@@ -17,7 +19,8 @@ use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
 
 use crate::plan::Operator;
-use crate::value::{ColVal, Nullness, Row};
+use crate::runtime::Runtime;
+use crate::value::{ColVal, Nullness, Row, StrVal};
 
 /// Dispatch a runtime arrow `DataType` to the matching [`Prim`] type parameter,
 /// running `$body` (in which `$m` is a type alias for the primitive) once for the
@@ -100,6 +103,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
     out: O,
     plan: &Operator,
     out_schema: &SchemaRef,
+    rt: Runtime,
 ) -> Var<u64> {
     let n = ctx.var(0u64);
     let fields = out_schema.fields().clone();
@@ -107,6 +111,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
         plan,
         ctx,
         batch,
+        rt,
         Box::new(move |ctx, row| {
             for (c, (cv, field)) in row.iter().zip(fields.iter()).enumerate() {
                 write_col(ctx, out, c, field, n, *cv);
@@ -117,7 +122,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
     n
 }
 
-fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
+fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, rt: Runtime, yld: Yld) {
     match op {
         Operator::Scan { schema } => gen_scan(ctx, batch, schema.clone(), yld),
 
@@ -128,8 +133,9 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
                 input,
                 ctx,
                 batch,
+                rt,
                 Box::new(move |ctx, row| {
-                    let keep = gen_predicate(ctx, &predicate, &schema, &row);
+                    let keep = gen_predicate(ctx, &predicate, &schema, &row, rt);
                     ctx.if_then(keep, move |ctx| yld(ctx, row));
                 }),
             );
@@ -142,10 +148,11 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
                 input,
                 ctx,
                 batch,
+                rt,
                 Box::new(move |ctx, row| {
                     let projected: Row = exprs
                         .iter()
-                        .map(|e| gen_expr(ctx, e, &schema, &row))
+                        .map(|e| gen_expr(ctx, e, &schema, &row, rt))
                         .collect();
                     yld(ctx, projected);
                 }),
@@ -172,9 +179,10 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, yld: Yld) {
                 input,
                 ctx,
                 batch,
+                rt,
                 Box::new(move |ctx, row| {
                     for agg in &loop_accs {
-                        agg.update(ctx, &row, &input_schema);
+                        agg.update(ctx, &row, &input_schema, rt);
                     }
                 }),
             );
@@ -246,8 +254,21 @@ fn gen_read_str<B: BatchSource>(
     let base = ctx.bind(mul(i, 2u64));
     let lo = ctx.bind(views.value_unchecked(base));
     let hi = ctx.bind(views.value_unchecked(add(base, 1u64)));
+    // The opaque pointer back to the arrow array, for the extern fallback.
+    let array = ctx.bind(load_field(
+        batch.get_ref_unchecked(col as u64),
+        FfiArrayType::array(),
+    ));
     let null = read_nullness(ctx, views, field.is_nullable(), i);
-    ColVal::Str { lo, hi, null }
+    ColVal::Str(
+        StrVal::Column {
+            lo,
+            hi,
+            array,
+            row: i,
+        },
+        null,
+    )
 }
 
 fn read_nullness<P, M>(
@@ -302,8 +323,8 @@ fn write_null<P, M>(
 // Expression evaluation
 // =============================================================================
 
-fn gen_predicate(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> Var<bool> {
-    let cv = gen_expr(ctx, e, schema, row);
+fn gen_predicate(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, rt: Runtime) -> Var<bool> {
+    let cv = gen_expr(ctx, e, schema, row, rt);
     let cond = as_bool(cv);
     // SQL: a NULL predicate does not pass the filter -> keep iff (valid && cond).
     match cv.nullness() {
@@ -312,7 +333,7 @@ fn gen_predicate(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> Var<
     }
 }
 
-fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> ColVal {
+fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, rt: Runtime) -> ColVal {
     match e {
         Expr::Column(c) => {
             let idx = schema
@@ -321,18 +342,24 @@ fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row) -> ColVal {
             row[idx]
         }
         Expr::Literal(sv, _) => gen_literal(ctx, sv),
-        Expr::BinaryExpr(be) => gen_binary(ctx, be, schema, row),
-        Expr::ScalarFunction(f) => gen_scalar_fn(ctx, f, schema, row),
+        Expr::BinaryExpr(be) => gen_binary(ctx, be, schema, row, rt),
+        Expr::ScalarFunction(f) => gen_scalar_fn(ctx, f, schema, row, rt),
         other => panic!("unsupported expression: {other:?}"),
     }
 }
 
-fn gen_scalar_fn(ctx: &mut Ctx, f: &ScalarFunction, schema: &SchemaRef, row: &Row) -> ColVal {
+fn gen_scalar_fn(
+    ctx: &mut Ctx,
+    f: &ScalarFunction,
+    schema: &SchemaRef,
+    row: &Row,
+    rt: Runtime,
+) -> ColVal {
     match f.func.name().to_ascii_lowercase().as_str() {
         // Octet length is the low 32 bits of the view's first half.
-        "octet_length" => match gen_expr(ctx, &f.args[0], schema, row) {
-            ColVal::Str { lo, null, .. } => {
-                let len = bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64);
+        "octet_length" => match gen_expr(ctx, &f.args[0], schema, row, rt) {
+            ColVal::Str(sv, null) => {
+                let len = bitand::<u64, _, _>(sv.lo(), 0xFFFF_FFFFu64);
                 ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(len)), null)
             }
             other => panic!("octet_length expects a string, got {}", tag(other)),
@@ -341,17 +368,60 @@ fn gen_scalar_fn(ctx: &mut Ctx, f: &ScalarFunction, schema: &SchemaRef, row: &Ro
     }
 }
 
-/// Whole-view equality: two strings are equal iff their 16-byte views match.
-/// Correct for *all* rows against a `≤12`-byte (inline) literal — differing
-/// lengths differ in `lo`; equal lengths mean both are inline, so the bytes are
-/// in the view. (Long-literal equality will fall back to an extern.)
-fn str_eq(ctx: &mut Ctx, l: ColVal, r: ColVal) -> Var<bool> {
+/// String equality (Column = Literal). An inline literal (`≤12` bytes) is a pure
+/// staged whole-view compare — correct for all rows: differing lengths differ in
+/// `lo`; equal lengths mean the row is inline, so the bytes are in the view. A
+/// long literal falls back to the `string_view_eq` extern over the column's bytes.
+fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, rt: Runtime) -> Var<bool> {
     match (l, r) {
         (
-            ColVal::Str {
+            StrVal::Column { lo, hi, array, row },
+            StrVal::Literal {
+                lo: l_lo,
+                hi: l_hi,
+                bytes,
+                blen,
+                inline,
+            },
+        )
+        | (
+            StrVal::Literal {
+                lo: l_lo,
+                hi: l_hi,
+                bytes,
+                blen,
+                inline,
+            },
+            StrVal::Column { lo, hi, array, row },
+        ) => {
+            if inline {
+                let lo_eq = ctx.bind(eq(lo, l_lo));
+                let hi_eq = ctx.bind(eq(hi, l_hi));
+                ctx.bind(select(lo_eq, hi_eq, Const::<bool>::new(false)))
+            } else {
+                // Long literal: let Rust do the full byte compare.
+                ctx.bind(call_extern3::<
+                    _,
+                    _,
+                    _,
+                    _,
+                    SRef<Opaque<StringViewArray>>,
+                    u64,
+                    FatSliceType<u8>,
+                    bool,
+                >(
+                    rt.string_view_eq,
+                    opaque_ref::<StringViewArray, _>(array),
+                    row,
+                    slice_from_raw_parts::<u8, _, _>(bytes, blen),
+                ))
+            }
+        }
+        (
+            StrVal::Literal {
                 lo: a_lo, hi: a_hi, ..
             },
-            ColVal::Str {
+            StrVal::Literal {
                 lo: b_lo, hi: b_hi, ..
             },
         ) => {
@@ -359,20 +429,22 @@ fn str_eq(ctx: &mut Ctx, l: ColVal, r: ColVal) -> Var<bool> {
             let hi_eq = ctx.bind(eq(a_hi, b_hi));
             ctx.bind(select(lo_eq, hi_eq, Const::<bool>::new(false)))
         }
-        _ => panic!("string equality expects two strings"),
+        (StrVal::Column { .. }, StrVal::Column { .. }) => {
+            panic!("column = column string equality not supported yet")
+        }
     }
 }
 
 fn is_str(cv: ColVal) -> bool {
-    matches!(cv, ColVal::Str { .. })
+    matches!(cv, ColVal::Str(..))
 }
 
-/// Equality: string operands compare by view, numeric operands by value.
-fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal) -> Var<bool> {
-    if is_str(l) || is_str(r) {
-        str_eq(ctx, l, r)
-    } else {
-        num_cmp(ctx, Cmp::Eq, l, r)
+/// Equality: string operands compare by view/extern, numeric operands by value.
+fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal, rt: Runtime) -> Var<bool> {
+    match (l, r) {
+        (ColVal::Str(a, _), ColVal::Str(b, _)) => str_eq(ctx, a, b, rt),
+        _ if is_str(l) || is_str(r) => panic!("string compared with non-string"),
+        _ => num_cmp(ctx, Cmp::Eq, l, r),
     }
 }
 
@@ -400,29 +472,56 @@ fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue) -> ColVal {
         ScalarValue::Boolean(Some(v)) => {
             ColVal::Bool(ctx.bind(Const::<bool>::new(*v)), Nullness::NonNull)
         }
-        // String literals encode as an inline Utf8View (≤12 bytes for now).
         ScalarValue::Utf8(Some(s))
         | ScalarValue::Utf8View(Some(s))
-        | ScalarValue::LargeUtf8(Some(s)) => {
-            let (lo, hi) = inline_view_halves(s);
-            ColVal::Str {
-                lo: ctx.var(lo),
-                hi: ctx.var(hi),
-                null: Nullness::NonNull,
-            }
-        }
+        | ScalarValue::LargeUtf8(Some(s)) => gen_str_literal(ctx, s),
         other => panic!("unsupported literal: {other:?}"),
     }
 }
 
-fn gen_binary(ctx: &mut Ctx, be: &BinaryExpr, schema: &SchemaRef, row: &Row) -> ColVal {
-    let l = gen_expr(ctx, &be.left, schema, row);
-    let r = gen_expr(ctx, &be.right, schema, row);
+/// A string literal. A `≤12`-byte literal is inline: its two view halves drive a
+/// pure-staged compare, and `bytes`/`blen` go unused. A longer literal has its
+/// bytes baked into the *kernel's* stack frame (`stack_bytes`) so the extern
+/// fallback can read them — a host pointer would dangle, since the codegen-time
+/// literal (a cloned `Expr`) drops before the JIT kernel runs.
+fn gen_str_literal(ctx: &mut Ctx, s: &str) -> ColVal {
+    let inline = s.len() <= 12;
+    let (lo, hi) = if inline {
+        inline_view_halves(s)
+    } else {
+        (0, 0)
+    };
+    let bytes = if inline {
+        ctx.var(0u64)
+    } else {
+        ctx.bind(stack_bytes(s.as_bytes()))
+    };
+    ColVal::Str(
+        StrVal::Literal {
+            lo: ctx.var(lo),
+            hi: ctx.var(hi),
+            bytes,
+            blen: ctx.var(s.len() as u64),
+            inline,
+        },
+        Nullness::NonNull,
+    )
+}
+
+fn gen_binary(
+    ctx: &mut Ctx,
+    be: &BinaryExpr,
+    schema: &SchemaRef,
+    row: &Row,
+    rt: Runtime,
+) -> ColVal {
+    let l = gen_expr(ctx, &be.left, schema, row, rt);
+    let r = gen_expr(ctx, &be.right, schema, row, rt);
     let null = combine_null(ctx, l.nullness(), r.nullness());
     match be.op {
-        DfOp::Eq => ColVal::Bool(gen_eq(ctx, l, r), null),
+        DfOp::Eq => ColVal::Bool(gen_eq(ctx, l, r, rt), null),
         DfOp::NotEq => {
-            let e = gen_eq(ctx, l, r);
+            let e = gen_eq(ctx, l, r, rt);
             ColVal::Bool(ctx.bind(not(e)), null)
         }
         DfOp::Lt => ColVal::Bool(num_cmp(ctx, Cmp::Lt, l, r), null),
@@ -654,8 +753,8 @@ impl Agg {
         }
     }
 
-    fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef) {
-        let arg = self.arg.as_ref().map(|e| gen_expr(ctx, e, schema, row));
+    fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef, rt: Runtime) {
+        let arg = self.arg.as_ref().map(|e| gen_expr(ctx, e, schema, row, rt));
         // The row contributes iff its argument is non-null (always, for count(*)).
         let row_valid = match arg.map(|cv| cv.nullness()) {
             Some(Nullness::Nullable(b)) => b,

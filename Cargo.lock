@@ -2792,6 +2792,7 @@ version = "0.1.0"
 dependencies = [
  "arrow",
  "arrow-lms",
+ "cranelift-codegen 0.127.1",
  "datafusion-common",
  "datafusion-expr",
  "datafusion-functions",

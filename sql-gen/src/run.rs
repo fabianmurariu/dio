@@ -7,6 +7,7 @@ use datafusion_common::{DataFusionError, Result};
 use rust_lms::prelude::*;
 
 use crate::codegen::gen_collect;
+use crate::runtime::Runtime;
 use crate::sql::sql_to_operator;
 
 /// Parse `sql` over `table` (bound to `rb`'s schema), JIT-compile it, run it over
@@ -22,10 +23,11 @@ pub fn exec_jit(sql: &str, table: &str, rb: &RecordBatch) -> Result<RecordBatch>
     let mut out = PreparedOutput::alloc(out_schema, capacity);
 
     let mut compiler = Compiler::new();
+    let rt = Runtime::register(&mut compiler);
     let f = compiler.fun2(
         "query",
         |ctx, batch: Var<SRef<Slice<FfiArray>>>, sink: Var<SRefMut<Slice<FfiArray>>>| {
-            gen_collect(ctx, batch, sink, &op, &op.output_schema())
+            gen_collect(ctx, batch, sink, &op, &op.output_schema(), rt)
         },
     );
     let compiled = compiler.compile(f).map_err(exec_err)?;

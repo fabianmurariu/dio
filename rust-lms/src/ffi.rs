@@ -24,9 +24,9 @@
 use std::marker::PhantomData;
 use std::slice;
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
-use cranelift_codegen::ir::{types, InstBuilder, Value};
+use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -241,6 +241,132 @@ impl<T: StagedType> StagedType for FatSliceMutType<T> {
 
     fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
         vec![types::I64, types::I64]
+    }
+}
+
+// =============================================================================
+// SliceFromRawParts: build a staged FatSlice from a raw (ptr, len)
+// =============================================================================
+
+/// Build a staged `FatSlice<T>` (`&[T]` at the ABI) from a raw pointer and
+/// length — e.g. a baked host buffer address handed to an extern `&[u8]` param.
+/// Materializes the `(ptr, len)` pair on a stack slot, like sub-slicing does.
+pub struct SliceFromRawParts<P, L, T> {
+    ptr: P,
+    len: L,
+    _elem: PhantomData<T>,
+}
+
+impl<P: Clone, L: Clone, T> Clone for SliceFromRawParts<P, L, T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+            len: self.len.clone(),
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, L: Copy, T> Copy for SliceFromRawParts<P, L, T> {}
+
+impl<P, L, T> Staged for SliceFromRawParts<P, L, T>
+where
+    P: Staged<Out = u64>,
+    L: Staged<Out = u64>,
+    T: StagedType,
+{
+    type Out = FatSliceType<T>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let ptr = self.ptr.codegen(ctx);
+        let len = self.len.codegen(ctx);
+        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            16,
+            3,
+        ));
+        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), ptr, slot_ptr, 0);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), len, slot_ptr, 8);
+        slot_ptr
+    }
+}
+
+/// Build a staged `FatSlice<T>` from a raw pointer and element length.
+pub fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P::Staged, L::Staged, T>
+where
+    T: StagedType,
+    P: IntoStaged<u64>,
+    L: IntoStaged<u64>,
+{
+    SliceFromRawParts {
+        ptr: ptr.into_staged(),
+        len: len.into_staged(),
+        _elem: PhantomData,
+    }
+}
+
+// =============================================================================
+// StackBytes: bake host bytes into a kernel-frame stack slot
+// =============================================================================
+
+/// A byte literal materialized into the kernel's own stack frame: the bytes are
+/// emitted as `iconst` stores at codegen and live for the whole kernel call.
+///
+/// Use this — never a baked host pointer — when literal bytes must reach stage-1
+/// code (e.g. an extern `&[u8]` param). A host address captured at codegen dangles
+/// once the codegen-time owner (a cloned `Expr`, say) drops, long before the JIT
+/// kernel runs. Returns the slot's **address** (`u64`); pair it with the length
+/// via [`slice_from_raw_parts`] to form a `&[u8]`.
+#[derive(Clone)]
+pub struct StackBytes {
+    bytes: Vec<u8>,
+}
+
+impl Staged for StackBytes {
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let n = self.bytes.len();
+        // Round the slot up to a whole number of 8-byte words (min one word, so a
+        // zero-length literal still has a valid, non-empty slot to address).
+        let slot_len = ((n + 7) & !7).max(8);
+        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            slot_len as u32,
+            3,
+        ));
+        let addr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+        let mut off = 0;
+        while off < slot_len {
+            let mut word = [0u8; 8];
+            for (j, w) in word.iter_mut().enumerate() {
+                if off + j < n {
+                    *w = self.bytes[off + j];
+                }
+            }
+            let v = ctx
+                .builder
+                .ins()
+                .iconst(types::I64, u64::from_le_bytes(word) as i64);
+            ctx.builder
+                .ins()
+                .store(MemFlags::trusted(), v, addr, off as i32);
+            off += 8;
+        }
+        addr
+    }
+}
+
+/// Bake `bytes` into the kernel's stack frame; returns the slot address (`u64`).
+/// See [`StackBytes`].
+pub fn stack_bytes(bytes: &[u8]) -> StackBytes {
+    StackBytes {
+        bytes: bytes.to_vec(),
     }
 }
 
