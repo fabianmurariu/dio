@@ -540,6 +540,8 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub struct #type_name;
 
         unsafe impl ::rust_lms::ffi::ExternFn for #type_name {
+            type Ret = #return_staged_type;
+
             const NAME: &'static str = #fn_name_str;
             const NUM_PARAMS: usize = #num_params;
             const FN_PTR: *const u8 = #fn_name as *const u8;
