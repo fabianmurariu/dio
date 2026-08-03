@@ -368,10 +368,12 @@ fn gen_scalar_fn(
     }
 }
 
-/// String equality (Column = Literal). An inline literal (`≤12` bytes) is a pure
+/// String equality over `Utf8View`. An inline literal (`≤12` bytes) is a pure
 /// staged whole-view compare — correct for all rows: differing lengths differ in
 /// `lo`; equal lengths mean the row is inline, so the bytes are in the view. A
-/// long literal falls back to the `string_view_eq` extern over the column's bytes.
+/// long literal or a column-vs-column pair falls back to a byte-compare extern:
+/// two different arrays store equal bytes under *different* views (buf_index +
+/// offset), so views can't be compared across columns.
 fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, rt: Runtime) -> Var<bool> {
     match (l, r) {
         (
@@ -429,9 +431,35 @@ fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, rt: Runtime) -> Var<bool> {
             let hi_eq = ctx.bind(eq(a_hi, b_hi));
             ctx.bind(select(lo_eq, hi_eq, Const::<bool>::new(false)))
         }
-        (StrVal::Column { .. }, StrVal::Column { .. }) => {
-            panic!("column = column string equality not supported yet")
-        }
+        (
+            StrVal::Column {
+                array: a_arr,
+                row: a_row,
+                ..
+            },
+            StrVal::Column {
+                array: b_arr,
+                row: b_row,
+                ..
+            },
+        ) => ctx.bind(call_extern4::<
+            _,
+            _,
+            _,
+            _,
+            _,
+            SRef<Opaque<StringViewArray>>,
+            u64,
+            SRef<Opaque<StringViewArray>>,
+            u64,
+            bool,
+        >(
+            rt.string_view_eq_cols,
+            opaque_ref::<StringViewArray, _>(a_arr),
+            a_row,
+            opaque_ref::<StringViewArray, _>(b_arr),
+            b_row,
+        )),
     }
 }
 

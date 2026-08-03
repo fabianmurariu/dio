@@ -133,9 +133,9 @@ pub mod prelude {
         if_then, if_then_else, not, while_loop, IfThen, IfThenElse, Not, While,
     };
     pub use crate::ffi::{
-        call_extern0, call_extern1, call_extern2, call_extern3, slice_from_raw_parts, stack_bytes,
-        ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice,
-        FfiSliceMut, FfiSliceMutType, FfiSliceType, SliceFromRawParts, StackBytes,
+        call_extern0, call_extern1, call_extern2, call_extern3, call_extern4, slice_from_raw_parts,
+        stack_bytes, ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType,
+        FfiSlice, FfiSliceMut, FfiSliceMutType, FfiSliceType, SliceFromRawParts, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,

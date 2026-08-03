@@ -18,6 +18,15 @@ fn batch(names: StringViewArray) -> RecordBatch {
     RecordBatch::try_new(schema, vec![Arc::new(names)]).unwrap()
 }
 
+/// A batch with two `Utf8View` columns `a` and `b`.
+fn batch2(a: StringViewArray, b: StringViewArray) -> RecordBatch {
+    let schema = Arc::new(ArrowSchema::new(vec![
+        Field::new("a", DataType::Utf8View, a.null_count() > 0),
+        Field::new("b", DataType::Utf8View, b.null_count() > 0),
+    ]));
+    RecordBatch::try_new(schema, vec![Arc::new(a), Arc::new(b)]).unwrap()
+}
+
 fn run(sql: &str, rb: &RecordBatch) -> RecordBatch {
     exec_jit(sql, "t", rb).expect("exec_jit")
 }
@@ -126,6 +135,37 @@ fn equality_long_literal_uses_extern() {
     );
     // exactly the 3 exact matches; the near-miss must be rejected by the extern
     assert_eq!(i64s(&out, 0).value(0), 3);
+}
+
+#[test]
+fn column_equals_column() {
+    // Mix of matching / non-matching rows, short (inline) and long (indirect),
+    // to exercise the byte-compare extern across both view shapes.
+    let a = StringViewArray::from(vec![
+        "ok",                  // == b -> match
+        "left",                // != b
+        "a-long-shared-value", // 19 bytes, indirect, == b -> match
+        "a-long-shared-value", // != b (near-miss below)
+    ]);
+    let b = StringViewArray::from(vec![
+        "ok",
+        "right",
+        "a-long-shared-value",
+        "a-long-shared-valuE", // differs only in last byte
+    ]);
+    let rb = batch2(a, b);
+    let out = run("SELECT count(*) FROM t WHERE a = b", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 2);
+}
+
+#[test]
+fn column_equals_column_with_nulls() {
+    // NULL = anything is unknown -> dropped, even NULL = NULL.
+    let a = StringViewArray::from(vec![Some("x"), None, Some("y"), None]);
+    let b = StringViewArray::from(vec![Some("x"), Some("z"), None, None]);
+    let rb = batch2(a, b);
+    let out = run("SELECT count(*) FROM t WHERE a = b", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 1);
 }
 
 #[test]
