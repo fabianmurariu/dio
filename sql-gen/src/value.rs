@@ -28,14 +28,18 @@ pub enum ColVal {
     Str(StrVal, Nullness),
 }
 
-/// A staged `Utf8View` string. The 16-byte view is carried as two `u64` halves
-/// (`lo` = `[len:u32][…]`, `hi` = the rest) — enough for `octet_length`
-/// (`lo & 0xFFFF_FFFF`) and inline-string equality (compare both halves).
+/// A staged `Utf8View` string, in one of two containers — but every container
+/// resolves to a generic `&[u8]` byte reference (`codegen::resolve`), so the
+/// runtime is a flat library over bytes.
 ///
-/// A `Column` string also carries the originating array pointer + row so the
-/// extern fallback can read its bytes. A `Literal` carries its baked bytes
-/// (`bytes`/`blen`) for that fallback; `inline` (stage-0) says whether it fits in
-/// a view (`≤12` bytes), so `str_eq` can pick the pure-staged path.
+/// - `Column`: a `Utf8View` column row. Carries the 16-byte view as two `u64`
+///   halves (`lo` = `[len:u32][…]`, `hi` = the rest) for register-op
+///   `octet_length` and the inline-literal `=` fast path, plus the originating
+///   array pointer + row so its bytes can be resolved (`arr.value(row)`).
+/// - `Bytes`: already-materialized bytes at `(ptr, len)` — a build-time-interned
+///   literal or a kernel-produced string. `view` holds the inline view halves iff
+///   the bytes are a known `≤12`-byte value (enables the staged `=` fast path);
+///   `None` for long literals and produced strings.
 #[derive(Clone, Copy)]
 pub enum StrVal {
     Column {
@@ -44,22 +48,11 @@ pub enum StrVal {
         array: Var<u64>,
         row: Var<u64>,
     },
-    Literal {
-        lo: Var<u64>,
-        hi: Var<u64>,
-        bytes: Var<u64>,
-        blen: Var<u64>,
-        inline: bool,
+    Bytes {
+        ptr: Var<u64>,
+        len: Var<u64>,
+        view: Option<(u64, u64)>,
     },
-}
-
-impl StrVal {
-    /// The view's first half (`[len:u32][…]`) — present in both variants.
-    pub fn lo(self) -> Var<u64> {
-        match self {
-            StrVal::Column { lo, .. } | StrVal::Literal { lo, .. } => lo,
-        }
-    }
 }
 
 impl ColVal {

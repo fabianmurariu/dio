@@ -14,7 +14,7 @@
 use std::marker::PhantomData;
 use std::sync::Arc;
 
-use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array};
+use arrow::array::{ArrayRef, Float64Array, Int32Array, Int64Array, StringViewBuilder};
 use arrow::buffer::{BooleanBuffer, Buffer, NullBuffer, ScalarBuffer};
 use arrow::datatypes::{DataType, SchemaRef};
 use arrow::record_batch::RecordBatch;
@@ -102,11 +102,29 @@ where
 // Host side: allocation + RecordBatch assembly
 // =============================================================================
 
-/// Host value storage for one output column: a typed `Vec` that hands the kernel
-/// a raw pointer and builds an Arrow array afterwards. Adding a type is one arm
-/// in `out_column!` + one in [`alloc_column`].
+/// Host value storage for one output column. Two shapes:
+///
+/// - **Fixed-width** (`Vec<T>`): the kernel writes values by index into a flat
+///   buffer via [`values_ptr`](OutColumn::values_ptr); nulls go in a separate
+///   validity bitmap.
+/// - **Append** (`StrOutColumn`, `Utf8View`): variable-length, so the kernel
+///   *appends* through the column's own builder — reached via
+///   [`builder_ptr`](OutColumn::builder_ptr), parked in the descriptor's opaque
+///   `array` field — and the builder owns its nulls (no external bitmap).
+///
+/// Adding a fixed-width type is one arm in `out_column!` + one in [`alloc_column`].
 trait OutColumn {
+    /// Raw pointer to the flat value buffer (fixed-width columns).
     fn values_ptr(&mut self) -> *mut u8;
+    /// Opaque pointer to this column's builder (append columns); null otherwise.
+    fn builder_ptr(&mut self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+    /// True for append (builder-backed) columns: no flat value buffer, and the
+    /// builder owns its own nulls, so no external validity bitmap.
+    fn is_append(&self) -> bool {
+        false
+    }
     fn into_array(self: Box<Self>, n: usize, nulls: Option<NullBuffer>) -> ArrayRef;
 }
 
@@ -126,11 +144,38 @@ macro_rules! out_column {
 
 out_column!(i32 => Int32Array, i64 => Int64Array, f64 => Float64Array);
 
+/// A `Utf8View` output column, backed by an Arrow [`StringViewBuilder`] the
+/// kernel appends into. `finish()` produces the `StringViewArray` directly (data
+/// buffers + views + nulls), zero-copy — no external buffer plumbing.
+struct StrOutColumn {
+    builder: StringViewBuilder,
+}
+
+impl OutColumn for StrOutColumn {
+    fn values_ptr(&mut self) -> *mut u8 {
+        std::ptr::null_mut()
+    }
+    fn builder_ptr(&mut self) -> *mut u8 {
+        (&mut self.builder as *mut StringViewBuilder).cast()
+    }
+    fn is_append(&self) -> bool {
+        true
+    }
+    fn into_array(mut self: Box<Self>, _n: usize, _nulls: Option<NullBuffer>) -> ArrayRef {
+        // The builder appended exactly one value per emitted row (== `n`) and
+        // owns its own nulls, so ignore the external `nulls`.
+        Arc::new(self.builder.finish())
+    }
+}
+
 fn alloc_column(dt: &DataType, capacity: usize) -> Box<dyn OutColumn> {
     match dt {
         DataType::Int32 => Box::new(vec![0i32; capacity]),
         DataType::Int64 => Box::new(vec![0i64; capacity]),
         DataType::Float64 => Box::new(vec![0.0f64; capacity]),
+        DataType::Utf8View => Box::new(StrOutColumn {
+            builder: StringViewBuilder::new(),
+        }),
         other => panic!("unsupported output column type: {other}"),
     }
 }
@@ -156,6 +201,22 @@ impl PreparedOutput {
 
         for field in schema.fields() {
             let mut col = alloc_column(field.data_type(), capacity);
+
+            // Append (string) columns don't use a flat value buffer or an external
+            // validity bitmap — the kernel appends through the builder pointer
+            // parked in the descriptor's `array` field, and the builder owns nulls.
+            if col.is_append() {
+                let array = col.builder_ptr().cast_const();
+                descriptors.push(FfiArray {
+                    values: unsafe { FfiBuffer::from_raw_parts(std::ptr::null_mut(), 0) },
+                    validity: FfiValidity::all_valid(capacity),
+                    array,
+                });
+                columns.push(col);
+                validity.push(None);
+                continue;
+            }
+
             let values = unsafe { FfiBuffer::from_raw_parts(col.values_ptr(), capacity) };
 
             let mut valid = field

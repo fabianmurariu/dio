@@ -37,6 +37,9 @@ fn i32s(rb: &RecordBatch, col: usize) -> &Int32Array {
 fn i64s(rb: &RecordBatch, col: usize) -> &Int64Array {
     rb.column(col).as_any().downcast_ref().unwrap()
 }
+fn strs(rb: &RecordBatch, col: usize) -> &StringViewArray {
+    rb.column(col).as_any().downcast_ref().unwrap()
+}
 
 #[test]
 fn octet_length_of_string_column() {
@@ -166,6 +169,94 @@ fn column_equals_column_with_nulls() {
     let rb = batch2(a, b);
     let out = run("SELECT count(*) FROM t WHERE a = b", &rb);
     assert_eq!(i64s(&out, 0).value(0), 1);
+}
+
+#[test]
+fn select_string_column_passthrough() {
+    // Mix of inline (<=12) and indirect (>12) and multi-byte, all materialized out.
+    let rb = batch(StringViewArray::from(vec![
+        "ok",
+        "a-longer-indirect-value",
+        "café",
+        "x",
+    ]));
+    let out = run("SELECT name FROM t", &rb);
+    let s = strs(&out, 0);
+    assert_eq!(s.len(), 4);
+    assert_eq!(s.value(0), "ok");
+    assert_eq!(s.value(1), "a-longer-indirect-value");
+    assert_eq!(s.value(2), "café");
+    assert_eq!(s.value(3), "x");
+}
+
+#[test]
+fn select_string_column_filtered() {
+    let rb = batch(StringViewArray::from(vec![
+        "keep-this-long-one",
+        "no",
+        "keep-this-long-one",
+        "yes",
+    ]));
+    let out = run("SELECT name FROM t WHERE octet_length(name) > 3", &rb);
+    let s = strs(&out, 0);
+    assert_eq!(s.len(), 2);
+    assert_eq!(s.value(0), "keep-this-long-one");
+    assert_eq!(s.value(1), "keep-this-long-one");
+}
+
+#[test]
+fn select_string_column_with_nulls() {
+    let rb = batch(StringViewArray::from(vec![
+        Some("a"),
+        None,
+        Some("this-is-indirect-long"),
+        None,
+    ]));
+    let out = run("SELECT name FROM t", &rb);
+    let s = strs(&out, 0);
+    assert_eq!(s.len(), 4);
+    assert!(s.is_valid(0));
+    assert_eq!(s.value(0), "a");
+    assert!(s.is_null(1));
+    assert!(s.is_valid(2));
+    assert_eq!(s.value(2), "this-is-indirect-long");
+    assert!(s.is_null(3));
+}
+
+#[test]
+fn select_string_literal_short() {
+    // A short (inline) literal, materialized once per surviving row.
+    let rb = batch(StringViewArray::from(vec!["a", "b", "c"]));
+    let out = run("SELECT 'hi' FROM t", &rb);
+    let s = strs(&out, 0);
+    assert_eq!(s.len(), 3);
+    assert_eq!(s.value(0), "hi");
+    assert_eq!(s.value(1), "hi");
+    assert_eq!(s.value(2), "hi");
+}
+
+#[test]
+fn select_string_literal_long() {
+    // A long (>12, indirect) literal, interned in the pool and output.
+    let rb = batch(StringViewArray::from(vec!["x", "y"]));
+    let out = run("SELECT 'a-fairly-long-literal-value' FROM t", &rb);
+    let s = strs(&out, 0);
+    assert_eq!(s.len(), 2);
+    assert_eq!(s.value(0), "a-fairly-long-literal-value");
+    assert_eq!(s.value(1), "a-fairly-long-literal-value");
+}
+
+#[test]
+fn select_literal_alongside_column() {
+    let rb = batch(StringViewArray::from(vec!["keep", "drop", "keep"]));
+    let out = run("SELECT name, 'tag' FROM t WHERE name = 'keep'", &rb);
+    let names = strs(&out, 0);
+    let tags = strs(&out, 1);
+    assert_eq!(names.len(), 2);
+    assert_eq!(names.value(0), "keep");
+    assert_eq!(names.value(1), "keep");
+    assert_eq!(tags.value(0), "tag");
+    assert_eq!(tags.value(1), "tag");
 }
 
 #[test]
