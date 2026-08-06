@@ -58,6 +58,16 @@ where
         ctx.emit(values.set_unchecked(n, value));
     }
 
+    /// Read the value at `n` — the read half of an in-place fold
+    /// (`set(n, combine(get(n), v))`), e.g. grouped-aggregate accumulators.
+    pub fn get(&self, ctx: &mut Ctx, n: Var<u64>) -> Var<M>
+    where
+        M: CopyType,
+    {
+        let values = field_addr(self.array.clone(), FfiArrayType::values()).as_mut_slice::<M>();
+        ctx.bind(values.get_unchecked(n))
+    }
+
     /// A mutable view of this column's validity bitmap (for `set_null` etc.).
     pub fn validity_mut(
         &self,
@@ -125,6 +135,10 @@ trait OutColumn {
     fn is_append(&self) -> bool {
         false
     }
+    /// Fill the whole value buffer with `value` (cast to the column type) — the
+    /// accumulator identity for grouped `min`/`max` (`i64::MAX` / `i64::MIN`). The
+    /// integer casts preserve `i32`/`i64` extremes; no-op for append columns.
+    fn fill_i64(&mut self, _value: i64) {}
     fn into_array(self: Box<Self>, n: usize, nulls: Option<NullBuffer>) -> ArrayRef;
 }
 
@@ -133,6 +147,9 @@ macro_rules! out_column {
         impl OutColumn for Vec<$native> {
             fn values_ptr(&mut self) -> *mut u8 {
                 self.as_mut_ptr().cast()
+            }
+            fn fill_i64(&mut self, value: i64) {
+                self.iter_mut().for_each(|x| *x = value as $native);
             }
             fn into_array(mut self: Box<Self>, n: usize, nulls: Option<NullBuffer>) -> ArrayRef {
                 self.truncate(n);
@@ -256,6 +273,12 @@ impl PreparedOutput {
     /// runtime (`&mut [FfiArray]`).
     pub fn as_ffi_mut(&mut self) -> &mut [FfiArray] {
         &mut self.descriptors
+    }
+
+    /// Pre-fill output column `col` with `value` — the accumulator identity for a
+    /// grouped `min`/`max` column (`i64::MAX` / `i64::MIN`) before the fold.
+    pub fn fill_i64(&mut self, col: usize, value: i64) {
+        self.columns[col].fill_i64(value);
     }
 
     /// Assemble the first `n` rows into a `RecordBatch`.

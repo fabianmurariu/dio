@@ -21,6 +21,7 @@ use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
 
+use crate::group::GroupTable;
 use crate::plan::Operator;
 use crate::runtime::{Runtime, StrPtrExtern};
 use crate::value::{ColVal, Nullness, Row, StrVal};
@@ -211,12 +212,19 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &Cx, yld: 
         }
 
         // Scalar aggregate: fold every input row into accumulators, then emit
-        // exactly one result row downstream (after the loop).
+        // exactly one result row downstream (after the loop). GROUP BY is handled
+        // by a dedicated kernel in `run.rs` (it needs the output arrays + the
+        // hash table), not through this push path.
         Operator::Aggregate {
+            group_exprs,
             aggs,
             input,
             schema,
         } => {
+            assert!(
+                group_exprs.is_empty(),
+                "grouped aggregate should be routed to gen_grouped, not gen_op"
+            );
             let fields = schema.fields().clone();
             let accs: Vec<Agg> = aggs
                 .iter()
@@ -246,6 +254,149 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &Cx, yld: 
             yld(ctx, result);
         }
     }
+}
+
+/// GROUP BY kernel: fold each input row into a group slot, keeping the hot loop in
+/// the JIT. Per row: compute the group key, `intern` it into the Rust-hosted
+/// `GroupTable` for a dense group index, write the key into output column 0, and
+/// fold each aggregate into its output column at that index. Returns the number of
+/// groups (the output row count). Output layout is `[group key | aggregates…]` and
+/// the accumulator columns are sized to the row count (groups ≤ rows) so indices
+/// never overflow. Single non-null `Int64` key; `count(*)`/`count(col)`/`sum` for
+/// now. `min`/`max` need identity-initialized accumulators — added next.
+#[allow(clippy::too_many_arguments)]
+pub fn gen_grouped<B: BatchSource, O: OutSink>(
+    ctx: &mut Ctx,
+    batch: B,
+    table: Var<SRefMut<'static, Opaque<GroupTable>>>,
+    out: O,
+    group_exprs: &[Expr],
+    aggs: &[Expr],
+    input: &Operator,
+    cx: &Cx,
+) -> Var<u64> {
+    assert_eq!(
+        group_exprs.len(),
+        1,
+        "only a single GROUP BY key is supported"
+    );
+    let group_expr = group_exprs[0].clone();
+    let parsed: Vec<GroupedAgg> = aggs.iter().map(GroupedAgg::parse).collect();
+    let input_schema = input.output_schema();
+    let cx_c = cx.clone();
+
+    gen_op(
+        input,
+        ctx,
+        batch,
+        cx,
+        Box::new(move |ctx, row| {
+            // Key → group index (the extern owns the Rust hash map). `table` is
+            // already a typed `&mut GroupTable` kernel param, so pass it directly.
+            let key_cv = gen_expr(ctx, &group_expr, &input_schema, &row, &cx_c);
+            let key = to_i64(ctx, key_cv);
+            let gidx = ctx.bind(call_extern2(cx_c.rt.group_intern, table, key));
+            // Group-key column (col 0), idempotent per group.
+            out.column_mut::<i64>(0).set(ctx, gidx, key);
+            // Fold each aggregate into its column at `gidx`.
+            for (j, agg) in parsed.iter().enumerate() {
+                agg.fold(ctx, out, 1 + j, gidx, &row, &input_schema, &cx_c);
+            }
+        }),
+    );
+
+    ctx.bind(call_extern1(cx.rt.group_len, table))
+}
+
+/// A parsed grouped aggregate (kind + optional argument), folded per row into an
+/// output accumulator column indexed by group.
+struct GroupedAgg {
+    kind: AggKind,
+    arg: Option<Expr>,
+}
+
+impl GroupedAgg {
+    #[allow(deprecated)]
+    fn parse(expr: &Expr) -> GroupedAgg {
+        let (name, arg) = match expr {
+            Expr::AggregateFunction(af) => (
+                af.func.name().to_ascii_lowercase(),
+                af.params
+                    .args
+                    .first()
+                    .cloned()
+                    .filter(|e| !matches!(e, Expr::Wildcard { .. })),
+            ),
+            other => panic!("expected aggregate function, got {other:?}"),
+        };
+        let kind = match name.as_str() {
+            "count" => AggKind::Count,
+            "sum" => AggKind::Sum,
+            "min" => AggKind::Min,
+            "max" => AggKind::Max,
+            other => panic!("grouped aggregate not yet supported: {other}"),
+        };
+        GroupedAgg { kind, arg }
+    }
+
+    /// Fold this row's contribution into output column `col` at group `gidx`.
+    /// (Non-null inputs for now, so validity is ignored.)
+    #[allow(clippy::too_many_arguments)]
+    fn fold<O: OutSink>(
+        &self,
+        ctx: &mut Ctx,
+        out: O,
+        col: usize,
+        gidx: Var<u64>,
+        row: &Row,
+        schema: &SchemaRef,
+        cx: &Cx,
+    ) {
+        let view = out.column_mut::<i64>(col);
+        match self.kind {
+            AggKind::Count => {
+                let cur = view.get(ctx, gidx);
+                let next = ctx.bind(add(cur, 1i64));
+                view.set(ctx, gidx, next);
+            }
+            AggKind::Sum => {
+                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
+                let v = to_i64(ctx, arg_cv);
+                let cur = view.get(ctx, gidx);
+                let next = ctx.bind(add(cur, v));
+                view.set(ctx, gidx, next);
+            }
+            // min/max fold from an identity-initialized column (i64::MAX / MIN).
+            AggKind::Min => {
+                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
+                let v = to_i64(ctx, arg_cv);
+                let cur = view.get(ctx, gidx);
+                let next = ctx.bind(min(cur, v));
+                view.set(ctx, gidx, next);
+            }
+            AggKind::Max => {
+                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
+                let v = to_i64(ctx, arg_cv);
+                let cur = view.get(ctx, gidx);
+                let next = ctx.bind(max(cur, v));
+                view.set(ctx, gidx, next);
+            }
+            AggKind::Avg => panic!("grouped avg not yet supported"),
+        }
+    }
+}
+
+/// Identity fill for each aggregate's accumulator column (aligned to output
+/// columns `1..`): `0` for `count`/`sum`, `i64::MAX`/`i64::MIN` for `min`/`max`.
+/// The host pre-fills these before the fold (see [`gen_grouped`]).
+pub fn agg_identities(aggs: &[Expr]) -> Vec<i64> {
+    aggs.iter()
+        .map(|e| match GroupedAgg::parse(e).kind {
+            AggKind::Min => i64::MAX,
+            AggKind::Max => i64::MIN,
+            _ => 0,
+        })
+        .collect()
 }
 
 fn gen_scan<B: BatchSource>(ctx: &mut Ctx, batch: B, schema: SchemaRef, yld: Yld) {

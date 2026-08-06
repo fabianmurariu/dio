@@ -29,11 +29,14 @@ pub enum Operator {
         schema: SchemaRef,
         input: Box<Operator>,
     },
-    /// Scalar aggregation without GROUP BY — emits exactly one row. Each `agg`
-    /// is a datafusion `Expr::AggregateFunction` (count/min/max/sum/…).
+    /// Aggregation. With no `group_exprs` it's a scalar aggregate — one output
+    /// row. With `group_exprs` it's a GROUP BY — one row per distinct key, output
+    /// columns `[group keys… | aggregates…]`. Each `agg` is a datafusion
+    /// `Expr::AggregateFunction` (count/min/max/sum/…).
     Aggregate {
+        group_exprs: Vec<Expr>,
         aggs: Vec<Expr>,
-        /// Output schema (one field per aggregate), from datafusion's `Aggregate`.
+        /// Output schema (`[group keys | aggregates]`), from datafusion's `Aggregate`.
         schema: SchemaRef,
         input: Box<Operator>,
     },
@@ -54,7 +57,14 @@ impl Operator {
     /// input); filters/projections emit at most one per input row.
     pub fn max_output_rows(&self, input_rows: usize) -> usize {
         match self {
-            Operator::Aggregate { .. } => 1,
+            // Scalar aggregate → 1 row; GROUP BY → at most one group per input row.
+            Operator::Aggregate { group_exprs, .. } => {
+                if group_exprs.is_empty() {
+                    1
+                } else {
+                    input_rows
+                }
+            }
             Operator::Scan { .. } => input_rows,
             Operator::Filter { input, .. } | Operator::Project { input, .. } => {
                 input.max_output_rows(input_rows)
