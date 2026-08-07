@@ -13,7 +13,7 @@ use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
 use crate::codegen::{
-    CodegenCtx, GroupHandle, collect_str_literals, gen_collect, group_slot_inits,
+    CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_slot_inits,
 };
 use crate::group::GroupState;
 use crate::plan::Operator;
@@ -87,8 +87,17 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     // Allocate the GROUP BY state (sized to the row count, groups ≤ rows) and bake
     // its pointers. Must outlive `as_fn` — kept in `group_state` below.
     let mut group_state = match find_grouped(&op) {
-        Some(Operator::Aggregate { aggs, .. }) => {
-            Some(GroupState::new(&group_slot_inits(aggs), rb.num_rows()))
+        Some(Operator::Aggregate {
+            aggs,
+            group_exprs,
+            schema,
+            ..
+        }) => {
+            let agg_tys = agg_output_types(schema, group_exprs.len());
+            Some(GroupState::new(
+                &group_slot_inits(aggs, &agg_tys),
+                rb.num_rows(),
+            ))
         }
         _ => None,
     };

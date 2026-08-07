@@ -294,3 +294,98 @@ fn group_by_all_aggs() {
     assert_eq!(as_map(&out, 3), BTreeMap::from([(1, 10), (2, 50)])); // min
     assert_eq!(as_map(&out, 4), BTreeMap::from([(1, 30), (2, 50)])); // max
 }
+
+// --- Float64 aggregate value columns: sum/min/max accumulate in `f64`. ---
+
+/// A batch with a non-null Int64 key and a non-null `Float64` value column.
+fn batch_f64(keys: Vec<i64>, values: Vec<f64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new("value", DataType::Float64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(keys)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// A batch with a non-null key and a **nullable** `Float64` value column.
+fn batch_f64_nullable(keys: Vec<i64>, values: Vec<Option<f64>>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, false),
+        Field::new("value", DataType::Float64, true),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(keys)),
+            Arc::new(Float64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+#[test]
+fn group_by_float_sum_min_max() {
+    // key 1: [1.5, 2.5, 4.0]  sum 8.0, min 1.5, max 4.0
+    // key 2: [10.25, -3.75]   sum 6.5, min -3.75, max 10.25
+    let rb = batch_f64(vec![1, 1, 2, 1, 2], vec![1.5, 2.5, 10.25, 4.0, -3.75]);
+    let out = exec_jit(
+        "SELECT key, sum(value), min(value), max(value) FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(
+        as_opt_f64_map(&out, 1),
+        BTreeMap::from([(1, Some(8.0)), (2, Some(6.5))])
+    ); // sum
+    assert_eq!(
+        as_opt_f64_map(&out, 2),
+        BTreeMap::from([(1, Some(1.5)), (2, Some(-3.75))])
+    ); // min
+    assert_eq!(
+        as_opt_f64_map(&out, 3),
+        BTreeMap::from([(1, Some(4.0)), (2, Some(10.25))])
+    ); // max
+}
+
+#[test]
+fn group_by_float_min_max_with_nulls() {
+    // key 1: [2.0, null, 0.5] min 0.5, max 2.0
+    // key 2: [null, null]     all-null -> NULL (never beats the ±∞ identity, count 0)
+    let rb = batch_f64_nullable(
+        vec![1, 2, 1, 2, 1],
+        vec![Some(2.0), None, None, None, Some(0.5)],
+    );
+    let out = exec_jit(
+        "SELECT key, min(value), max(value) FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(
+        as_opt_f64_map(&out, 1),
+        BTreeMap::from([(1, Some(0.5)), (2, None)])
+    ); // min
+    assert_eq!(
+        as_opt_f64_map(&out, 2),
+        BTreeMap::from([(1, Some(2.0)), (2, None)])
+    ); // max
+}
+
+#[test]
+fn group_by_float_sum_all_null_is_null() {
+    // A group whose float inputs are all NULL yields SQL NULL for sum (count 0),
+    // not 0.0 — the seen-bit guards it.
+    let rb = batch_f64_nullable(vec![1, 1, 2], vec![None, None, Some(3.5)]);
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    assert_eq!(
+        as_opt_f64_map(&out, 1),
+        BTreeMap::from([(1, None), (2, Some(3.5))])
+    );
+}

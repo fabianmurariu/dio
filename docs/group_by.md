@@ -7,7 +7,9 @@ downstream — so any projection/filter above it (including `HAVING`) runs in th
 *same* JIT unit. There is no second compiler and no second pass.
 
 Scope today: a single `Int64` (non-null) group key; `count(*)`, `count(col)`,
-`sum`, `min`, `max`, `avg` over integer inputs, with full null handling.
+`sum`, `min`, `max`, `avg` over **integer *or* `Float64`** inputs, with full null
+handling. The accumulator cell type (`i64` vs `f64`) is chosen per aggregate from its
+datafusion output type — see [§3](#3-the-slot-layout).
 
 ---
 
@@ -126,15 +128,27 @@ struct AggSlots { kind: AggKind, value: usize, count: Option<usize> }
 struct GroupLayout { key: usize, slots: Vec<Slot>, aggs: Vec<AggSlots> }
 ```
 
-Layout rules:
+Each aggregate also carries an **`AccTy`** (`I64` | `F64`) — the physical cell it
+folds in — chosen from its datafusion output `DataType` (`agg_output_types`): `count`
+is always `I64`, `avg` always `F64`, and `sum`/`min`/`max` are `F64` iff the output is
+`Float64` (so `min(f64_col)` folds in `f64`, `sum(i32_col)` widens to `i64`). The cell
+type also picks `min`/`max`'s identity fill.
 
-| slot                       | who                        | init        |
-|----------------------------|----------------------------|-------------|
-| `0` (key)                  | always                     | `0`         |
-| `value` per aggregate      | `count`, `sum`, `avg`      | `0`         |
-|                            | `min`                      | `i64::MAX`  |
-|                            | `max`                      | `i64::MIN`  |
-| `count` per aggregate      | `sum`/`min`/`max`/`avg`    | `0`         |
+Layout rules (`init` is the raw `i64` bits stored in the 8-byte cell):
+
+| slot                       | who                        | init                        |
+|----------------------------|----------------------------|-----------------------------|
+| `0` (key)                  | always                     | `0`                         |
+| `value` per aggregate      | `count`, `sum`, `avg`      | `0` (`f64 0.0` == `0` bits)  |
+|                            | `min` (`i64` / `f64`)      | `i64::MAX` / `+∞` bits       |
+|                            | `max` (`i64` / `f64`)      | `i64::MIN` / `−∞` bits       |
+| `count` per aggregate      | `sum`/`min`/`max`/`avg`    | `0`                         |
+
+`min`/`max` over a float column seed the cell with `±∞` (not `i64::MAX/MIN`
+reinterpreted, which would be a bogus float) so the first real value always wins. The
+fold dispatches on `AccTy` — `combine_i64` (`add`/`min`/`max` → `iadd`/int compare) vs
+`combine_f64` (→ `fadd`/`fcmp`); `finalize` emits `ColVal::I64` or `ColVal::F64`
+accordingly, and `write_col` narrows to the output column type.
 
 The per-aggregate **`count` slot** is the non-null input count. It serves two
 purposes: it's the "seen a non-null value?" bit (`count > 0`) for the NULL
@@ -412,8 +426,11 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
 ## 8. Limitations & extension points
 
 - **Single, non-null `Int64` key.** A nullable key is rejected (`NotImplemented`) —
-  a null key can't be an `i64` yet. `Int32` keys and `f64`/`Int32` accumulators are
-  straightforward extensions of the slot layout.
+  a null key can't be an `i64` yet. `Int32` keys work today (widened to `i64` for
+  interning, narrowed on output); `Float64`/string keys are the next key-typing step.
+- **Aggregate value types: `i64` and `Float64` done** (`sum`/`min`/`max` pick their
+  cell from the output type; `avg` always `f64`). `Decimal`/other numeric inputs
+  still fall through to the `to_i64` panic.
 - **Utf8View / composite keys** need a richer `GroupTable` (byte-hash via the
   `BytesPool`, or multi-column interning) — future work.
 - **Single group-by per plan.** `Cx.group` is one handle; a `Vec` indexed by plan
@@ -423,3 +440,43 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
   two-phase partial/final split drops in without redesign.
 - Two deferred codegen inefficiencies (redundant loop-invariant pointer reloads; a
   dead `iconst.i8 0`) are tracked in `docs/codegen_issues.md`.
+
+---
+
+## 9. Storage layout & future work (Umbra comparison)
+
+Today's state is **columnar** (struct-of-arrays): the `GroupTable` holds only
+`key → gidx`, and each accumulator slot is its *own* `Vec<i64>` indexed by `gidx`
+(`buffers[slot][gidx]`). This is the *opposite* of how compiling engines like Umbra
+store aggregation state — Umbra packs each group **row-wise**, a contiguous tuple
+`[hash | key(s) | aggregate payload]` in one open-addressing arena (the "Tidy
+Tuples" paper's Tuples layer: *"packing tuples into a memory efficient format"*).
+
+**Does the columnar-vs-row-wise choice matter here?** Less than it looks:
+
+- **No transpose for the projection either way.** The emit loop already reads each
+  slot into a register, finalizes (`avg` divides, cast, nulls), and the `yld` writes
+  it to the output column — a per-*group* scatter of a few registers, not a
+  per-row cost. A row-wise layout would do the identical read-into-register; neither
+  needs a bulk "flip to columns". (We can't memcpy slot→output even though both are
+  columnar: `avg` divides, types differ, nulls, and a projection may compute over
+  the aggregates.)
+- **Where row-wise wins is the *fold* loop** (the hot path, once per input row):
+  a group's cells are contiguous → one cache line per probe, vs. our N separate
+  slot arrays → up to N cache lines per row when a query has several aggregates.
+
+But for us that cache effect is **second-order**, dominated by two first-order
+issues, which are the real future work — in priority order:
+
+1. **Per-row extern call.** `group_intern` is an out-of-line Rust `HashMap` probe
+   called once per input row. Inlining the hash+probe as *staged* code (a staged
+   open-addressing table in the kernel) removes a function call + non-inlinable
+   hash from the hot loop — the biggest win, and the natural rust-lms exercise.
+2. **Buffers sized to `num_rows`, not group count.** `vec![init; rows]` per slot
+   means a 1M-row / 3-aggregate query allocates ~32 MB to hold possibly a handful
+   of groups — O(rows) memory for what should be O(groups). Growing the table by
+   discovered-group count (once (1) makes the probe ours) fixes this and is the
+   point of hash aggregation. Also collapses the one-`Vec`-per-slot allocations +
+   the `HashMap`'s internal growth into a single arena.
+3. **Only then**, pack row-wise so a group's cells share a cache line in the fold
+   loop. Genuinely marginal until (1) is done.
