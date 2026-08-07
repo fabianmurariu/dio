@@ -24,6 +24,7 @@
 use std::marker::PhantomData;
 use std::slice;
 
+use crate::refer::SPtr;
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
@@ -248,9 +249,9 @@ impl<T: StagedType> StagedType for FatSliceMutType<T> {
 // SliceFromRawParts: build a staged FatSlice from a raw (ptr, len)
 // =============================================================================
 
-/// Build a staged `FatSlice<T>` (`&[T]` at the ABI) from a raw pointer and
-/// length — e.g. a baked host buffer address handed to an extern `&[u8]` param.
-/// Materializes the `(ptr, len)` pair on a stack slot, like sub-slicing does.
+/// Build a staged `FatSlice<T>` (`&[T]` at the ABI) from a typed pointer (`SPtr<T>`)
+/// and an element length — e.g. a baked host buffer handed to an extern `&[u8]`
+/// param. Materializes the `(ptr, len)` pair on a stack slot, like sub-slicing.
 pub struct SliceFromRawParts<P, L, T> {
     ptr: P,
     len: L,
@@ -271,9 +272,9 @@ impl<P: Copy, L: Copy, T> Copy for SliceFromRawParts<P, L, T> {}
 
 impl<P, L, T> Staged for SliceFromRawParts<P, L, T>
 where
-    P: Staged<Out = u64>,
+    P: Staged<Out = SPtr<T>>,
     L: Staged<Out = u64>,
-    T: StagedType,
+    T: StagedType + 'static,
 {
     type Out = FatSliceType<T>;
 
@@ -296,15 +297,15 @@ where
     }
 }
 
-/// Build a staged `FatSlice<T>` from a raw pointer and element length.
-pub fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P::Staged, L::Staged, T>
+/// Build a staged `FatSlice<T>` from a typed pointer (`SPtr<T>`) and element length.
+pub fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P, L::Staged, T>
 where
-    T: StagedType,
-    P: IntoStaged<u64>,
+    T: StagedType + 'static,
+    P: Staged<Out = SPtr<T>>,
     L: IntoStaged<u64>,
 {
     SliceFromRawParts {
-        ptr: ptr.into_staged(),
+        ptr,
         len: len.into_staged(),
         _elem: PhantomData,
     }
@@ -320,7 +321,7 @@ where
 /// Use this — never a baked host pointer — when literal bytes must reach stage-1
 /// code (e.g. an extern `&[u8]` param). A host address captured at codegen dangles
 /// once the codegen-time owner (a cloned `Expr`, say) drops, long before the JIT
-/// kernel runs. Returns the slot's **address** (`u64`); pair it with the length
+/// kernel runs. Returns a typed `SPtr<u8>` to the slot; pair it with the length
 /// via [`slice_from_raw_parts`] to form a `&[u8]`.
 #[derive(Clone)]
 pub struct StackBytes {
@@ -328,7 +329,7 @@ pub struct StackBytes {
 }
 
 impl Staged for StackBytes {
-    type Out = u64;
+    type Out = SPtr<u8>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let n = self.bytes.len();
@@ -362,8 +363,8 @@ impl Staged for StackBytes {
     }
 }
 
-/// Bake `bytes` into the kernel's stack frame; returns the slot address (`u64`).
-/// See [`StackBytes`].
+/// Bake `bytes` into the kernel's stack frame; returns a typed `SPtr<u8>` to the
+/// slot. See [`StackBytes`].
 pub fn stack_bytes(bytes: &[u8]) -> StackBytes {
     StackBytes {
         bytes: bytes.to_vec(),

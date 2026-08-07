@@ -156,7 +156,9 @@ pub mod prelude {
         select, shl, shr, sub, BitAnd, BitOr, BitXor, FloatNum, IntCast, IntNum, IntToFloat, Num,
         Shl, Shr,
     };
-    pub use crate::opaque::{opaque_ref, opaque_ref_mut, Opaque, OpaqueRef, OpaqueRefMut};
+    pub use crate::opaque::{
+        const_opaque, const_opaque_mut, opaque_ref, opaque_ref_mut, Opaque, OpaqueRef, OpaqueRefMut,
+    };
     pub use crate::option::{
         c_none, c_some, is_mut_ref_none, is_mut_ref_some, is_none, is_ref_none, is_ref_some,
         is_some, match_opt, match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some,
@@ -168,9 +170,9 @@ pub mod prelude {
         FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,
     };
     pub use crate::refer::{
-        array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut,
-        raw_mut_ptr, raw_ptr, store, store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset,
-        PtrOffsetMut, RawPtr, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
+        array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut, ptr_offset,
+        ptr_offset_mut, store, store_ref, ArrayIndex, ConstPtr, LoadMutRef, LoadRef, PtrOffset,
+        PtrOffsetMut, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
         AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,

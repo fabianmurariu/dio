@@ -2,6 +2,7 @@
 //! `RecordBatch`. The single entry point for running queries.
 
 use std::collections::HashMap;
+use std::rc::Rc;
 use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
@@ -11,7 +12,9 @@ use datafusion_common::{DataFusionError, Result};
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
-use crate::codegen::{Cx, GroupHandle, collect_str_literals, gen_collect, group_slot_inits};
+use crate::codegen::{
+    CodegenCtx, GroupHandle, collect_str_literals, gen_collect, group_slot_inits,
+};
 use crate::group::GroupState;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
@@ -74,10 +77,10 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let mut pool = BytesPool::new();
     let mut lit_strs = Vec::new();
     collect_str_literals(&op, &mut lit_strs);
-    let mut lits: HashMap<String, u64> = HashMap::new();
+    let mut lits: HashMap<String, *const u8> = HashMap::new();
     for s in lit_strs {
         if !lits.contains_key(s) {
-            lits.insert(s.to_string(), pool.append(s.as_bytes()) as u64);
+            lits.insert(s.to_string(), pool.append(s.as_bytes()));
         }
     }
 
@@ -90,15 +93,15 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
         _ => None,
     };
     let group = group_state.as_mut().map(|gs| {
-        Arc::new(GroupHandle {
-            table_ptr: gs.table_ptr(),
+        Rc::new(GroupHandle {
+            table: gs.table_ptr(),
             bases: gs.base_ptrs(),
         })
     });
 
-    let cx = Cx {
+    let cx = CodegenCtx {
         rt,
-        lits: Arc::new(lits),
+        lits: Rc::new(lits),
         group,
     };
 

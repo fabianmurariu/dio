@@ -25,15 +25,41 @@ The library's defining idea: **a value's Rust type encodes its staged type**, so
 the Rust type checker is the staged type checker. Put real constraints on `Staged`
 impls (`T: Num`, `S::Out: MutSliceType`, lifetime bounds) — that's the type system.
 
+## Guiding principles
+
+> **"Simplicity is the ultimate sophistication."**
+
+- **Fewer, cleaner pieces.** Prefer the smallest set of well-typed constructs.
+  *Remove before you add* — if a new feature reveals a duplication, collapse it
+  first. A `Box` (or an `Arc`) to get a clean type is a good trade; a `u64` smuggled
+  around to avoid one is not.
+- **Type the pointers.** Never thread a bare address (`u64`, `usize`) as if it were a
+  pointer. A pointer is `SPtr<T>` / `SMutPtr<T>` (`*const T` / `*mut T` at runtime),
+  and an opaque host struct handed to an extern is `SRef` / `SRefMut<Opaque<T>>`
+  (`&T` / `&mut T`). Host addresses you bake into a kernel are real Rust pointers
+  (`*const T` / `*mut T`) at stage 0, not integers. If you find yourself writing
+  `u64` for something that is a pointer, rust-lms has a type for it — use it. Anyone
+  can throw integers around and pretend they're pointers; the whole point of this
+  project is that the compiler you build keeps its types.
+- **`sql-gen` is a worked example, not just an app.** It must be both a good SQL
+  engine *and* a demonstration of how rust-lms lets a compiler author track types
+  end-to-end. Held to the same bar as the library: no `u64`-as-pointer, real trait
+  bounds, clean enums over tag-and-cast.
+
 ## Workspace layout
 
 - `rust-lms/` — the library and Cranelift backend (the heart of the project).
 - `rust-lms-derive/` — `#[derive(StagedType)]` and `#[extern_fn]` proc macros.
-- `arrow-lms/` — staged Apache Arrow interop: `#[repr(C)]` column descriptors
-  (`FfiArray`) extracted from a `RecordBatch`, exposed to staged code as iterator
-  sources (`StagedArrowArrayI32`). The data layer the SQL executor will codegen
-  against.
-- `sql-gen/` — early/stub crate for SQL → staged-code generation.
+- `arrow-lms/` — staged Apache Arrow interop: lifetime-free `#[repr(C)]` column
+  descriptors (`FfiArray`) extracted from a `RecordBatch`, plus the host-side output
+  side (`PreparedOutput`, `StringViewBuilder` sinks). The data layer the SQL engine
+  codegens against.
+- `sql-gen/` — the SQL engine: datafusion parses SQL → we lower its `LogicalPlan`
+  into a push-based `Operator` tree → `codegen.rs` emits one rust-lms kernel per
+  query (`exec_jit`). Supports `Scan`/`Filter`/`Project`, scalar + `GROUP BY`
+  aggregates (`count`/`sum`/`min`/`max`/`avg`, with nulls), and `Utf8View` strings.
+  Also the flagship example of typed compiler construction on rust-lms (see
+  principles above). Design docs: `docs/group_by.md`, `docs/codegen_issues.md`.
 
 ## Build & test
 
@@ -94,6 +120,11 @@ RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms <name> -- --nocapture
 - Slice/pointer ops are **unchecked** (no bounds checks); safety is the staged
   author's contract, surfaced through Rust types (mutability, lifetimes) wherever
   possible.
+- Baked host pointers must stay typed. When a kernel holds a host buffer whose owner
+  outlives the run (the string pool, a GROUP BY's state), bake it as a real
+  `*const T` / `*mut T`, not a `u64`. rust-lms provides the reinterpret from a typed
+  host pointer to a staged `SPtr`/`SMutPtr`/`SRef`/`SRefMut<Opaque<T>>` — the address
+  is the only thing that reaches Cranelift, but the Rust type is checked at stage 0.
 - `Compiled` owns the JIT module's executable memory — it must outlive any `as_fn`
   pointer.
 

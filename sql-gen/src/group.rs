@@ -44,14 +44,14 @@ impl GroupState {
         }
     }
 
-    /// Address of the group hash table (baked; handed to the `intern` extern).
-    pub fn table_ptr(&mut self) -> u64 {
-        &mut self.table as *mut GroupTable as u64
+    /// The group hash table (baked; handed to the `intern`/`len` externs).
+    pub fn table_ptr(&mut self) -> *mut GroupTable {
+        &mut self.table
     }
 
-    /// Base address of each slot buffer (baked; the kernel indexes by `gidx`).
-    pub fn base_ptrs(&self) -> Vec<u64> {
-        self.buffers.iter().map(|b| b.as_ptr() as u64).collect()
+    /// Base of each slot buffer (baked; the kernel indexes by `gidx`).
+    pub fn base_ptrs(&mut self) -> Vec<*mut i64> {
+        self.buffers.iter_mut().map(|b| b.as_mut_ptr()).collect()
     }
 }
 

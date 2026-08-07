@@ -19,8 +19,8 @@ use crate::group::{GroupInternExtern, GroupLenExtern};
 /// A null row reads as an empty inline view — safe, never out of bounds.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn str_ptr(arr: &StringViewArray, row: usize) -> u64 {
-    arr.value(row).as_ptr() as u64
+pub extern "C" fn str_ptr(arr: &StringViewArray, row: usize) -> *const u8 {
+    arr.value(row).as_ptr()
 }
 
 /// Full byte-equality of two resolved strings — the uniform fallback for every

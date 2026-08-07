@@ -7,6 +7,7 @@
 //! columns/exprs carry **no** validity `Var` at all (zero overhead), nullable
 //! ones carry an `is_valid` bit that propagates through expression evaluation.
 
+use arrow::array::StringViewArray;
 use rust_lms::prelude::*;
 
 /// Static-nullability tag. `NonNull` emits no validity IR; `Nullable` carries a
@@ -45,11 +46,11 @@ pub enum StrVal {
     Column {
         lo: Var<u64>,
         hi: Var<u64>,
-        array: Var<u64>,
+        array: Var<SRef<'static, Opaque<StringViewArray>>>,
         row: Var<u64>,
     },
     Bytes {
-        ptr: Var<u64>,
+        ptr: Var<SPtr<u8>>,
         len: Var<u64>,
         view: Option<(u64, u64)>,
     },

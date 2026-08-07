@@ -12,7 +12,7 @@
 //! - `SRefMut<T>` = `SRefMut<T, RustRef>` (default)
 //! - `SMutPtr<T>` = `SRefMut<T, RustPtr>`
 
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::staged::{CompilationContext, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
@@ -425,64 +425,56 @@ where
 }
 
 // =============================================================================
-// RawPtr / RawMutPtr: reinterpret a staged u64 address as a raw pointer
+// ConstPtr: bake a typed host pointer as a staged pointer/reference
 // =============================================================================
 
-/// Reinterpret a staged `u64` address as a raw pointer (`SPtr<T>` or `SMutPtr<T>`).
-/// Emits no code — a pointer *is* the address value — mirroring [`crate::opaque`]'s
-/// `opaque_ref`. Use it to hand a **baked host-buffer address** (e.g. a group-by
-/// accumulator array whose owner outlives the run) to `load`/`store`/`ptr_offset`.
-pub struct RawPtr<E, R> {
-    addr: E,
-    _r: PhantomData<R>,
+/// A staged pointer/reference whose value is a **baked host address** — a
+/// compile-time constant known at stage 0. The pointer's Rust type (`*const T` /
+/// `*mut T`) is checked when you construct it; only the address reaches Cranelift.
+///
+/// Use it to hand a kernel a host buffer that outlives the run (a GROUP BY's
+/// accumulator arrays, the string pool). This is how a compiler author keeps
+/// pointers *typed* instead of smuggling `u64`s around — see [`const_ptr`],
+/// [`const_mut_ptr`], and (for opaque host structs) `opaque` constructors.
+pub struct ConstPtr<S> {
+    addr: usize,
+    _s: PhantomData<S>,
 }
 
-impl<E: Clone, R> Clone for RawPtr<E, R> {
+impl<S> Clone for ConstPtr<S> {
     fn clone(&self) -> Self {
-        Self {
-            addr: self.addr.clone(),
-            _r: PhantomData,
+        *self
+    }
+}
+impl<S> Copy for ConstPtr<S> {}
+
+impl<S: StagedType> Staged for ConstPtr<S> {
+    type Out = S;
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        ctx.builder.ins().iconst(types::I64, self.addr as i64)
+    }
+}
+
+impl<S> ConstPtr<S> {
+    /// Bake `addr` (a host pointer's address) as this staged pointer type. Prefer
+    /// the typed [`const_ptr`]/[`const_mut_ptr`] constructors, which take a real
+    /// `*const T`/`*mut T` and so check the pointee type.
+    pub fn from_addr(addr: usize) -> Self {
+        ConstPtr {
+            addr,
+            _s: PhantomData,
         }
     }
 }
-impl<E: Copy, R> Copy for RawPtr<E, R> {}
 
-impl<E, T> Staged for RawPtr<E, SPtr<T>>
-where
-    E: Staged<Out = u64>,
-    T: StagedType,
-{
-    type Out = SPtr<T>;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        self.addr.codegen(ctx)
-    }
+/// Bake a host `*const T::RuntimeValue` as a staged `SPtr<T>` (`*const T`).
+pub fn const_ptr<T: StagedType>(p: *const T::RuntimeValue) -> ConstPtr<SPtr<T>> {
+    ConstPtr::from_addr(p as usize)
 }
 
-impl<E, T> Staged for RawPtr<E, SMutPtr<T>>
-where
-    E: Staged<Out = u64>,
-    T: StagedType,
-{
-    type Out = SMutPtr<T>;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        self.addr.codegen(ctx)
-    }
-}
-
-/// Reinterpret a staged address as `*const T` ([`SPtr`]).
-pub fn raw_ptr<T: StagedType, E: IntoStaged<u64>>(addr: E) -> RawPtr<E::Staged, SPtr<T>> {
-    RawPtr {
-        addr: addr.into_staged(),
-        _r: PhantomData,
-    }
-}
-
-/// Reinterpret a staged address as `*mut T` ([`SMutPtr`]).
-pub fn raw_mut_ptr<T: StagedType, E: IntoStaged<u64>>(addr: E) -> RawPtr<E::Staged, SMutPtr<T>> {
-    RawPtr {
-        addr: addr.into_staged(),
-        _r: PhantomData,
-    }
+/// Bake a host `*mut T::RuntimeValue` as a staged `SMutPtr<T>` (`*mut T`).
+pub fn const_mut_ptr<T: StagedType>(p: *mut T::RuntimeValue) -> ConstPtr<SMutPtr<T>> {
+    ConstPtr::from_addr(p as usize)
 }
 
 #[cfg(test)]

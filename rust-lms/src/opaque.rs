@@ -23,7 +23,7 @@
 
 use std::marker::PhantomData;
 
-use crate::refer::{SRef, SRefMut};
+use crate::refer::{ConstPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, Value};
@@ -120,4 +120,16 @@ pub fn opaque_ref_mut<T: 'static, E: IntoStaged<u64>>(addr: E) -> OpaqueRefMut<E
         addr: addr.into_staged(),
         _t: PhantomData,
     }
+}
+
+/// Bake a host `*const T` as a staged opaque `&T` (`SRef<Opaque<T>>`) — the typed
+/// counterpart of [`opaque_ref`] for a **baked** host struct (address known at
+/// stage 0, owner outlives the run), e.g. a GROUP BY table handed to an extern.
+pub fn const_opaque<T: 'static>(p: *const T) -> ConstPtr<SRef<'static, Opaque<T>>> {
+    ConstPtr::from_addr(p as usize)
+}
+
+/// Bake a host `*mut T` as a staged opaque `&mut T` (`SRefMut<Opaque<T>>`).
+pub fn const_opaque_mut<T: 'static>(p: *mut T) -> ConstPtr<SRefMut<'static, Opaque<T>>> {
+    ConstPtr::from_addr(p as usize)
 }

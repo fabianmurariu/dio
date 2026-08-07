@@ -10,7 +10,7 @@
 //! through evaluation; non-nullable ones emit no validity IR.
 
 use std::collections::HashMap;
-use std::sync::Arc;
+use std::rc::Rc;
 
 use arrow::array::{StringViewArray, StringViewBuilder};
 use arrow::datatypes::{DataType, Field, SchemaRef};
@@ -28,27 +28,30 @@ use crate::value::{ColVal, Nullness, Row, StrVal};
 
 /// Codegen context threaded through the walk: the runtime extern handles plus the
 /// build-time-interned string literals (value → stable `BytesPool` pointer). The
-/// `Arc` is because the push-model `yld` closures are `'static` and can't borrow.
+/// `Rc` is because the push-model `yld` closures are `'static` and can't borrow;
+/// codegen is single-threaded, so `Rc` (not `Arc`) is the honest sharing type.
 #[derive(Clone)]
-pub struct Cx {
+pub struct CodegenCtx {
     pub rt: Runtime,
-    pub lits: Arc<HashMap<String, u64>>,
+    pub lits: Rc<HashMap<String, *const u8>>,
     /// Baked pointers to the GROUP BY's host-side state, when the plan has one.
     /// Single group-by for now; a `Vec` indexed by plan order generalizes to CTEs.
-    pub group: Option<Arc<GroupHandle>>,
+    pub group: Option<Rc<GroupHandle>>,
 }
 
-/// Baked addresses of a GROUP BY's Rust-hosted state (see `group::GroupState`),
-/// captured before compilation and constant-folded into the kernel.
+/// Typed host pointers into a GROUP BY's Rust-hosted state (see `group::GroupState`),
+/// captured before compilation and baked (as constants) into the kernel. Real
+/// pointers, not `u64`s — the pointee type is checked at stage 0.
 pub struct GroupHandle {
-    /// Address of the group hash table (for the `intern` extern).
-    pub table_ptr: u64,
-    /// Base address of each slot buffer (indexed by group).
-    pub bases: Vec<u64>,
+    /// The group hash table (handed to the `intern`/`len` externs).
+    pub table: *mut GroupTable,
+    /// Each slot buffer's base (an `i64` cell array; `avg`'s `f64` sum reuses the
+    /// cell bytes). Indexed by group.
+    pub bases: Vec<*mut i64>,
 }
 
 /// Collect the string-literal values in `op`'s expressions, so `exec_jit` can
-/// intern each into the `BytesPool` before codegen (see [`Cx::lits`]).
+/// intern each into the `BytesPool` before codegen (see [`CodegenCtx::lits`]).
 pub fn collect_str_literals<'a>(op: &'a Operator, out: &mut Vec<&'a str>) {
     fn expr_lits<'b>(e: &'b Expr, out: &mut Vec<&'b str>) {
         match e {
@@ -164,7 +167,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
     out: O,
     plan: &Operator,
     out_schema: &SchemaRef,
-    cx: &Cx,
+    cx: &CodegenCtx,
 ) -> Var<u64> {
     let n = ctx.var(0u64);
     let fields = out_schema.fields().clone();
@@ -184,7 +187,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
     n
 }
 
-fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &Cx, yld: Yld) {
+fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCtx, yld: Yld) {
     match op {
         Operator::Scan { schema } => gen_scan(ctx, batch, schema.clone(), yld),
 
@@ -277,7 +280,7 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &Cx, yld: 
 /// GROUP BY as a push operator: fold each input row into the Rust-hosted group
 /// state (baked buffers indexed by `gidx`), then emit one *manifested* Row per
 /// group downstream. Keeps the hot fold loop in the JIT and lets the projection /
-/// filter above it run in the same kernel (see [`Cx::group`]). `avg` divides at
+/// filter above it run in the same kernel (see [`CodegenCtx::group`]). `avg` divides at
 /// emit; nullability rides in the emitted `ColVal` (so `write_col` handles nulls).
 fn gen_grouped<B: BatchSource>(
     ctx: &mut Ctx,
@@ -285,7 +288,7 @@ fn gen_grouped<B: BatchSource>(
     group_exprs: &[Expr],
     aggs: &[Expr],
     input: &Operator,
-    cx: &Cx,
+    cx: &CodegenCtx,
     yld: Yld,
 ) {
     assert_eq!(
@@ -299,7 +302,7 @@ fn gen_grouped<B: BatchSource>(
         .expect("grouped aggregate without a baked GroupState");
     let layout = group_layout(aggs);
     let key_base = handle.bases[layout.key];
-    let table_ptr = handle.table_ptr;
+    let table = handle.table;
     // Resolve each aggregate's slot buffers to their baked base addresses.
     let resolved: Vec<ResolvedAgg> = layout
         .aggs
@@ -331,7 +334,7 @@ fn gen_grouped<B: BatchSource>(
             let key = to_i64(ctx, key_cv);
             let gidx = ctx.bind(call_extern2(
                 cx_c.rt.group_intern,
-                opaque_ref_mut::<GroupTable, _>(table_ptr),
+                const_opaque_mut::<GroupTable>(table),
                 key,
             ));
             acc_set_i64(ctx, key_base, gidx, key);
@@ -344,7 +347,7 @@ fn gen_grouped<B: BatchSource>(
     // Emit: one manifested Row per group, pushed downstream in the same kernel.
     let num_groups = ctx.bind(call_extern1(
         cx.rt.group_len,
-        opaque_ref::<GroupTable, _>(table_ptr),
+        const_opaque::<GroupTable>(table),
     ));
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
@@ -425,26 +428,31 @@ pub fn group_slot_inits(aggs: &[Expr]) -> Vec<i64> {
         .collect()
 }
 
-// --- baked-buffer accessors: read/write `base[gidx]` via a raw pointer ---
+// --- baked-buffer accessors: read/write `base[gidx]` via a typed const pointer.
+// The slot is an `i64` cell; `f64` accessors reinterpret the same 8 bytes (used by
+// `avg`'s running sum). ---
 
-fn acc_get_i64(ctx: &mut Ctx, base: u64, gidx: Var<u64>) -> Var<i64> {
+fn acc_get_i64(ctx: &mut Ctx, base: *mut i64, gidx: Var<u64>) -> Var<i64> {
     let i = ctx.bind(int_cast::<i64, u64, _>(gidx));
-    ctx.bind(array_index(raw_ptr::<i64, _>(base), i))
+    ctx.bind(array_index(const_ptr::<i64>(base), i))
 }
 
-fn acc_set_i64(ctx: &mut Ctx, base: u64, gidx: Var<u64>, v: Var<i64>) {
+fn acc_set_i64(ctx: &mut Ctx, base: *mut i64, gidx: Var<u64>, v: Var<i64>) {
     let i = ctx.bind(int_cast::<i64, u64, _>(gidx));
-    ctx.emit(store(ptr_offset_mut(raw_mut_ptr::<i64, _>(base), i), v));
+    ctx.emit(store(ptr_offset_mut(const_mut_ptr::<i64>(base), i), v));
 }
 
-fn acc_get_f64(ctx: &mut Ctx, base: u64, gidx: Var<u64>) -> Var<f64> {
+fn acc_get_f64(ctx: &mut Ctx, base: *mut i64, gidx: Var<u64>) -> Var<f64> {
     let i = ctx.bind(int_cast::<i64, u64, _>(gidx));
-    ctx.bind(array_index(raw_ptr::<f64, _>(base), i))
+    ctx.bind(array_index(const_ptr::<f64>(base as *const f64), i))
 }
 
-fn acc_set_f64(ctx: &mut Ctx, base: u64, gidx: Var<u64>, v: Var<f64>) {
+fn acc_set_f64(ctx: &mut Ctx, base: *mut i64, gidx: Var<u64>, v: Var<f64>) {
     let i = ctx.bind(int_cast::<i64, u64, _>(gidx));
-    ctx.emit(store(ptr_offset_mut(raw_mut_ptr::<f64, _>(base), i), v));
+    ctx.emit(store(
+        ptr_offset_mut(const_mut_ptr::<f64>(base as *mut f64), i),
+        v,
+    ));
 }
 
 /// A parsed grouped aggregate (kind + optional argument).
@@ -484,8 +492,8 @@ impl GroupedAgg {
 #[derive(Clone)]
 struct ResolvedAgg {
     kind: AggKind,
-    value_base: u64,
-    count_base: Option<u64>,
+    value_base: *mut i64,
+    count_base: Option<*mut i64>,
     arg: Option<Expr>,
 }
 
@@ -496,7 +504,7 @@ fn agg_arg_value(
     ctx: &mut Ctx,
     row: &Row,
     schema: &SchemaRef,
-    cx: &Cx,
+    cx: &CodegenCtx,
 ) -> (Option<ColVal>, Var<bool>) {
     match arg {
         None => (None, ctx.bind(Const::<bool>::new(true))),
@@ -515,7 +523,7 @@ impl ResolvedAgg {
     /// Fold this row into the group's slot(s) at `gidx`. Only non-null inputs
     /// contribute; `sum`/`min`/`max`/`avg` also bump a non-null count (used as the
     /// "seen" bit and, for `avg`, the divisor).
-    fn fold(&self, ctx: &mut Ctx, gidx: Var<u64>, row: &Row, schema: &SchemaRef, cx: &Cx) {
+    fn fold(&self, ctx: &mut Ctx, gidx: Var<u64>, row: &Row, schema: &SchemaRef, cx: &CodegenCtx) {
         let (val_cv, valid) = agg_arg_value(&self.arg, ctx, row, schema, cx);
         let value_base = self.value_base;
         let count_base = self.count_base;
@@ -594,7 +602,7 @@ impl ResolvedAgg {
 }
 
 /// `count_base[gidx] += 1` (the non-null count for a nullable aggregate).
-fn bump_count(ctx: &mut Ctx, count_base: Option<u64>, gidx: Var<u64>) {
+fn bump_count(ctx: &mut Ctx, count_base: Option<*mut i64>, gidx: Var<u64>) {
     let base = count_base.expect("nullable aggregate has a count slot");
     let cur = acc_get_i64(ctx, base, gidx);
     let next = ctx.bind(add(cur, 1i64));
@@ -659,11 +667,11 @@ fn gen_read_str<B: BatchSource>(
     let base = ctx.bind(mul(i, 2u64));
     let lo = ctx.bind(views.value_unchecked(base));
     let hi = ctx.bind(views.value_unchecked(add(base, 1u64)));
-    // The opaque pointer back to the arrow array, for the extern fallback.
-    let array = ctx.bind(load_field(
+    // The typed opaque reference back to the arrow array, for the extern fallback.
+    let array = ctx.bind(opaque_ref::<StringViewArray, _>(load_field(
         batch.get_ref_unchecked(col as u64),
         FfiArrayType::array(),
-    ));
+    )));
     let null = read_nullness(ctx, views, field.is_nullable(), i);
     ColVal::Str(
         StrVal::Column {
@@ -704,7 +712,7 @@ fn write_col<O: OutSink>(
     field: &Field,
     n: Var<u64>,
     cv: ColVal,
-    cx: &Cx,
+    cx: &CodegenCtx,
 ) {
     if matches!(field.data_type(), DataType::Utf8View) {
         return write_str_col(ctx, out, c, cv, cx);
@@ -722,7 +730,7 @@ fn write_col<O: OutSink>(
 /// the value is `resolve`d to bytes and appended. A null row appends a null.
 /// Appends happen once per emitted row, in order, so the builder ends
 /// length-aligned with the fixed-width columns.
-fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, cx: &Cx) {
+fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, cx: &CodegenCtx) {
     let sv = match cv {
         ColVal::Str(sv, _) => sv,
         other => panic!(
@@ -782,7 +790,13 @@ fn write_null<P, M>(
 // Expression evaluation
 // =============================================================================
 
-fn gen_predicate(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, cx: &Cx) -> Var<bool> {
+fn gen_predicate(
+    ctx: &mut Ctx,
+    e: &Expr,
+    schema: &SchemaRef,
+    row: &Row,
+    cx: &CodegenCtx,
+) -> Var<bool> {
     let cv = gen_expr(ctx, e, schema, row, cx);
     let cond = as_bool(cv);
     // SQL: a NULL predicate does not pass the filter -> keep iff (valid && cond).
@@ -792,7 +806,7 @@ fn gen_predicate(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, cx: &Cx
     }
 }
 
-fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, cx: &Cx) -> ColVal {
+fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, cx: &CodegenCtx) -> ColVal {
     match e {
         Expr::Column(c) => {
             let idx = schema
@@ -812,7 +826,7 @@ fn gen_scalar_fn(
     f: &ScalarFunction,
     schema: &SchemaRef,
     row: &Row,
-    cx: &Cx,
+    cx: &CodegenCtx,
 ) -> ColVal {
     match f.func.name().to_ascii_lowercase().as_str() {
         // Octet length: the byte length, from the view (`lo & 0xFFFF_FFFF`) for a
@@ -835,15 +849,15 @@ fn gen_scalar_fn(
 /// container produces. A `Column` reads its byte pointer via the `str_ptr` extern
 /// (its length comes free from the view, `lo & 0xFFFF_FFFF`); `Bytes` (interned
 /// literal or produced string) is already resolved. Takes the extern handle (not
-/// `&Cx`) so it can be called from `'static` branch closures.
-fn resolve(ctx: &mut Ctx, sv: StrVal, str_ptr: ExternRef<StrPtrExtern>) -> (Var<u64>, Var<u64>) {
+/// `&CodegenCtx`) so it can be called from `'static` branch closures.
+fn resolve(
+    ctx: &mut Ctx,
+    sv: StrVal,
+    str_ptr: ExternRef<StrPtrExtern>,
+) -> (Var<SPtr<u8>>, Var<u64>) {
     match sv {
         StrVal::Column { lo, array, row, .. } => {
-            let ptr = ctx.bind(call_extern2(
-                str_ptr,
-                opaque_ref::<StringViewArray, _>(array),
-                row,
-            ));
+            let ptr = ctx.bind(call_extern2(str_ptr, array, row));
             let len = ctx.bind(bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64));
             (ptr, len)
         }
@@ -877,7 +891,7 @@ fn view_of(ctx: &mut Ctx, sv: StrVal) -> Option<(Var<u64>, Var<u64>)> {
 /// This is correct across containers: a column row and a literal share the same
 /// `lo`/`hi` encoding, and step 3 never trusts the array-relative `hi`. Only when
 /// an operand has no view (a produced string) do we resolve outright.
-fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &Cx) -> Var<bool> {
+fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Var<bool> {
     let str_ptr = cx.rt.str_ptr;
     let bytes_eq = cx.rt.bytes_eq;
     match (view_of(ctx, l), view_of(ctx, r)) {
@@ -924,7 +938,7 @@ fn is_str(cv: ColVal) -> bool {
 }
 
 /// Equality: string operands compare by view/bytes, numeric operands by value.
-fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal, cx: &Cx) -> Var<bool> {
+fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal, cx: &CodegenCtx) -> Var<bool> {
     match (l, r) {
         (ColVal::Str(a, _), ColVal::Str(b, _)) => str_eq(ctx, a, b, cx),
         _ if is_str(l) || is_str(r) => panic!("string compared with non-string"),
@@ -957,7 +971,7 @@ fn literal_view_halves(s: &str) -> (u64, u64) {
     (lo, hi)
 }
 
-fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue, cx: &Cx) -> ColVal {
+fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue, cx: &CodegenCtx) -> ColVal {
     match sv {
         ScalarValue::Int32(Some(v)) => ColVal::I32(ctx.var(*v), Nullness::NonNull),
         ScalarValue::Int64(Some(v)) => ColVal::I64(ctx.var(*v), Nullness::NonNull),
@@ -973,17 +987,17 @@ fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue, cx: &Cx) -> ColVal {
 }
 
 /// A string literal as resolved [`StrVal::Bytes`]: `ptr` is the literal's stable
-/// address in the `BytesPool` (interned once at build time — see [`Cx::lits`]),
+/// address in the `BytesPool` (interned once at build time — see [`CodegenCtx::lits`]),
 /// and `view` carries the view halves (for *any* length) so `str_eq`'s length +
 /// prefix fast-reject and inline compare apply.
-fn gen_str_literal(ctx: &mut Ctx, s: &str, cx: &Cx) -> ColVal {
+fn gen_str_literal(ctx: &mut Ctx, s: &str, cx: &CodegenCtx) -> ColVal {
     let ptr = *cx
         .lits
         .get(s)
         .unwrap_or_else(|| panic!("literal not interned: {s:?}"));
     ColVal::Str(
         StrVal::Bytes {
-            ptr: ctx.var(ptr),
+            ptr: ctx.bind(const_ptr::<u8>(ptr)),
             len: ctx.var(s.len() as u64),
             view: Some(literal_view_halves(s)),
         },
@@ -991,7 +1005,13 @@ fn gen_str_literal(ctx: &mut Ctx, s: &str, cx: &Cx) -> ColVal {
     )
 }
 
-fn gen_binary(ctx: &mut Ctx, be: &BinaryExpr, schema: &SchemaRef, row: &Row, cx: &Cx) -> ColVal {
+fn gen_binary(
+    ctx: &mut Ctx,
+    be: &BinaryExpr,
+    schema: &SchemaRef,
+    row: &Row,
+    cx: &CodegenCtx,
+) -> ColVal {
     let l = gen_expr(ctx, &be.left, schema, row, cx);
     let r = gen_expr(ctx, &be.right, schema, row, cx);
     let null = combine_null(ctx, l.nullness(), r.nullness());
@@ -1230,7 +1250,7 @@ impl Agg {
         }
     }
 
-    fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef, cx: &Cx) {
+    fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef, cx: &CodegenCtx) {
         let arg = self.arg.as_ref().map(|e| gen_expr(ctx, e, schema, row, cx));
         // The row contributes iff its argument is non-null (always, for count(*)).
         let row_valid = match arg.map(|cv| cv.nullness()) {
