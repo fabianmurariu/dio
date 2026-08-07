@@ -168,9 +168,9 @@ pub mod prelude {
         FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,
     };
     pub use crate::refer::{
-        array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut, store,
-        store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset, PtrOffsetMut, RustPtr, RustRef,
-        SMutPtr, SPtr, SRef, SRefMut, Store,
+        array_index, load, load_mut, load_ref, load_ref_mut, ptr_offset, ptr_offset_mut,
+        raw_mut_ptr, raw_ptr, store, store_ref, ArrayIndex, LoadMutRef, LoadRef, PtrOffset,
+        PtrOffsetMut, RawPtr, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
         AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,

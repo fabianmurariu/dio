@@ -12,7 +12,7 @@
 //! - `SRefMut<T>` = `SRefMut<T, RustRef>` (default)
 //! - `SMutPtr<T>` = `SRefMut<T, RustPtr>`
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
@@ -421,6 +421,67 @@ where
         ptr,
         index,
         _marker: PhantomData,
+    }
+}
+
+// =============================================================================
+// RawPtr / RawMutPtr: reinterpret a staged u64 address as a raw pointer
+// =============================================================================
+
+/// Reinterpret a staged `u64` address as a raw pointer (`SPtr<T>` or `SMutPtr<T>`).
+/// Emits no code — a pointer *is* the address value — mirroring [`crate::opaque`]'s
+/// `opaque_ref`. Use it to hand a **baked host-buffer address** (e.g. a group-by
+/// accumulator array whose owner outlives the run) to `load`/`store`/`ptr_offset`.
+pub struct RawPtr<E, R> {
+    addr: E,
+    _r: PhantomData<R>,
+}
+
+impl<E: Clone, R> Clone for RawPtr<E, R> {
+    fn clone(&self) -> Self {
+        Self {
+            addr: self.addr.clone(),
+            _r: PhantomData,
+        }
+    }
+}
+impl<E: Copy, R> Copy for RawPtr<E, R> {}
+
+impl<E, T> Staged for RawPtr<E, SPtr<T>>
+where
+    E: Staged<Out = u64>,
+    T: StagedType,
+{
+    type Out = SPtr<T>;
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        self.addr.codegen(ctx)
+    }
+}
+
+impl<E, T> Staged for RawPtr<E, SMutPtr<T>>
+where
+    E: Staged<Out = u64>,
+    T: StagedType,
+{
+    type Out = SMutPtr<T>;
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        self.addr.codegen(ctx)
+    }
+}
+
+/// Reinterpret a staged address as `*const T` ([`SPtr`]).
+pub fn raw_ptr<T: StagedType, E: IntoStaged<u64>>(addr: E) -> RawPtr<E::Staged, SPtr<T>> {
+    RawPtr {
+        addr: addr.into_staged(),
+        _r: PhantomData,
+    }
+}
+
+/// Reinterpret a staged address as `*mut T` ([`SMutPtr`]).
+pub fn raw_mut_ptr<T: StagedType, E: IntoStaged<u64>>(addr: E) -> RawPtr<E::Staged, SMutPtr<T>> {
+    RawPtr {
+        addr: addr.into_staged(),
+        _r: PhantomData,
     }
 }
 

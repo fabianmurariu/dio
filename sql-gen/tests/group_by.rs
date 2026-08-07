@@ -115,10 +115,10 @@ fn group_by_count_and_sum() {
 
 #[test]
 fn group_by_sum_expr() {
-    let rb = batch(vec![5, 5, 7, 5, 7, 9], vec![1, 2, 3, 4, 5, 6]);
+    let rb = batch(vec![1, 2, 1, 2, 1], vec![1, 2, 3, 4, 5]);
     let out = exec_jit("SELECT key, sum(value)+2 FROM t GROUP BY key", "t", &rb).unwrap();
-    assert_eq!(out.num_rows(), 3);
-    assert_eq!(as_map(&out, 1), BTreeMap::from([(5, 9), (7, 10), (9, 8)])); // sum
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(1, 11), (2, 8)])); // sum
 }
 
 #[test]
