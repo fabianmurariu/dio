@@ -273,6 +273,7 @@ pub fn gen_grouped<B: BatchSource, O: OutSink>(
     group_exprs: &[Expr],
     aggs: &[Expr],
     input: &Operator,
+    out_schema: &SchemaRef,
     cx: &Cx,
 ) -> Var<u64> {
     assert_eq!(
@@ -282,6 +283,26 @@ pub fn gen_grouped<B: BatchSource, O: OutSink>(
     );
     let group_expr = group_exprs[0].clone();
     let parsed: Vec<GroupedAgg> = aggs.iter().map(GroupedAgg::parse).collect();
+    // Whether each aggregate's output column carries a validity bitmap (so the
+    // fold marks a group valid on its first non-null input).
+    let nullable: Vec<bool> = (0..parsed.len())
+        .map(|j| out_schema.field(1 + j).is_nullable())
+        .collect();
+    // `avg` needs a per-group count alongside its running sum; give each one a
+    // hidden `i64` count column appended after the visible ones (see `exec_grouped`).
+    let mut avg_count: Vec<Option<usize>> = vec![None; parsed.len()];
+    let mut next_hidden = 1 + parsed.len();
+    for (j, a) in parsed.iter().enumerate() {
+        if a.kind == AggKind::Avg {
+            avg_count[j] = Some(next_hidden);
+            next_hidden += 1;
+        }
+    }
+    // (avg sum column, count column) pairs, for the finalize divide.
+    let avg_finalize: Vec<(usize, usize)> = (0..parsed.len())
+        .filter_map(|j| avg_count[j].map(|cc| (1 + j, cc)))
+        .collect();
+
     let input_schema = input.output_schema();
     let cx_c = cx.clone();
 
@@ -300,12 +321,45 @@ pub fn gen_grouped<B: BatchSource, O: OutSink>(
             out.column_mut::<i64>(0).set(ctx, gidx, key);
             // Fold each aggregate into its column at `gidx`.
             for (j, agg) in parsed.iter().enumerate() {
-                agg.fold(ctx, out, 1 + j, gidx, &row, &input_schema, &cx_c);
+                agg.fold(
+                    ctx,
+                    out,
+                    1 + j,
+                    nullable[j],
+                    avg_count[j],
+                    gidx,
+                    &row,
+                    &input_schema,
+                    &cx_c,
+                );
             }
         }),
     );
 
-    ctx.bind(call_extern1(cx.rt.group_len, table))
+    let num_groups = ctx.bind(call_extern1(cx.rt.group_len, table));
+
+    // Finalize `avg`: divide each group's running sum by its count (valid iff the
+    // count is > 0, i.e. the group had a non-null input; otherwise it stays null).
+    if !avg_finalize.is_empty() {
+        let g = ctx.var(0u64);
+        ctx.while_loop(lt(g, num_groups), move |ctx| {
+            for &(sum_col, count_col) in &avg_finalize {
+                let count = out.column_mut::<i64>(count_col).get(ctx, g);
+                let cond = ctx.bind(gt(count, 0i64));
+                ctx.if_then(cond, move |ctx| {
+                    let sview = out.column_mut::<f64>(sum_col);
+                    let sum = sview.get(ctx, g);
+                    let cf = ctx.bind(int_to_float::<f64, i64, _>(count));
+                    let avg = ctx.bind(div(sum, cf));
+                    sview.set(ctx, g, avg);
+                    sview.validity_mut().set_valid(ctx, g);
+                });
+            }
+            ctx.store(g, add(g, 1u64));
+        });
+    }
+
+    num_groups
 }
 
 /// A parsed grouped aggregate (kind + optional argument), folded per row into an
@@ -334,61 +388,124 @@ impl GroupedAgg {
             "sum" => AggKind::Sum,
             "min" => AggKind::Min,
             "max" => AggKind::Max,
+            "avg" => AggKind::Avg,
             other => panic!("grouped aggregate not yet supported: {other}"),
         };
         GroupedAgg { kind, arg }
     }
 
-    /// Fold this row's contribution into output column `col` at group `gidx`.
-    /// (Non-null inputs for now, so validity is ignored.)
+    /// The aggregate's input value (`None` for `count(*)`) and its per-row validity
+    /// bit (`true` when there's no argument or the argument is non-null).
+    fn arg_value(
+        &self,
+        ctx: &mut Ctx,
+        row: &Row,
+        schema: &SchemaRef,
+        cx: &Cx,
+    ) -> (Option<ColVal>, Var<bool>) {
+        match &self.arg {
+            None => (None, ctx.bind(Const::<bool>::new(true))),
+            Some(e) => {
+                let cv = gen_expr(ctx, e, schema, row, cx);
+                let valid = match cv.nullness() {
+                    Nullness::NonNull => ctx.bind(Const::<bool>::new(true)),
+                    Nullness::Nullable(b) => b,
+                };
+                (Some(cv), valid)
+            }
+        }
+    }
+
+    /// Fold this row's contribution into output column `col` at group `gidx`. Only
+    /// non-null inputs contribute; for nullable `sum`/`min`/`max` the group is
+    /// marked valid on its first non-null input (columns start all-null), so an
+    /// all-null group stays null. `count` counts non-null rows (or all rows for
+    /// `count(*)`) and is never null. `avg` folds an `f64` running sum into `col`
+    /// and a count into hidden `avg_count` col; the divide happens in the finalize
+    /// pass (see [`gen_grouped`]).
     #[allow(clippy::too_many_arguments)]
     fn fold<O: OutSink>(
         &self,
         ctx: &mut Ctx,
         out: O,
         col: usize,
+        nullable: bool,
+        avg_count: Option<usize>,
         gidx: Var<u64>,
         row: &Row,
         schema: &SchemaRef,
         cx: &Cx,
     ) {
-        let view = out.column_mut::<i64>(col);
+        let (val_cv, valid) = self.arg_value(ctx, row, schema, cx);
         match self.kind {
             AggKind::Count => {
-                let cur = view.get(ctx, gidx);
-                let next = ctx.bind(add(cur, 1i64));
-                view.set(ctx, gidx, next);
+                let view = out.column_mut::<i64>(col);
+                ctx.if_then(valid, move |ctx| {
+                    let cur = view.get(ctx, gidx);
+                    let next = ctx.bind(add(cur, 1i64));
+                    view.set(ctx, gidx, next);
+                });
             }
             AggKind::Sum => {
-                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
-                let v = to_i64(ctx, arg_cv);
-                let cur = view.get(ctx, gidx);
-                let next = ctx.bind(add(cur, v));
-                view.set(ctx, gidx, next);
+                let view = out.column_mut::<i64>(col);
+                let v = to_i64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    if nullable {
+                        view.validity_mut().set_valid(ctx, gidx);
+                    }
+                    let cur = view.get(ctx, gidx);
+                    let next = ctx.bind(add(cur, v));
+                    view.set(ctx, gidx, next);
+                });
             }
             // min/max fold from an identity-initialized column (i64::MAX / MIN).
             AggKind::Min => {
-                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
-                let v = to_i64(ctx, arg_cv);
-                let cur = view.get(ctx, gidx);
-                let next = ctx.bind(min(cur, v));
-                view.set(ctx, gidx, next);
+                let view = out.column_mut::<i64>(col);
+                let v = to_i64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    if nullable {
+                        view.validity_mut().set_valid(ctx, gidx);
+                    }
+                    let cur = view.get(ctx, gidx);
+                    let next = ctx.bind(min(cur, v));
+                    view.set(ctx, gidx, next);
+                });
             }
             AggKind::Max => {
-                let arg_cv = gen_expr(ctx, self.arg.as_ref().unwrap(), schema, row, cx);
-                let v = to_i64(ctx, arg_cv);
-                let cur = view.get(ctx, gidx);
-                let next = ctx.bind(max(cur, v));
-                view.set(ctx, gidx, next);
+                let view = out.column_mut::<i64>(col);
+                let v = to_i64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    if nullable {
+                        view.validity_mut().set_valid(ctx, gidx);
+                    }
+                    let cur = view.get(ctx, gidx);
+                    let next = ctx.bind(max(cur, v));
+                    view.set(ctx, gidx, next);
+                });
             }
-            AggKind::Avg => panic!("grouped avg not yet supported"),
+            // avg: fold (f64 sum, i64 count); the finalize pass divides.
+            AggKind::Avg => {
+                let cc = avg_count.expect("avg needs a hidden count column");
+                let v = to_f64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    let sview = out.column_mut::<f64>(col);
+                    let cur = sview.get(ctx, gidx);
+                    let next = ctx.bind(add(cur, v));
+                    sview.set(ctx, gidx, next);
+
+                    let cview = out.column_mut::<i64>(cc);
+                    let ccur = cview.get(ctx, gidx);
+                    let cnext = ctx.bind(add(ccur, 1i64));
+                    cview.set(ctx, gidx, cnext);
+                });
+            }
         }
     }
 }
 
 /// Identity fill for each aggregate's accumulator column (aligned to output
-/// columns `1..`): `0` for `count`/`sum`, `i64::MAX`/`i64::MIN` for `min`/`max`.
-/// The host pre-fills these before the fold (see [`gen_grouped`]).
+/// columns `1..`): `0` for `count`/`sum`/`avg`, `i64::MAX`/`i64::MIN` for
+/// `min`/`max`. The host pre-fills these before the fold (see [`gen_grouped`]).
 pub fn agg_identities(aggs: &[Expr]) -> Vec<i64> {
     aggs.iter()
         .map(|e| match GroupedAgg::parse(e).kind {
@@ -397,6 +514,15 @@ pub fn agg_identities(aggs: &[Expr]) -> Vec<i64> {
             _ => 0,
         })
         .collect()
+}
+
+/// Number of hidden scratch columns the grouped kernel needs appended after the
+/// visible output columns — one `i64` per-group count per `avg` (its running sum
+/// lives in the visible column; the finalize pass divides).
+pub fn grouped_scratch_cols(aggs: &[Expr]) -> usize {
+    aggs.iter()
+        .filter(|e| GroupedAgg::parse(e).kind == AggKind::Avg)
+        .count()
 }
 
 fn gen_scan<B: BatchSource>(ctx: &mut Ctx, batch: B, schema: SchemaRef, yld: Yld) {
@@ -946,7 +1072,7 @@ fn tag(cv: ColVal) -> &'static str {
 // arm, which emits one result row.
 // =============================================================================
 
-#[derive(Clone, Copy)]
+#[derive(Clone, Copy, PartialEq, Eq)]
 enum AggKind {
     Count,
     Sum,

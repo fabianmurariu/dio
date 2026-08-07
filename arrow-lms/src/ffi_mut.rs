@@ -281,6 +281,16 @@ impl PreparedOutput {
         self.columns[col].fill_i64(value);
     }
 
+    /// Clear column `col`'s validity bitmap to all-null. Grouped `sum`/`min`/`max`
+    /// start all-null and the kernel marks a group valid on its first non-null
+    /// input, so a group with only nulls stays null. No-op for non-nullable
+    /// columns (no bitmap).
+    pub fn clear_validity(&mut self, col: usize) {
+        if let Some(bytes) = &mut self.validity[col] {
+            bytes.iter_mut().for_each(|b| *b = 0);
+        }
+    }
+
     /// Assemble the first `n` rows into a `RecordBatch`.
     pub fn into_record_batch(self, n: usize) -> RecordBatch {
         let arrays = self

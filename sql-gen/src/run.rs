@@ -12,7 +12,9 @@ use datafusion_expr::Expr;
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
-use crate::codegen::{Cx, agg_identities, collect_str_literals, gen_collect, gen_grouped};
+use crate::codegen::{
+    Cx, agg_identities, collect_str_literals, gen_collect, gen_grouped, grouped_scratch_cols,
+};
 use crate::group::GroupTable;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
@@ -129,15 +131,33 @@ fn grouped_plan(op: &Operator) -> Option<Grouped> {
 /// the row count) via the JIT kernel + Rust-hosted [`GroupTable`], then truncate
 /// to the number of groups.
 fn exec_grouped(g: Grouped, op: &Operator, rb: &RecordBatch) -> Result<RecordBatch> {
+    // The group key is stored into a plain output slot; a null key can't be
+    // represented as an `i64`, so reject nullable keys until we track key nulls.
+    if g.schema.field(0).is_nullable() {
+        return Err(DataFusionError::NotImplemented(
+            "nullable GROUP BY key".into(),
+        ));
+    }
+
     let out_schema = normalize_out_schema(&g.schema);
+    let n_visible = out_schema.fields().len();
     let capacity = rb.num_rows(); // groups ≤ rows
 
+    // The kernel writes the visible output columns plus hidden `i64` scratch columns
+    // (one per `avg`, holding its per-group count); we drop them from the result.
+    let n_scratch = grouped_scratch_cols(&g.aggs);
+    let alloc_schema = extend_schema(&out_schema, n_scratch);
+
     let prepared_in = prepare_record_batch(rb).map_err(exec_err)?;
-    let mut out = PreparedOutput::alloc(out_schema.clone(), capacity);
+    let mut out = PreparedOutput::alloc(alloc_schema, capacity);
     // Accumulator columns start at 1 (column 0 is the group key). Pre-fill min/max
-    // with their identity so the fold is correct from the first row.
+    // with their identity, and clear nullable agg columns to all-null so a group is
+    // marked valid only by its first non-null input.
     for (j, id) in agg_identities(&g.aggs).into_iter().enumerate() {
         out.fill_i64(1 + j, id);
+        if out_schema.field(1 + j).is_nullable() {
+            out.clear_validity(1 + j);
+        }
     }
 
     let mut compiler = Compiler::new();
@@ -165,21 +185,52 @@ fn exec_grouped(g: Grouped, op: &Operator, rb: &RecordBatch) -> Result<RecordBat
         ..
     } = g;
 
+    let out_schema_k = out_schema.clone();
     let f = compiler.fun3(
         "group_by",
         move |ctx,
               batch: Var<SRef<Slice<FfiArray>>>,
               table: Var<SRefMut<Opaque<GroupTable>>>,
               sink: Var<SRefMut<Slice<FfiArray>>>| {
-            gen_grouped(ctx, batch, table, sink, &group_exprs, &aggs, &input, &cx)
+            gen_grouped(
+                ctx,
+                batch,
+                table,
+                sink,
+                &group_exprs,
+                &aggs,
+                &input,
+                &out_schema_k,
+                &cx,
+            )
         },
     );
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
     let num_groups = compiled.as_fn()(prepared_in.arrays(), &mut table, out.as_ffi_mut());
-    let result = out.into_record_batch(num_groups as usize);
+    let full = out.into_record_batch(num_groups as usize);
     drop(pool);
-    Ok(result)
+
+    // Drop the hidden scratch columns, keeping the visible output schema.
+    let columns = full.columns()[..n_visible].to_vec();
+    RecordBatch::try_new(out_schema, columns).map_err(exec_err)
+}
+
+/// Append `n_extra` hidden non-null `Int64` scratch columns to `schema` (grouped
+/// `avg` per-group counts).
+fn extend_schema(schema: &SchemaRef, n_extra: usize) -> SchemaRef {
+    if n_extra == 0 {
+        return schema.clone();
+    }
+    let mut fields: Vec<Arc<Field>> = schema.fields().iter().cloned().collect();
+    for i in 0..n_extra {
+        fields.push(Arc::new(Field::new(
+            format!("__avg_count_{i}"),
+            DataType::Int64,
+            false,
+        )));
+    }
+    Arc::new(Schema::new(fields))
 }
 
 fn exec_err(e: impl std::fmt::Debug) -> DataFusionError {
