@@ -445,38 +445,25 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
 
 ## 9. Storage layout & future work (Umbra comparison)
 
-Today's state is **columnar** (struct-of-arrays): the `GroupTable` holds only
-`key → gidx`, and each accumulator slot is its *own* `Vec<i64>` indexed by `gidx`
-(`buffers[slot][gidx]`). This is the *opposite* of how compiling engines like Umbra
-store aggregation state — Umbra packs each group **row-wise**, a contiguous tuple
-`[hash | key(s) | aggregate payload]` in one open-addressing arena (the "Tidy
-Tuples" paper's Tuples layer: *"packing tuples into a memory efficient format"*).
+> **Update (Phase 2, done):** the state is now **row-wise packed**, not columnar.
+> `GroupState.records` is a single `u64`-backed buffer of one `[key | per-agg value
+> (+count)]` record per group; `codegen::group_record` builds a `RecordLayout`
+> (rust-lms-std), fold/emit go through `layout.record(gidx)` + typed `FieldHandle`s.
+> This delivered item (3) below. The full roadmap to Umbra lives in
+> `docs/path_to_umbra_group_by.md`; what remains here is items (1)–(2).
 
-**Does the columnar-vs-row-wise choice matter here?** Less than it looks:
-
-- **No transpose for the projection either way.** The emit loop already reads each
-  slot into a register, finalizes (`avg` divides, cast, nulls), and the `yld` writes
-  it to the output column — a per-*group* scatter of a few registers, not a
-  per-row cost. A row-wise layout would do the identical read-into-register; neither
-  needs a bulk "flip to columns". (We can't memcpy slot→output even though both are
-  columnar: `avg` divides, types differ, nulls, and a projection may compute over
-  the aggregates.)
-- **Where row-wise wins is the *fold* loop** (the hot path, once per input row):
-  a group's cells are contiguous → one cache line per probe, vs. our N separate
-  slot arrays → up to N cache lines per row when a query has several aggregates.
-
-But for us that cache effect is **second-order**, dominated by two first-order
-issues, which are the real future work — in priority order:
+Umbra packs each group **row-wise**, a contiguous tuple `[hash | key(s) | aggregate
+payload]` in one open-addressing arena (the "Tidy Tuples" paper's Tuples layer:
+*"packing tuples into a memory efficient format"*) — which is now what we do too, for
+the *payload*. Two first-order gaps remain, in priority order:
 
 1. **Per-row extern call.** `group_intern` is an out-of-line Rust `HashMap` probe
    called once per input row. Inlining the hash+probe as *staged* code (a staged
-   open-addressing table in the kernel) removes a function call + non-inlinable
-   hash from the hot loop — the biggest win, and the natural rust-lms exercise.
-2. **Buffers sized to `num_rows`, not group count.** `vec![init; rows]` per slot
-   means a 1M-row / 3-aggregate query allocates ~32 MB to hold possibly a handful
-   of groups — O(rows) memory for what should be O(groups). Growing the table by
-   discovered-group count (once (1) makes the probe ours) fixes this and is the
-   point of hash aggregation. Also collapses the one-`Vec`-per-slot allocations +
-   the `HashMap`'s internal growth into a single arena.
-3. **Only then**, pack row-wise so a group's cells share a cache line in the fold
-   loop. Genuinely marginal until (1) is done.
+   open-addressing table in the kernel — `rust-lms-std`'s `SHashMap`) removes a
+   function call + non-inlinable hash from the hot loop — the biggest win.
+2. **Records sized to `num_rows`, not group count.** The packed buffer still holds
+   `num_rows` records, so a 1M-row query allocates for 1M groups even when there are
+   a handful — O(rows) memory for what should be O(groups). Growing the table by
+   discovered-group count (once (1) makes the probe ours, over an `SArena`) fixes it.
+3. ✅ **Row-wise packing** (Phase 2) — a group's cells now share a cache line in the
+   fold loop.

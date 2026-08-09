@@ -264,10 +264,17 @@ Each phase builds, tests, and ships green on its own.
    typed analogue of `opaque_ref`); `FieldRefOf`/`PointerLike` for the `RustPtr`
    tag (so `field_addr`, hence field *writes*, work on baked pointers); `CopyType`
    for `SPtr`/`SMutPtr` (so a pointer field can be loaded/bound to a `Var`).
-2. **`RecordLayout` + `FieldHandle<T>`.** Convert *today's* group state to a **single
-   packed byte buffer** with typed field offsets — still pre-sized to rows, still
-   using `group_intern` for the index. This lands row-wise packing and the API we
-   like **without** touching the hash map. Low risk, tests stay green.
+2. **✅ DONE — `RecordLayout` + `FieldHandle<T>`.** The dynamic-but-typed record API
+   (`rust-lms-std::record`): `RecordLayout::field::<T>()` reserves a typed field,
+   `record(ctx, base, i)` gives `base + i*stride`, `FieldHandle::{at,get,set}` are
+   typed leaf accesses on a `*mut u8` record. sql-gen's GROUP BY state is now a
+   **single packed byte buffer** (`GroupState.records: Vec<u64>`, 8-aligned, one
+   `[key | per-agg value (+count)]` record per group), pre-filled with an identity
+   template (`group_template`); `codegen::group_record` builds the layout, fold/emit
+   go through `layout.record` + field handles. Still pre-sized to rows and still
+   using `group_intern` — row-wise packing landed *without* touching the hash map.
+   IR shows `record = gidx * stride` then per-field offsets; the columnar
+   `Vec<Vec<i64>>` slot buffers, `acc_get/set_*`, and `group_slot_inits` are gone.
 3. **`SArena<T>`** — lift `BytesPool` to typed elements. Mostly a refactor.
 4. **`SHashMap` / `SAggTable`** with inline `find_or_insert` (extern append/grow;
    inline hash + walk + update). Single `i64` key first.

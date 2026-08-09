@@ -22,7 +22,7 @@ pub mod sql;
 pub mod value;
 
 pub use catalog::Catalog;
-pub use codegen::{BatchSource, OutSink, gen_collect, group_slot_inits};
+pub use codegen::{BatchSource, OutSink, gen_collect, group_template};
 pub use plan::Operator;
 pub use run::exec_jit;
 pub use sql::sql_to_operator;

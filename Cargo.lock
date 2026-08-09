@@ -2875,6 +2875,7 @@ dependencies = [
  "datafusion-sql",
  "proptest",
  "rust-lms",
+ "rust-lms-std",
 ]
 
 [[package]]

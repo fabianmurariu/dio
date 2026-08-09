@@ -13,7 +13,7 @@ use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
 use crate::codegen::{
-    CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_slot_inits,
+    CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_template,
 };
 use crate::group::GroupState;
 use crate::plan::Operator;
@@ -95,7 +95,7 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
         }) => {
             let agg_tys = agg_output_types(schema, group_exprs.len());
             Some(GroupState::new(
-                &group_slot_inits(aggs, &agg_tys),
+                &group_template(aggs, &agg_tys),
                 rb.num_rows(),
             ))
         }
@@ -104,7 +104,7 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let group = group_state.as_mut().map(|gs| {
         Rc::new(GroupHandle {
             table: gs.table_ptr(),
-            bases: gs.base_ptrs(),
+            records: gs.records_ptr(),
         })
     });
 

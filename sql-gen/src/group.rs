@@ -27,20 +27,24 @@ use rust_lms::prelude::*;
 /// for parallel aggregation.
 pub struct GroupState {
     pub table: GroupTable,
-    buffers: Vec<Vec<i64>>,
+    /// One packed record per group (`capacity` records of `template.len()` words),
+    /// row-wise: `[key | per-agg value (+ count)]`. `u64`-backed for 8-byte
+    /// alignment (every field is an `i64`/`f64` cell). Pre-filled with the identity
+    /// record so a group's first fold sees the right start value.
+    records: Vec<u64>,
 }
 
 impl GroupState {
-    /// Allocate `capacity`-row buffers, one per slot, each filled with its identity
-    /// (`0` for count/sum/avg, `i64::MAX`/`MIN` for min/max — see the codegen layout).
-    pub fn new(slot_inits: &[i64], capacity: usize) -> Self {
-        let buffers = slot_inits
-            .iter()
-            .map(|&init| vec![init; capacity])
-            .collect();
+    /// Allocate `capacity` records, each initialised to the identity `template`
+    /// (the per-field start values — see `codegen::group_template`).
+    pub fn new(template: &[u64], capacity: usize) -> Self {
+        let mut records = Vec::with_capacity(capacity * template.len());
+        for _ in 0..capacity {
+            records.extend_from_slice(template);
+        }
         Self {
             table: GroupTable::new(),
-            buffers,
+            records,
         }
     }
 
@@ -49,9 +53,10 @@ impl GroupState {
         &mut self.table
     }
 
-    /// Base of each slot buffer (baked; the kernel indexes by `gidx`).
-    pub fn base_ptrs(&mut self) -> Vec<*mut i64> {
-        self.buffers.iter_mut().map(|b| b.as_mut_ptr()).collect()
+    /// Base of the packed-records buffer (baked; the kernel indexes by `gidx`
+    /// through a `RecordLayout`).
+    pub fn records_ptr(&mut self) -> *mut u8 {
+        self.records.as_mut_ptr() as *mut u8
     }
 }
 
