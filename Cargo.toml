@@ -1,10 +1,11 @@
 [workspace]
-members = ["rust-lms", "rust-lms-derive", "arrow-lms", "sql-gen"]
+members = ["rust-lms", "rust-lms-derive", "rust-lms-std", "arrow-lms", "sql-gen"]
 resolver = "2"
 
 [workspace.dependencies]
 rust-lms = { path = "rust-lms" }
 rust-lms-derive = { path = "rust-lms-derive" }
+rust-lms-std = { path = "rust-lms-std" }
 arrow-lms = { path = "arrow-lms" }
 # Parsing
 nom = "7.1"

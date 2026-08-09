@@ -13,7 +13,7 @@
 //! - `SMutPtr<T>` = `SRefMut<T, RustPtr>`
 
 use crate::staged::{CompilationContext, Staged};
-use crate::types::StagedType;
+use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
 
@@ -111,6 +111,13 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustPtr> {
         types::I64 // Pointer-sized
     }
 }
+
+// Raw pointers are register-sized, `Copy` values — so they are `CopyType` and can
+// be loaded from a field / bound to a `Var` (e.g. a `SVec`'s buffer pointer read
+// out of its control block). Only the raw-pointer (`RustPtr`) flavors: a `&T`
+// (`RustRef`) stays off the copy path.
+impl<'a, T: StagedType> CopyType for SRef<'a, T, RustPtr> {}
+impl<'a, T: StagedType> CopyType for SRefMut<'a, T, RustPtr> {}
 
 // =============================================================================
 // Type Aliases for Convenience
@@ -475,6 +482,61 @@ pub fn const_ptr<T: StagedType>(p: *const T::RuntimeValue) -> ConstPtr<SPtr<T>> 
 /// Bake a host `*mut T::RuntimeValue` as a staged `SMutPtr<T>` (`*mut T`).
 pub fn const_mut_ptr<T: StagedType>(p: *mut T::RuntimeValue) -> ConstPtr<SMutPtr<T>> {
     ConstPtr::from_addr(p as usize)
+}
+
+/// Reinterpret a staged pointer as pointing to a different element type — same
+/// address, emits no code. The typed-pointer analogue of [`opaque_ref`](crate::opaque::opaque_ref):
+/// a pointer *is* its address, so the pointee type is the staged author's contract.
+/// Use it to turn a raw byte buffer (`SMutPtr<u8>` loaded from a control block) into
+/// a typed `SMutPtr<T>` for element-strided indexing. Prefer the [`ptr_cast`] /
+/// [`ptr_cast_mut`] constructors, which fix the input to a real pointer type.
+pub struct PtrCast<P, S> {
+    ptr: P,
+    _s: PhantomData<S>,
+}
+
+impl<P: Clone, S> Clone for PtrCast<P, S> {
+    fn clone(&self) -> Self {
+        PtrCast {
+            ptr: self.ptr.clone(),
+            _s: PhantomData,
+        }
+    }
+}
+impl<P: Copy, S> Copy for PtrCast<P, S> {}
+
+impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
+    type Out = S;
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        // A cast is a no-op on the address value; only the static type changes.
+        self.ptr.codegen(ctx)
+    }
+}
+
+/// Reinterpret `*const U` as `*const T` at the same address (no code emitted).
+pub fn ptr_cast<T, U, P>(ptr: P) -> PtrCast<P, SPtr<T>>
+where
+    T: StagedType + 'static,
+    U: StagedType + 'static,
+    P: Staged<Out = SPtr<U>>,
+{
+    PtrCast {
+        ptr,
+        _s: PhantomData,
+    }
+}
+
+/// Reinterpret `*mut U` as `*mut T` at the same address (no code emitted).
+pub fn ptr_cast_mut<T, U, P>(ptr: P) -> PtrCast<P, SMutPtr<T>>
+where
+    T: StagedType + 'static,
+    U: StagedType + 'static,
+    P: Staged<Out = SMutPtr<U>>,
+{
+    PtrCast {
+        ptr,
+        _s: PhantomData,
+    }
 }
 
 #[cfg(test)]
