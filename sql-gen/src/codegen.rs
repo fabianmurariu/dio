@@ -44,8 +44,8 @@ pub struct CodegenCtx {
 /// captured before compilation and baked (as constants) into the kernel. Real
 /// pointers, not `u64`s — the pointee type is checked at stage 0.
 pub struct GroupHandle {
-    /// The group hash table (handed to the `intern`/`len` externs).
-    pub table: *mut GroupTable,
+    /// The group hash table (handed to the `find_or_insert`/`len` externs).
+    pub table: *mut GroupTable<u64>,
     /// Base of the packed-records buffer (one record per group, indexed by `gidx`
     /// through the [`RecordLayout`]).
     pub records: *mut u8,
@@ -334,10 +334,13 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         Box::new(move |ctx, row| {
             let key_cv = gen_expr(ctx, &group_expr_f, &schema_f, &row, &cx_c);
             let key = to_i64(ctx, key_cv);
+            // The table keys on `u64` bits (grouping is sign-agnostic); the cast is a
+            // no-op reinterpret. The signed `key` still goes into the record for emit.
+            let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
             let group_id = ctx.bind(call_extern2(
-                cx_c.rt.group_intern,
-                const_opaque_mut::<GroupTable>(table),
-                key,
+                cx_c.rt.group_find_or_insert,
+                const_opaque_mut::<GroupTable<u64>>(table),
+                key_bits,
             ));
             let rec = layout.record(ctx, const_mut_ptr::<u8>(base), group_id);
             key_field.set(ctx, rec, key);
@@ -350,7 +353,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     // Emit: one manifested Row per group, pushed downstream in the same kernel.
     let num_groups = ctx.bind(call_extern1(
         cx.rt.group_len,
-        const_opaque::<GroupTable>(table),
+        const_opaque::<GroupTable<u64>>(table),
     ));
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {

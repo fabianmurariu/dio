@@ -1615,6 +1615,8 @@ version = "0.15.5"
 source = "registry+https://github.com/rust-lang/crates.io-index"
 checksum = "9229cfe53dfd69f0609a49f65461bd93001ea1ef889cd5529dd176593f5338a1"
 dependencies = [
+ "allocator-api2",
+ "equivalent",
  "foldhash 0.1.5",
 ]
 
@@ -2865,6 +2867,7 @@ checksum = "3b9b39299b249ad65f3b7e96443bad61c02ca5cd3589f46cb6d610a0fd6c0d6a"
 name = "sql-gen"
 version = "0.1.0"
 dependencies = [
+ "ahash",
  "arrow",
  "arrow-lms",
  "cranelift-codegen 0.127.1",
@@ -2873,6 +2876,7 @@ dependencies = [
  "datafusion-functions",
  "datafusion-functions-aggregate",
  "datafusion-sql",
+ "hashbrown 0.15.5",
  "proptest",
  "rust-lms",
  "rust-lms-std",

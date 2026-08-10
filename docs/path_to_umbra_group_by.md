@@ -16,14 +16,22 @@ typed pointer. No `u64`-as-pointer anywhere.
 
 | | Today (`docs/group_by.md`) | Target (this doc) |
 |---|---|---|
-| Aggregate storage | columnar: one `Vec<i64>` **per slot**, indexed by `gidx` | **row-wise**: one packed record per group in an arena |
-| Key → group | `group_intern` **extern per input row** (Rust `HashMap`) | hash **inline**, probe inline, insert/grow via extern (cold path only) |
-| Memory | `O(rows)` — every buffer sized to the row count | `O(groups)` — table grows as groups are discovered |
+| Aggregate storage | columnar: one `Vec<i64>` **per slot**, indexed by `gidx` | **row-wise**: one packed record per group |
+| Key → group | `group_intern` (Rust `HashMap<i64,u32>`), fixed key type | host `hashbrown::HashTable<Entry<K>>` via a per-row proxy, **key-generic** (`GroupKey`) — the paper's model, faster to extend to composite/string keys |
+| Memory | `O(rows)` — every buffer sized to the row count | `O(groups)` — records grow with the group count |
 | Layout typing | `AccTy` + hand-indexed `i64`/`f64` cells | `RecordLayout` + `FieldHandle<T>` typed field accessors |
-| Reusability | group-by-specific | `SVec`/`SArena`/`SHashMap` reused by join/sort/distinct |
+| Reusability | group-by-specific | `SVec` / `BytesPool`(→`SArena`) reused by join/sort/distinct |
 
-The performance rationale (fold-loop cache locality, killing the per-row extern,
-`O(groups)` memory) is in `docs/group_by.md §9`. This doc is the *how*.
+> **Direction note (Phase 3):** we deliberately *keep the hash table host-side* (a
+> per-row proxy `find_or_insert`), rather than generating a staged inline probe.
+> That is what the "Tidy Tuples" paper actually does (Fig 5's `insert` is a proxy),
+> it's far simpler, and `hashbrown::HashTable`'s raw hash/`eq` hooks are exactly the
+> German "specialize to the key" mechanism — so complex keys are new `GroupKey`
+> impls, not a rewrite. Inlining the probe stays a possible *later* optimisation,
+> not a goal.
+
+The performance rationale (fold-loop cache locality, `O(groups)` memory) is in
+`docs/group_by.md §9`. This doc is the *how*.
 
 ---
 
@@ -275,18 +283,40 @@ Each phase builds, tests, and ships green on its own.
    using `group_intern` — row-wise packing landed *without* touching the hash map.
    IR shows `record = gidx * stride` then per-field offsets; the columnar
    `Vec<Vec<i64>>` slot buffers, `acc_get/set_*`, and `group_slot_inits` are gone.
-3. **`SArena<T>`** — lift `BytesPool` to typed elements. Mostly a refactor.
-4. **`SHashMap` / `SAggTable`** with inline `find_or_insert` (extern append/grow;
-   inline hash + walk + update). Single `i64` key first.
-5. **Rewire GROUP BY** onto `SAggTable`; delete `group_intern`/`group_len` and the
-   columnar buffers. Now `O(groups)` memory, hash inline.
-6. **Typed keys & beyond:** `Int32` (done via widen), `Float64` (bitcast), string
-   keys (arena + byte hash), nullable/null keys; then parallel partial/final split
-   (the `[keys | payloads]` arena is already the mergeable unit).
+3. **✅ DONE — host `hashbrown::HashTable` group table (reroute).** We reconsidered
+   the "staged inline hash map" (old phases 3–5) and chose the paper's *actual*
+   design: the table stays **host-side, behind a per-row proxy** (`insert` is Umbra's
+   Fig-5 proxy call), and we generate the key + the fold. `GroupTable<K>` is now
+   `hashbrown::HashTable<Entry<K>>` (the *raw* Swiss-table API where we supply
+   hash + `eq` per op — the German "specialize to the key" hook), keyed via a small
+   `GroupKey` trait; the key is stored **in the entry** (decoupled from the records
+   buffer), value = the dense `gidx`. `group_find_or_insert(&mut GroupTable<u64>,
+   u64) -> gidx` replaces `group_intern`. `K = u64` only for now (int columns,
+   reinterpreted from the signed key — a no-op cast). No staged inline table is
+   built; `SArena` is **deferred to string keys** (its honest use). Records buffer,
+   `RecordLayout`, and everything downstream are unchanged.
 
-Recommended start: **Phase 1 (`SVec<T>`)** — it forces the handle indirection alone,
-and the hash map falls out as `SVec` (directory) + `SArena` (entries). Phase 2 gives
-you the `RecordLayout` win early and independently.
+   > **Why the reroute:** an open-addressing/`hashbrown` table keyed on `gidx` needs
+   > no stable-pointer arena, and per-row proxy `find_or_insert` is exactly what the
+   > paper does for the build/aggregation side. Simpler, faithful, and key-generic —
+   > composite/string keys become new `GroupKey` impls, not a rewrite.
+
+4. **O(groups) records.** Make the records buffer grow with the group count instead
+   of pre-sizing to `num_rows` — a byte-stride variant of `SVec`'s control-block/grow
+   (base reloaded per row, so the baked pointer survives a grow). Removes the last
+   O(rows) allocation. `group_find_or_insert` grows the buffer when it mints a new
+   `gidx`.
+5. **Typed / complex keys via `GroupKey`:** `Float64` (bitcast to `u64` bits),
+   composite (`[u64; 2]` inline fast path, else a bundled key-pool), then **string
+   keys** — a `BytesPool` **bundled with the table**, entry storing a stable
+   `(offset, len)`, `hash`/`eq` on *content* (long-string views differ per
+   occurrence, so hashing the view is wrong; the ≤12-byte inline view is a fast
+   path). This is where `SArena`/`BytesPool` earns its place.
+6. **Nullable/null keys**, then the **parallel partial/final split** (the
+   `[keys | payloads]` state is already the mergeable unit).
+
+Done in order 1 → 2 → 3. Next: Phase 4 (O(groups) records) or jump to Phase 5
+(string keys) — both build only on what's already green.
 
 ---
 

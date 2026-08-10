@@ -11,7 +11,7 @@
 use arrow::array::{StringViewArray, StringViewBuilder};
 use rust_lms::prelude::*;
 
-use crate::group::{GroupInternExtern, GroupLenExtern};
+use crate::group::{GroupFindOrInsertExtern, GroupLenExtern};
 
 /// The byte pointer of a `Utf8View` row: `arr.value(row).as_ptr()`. Valid for the
 /// life of the source array (points into its views/data buffers); the length
@@ -55,7 +55,7 @@ pub struct Runtime {
     pub bytes_eq: ExternRef<BytesEqExtern>,
     pub strview_append_bytes: ExternRef<StrviewAppendBytesExtern>,
     pub strview_append_null: ExternRef<StrviewAppendNullExtern>,
-    pub group_intern: ExternRef<GroupInternExtern>,
+    pub group_find_or_insert: ExternRef<GroupFindOrInsertExtern>,
     pub group_len: ExternRef<GroupLenExtern>,
 }
 
@@ -67,7 +67,7 @@ impl Runtime {
             bytes_eq: compiler.extern_fn::<BytesEqExtern>(),
             strview_append_bytes: compiler.extern_fn::<StrviewAppendBytesExtern>(),
             strview_append_null: compiler.extern_fn::<StrviewAppendNullExtern>(),
-            group_intern: compiler.extern_fn::<GroupInternExtern>(),
+            group_find_or_insert: compiler.extern_fn::<GroupFindOrInsertExtern>(),
             group_len: compiler.extern_fn::<GroupLenExtern>(),
         }
     }
