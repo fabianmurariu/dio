@@ -19,7 +19,7 @@ typed pointer. No `u64`-as-pointer anywhere.
 | Aggregate storage | columnar: one `Vec<i64>` **per slot**, indexed by `gidx` | **row-wise**: one packed record per group |
 | Key → group | `group_intern` (Rust `HashMap<i64,u32>`), fixed key type | host `hashbrown::HashTable<Entry<K>>` via a per-row proxy, **key-generic** (`GroupKey`) — the paper's model, faster to extend to composite/string keys |
 | Memory | `O(rows)` — every buffer sized to the row count | `O(groups)` — records grow with the group count |
-| Layout typing | `AccTy` + hand-indexed `i64`/`f64` cells | `RecordLayout` + `FieldHandle<T>` typed field accessors |
+| Layout typing | `AccTy` + hand-indexed `i64`/`f64` cells | `RecordLayout` + `FieldId<T>` tokens + `DynamicRecord` (pointer hidden) |
 | Reusability | group-by-specific | `SVec` / `BytesPool`(→`SArena`) reused by join/sort/distinct |
 
 > **Direction note (Phase 3):** we deliberately *keep the hash table host-side* (a
@@ -56,7 +56,7 @@ This maps our stack onto Umbra's layers (their Fig 4):
 ```
 Operators        sql-gen: plan.rs / codegen.rs
 Data Structures  rust-lms-std: SVec, SArena, SHashMap        <-- NEW
-Tuples           RecordLayout / FieldHandle (pack + hash)    <-- NEW
+Tuples           RecordLayout / FieldId / DynamicRecord      <-- NEW
 SQL Values       sql-gen: ColVal / Nullness
 Codegen          rust-lms core: Var, Ctx, typed pointers, control flow
 ```
@@ -162,59 +162,59 @@ a typed payload struct — because the payload is query-shaped. That's §4.
 
 ---
 
-## 4. The query-shaped record: `RecordLayout` + `FieldHandle<T>`
+## 4. The query-shaped record: `RecordLayout` + `FieldId<T>` + `DynamicRecord` ✅
 
 The payload can't be a Rust `struct` — `sum(a)` vs `min(a),max(b),avg(c)` are
 different shapes, known only at query time. Umbra doesn't use a struct either; its
 Tuples layer emits `store(target + layout[slot].offset, value)` from a
-**query-computed layout descriptor** (Fig 5, Lines 30-52). We already have the seed
-of this in `group_layout`.
+**query-computed layout descriptor** (Fig 5, Lines 30-52).
 
-The typed version — **the set of fields is dynamic, each field is typed**:
+Our version (built, `rust-lms-std::record`) goes one better than a raw offset: the
+**set of fields is dynamic, but each field is a typed, layout-bound token**, and the
+raw `*mut u8` never surfaces:
 
 ```rust
-struct RecordLayout { stride: usize }
-struct FieldHandle<T> { offset: usize, _t: PhantomData<T> }   // T known in Rust, offset per-query
-
 impl RecordLayout {
-    fn field<T: StagedType>(&mut self) -> FieldHandle<T>;      // reserve size_of::<T>(), bump stride
+    fn field<T>(&mut self) -> FieldId<T>;                 // reserve aligned slot; typed token (carries layout brand + offset)
+    fn record(&self, ctx, base, index) -> DynamicRecord;  // base + index*stride, branded
+    fn wrap(&self, ptr: Var<SMutPtr<u8>>) -> DynamicRecord;// wrap an extern-returned record ptr, branded
 }
-
-impl<T: StagedType> FieldHandle<T> {
-    fn at(&self, entry: impl Staged<Out = SMutPtr<u8>>) -> SMutPtr<T>;  // entry + offset, typed
+impl DynamicRecord {                                       // hides the pointer entirely
+    fn get<T>(&self, ctx, FieldId<T>) -> Var<T>;           // T inferred from token
+    fn set<T>(&self, ctx, FieldId<T>, Var<T>);
 }
 ```
 
-Built per query by the loop we already run (a stage-0 dispatch on the arrow
-`DataType` picks the `T` — this is today's `dispatch_prim!` / `AccTy`):
+Built per query by the loop we already run — a stage-0 dispatch on the arrow
+`DataType` picks the `T`, and the heterogeneous tokens live in an enum:
 
 ```rust
 let mut layout = RecordLayout::new();
+let key = layout.field::<i64>();
 for agg in aggs {
-    let field = match acc_ty(agg) {                 // dynamic, per query
-        AccTy::I64 => AnyField::I64(layout.field::<i64>()),
-        AccTy::F64 => AnyField::F64(layout.field::<f64>()),
+    let value = match acc_ty(agg) {                        // dynamic, per query
+        AccTy::I64 => AggValueField::I64(layout.field::<i64>()),
+        AccTy::F64 => AggValueField::F64(layout.field::<f64>()),
     };
-    // keep `field` for this agg's fold/finalize
+    // keep the token(s) for this agg's fold/finalize
 }
 ```
 
-Then fold/finalize read and write **typed leaves** off a type-erased record:
+Then fold/finalize never touch a pointer — just tokens on a `DynamicRecord`:
 
 ```rust
-let entry: SMutPtr<u8> = table.find_or_insert(ctx, key);   // payload region
-let cur = ctx.bind(load(sum.at(entry)));                    // sum.at(entry): SMutPtr<f64>
-ctx.emit(store(sum.at(entry), ctx.bind(add(cur, v))));
+let rec = layout.wrap(record_ptr);       // record_ptr came from group_upsert
+let cur = rec.get(ctx, sum);             // sum: FieldId<f64> → Var<f64>
+rec.set(ctx, sum, ctx.bind(add(cur, v)));
+// rec.get::<i64>(ctx, sum)  -- won't compile (sum is FieldId<f64>)
+// a token from another layout -> panics at stage 0 (a layout brand), never an OOB pointer op
 ```
 
-The **record as a whole** is type-erased (it must be — the shape is the query); the
-**leaves stay typed**, the same discipline as today's `acc_get_i64`/`acc_get_f64`,
-just at `entry + offset` instead of `base[gidx]`. `offset` is an integer; the pointer
-is `SMutPtr<T>`. This is the "dynamic struct" — and it's the API we like.
-
-`RecordLayout` becomes the single owner of layout (offsets, stride, later the null
-bitmap offset), the way `CompilationContext::slice_data_ptr` is the single owner of
-slice layout. One place, no re-derivation.
+Two guardrails, both free at runtime: **wrong type is a compile error**, and **wrong
+layout is a stage-0 panic** (each `RecordLayout` carries a unique brand its tokens
+check). The pointer math (`ptr_offset_mut` + `ptr_cast_mut`) is hidden inside
+`DynamicRecord::get`/`set`. `RecordLayout` is the single owner of layout (offsets,
+stride, later the null-bitmap offset).
 
 ---
 
@@ -248,7 +248,7 @@ Most of the hot path already exists (`add/sub/mul`, `bitand/bitor/bitxor`, `shl/
 
 | Need | Why | Size |
 |---|---|---|
-| `ptr_cast::<T>(SMutPtr<u8>) -> SMutPtr<T>` on a **runtime** pointer (no-op) | `FieldHandle::at` — reinterpret a runtime entry ptr; the typed-pointer analogue of `opaque_ref` | tiny |
+| `ptr_cast::<T>(SMutPtr<u8>) -> SMutPtr<T>` on a **runtime** pointer (no-op) | `DynamicRecord::get`/`set` — reinterpret a runtime record ptr at a field's offset; the typed-pointer analogue of `opaque_ref` | tiny |
 | `bitcast` `f64 ↔ u64` | hashing / storing `Float64` keys | small |
 | `alloc`/`realloc`/`free` extern convention | `SVec`/`SArena` growth (the cold path) | trivial |
 | staged hash (`mul`/`xor`/`shr` finalizer; byte loop for strings) | inline hashing | small; ops already exist |
@@ -272,17 +272,16 @@ Each phase builds, tests, and ships green on its own.
    typed analogue of `opaque_ref`); `FieldRefOf`/`PointerLike` for the `RustPtr`
    tag (so `field_addr`, hence field *writes*, work on baked pointers); `CopyType`
    for `SPtr`/`SMutPtr` (so a pointer field can be loaded/bound to a `Var`).
-2. **✅ DONE — `RecordLayout` + `FieldHandle<T>`.** The dynamic-but-typed record API
-   (`rust-lms-std::record`): `RecordLayout::field::<T>()` reserves a typed field,
-   `record(ctx, base, i)` gives `base + i*stride`, `FieldHandle::{at,get,set}` are
-   typed leaf accesses on a `*mut u8` record. sql-gen's GROUP BY state is now a
-   **single packed byte buffer** (`GroupState.records: Vec<u64>`, 8-aligned, one
-   `[key | per-agg value (+count)]` record per group), pre-filled with an identity
-   template (`group_template`); `codegen::group_record` builds the layout, fold/emit
-   go through `layout.record` + field handles. Still pre-sized to rows and still
-   using `group_intern` — row-wise packing landed *without* touching the hash map.
-   IR shows `record = gidx * stride` then per-field offsets; the columnar
-   `Vec<Vec<i64>>` slot buffers, `acc_get/set_*`, and `group_slot_inits` are gone.
+2. **✅ DONE — `RecordLayout` + `FieldId<T>` tokens + `DynamicRecord`.** The
+   dynamic-but-typed record API (`rust-lms-std::record`, see §4): `field::<T>()`
+   hands back a typed layout-bound token; `DynamicRecord::get/set(token)` hide the
+   `*mut u8` (wrong type = compile error, wrong layout = stage-0 panic). sql-gen's
+   GROUP BY state is a **single packed byte buffer** (one `[key | per-agg value
+   (+count)]` record per group); `codegen::group_record` builds the tokens,
+   fold/finalize call `rec.get/set` and never touch a pointer. IR shows
+   `record = gidx * stride` then per-field offsets; the columnar `Vec<Vec<i64>>`
+   slot buffers, `acc_get/set_*`, `group_slot_inits`, and `FieldHandle` are gone.
+   (Row-wise packing landed without touching the hash map; keys/growth came in 3–4.)
 3. **✅ DONE — host `hashbrown::HashTable` group table (reroute).** We reconsidered
    the "staged inline hash map" (old phases 3–5) and chose the paper's *actual*
    design: the table stays **host-side, behind a per-row proxy** (`insert` is Umbra's

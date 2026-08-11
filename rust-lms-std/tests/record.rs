@@ -1,9 +1,9 @@
-//! `RecordLayout` / `FieldHandle`: the offset math is a plain unit check; a JIT
-//! kernel then writes typed fields into two packed records and we verify the bytes
-//! land at the right (typed) offsets — the dynamic-but-typed record in action.
+//! `RecordLayout` / `FieldId` / `DynamicRecord`: the offset math is a plain unit
+//! check; a JIT kernel then writes typed fields into two packed records (through
+//! tokens, never a raw pointer) and the host reads the bytes back at their offsets.
 
 use rust_lms::prelude::*;
-use rust_lms_std::{FieldHandle, RecordLayout};
+use rust_lms_std::{DynamicRecord, RecordLayout};
 
 #[test]
 fn layout_offsets_and_stride() {
@@ -14,13 +14,15 @@ fn layout_offsets_and_stride() {
     assert_eq!(a.offset(), 0);
     assert_eq!(b.offset(), 8);
     assert_eq!(c.offset(), 16);
+    assert_eq!((a.index(), b.index(), c.index()), (0, 1, 2));
     assert_eq!(l.align(), 8);
     assert_eq!(l.stride(), 24);
+    assert_eq!(l.num_fields(), 3);
 }
 
 /// A records buffer of `[i64 key, f64 val, i64 count]` per record. A kernel writes
-/// record `i`'s three fields (typed), for `i in 0..n`; the host reads the raw
-/// buffer back and checks every field landed at its offset with the right value.
+/// record `i`'s three fields through typed tokens (the `*mut u8` never appears),
+/// for `i in 0..n`; the host reads the raw buffer back and checks every field.
 #[test]
 fn jit_writes_typed_fields_into_packed_records() {
     let mut layout = RecordLayout::new();
@@ -40,14 +42,14 @@ fn jit_writes_typed_fields_into_packed_records() {
     let fill = compiler.fun1("fill", move |ctx, n: Var<u64>| {
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, n), move |ctx| {
-            let rec = layout.record(ctx, const_mut_ptr::<u8>(base), i);
-            // key = i*100 ; val = i + 0.5 ; count = i
+            let rec: DynamicRecord = layout.record(ctx, const_mut_ptr::<u8>(base), i);
+            // key = i*100 ; val = i*100 + 0.5 ; count = i
             let k = ctx.bind(mul(int_cast::<i64, u64, _>(i), 100i64));
-            key.set(ctx, rec, k);
+            rec.set(ctx, key, k);
             let vf = ctx.bind(add(int_to_float::<f64, i64, _>(k), 0.5f64));
-            val.set(ctx, rec, vf);
+            rec.set(ctx, val, vf);
             let ci = ctx.bind(int_cast::<i64, u64, _>(i));
-            cnt.set(ctx, rec, ci);
+            rec.set(ctx, cnt, ci);
             ctx.store(i, add(i, 1u64));
         });
         i
@@ -55,7 +57,6 @@ fn jit_writes_typed_fields_into_packed_records() {
     let compiled = compiler.compile(fill).expect("compile");
     compiled.as_fn()(N as u64);
 
-    // Read the packed records back from the raw buffer.
     for i in 0..N {
         let rec = unsafe { (base as *const u8).add(i * stride) };
         let k = unsafe { *(rec.add(key.offset()) as *const i64) };
@@ -67,15 +68,26 @@ fn jit_writes_typed_fields_into_packed_records() {
     }
 }
 
-/// Reconstruct a `FieldHandle<T>` from a stored offset (the type-erased-offset →
-/// re-typed-leaf pattern a query planner uses), and confirm it addresses the same
-/// field.
+/// A token from one layout used on a record from another panics at stage 0 (during
+/// codegen) — the brand guards against a mis-addressed field reaching an unchecked
+/// pointer op.
 #[test]
-fn from_offset_roundtrip() {
-    let mut layout = RecordLayout::new();
-    let _k = layout.field::<i64>();
-    let v = layout.field::<f64>();
-    let rebuilt = FieldHandle::<f64>::from_offset(v.offset());
-    assert_eq!(rebuilt.offset(), v.offset());
-    assert_eq!(v.offset(), 8);
+#[should_panic(expected = "different RecordLayout")]
+fn cross_layout_token_panics() {
+    let mut a = RecordLayout::new();
+    let a_field = a.field::<i64>();
+
+    let mut b = RecordLayout::new();
+    let _ = b.field::<i64>();
+
+    let mut buf = [0u64; 1];
+    let base = buf.as_mut_ptr() as *mut u8;
+
+    let mut compiler = Compiler::new();
+    // The closure runs at codegen time; `get` asserts the brand and panics there.
+    let _ = compiler.fun0("bad", move |ctx| {
+        let ptr = ctx.bind(const_mut_ptr::<u8>(base));
+        let rec = b.wrap(ptr); // record branded `b`
+        rec.get(ctx, a_field) // token from `a` → panic
+    });
 }

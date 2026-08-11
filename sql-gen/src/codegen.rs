@@ -20,7 +20,7 @@ use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
-use rust_lms_std::{FieldHandle, RecordLayout};
+use rust_lms_std::{DynamicRecord, FieldId, RecordLayout};
 
 use crate::group::GroupState;
 use crate::plan::Operator;
@@ -308,9 +308,8 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         .zip(aggs)
         .map(|(a, e)| ResolvedAgg {
             kind: a.kind,
-            acc: a.acc,
-            value_off: a.value_off,
-            count_off: a.count_off,
+            value: a.value,
+            count: a.count,
             arg: GroupedAgg::parse(e).arg,
         })
         .collect();
@@ -339,12 +338,13 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
             // `group_upsert` grows the records buffer (host-side) when it mints a new
             // group, and returns that group's record pointer — so the fold never bakes
             // a records base that a grow could dangle. Valid until the next `upsert`.
-            let rec = ctx.bind(call_extern2(
+            let rec_ptr = ctx.bind(call_extern2(
                 cx_c.rt.group_upsert,
                 const_opaque_mut::<GroupState>(state),
                 key_bits,
             ));
-            key_field.set(ctx, rec, key);
+            let rec = layout.wrap(rec_ptr);
+            rec.set(ctx, key_field, key);
             for agg in &resolved_f {
                 agg.fold(ctx, rec, &row, &schema_f, &cx_c);
             }
@@ -364,7 +364,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
         let rec = layout.record(ctx, base, g);
-        let key = key_field.get(ctx, rec);
+        let key = rec.get(ctx, key_field);
         let mut row: Row = Vec::with_capacity(1 + resolved.len());
         row.push(ColVal::I64(key, Nullness::NonNull));
         for agg in &resolved {
@@ -407,29 +407,45 @@ pub fn agg_output_types(schema: &SchemaRef, num_keys: usize) -> Vec<DataType> {
         .collect()
 }
 
-/// The record fields an aggregate uses, and the cell type it folds in. Offsets are
-/// byte offsets into the group's packed record (see [`group_record`]).
+/// An aggregate's value field, typed by the cell it folds in: an `i64` field
+/// (integer inputs, `count`) or an `f64` field (`Float64` `sum`/`min`/`max`, `avg`).
+/// The `FieldId` is the layout-bound token used for every access.
+#[derive(Clone, Copy)]
+enum AggValueField {
+    I64(FieldId<i64>),
+    F64(FieldId<f64>),
+}
+
+impl AggValueField {
+    fn offset(&self) -> usize {
+        match self {
+            AggValueField::I64(f) => f.offset(),
+            AggValueField::F64(f) => f.offset(),
+        }
+    }
+}
+
+/// The record fields an aggregate uses: its value field (typed) and, for
+/// `sum`/`min`/`max`/`avg`, a non-null count field (`i64`).
 struct AggFields {
     kind: AggKind,
-    acc: AccTy,
-    value_off: usize,
-    /// Non-null input count (for nullability + `avg`'s divide); `None` for `count`.
-    count_off: Option<usize>,
+    value: AggValueField,
+    count: Option<FieldId<i64>>,
 }
 
 /// The packed record of a group-by's state: field 0 is the `i64` key, then a value
 /// (+ count) field per aggregate. One [`RecordLayout`], derived deterministically
 /// from the aggregates, is shared by the host allocator ([`group_template`]) and
 /// codegen so they agree on field offsets — exactly like a `#[repr(C)]` struct, but
-/// query-shaped.
+/// query-shaped. Fields are addressed only through typed [`FieldId`] tokens.
 struct GroupRecord {
     layout: RecordLayout,
-    key: FieldHandle<i64>,
+    key: FieldId<i64>,
     aggs: Vec<AggFields>,
 }
 
 /// Build the packed-record layout from the aggregates and their output `DataType`s
-/// (parallel to `aggs`). The output type picks the accumulator cell ([`acc_ty`]);
+/// (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
 /// `sum`/`min`/`max` over `Float64` fold in an `f64` field, everything else `i64`.
 fn group_record(aggs: &[Expr], agg_tys: &[DataType]) -> GroupRecord {
     let mut layout = RecordLayout::new();
@@ -437,23 +453,17 @@ fn group_record(aggs: &[Expr], agg_tys: &[DataType]) -> GroupRecord {
     let mut agg_fields = Vec::with_capacity(aggs.len());
     for (e, out) in aggs.iter().zip(agg_tys) {
         let kind = GroupedAgg::parse(e).kind;
-        let acc = acc_ty(kind, out);
-        let value_off = match acc {
-            AccTy::I64 => layout.field::<i64>().offset(),
-            AccTy::F64 => layout.field::<f64>().offset(),
+        let value = match acc_ty(kind, out) {
+            AccTy::I64 => AggValueField::I64(layout.field::<i64>()),
+            AccTy::F64 => AggValueField::F64(layout.field::<f64>()),
         };
         // sum/min/max/avg track a non-null count (seen / divisor); count does not.
-        let count_off = matches!(
+        let count = matches!(
             kind,
             AggKind::Sum | AggKind::Min | AggKind::Max | AggKind::Avg
         )
-        .then(|| layout.field::<i64>().offset());
-        agg_fields.push(AggFields {
-            kind,
-            acc,
-            value_off,
-            count_off,
-        });
+        .then(|| layout.field::<i64>());
+        agg_fields.push(AggFields { kind, value, count });
     }
     GroupRecord {
         layout,
@@ -465,12 +475,12 @@ fn group_record(aggs: &[Expr], agg_tys: &[DataType]) -> GroupRecord {
 /// A value field's identity fill, as raw `i64` bits (an `f64` field reuses the same
 /// 8 bytes): `0` for count/sum/avg, `i64::MAX`/`MIN` for integer min/max, `±∞` bits
 /// for float min/max.
-fn value_init_bits(kind: AggKind, acc: AccTy) -> i64 {
-    match (kind, acc) {
-        (AggKind::Min, AccTy::I64) => i64::MAX,
-        (AggKind::Min, AccTy::F64) => f64::INFINITY.to_bits() as i64,
-        (AggKind::Max, AccTy::I64) => i64::MIN,
-        (AggKind::Max, AccTy::F64) => f64::NEG_INFINITY.to_bits() as i64,
+fn value_init_bits(kind: AggKind, value: &AggValueField) -> i64 {
+    match (kind, value) {
+        (AggKind::Min, AggValueField::I64(_)) => i64::MAX,
+        (AggKind::Min, AggValueField::F64(_)) => f64::INFINITY.to_bits() as i64,
+        (AggKind::Max, AggValueField::I64(_)) => i64::MIN,
+        (AggKind::Max, AggValueField::F64(_)) => f64::NEG_INFINITY.to_bits() as i64,
         _ => 0,
     }
 }
@@ -484,20 +494,9 @@ pub fn group_template(aggs: &[Expr], agg_tys: &[DataType]) -> Vec<u64> {
     let words = record.layout.stride() / 8;
     let mut template = vec![0u64; words];
     for a in &record.aggs {
-        template[a.value_off / 8] = value_init_bits(a.kind, a.acc) as u64;
+        template[a.value.offset() / 8] = value_init_bits(a.kind, &a.value) as u64;
     }
     template
-}
-
-// --- record-field accessors: reconstruct a typed `FieldHandle` from a stored byte
-// offset (the query planner keeps offsets + `AccTy`, re-types the leaf here). ---
-
-fn field_i64(offset: usize) -> FieldHandle<i64> {
-    FieldHandle::from_offset(offset)
-}
-
-fn field_f64(offset: usize) -> FieldHandle<f64> {
-    FieldHandle::from_offset(offset)
 }
 
 /// A parsed grouped aggregate (kind + optional argument).
@@ -532,14 +531,13 @@ impl GroupedAgg {
     }
 }
 
-/// An aggregate resolved to its record-field byte offsets — the fold/emit form used
+/// An aggregate resolved to its record-field tokens — the fold/emit form used
 /// inside [`gen_grouped`].
 #[derive(Clone)]
 struct ResolvedAgg {
     kind: AggKind,
-    acc: AccTy,
-    value_off: usize,
-    count_off: Option<usize>,
+    value: AggValueField,
+    count: Option<FieldId<i64>>,
     arg: Option<Expr>,
 }
 
@@ -572,104 +570,92 @@ impl ResolvedAgg {
     fn fold(
         &self,
         ctx: &mut Ctx,
-        rec: Var<SMutPtr<u8>>,
+        rec: DynamicRecord,
         row: &Row,
         schema: &SchemaRef,
         cg_ctx: &CodegenCtx,
     ) {
         let (val_cv, valid) = agg_arg_value(&self.arg, ctx, row, schema, cg_ctx);
         let kind = self.kind;
-        let value_off = self.value_off;
-        let count_off = self.count_off;
-        match kind {
-            AggKind::Count => ctx.if_then(valid, move |ctx| {
-                let f = field_i64(value_off);
-                let cur = f.get(ctx, rec);
+        let count = self.count;
+        match (kind, self.value) {
+            (AggKind::Count, AggValueField::I64(f)) => ctx.if_then(valid, move |ctx| {
+                let cur = rec.get(ctx, f);
                 let next = ctx.bind(add(cur, 1i64));
-                f.set(ctx, rec, next);
+                rec.set(ctx, f, next);
             }),
-            // sum/min/max fold in the accumulator's cell type: `i64` for integer
-            // inputs (i32 widened), `f64` for a `Float64` column.
-            AggKind::Sum | AggKind::Min | AggKind::Max => match self.acc {
-                AccTy::I64 => {
-                    let v = to_i64(ctx, val_cv.unwrap());
-                    ctx.if_then(valid, move |ctx| {
-                        bump_count(ctx, count_off, rec);
-                        let f = field_i64(value_off);
-                        let cur = f.get(ctx, rec);
-                        let next = combine_i64(ctx, kind, cur, v);
-                        f.set(ctx, rec, next);
-                    });
-                }
-                AccTy::F64 => {
-                    let v = to_f64(ctx, val_cv.unwrap());
-                    ctx.if_then(valid, move |ctx| {
-                        bump_count(ctx, count_off, rec);
-                        let f = field_f64(value_off);
-                        let cur = f.get(ctx, rec);
-                        let next = combine_f64(ctx, kind, cur, v);
-                        f.set(ctx, rec, next);
-                    });
-                }
-            },
-            AggKind::Avg => {
-                let v = to_f64(ctx, val_cv.unwrap());
+            // sum/min/max fold in the value cell's type: `i64` for integer inputs
+            // (i32 widened), `f64` for a `Float64` column.
+            (AggKind::Sum | AggKind::Min | AggKind::Max, AggValueField::I64(f)) => {
+                let v = to_i64(ctx, val_cv.unwrap());
                 ctx.if_then(valid, move |ctx| {
-                    bump_count(ctx, count_off, rec);
-                    let f = field_f64(value_off);
-                    let cur = f.get(ctx, rec);
-                    let next = ctx.bind(add(cur, v));
-                    f.set(ctx, rec, next);
+                    bump_count(ctx, count, rec);
+                    let cur = rec.get(ctx, f);
+                    let next = combine_i64(ctx, kind, cur, v);
+                    rec.set(ctx, f, next);
                 });
             }
+            (AggKind::Sum | AggKind::Min | AggKind::Max, AggValueField::F64(f)) => {
+                let v = to_f64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    bump_count(ctx, count, rec);
+                    let cur = rec.get(ctx, f);
+                    let next = combine_f64(ctx, kind, cur, v);
+                    rec.set(ctx, f, next);
+                });
+            }
+            (AggKind::Avg, AggValueField::F64(f)) => {
+                let v = to_f64(ctx, val_cv.unwrap());
+                ctx.if_then(valid, move |ctx| {
+                    bump_count(ctx, count, rec);
+                    let cur = rec.get(ctx, f);
+                    let next = ctx.bind(add(cur, v));
+                    rec.set(ctx, f, next);
+                });
+            }
+            (k, _) => unreachable!("aggregate {k:?} has a mismatched value-field type"),
         }
     }
 
     /// Manifest this aggregate's final `ColVal` from the group's record `rec`:
     /// `count` is never null; `sum`/`min`/`max` are null when the count is 0; `avg`
     /// divides `sum/count` (null when count 0).
-    fn finalize(&self, ctx: &mut Ctx, rec: Var<SMutPtr<u8>>) -> ColVal {
-        match self.kind {
-            AggKind::Count => {
-                ColVal::I64(field_i64(self.value_off).get(ctx, rec), Nullness::NonNull)
+    fn finalize(&self, ctx: &mut Ctx, rec: DynamicRecord) -> ColVal {
+        match (self.kind, self.value) {
+            (AggKind::Count, AggValueField::I64(f)) => {
+                ColVal::I64(rec.get(ctx, f), Nullness::NonNull)
             }
-            AggKind::Sum | AggKind::Min | AggKind::Max => {
-                let seen = self.seen(ctx, rec);
-                match self.acc {
-                    AccTy::I64 => ColVal::I64(
-                        field_i64(self.value_off).get(ctx, rec),
-                        Nullness::Nullable(seen),
-                    ),
-                    AccTy::F64 => ColVal::F64(
-                        field_f64(self.value_off).get(ctx, rec),
-                        Nullness::Nullable(seen),
-                    ),
-                }
+            (AggKind::Sum | AggKind::Min | AggKind::Max, AggValueField::I64(f)) => {
+                ColVal::I64(rec.get(ctx, f), Nullness::Nullable(self.seen(ctx, rec)))
             }
-            AggKind::Avg => {
-                let sum = field_f64(self.value_off).get(ctx, rec);
-                let count = field_i64(self.count_off.unwrap()).get(ctx, rec);
+            (AggKind::Sum | AggKind::Min | AggKind::Max, AggValueField::F64(f)) => {
+                ColVal::F64(rec.get(ctx, f), Nullness::Nullable(self.seen(ctx, rec)))
+            }
+            (AggKind::Avg, AggValueField::F64(f)) => {
+                let sum = rec.get(ctx, f);
+                let count = rec.get(ctx, self.count.unwrap());
                 let cf = ctx.bind(int_to_float::<f64, i64, _>(count));
                 let avg = ctx.bind(div(sum, cf));
                 let seen = ctx.bind(gt(count, 0i64));
                 ColVal::F64(avg, Nullness::Nullable(seen))
             }
+            (k, _) => unreachable!("aggregate {k:?} has a mismatched value-field type"),
         }
     }
 
     /// Whether group `rec` saw any non-null input (its non-null count > 0).
-    fn seen(&self, ctx: &mut Ctx, rec: Var<SMutPtr<u8>>) -> Var<bool> {
-        let count = field_i64(self.count_off.expect("nullable agg has a count")).get(ctx, rec);
+    fn seen(&self, ctx: &mut Ctx, rec: DynamicRecord) -> Var<bool> {
+        let count = rec.get(ctx, self.count.expect("nullable agg has a count"));
         ctx.bind(gt(count, 0i64))
     }
 }
 
 /// `rec.count += 1` (the non-null count field for a nullable aggregate).
-fn bump_count(ctx: &mut Ctx, count_off: Option<usize>, rec: Var<SMutPtr<u8>>) {
-    let f = field_i64(count_off.expect("nullable aggregate has a count field"));
-    let cur = f.get(ctx, rec);
+fn bump_count(ctx: &mut Ctx, count: Option<FieldId<i64>>, rec: DynamicRecord) {
+    let f = count.expect("nullable aggregate has a count field");
+    let cur = rec.get(ctx, f);
     let next = ctx.bind(add(cur, 1i64));
-    f.set(ctx, rec, next);
+    rec.set(ctx, f, next);
 }
 
 /// Fold one `i64` input into a `sum`/`min`/`max` accumulator (`add`/`min`/`max`).
@@ -1252,7 +1238,7 @@ fn tag(cv: ColVal) -> &'static str {
 // arm, which emits one result row.
 // =============================================================================
 
-#[derive(Clone, Copy, PartialEq, Eq)]
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
 enum AggKind {
     Count,
     Sum,

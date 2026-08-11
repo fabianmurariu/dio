@@ -7,12 +7,12 @@
 //! - [`SVec`] — a growable dynamic array. Proves **handle indirection**: a kernel
 //!   structure can grow without dangling the pointer baked into the kernel, because
 //!   the baked pointer targets a stable control block, not the movable buffer.
-//! - [`RecordLayout`] / [`FieldHandle`] — a record whose *field set* is chosen at
-//!   query-compile time but whose every field *access* stays typed. The record is a
-//!   type-erased `*mut u8`; the leaves are `SMutPtr<T>`.
+//! - [`RecordLayout`] / [`FieldId`] / [`DynamicRecord`] — a record whose *field set*
+//!   is chosen at query-compile time but whose every field *access* stays typed.
+//!   Reads/writes take a typed, layout-bound token; the raw `*mut u8` never surfaces.
 
 pub mod record;
 pub mod svec;
 
-pub use record::{FieldHandle, RecordLayout};
+pub use record::{DynamicRecord, FieldId, RecordLayout};
 pub use svec::{svec_grow, HostVec, RawVec, RawVecType, SVec, SvecGrowExtern};
