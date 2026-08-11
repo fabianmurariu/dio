@@ -301,11 +301,19 @@ Each phase builds, tests, and ships green on its own.
    > paper does for the build/aggregation side. Simpler, faithful, and key-generic —
    > composite/string keys become new `GroupKey` impls, not a rewrite.
 
-4. **O(groups) records.** Make the records buffer grow with the group count instead
-   of pre-sizing to `num_rows` — a byte-stride variant of `SVec`'s control-block/grow
-   (base reloaded per row, so the baked pointer survives a grow). Removes the last
-   O(rows) allocation. `group_find_or_insert` grows the buffer when it mints a new
-   `gidx`.
+4. **✅ DONE — O(groups) records.** The records buffer now grows with the group count
+   (starts empty), not pre-sized to `num_rows` — the last O(rows) allocation is gone.
+   Simpler than the "byte-stride SVec" first sketched: since the table is host-side
+   (Phase 3), growth folds into the proxy. `group_upsert(&mut GroupState, u64) ->
+   *mut u8` interns the key, appends one identity record when it mints a new group,
+   and **returns that group's record pointer** — so the fold never bakes a records
+   base that a grow could dangle (the pointer is used immediately, valid until the
+   next `upsert`). Emit fetches the now-stable base once (`group_records_base`) and
+   indexes with `layout.record`. `GroupHandle` is now a single baked `*mut GroupState`
+   (the whole host state — table + growable records — like Umbra's table owning its
+   tuples). IR: the fold does `rec = call group_upsert(...)` then field writes at
+   offsets off `rec`; no baked base, no `gidx*stride` in the hot loop. Stress test
+   `group_by_many_groups_grows_records` (1000 groups) exercises the realloc path.
 5. **Typed / complex keys via `GroupKey`:** `Float64` (bitcast to `u64` bits),
    composite (`[u64; 2]` inline fast path, else a bundled key-pool), then **string
    keys** — a `BytesPool` **bundled with the table**, entry storing a stable

@@ -94,17 +94,13 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
             ..
         }) => {
             let agg_tys = agg_output_types(schema, group_exprs.len());
-            Some(GroupState::new(
-                &group_template(aggs, &agg_tys),
-                rb.num_rows(),
-            ))
+            Some(GroupState::new(group_template(aggs, &agg_tys)))
         }
         _ => None,
     };
     let group = group_state.as_mut().map(|gs| {
         Rc::new(GroupHandle {
-            table: gs.table_ptr(),
-            records: gs.records_ptr(),
+            state: gs as *mut GroupState,
         })
     });
 

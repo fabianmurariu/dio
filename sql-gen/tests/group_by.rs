@@ -281,6 +281,21 @@ fn group_by_count_star_ignores_nulls() {
 }
 
 #[test]
+fn group_by_many_groups_grows_records() {
+    // Every row is its own group → the records buffer must grow ~N times
+    // (reallocating and moving), exercising the O(groups) grow + returned-record-ptr
+    // path. Each group's sum is just its single value.
+    let n = 1000i64;
+    let keys: Vec<i64> = (0..n).collect();
+    let values: Vec<i64> = (0..n).map(|k| k * 3).collect();
+    let rb = batch(keys, values);
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), n as usize);
+    let expected: BTreeMap<i64, i64> = (0..n).map(|k| (k, k * 3)).collect();
+    assert_eq!(as_map(&out, 1), expected);
+}
+
+#[test]
 fn group_by_all_aggs() {
     let rb = batch(vec![1, 1, 2], vec![10, 30, 50]);
     let out = exec_jit(

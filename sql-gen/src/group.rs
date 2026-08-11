@@ -19,43 +19,58 @@ use rust_lms::prelude::*;
 /// and kept alive across the run (its buffer pointers are baked into the kernel as
 /// constants — the same "host outlives the run" contract as the string pool).
 ///
-/// The kernel folds each input row into a group slot: `intern` the key → `gidx`,
-/// then read-modify-write `buffers[slot][gidx]`. Buffers are `i64`-typed 8-byte
-/// slots (an `f64` accumulator — `avg`'s running sum — reuses the same bytes via a
-/// bit-reinterpreting pointer). Sized to the input row count, so `gidx` (dense,
-/// `< num_groups ≤ rows`) never overflows. This is also the mergeable partial state
-/// for parallel aggregation.
+/// The kernel folds each input row into a group's packed record: `group_upsert` the
+/// key → the record pointer, then read-modify-write its fields. Records are `u64`-
+/// backed for 8-byte alignment (every field is an `i64`/`f64` cell) and the buffer
+/// **grows with the group count** (`O(groups)`, not `O(rows)`) — a new group appends
+/// one identity record. This is also the mergeable partial state for parallel
+/// aggregation.
 pub struct GroupState {
-    pub table: GroupTable<u64>,
-    /// One packed record per group (`capacity` records of `template.len()` words),
-    /// row-wise: `[key | per-agg value (+ count)]`. `u64`-backed for 8-byte
-    /// alignment (every field is an `i64`/`f64` cell). Pre-filled with the identity
-    /// record so a group's first fold sees the right start value.
+    table: GroupTable<u64>,
+    /// Packed records, `[key | per-agg value (+ count)]` each, laid out back-to-back
+    /// (`num_records = records.len() / template.len()`). Grows as groups are minted.
     records: Vec<u64>,
+    /// The identity record (per-field start values — see `codegen::group_template`),
+    /// copied in whenever a new group is appended.
+    template: Vec<u64>,
 }
 
 impl GroupState {
-    /// Allocate `capacity` records, each initialised to the identity `template`
-    /// (the per-field start values — see `codegen::group_template`).
-    pub fn new(template: &[u64], capacity: usize) -> Self {
-        let mut records = Vec::with_capacity(capacity * template.len());
-        for _ in 0..capacity {
-            records.extend_from_slice(template);
-        }
-        Self {
+    /// A fresh state with no groups; `template` is one identity record's words.
+    pub fn new(template: Vec<u64>) -> Self {
+        GroupState {
             table: GroupTable::new(),
-            records,
+            records: Vec::new(),
+            template,
         }
     }
 
-    /// The group hash table (baked; handed to the `intern`/`len` externs).
-    pub fn table_ptr(&mut self) -> *mut GroupTable<u64> {
-        &mut self.table
+    fn stride_words(&self) -> usize {
+        self.template.len()
     }
 
-    /// Base of the packed-records buffer (baked; the kernel indexes by `gidx`
-    /// through a `RecordLayout`).
-    pub fn records_ptr(&mut self) -> *mut u8 {
+    fn num_records(&self) -> usize {
+        match self.stride_words() {
+            0 => 0,
+            w => self.records.len() / w,
+        }
+    }
+
+    /// Ensure a record exists at `gidx` (append the identity template if `gidx` is
+    /// the next new group), then return that record's byte pointer. Valid until the
+    /// next append reallocates the buffer.
+    fn ensure_record(&mut self, gidx: usize) -> *mut u8 {
+        if gidx == self.num_records() {
+            let template = &self.template;
+            self.records.extend_from_slice(template);
+        }
+        debug_assert!(gidx < self.num_records());
+        // SAFETY: `gidx < num_records`, so `gidx * stride_words` is in bounds.
+        unsafe { self.records.as_mut_ptr().add(gidx * self.stride_words()) as *mut u8 }
+    }
+
+    /// Base of the (now fully grown) records buffer, for the emit loop.
+    fn records_base(&mut self) -> *mut u8 {
         self.records.as_mut_ptr() as *mut u8
     }
 }
@@ -133,18 +148,28 @@ impl<K: GroupKey> Default for GroupTable<K> {
     }
 }
 
-/// Find-or-insert `key` (a `u64`-keyed group), returning its dense group index.
-/// The per-row proxy call from the kernel (Umbra's `insert` — the table mechanics
-/// are host code; the kernel generates the key and the fold).
+/// Find-or-insert the `u64`-keyed group and return its **record pointer** — the
+/// per-row proxy call from the kernel (Umbra's `insert`). Table mechanics + the
+/// records-buffer growth are host code; the kernel generates the key and the fold.
+/// The returned pointer is valid until the next `group_upsert` (which may grow and
+/// move the buffer) — the fold uses it immediately, so this holds.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_find_or_insert(table: &mut GroupTable<u64>, key: u64) -> u64 {
-    table.intern(key) as u64
+pub extern "C" fn group_upsert(state: &mut GroupState, key: u64) -> *mut u8 {
+    let gidx = state.table.intern(key) as usize;
+    state.ensure_record(gidx)
+}
+
+/// Base of the fully-grown records buffer, fetched once for the emit loop.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_records_base(state: &mut GroupState) -> *mut u8 {
+    state.records_base()
 }
 
 /// The final group count, called once after the fold loop to size the output.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_len(table: &GroupTable<u64>) -> u64 {
-    table.len() as u64
+pub extern "C" fn group_len(state: &GroupState) -> u64 {
+    state.table.len() as u64
 }

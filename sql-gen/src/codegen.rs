@@ -22,7 +22,7 @@ use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
 use rust_lms_std::{FieldHandle, RecordLayout};
 
-use crate::group::GroupTable;
+use crate::group::GroupState;
 use crate::plan::Operator;
 use crate::runtime::{Runtime, StrPtrExtern};
 use crate::value::{ColVal, Nullness, Row, StrVal};
@@ -44,11 +44,10 @@ pub struct CodegenCtx {
 /// captured before compilation and baked (as constants) into the kernel. Real
 /// pointers, not `u64`s — the pointee type is checked at stage 0.
 pub struct GroupHandle {
-    /// The group hash table (handed to the `find_or_insert`/`len` externs).
-    pub table: *mut GroupTable<u64>,
-    /// Base of the packed-records buffer (one record per group, indexed by `gidx`
-    /// through the [`RecordLayout`]).
-    pub records: *mut u8,
+    /// The whole host-side GROUP BY state (hash table + growable records buffer),
+    /// handed to the `group_upsert`/`group_len`/`group_records_base` externs. One
+    /// baked pointer: growth happens inside the externs, so nothing here dangles.
+    pub state: *mut GroupState,
 }
 
 /// Collect the string-literal values in `op`'s expressions, so `exec_jit` can
@@ -301,8 +300,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     let record = group_record(aggs, &agg_tys);
     let layout = record.layout;
     let key_field = record.key;
-    let base = handle.records;
-    let table = handle.table;
+    let state = handle.state;
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
     let resolved: Vec<ResolvedAgg> = record
         .aggs
@@ -337,12 +335,15 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
             // The table keys on `u64` bits (grouping is sign-agnostic); the cast is a
             // no-op reinterpret. The signed `key` still goes into the record for emit.
             let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
-            let group_id = ctx.bind(call_extern2(
-                cx_c.rt.group_find_or_insert,
-                const_opaque_mut::<GroupTable<u64>>(table),
+            // Find-or-insert the group AND materialise its record in one proxy call:
+            // `group_upsert` grows the records buffer (host-side) when it mints a new
+            // group, and returns that group's record pointer — so the fold never bakes
+            // a records base that a grow could dangle. Valid until the next `upsert`.
+            let rec = ctx.bind(call_extern2(
+                cx_c.rt.group_upsert,
+                const_opaque_mut::<GroupState>(state),
                 key_bits,
             ));
-            let rec = layout.record(ctx, const_mut_ptr::<u8>(base), group_id);
             key_field.set(ctx, rec, key);
             for agg in &resolved_f {
                 agg.fold(ctx, rec, &row, &schema_f, &cx_c);
@@ -350,14 +351,19 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         }),
     );
 
-    // Emit: one manifested Row per group, pushed downstream in the same kernel.
+    // Emit: one manifested Row per group, pushed downstream in the same kernel. The
+    // records buffer is fully grown now, so its base is stable — fetch it once.
     let num_groups = ctx.bind(call_extern1(
         cx.rt.group_len,
-        const_opaque::<GroupTable<u64>>(table),
+        const_opaque::<GroupState>(state),
+    ));
+    let base = ctx.bind(call_extern1(
+        cx.rt.group_records_base,
+        const_opaque_mut::<GroupState>(state),
     ));
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
-        let rec = layout.record(ctx, const_mut_ptr::<u8>(base), g);
+        let rec = layout.record(ctx, base, g);
         let key = key_field.get(ctx, rec);
         let mut row: Row = Vec::with_capacity(1 + resolved.len());
         row.push(ColVal::I64(key, Nullness::NonNull));

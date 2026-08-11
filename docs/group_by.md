@@ -457,13 +457,13 @@ payload]` in one open-addressing arena (the "Tidy Tuples" paper's Tuples layer:
 *"packing tuples into a memory efficient format"*) — which is now what we do too, for
 the *payload*. Two first-order gaps remain, in priority order:
 
-1. **Per-row extern call.** `group_intern` is an out-of-line Rust `HashMap` probe
-   called once per input row. Inlining the hash+probe as *staged* code (a staged
-   open-addressing table in the kernel — `rust-lms-std`'s `SHashMap`) removes a
-   function call + non-inlinable hash from the hot loop — the biggest win.
-2. **Records sized to `num_rows`, not group count.** The packed buffer still holds
-   `num_rows` records, so a 1M-row query allocates for 1M groups even when there are
-   a handful — O(rows) memory for what should be O(groups). Growing the table by
-   discovered-group count (once (1) makes the probe ours, over an `SArena`) fixes it.
-3. ✅ **Row-wise packing** (Phase 2) — a group's cells now share a cache line in the
-   fold loop.
+1. **Per-row proxy call.** `group_upsert` is one host call per input row (find-or-
+   insert on `hashbrown` + return the record pointer). This is *exactly* Umbra's
+   model (Fig 5's `insert` is a proxy), so it's a deliberate design point, not a
+   wart — inlining the probe as staged code stays a possible later optimisation, not
+   a goal.
+2. ✅ **O(groups) memory** (Phase 4) — the records buffer starts empty and grows one
+   record per new group; the last O(rows) allocation is gone. Full roadmap and the
+   key-generic table are in `docs/path_to_umbra_group_by.md`.
+3. ✅ **Row-wise packing** (Phase 2) — a group's cells share a cache line in the fold
+   loop.
