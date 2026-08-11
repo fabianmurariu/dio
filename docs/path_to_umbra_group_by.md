@@ -313,17 +313,27 @@ Each phase builds, tests, and ships green on its own.
    tuples). IR: the fold does `rec = call group_upsert(...)` then field writes at
    offsets off `rec`; no baked base, no `gidx*stride` in the hot loop. Stress test
    `group_by_many_groups_grows_records` (1000 groups) exercises the realloc path.
-5. **Typed / complex keys via `GroupKey`:** `Float64` (bitcast to `u64` bits),
-   composite (`[u64; 2]` inline fast path, else a bundled key-pool), then **string
-   keys** — a `BytesPool` **bundled with the table**, entry storing a stable
-   `(offset, len)`, `hash`/`eq` on *content* (long-string views differ per
-   occurrence, so hashing the view is wrong; the ≤12-byte inline view is a fast
-   path). This is where `SArena`/`BytesPool` earns its place.
+5. **✅ DONE — string keys via `GroupKey`.** `GroupKey` gained `matches` (content
+   equality) and `store(&mut BytesPool) -> Self` (copy variable data into the table's
+   pool). `StrKey { ptr, len }` hashes/compares on **content** (long-string views
+   differ per occurrence, so hashing the view is wrong) and `store` copies the bytes
+   into a `BytesPool` **bundled with the `GroupTable`** — so the group state (and the
+   result) survive the input batch being dropped, the contract a *stream* of batches
+   needs (the user's reason for copying, verified by `group_by_string_key_survives_input_drop`).
+   `GroupState` holds a non-generic `KeyTable = Int(GroupTable<u64>) | Str(GroupTable<StrKey>)`;
+   only `group_upsert` vs `group_upsert_str(state, ptr, len)` differ, and the upsert
+   externs now write the key into the record's leading field(s) themselves (so the
+   fold only folds aggregates). The record's key is typed — `FieldId<i64>` for int,
+   `FieldId<SPtr<u8>> + FieldId<u64>` for a string — and emit reads it back into a
+   `ColVal::Str` through the existing output path. Codegen picks the int/string path
+   from the key column's `DataType`; nullable keys still `NotImplemented`.
+   **Deferred:** `Float64` keys (bitcast), composite (`[u64;2]` inline + pool spill),
+   computed string keys (`upper(x)` — needs string functions).
 6. **Nullable/null keys**, then the **parallel partial/final split** (the
    `[keys | payloads]` state is already the mergeable unit).
 
-Done in order 1 → 2 → 3. Next: Phase 4 (O(groups) records) or jump to Phase 5
-(string keys) — both build only on what's already green.
+Done in order 1 → 2 → 3 → 4 → 5. Next: composite/`Float64` keys (finish the
+`GroupKey` family) or null-key grouping (Phase 6).
 
 ---
 

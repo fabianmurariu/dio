@@ -15,7 +15,7 @@ use rust_lms::prelude::*;
 use crate::codegen::{
     CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_template,
 };
-use crate::group::GroupState;
+use crate::group::{GroupState, KeyKind};
 use crate::plan::Operator;
 use crate::runtime::Runtime;
 use crate::sql::sql_to_operator;
@@ -55,14 +55,21 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
     let capacity = op.max_output_rows(rb.num_rows());
 
-    // A grouped aggregate's key is stored as an `i64`; reject nullable keys until we
-    // track key nulls.
-    if let Some(Operator::Aggregate { schema, .. }) = find_grouped(&op)
-        && schema.field(0).is_nullable()
-    {
-        return Err(DataFusionError::NotImplemented(
-            "nullable GROUP BY key".into(),
-        ));
+    // Reject nullable GROUP BY keys (null-grouping is a later phase) and key types we
+    // don't support yet — `Int32`/`Int64` and `Utf8View`.
+    if let Some(Operator::Aggregate { schema, .. }) = find_grouped(&op) {
+        let key = schema.field(0);
+        if key.is_nullable() {
+            return Err(DataFusionError::NotImplemented(
+                "nullable GROUP BY key".into(),
+            ));
+        }
+        if key_kind(key.data_type()).is_none() {
+            return Err(DataFusionError::NotImplemented(format!(
+                "GROUP BY key type {}",
+                key.data_type()
+            )));
+        }
     }
 
     let prepared_in = prepare_record_batch(rb).map_err(exec_err)?;
@@ -94,7 +101,12 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
             ..
         }) => {
             let agg_tys = agg_output_types(schema, group_exprs.len());
-            Some(GroupState::new(group_template(aggs, &agg_tys)))
+            let key_ty = schema.field(0).data_type();
+            let template = group_template(aggs, &agg_tys, key_ty);
+            Some(GroupState::new(
+                template,
+                key_kind(key_ty).expect("checked above"),
+            ))
         }
         _ => None,
     };
@@ -124,6 +136,15 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     drop(pool);
     drop(group_state);
     Ok(result)
+}
+
+/// The [`KeyKind`] for a GROUP BY key column type, or `None` if unsupported.
+fn key_kind(dt: &DataType) -> Option<KeyKind> {
+    match dt {
+        DataType::Int32 | DataType::Int64 => Some(KeyKind::Int),
+        DataType::Utf8View => Some(KeyKind::Str),
+        _ => None,
+    }
 }
 
 /// Find the (single) grouped `Aggregate` node in the plan, if any.

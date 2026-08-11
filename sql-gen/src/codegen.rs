@@ -297,9 +297,10 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         .clone()
         .expect("grouped aggregate without a baked GroupState");
     let agg_tys = agg_output_types(out_schema, group_exprs.len());
-    let record = group_record(aggs, &agg_tys);
+    let key_ty = out_schema.field(0).data_type().clone();
+    let record = group_record(aggs, &agg_tys, &key_ty);
     let layout = record.layout;
-    let key_field = record.key;
+    let key_fields = record.key;
     let state = handle.state;
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
     let resolved: Vec<ResolvedAgg> = record
@@ -330,21 +331,35 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         cx,
         Box::new(move |ctx, row| {
             let key_cv = gen_expr(ctx, &group_expr_f, &schema_f, &row, &cx_c);
-            let key = to_i64(ctx, key_cv);
-            // The table keys on `u64` bits (grouping is sign-agnostic); the cast is a
-            // no-op reinterpret. The signed `key` still goes into the record for emit.
-            let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
             // Find-or-insert the group AND materialise its record in one proxy call:
-            // `group_upsert` grows the records buffer (host-side) when it mints a new
-            // group, and returns that group's record pointer — so the fold never bakes
-            // a records base that a grow could dangle. Valid until the next `upsert`.
-            let rec_ptr = ctx.bind(call_extern2(
-                cx_c.rt.group_upsert,
-                const_opaque_mut::<GroupState>(state),
-                key_bits,
-            ));
+            // the `upsert` extern grows the records buffer (host-side) when it mints a
+            // new group, writes the key into the record's leading field(s), and returns
+            // the record pointer — so the fold never bakes a records base that a grow
+            // could dangle, and never handles the key. Valid until the next `upsert`.
+            let rec_ptr = match key_fields {
+                KeyFields::Int(_) => {
+                    // The table keys on `u64` bits (grouping is sign-agnostic); the cast
+                    // is a no-op reinterpret.
+                    let key = to_i64(ctx, key_cv);
+                    let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
+                    ctx.bind(call_extern2(
+                        cx_c.rt.group_upsert,
+                        const_opaque_mut::<GroupState>(state),
+                        key_bits,
+                    ))
+                }
+                KeyFields::Str { .. } => {
+                    // Pass the key's content bytes; the extern copies them into its pool.
+                    let (ptr, len) = resolve(ctx, as_str(key_cv), cx_c.rt.str_ptr);
+                    ctx.bind(call_extern3(
+                        cx_c.rt.group_upsert_str,
+                        const_opaque_mut::<GroupState>(state),
+                        ptr,
+                        len,
+                    ))
+                }
+            };
             let rec = layout.wrap(rec_ptr);
-            rec.set(ctx, key_field, key);
             for agg in &resolved_f {
                 agg.fold(ctx, rec, &row, &schema_f, &cx_c);
             }
@@ -364,9 +379,25 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
         let rec = layout.record(ctx, base, g);
-        let key = rec.get(ctx, key_field);
+        let key_cv = match key_fields {
+            KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), Nullness::NonNull),
+            KeyFields::Str { ptr, len } => {
+                // The record's `(ptr, len)` point at the pooled key bytes; produce a
+                // `Bytes` string so the existing output path appends them (copying).
+                let ptr = rec.get(ctx, ptr);
+                let len = rec.get(ctx, len);
+                ColVal::Str(
+                    StrVal::Bytes {
+                        ptr,
+                        len,
+                        view: None,
+                    },
+                    Nullness::NonNull,
+                )
+            }
+        };
         let mut row: Row = Vec::with_capacity(1 + resolved.len());
-        row.push(ColVal::I64(key, Nullness::NonNull));
+        row.push(key_cv);
         for agg in &resolved {
             row.push(agg.finalize(ctx, rec));
         }
@@ -433,23 +464,49 @@ struct AggFields {
     count: Option<FieldId<i64>>,
 }
 
-/// The packed record of a group-by's state: field 0 is the `i64` key, then a value
-/// (+ count) field per aggregate. One [`RecordLayout`], derived deterministically
-/// from the aggregates, is shared by the host allocator ([`group_template`]) and
+/// The group key's field(s) in the record — an `i64` for an integer key, or a
+/// `(ptr, len)` byte reference for a `Utf8View` key (the extern writes the pooled
+/// pointer; emit reads it to produce the output string). Always the record's leading
+/// field(s), at offset 0 — the `group_upsert*` externs rely on this.
+#[derive(Clone, Copy)]
+enum KeyFields {
+    Int(FieldId<i64>),
+    Str {
+        ptr: FieldId<SPtr<u8>>,
+        len: FieldId<u64>,
+    },
+}
+
+/// The packed record of a group-by's state: the key field(s), then a value (+ count)
+/// field per aggregate. One [`RecordLayout`], derived deterministically from the
+/// aggregates + key type, is shared by the host allocator ([`group_template`]) and
 /// codegen so they agree on field offsets — exactly like a `#[repr(C)]` struct, but
 /// query-shaped. Fields are addressed only through typed [`FieldId`] tokens.
 struct GroupRecord {
     layout: RecordLayout,
-    key: FieldId<i64>,
+    key: KeyFields,
     aggs: Vec<AggFields>,
 }
 
-/// Build the packed-record layout from the aggregates and their output `DataType`s
-/// (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
+/// Reserve the leading key field(s) for `key_ty`. Must be first (offset 0) — the
+/// `group_upsert*` externs write the key there.
+fn key_fields(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
+    match key_ty {
+        DataType::Int32 | DataType::Int64 => KeyFields::Int(layout.field::<i64>()),
+        DataType::Utf8View => KeyFields::Str {
+            ptr: layout.field::<SPtr<u8>>(),
+            len: layout.field::<u64>(),
+        },
+        other => panic!("unsupported GROUP BY key type: {other}"),
+    }
+}
+
+/// Build the packed-record layout from the key type and the aggregates + their output
+/// `DataType`s (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
 /// `sum`/`min`/`max` over `Float64` fold in an `f64` field, everything else `i64`.
-fn group_record(aggs: &[Expr], agg_tys: &[DataType]) -> GroupRecord {
+fn group_record(aggs: &[Expr], agg_tys: &[DataType], key_ty: &DataType) -> GroupRecord {
     let mut layout = RecordLayout::new();
-    let key = layout.field::<i64>();
+    let key = key_fields(&mut layout, key_ty);
     let mut agg_fields = Vec::with_capacity(aggs.len());
     for (e, out) in aggs.iter().zip(agg_tys) {
         let kind = GroupedAgg::parse(e).kind;
@@ -489,8 +546,8 @@ fn value_init_bits(kind: AggKind, value: &AggValueField) -> i64 {
 /// value field at its identity, counts `0`). The host fills every group slot with
 /// this before the fold (see `group::GroupState::new`). All fields are 8-byte
 /// `i64`/`f64` cells, so every offset is a whole word.
-pub fn group_template(aggs: &[Expr], agg_tys: &[DataType]) -> Vec<u64> {
-    let record = group_record(aggs, agg_tys);
+pub fn group_template(aggs: &[Expr], agg_tys: &[DataType], key_ty: &DataType) -> Vec<u64> {
+    let record = group_record(aggs, agg_tys, key_ty);
     let words = record.layout.stride() / 8;
     let mut template = vec![0u64; words];
     for a in &record.aggs {
@@ -1220,6 +1277,13 @@ fn as_bool(cv: ColVal) -> Var<bool> {
     match cv {
         ColVal::Bool(v, _) => v,
         other => panic!("expected bool, got {}", tag(other)),
+    }
+}
+
+fn as_str(cv: ColVal) -> StrVal {
+    match cv {
+        ColVal::Str(sv, _) => sv,
+        other => panic!("expected string group key, got {}", tag(other)),
     }
 }
 

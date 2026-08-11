@@ -5,7 +5,7 @@
 use std::collections::BTreeMap;
 use std::sync::Arc;
 
-use arrow::array::{Array, Float64Array, Int64Array};
+use arrow::array::{Array, Float64Array, Int64Array, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 use sql_gen::exec_jit;
@@ -402,5 +402,98 @@ fn group_by_float_sum_all_null_is_null() {
     assert_eq!(
         as_opt_f64_map(&out, 1),
         BTreeMap::from([(1, None), (2, Some(3.5))])
+    );
+}
+
+// --- Utf8View string group keys: hash/eq on content, keys copied into the table's
+// pool, emitted as a Utf8View column. ---
+
+/// A batch with a non-null `Utf8View` key column and a non-null Int64 value.
+fn batch_str(keys: Vec<&str>, values: Vec<i64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8View, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringViewArray::from(keys)),
+            Arc::new(Int64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Result as a `name -> agg` map (column 0 = Utf8View key, `agg_col` = i64 aggregate).
+fn as_str_map(rb: &RecordBatch, agg_col: usize) -> BTreeMap<String, i64> {
+    let keys: &StringViewArray = rb.column(0).as_any().downcast_ref().unwrap();
+    let aggs = i64s(rb, agg_col);
+    (0..rb.num_rows())
+        .map(|i| (keys.value(i).to_string(), aggs.value(i)))
+        .collect()
+}
+
+#[test]
+fn group_by_string_key() {
+    // short (inline) strings; a/b/a/c/b/a
+    let rb = batch_str(
+        vec!["apple", "beet", "apple", "cherry", "beet", "apple"],
+        vec![1, 2, 3, 4, 5, 6],
+    );
+    let out = exec_jit(
+        "SELECT name, count(*), sum(value) FROM t GROUP BY name",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 3);
+    assert_eq!(
+        as_str_map(&out, 1),
+        BTreeMap::from([
+            ("apple".into(), 3),
+            ("beet".into(), 2),
+            ("cherry".into(), 1),
+        ])
+    ); // count: apple×3, beet×2, cherry×1
+    assert_eq!(
+        as_str_map(&out, 2),
+        BTreeMap::from([
+            ("apple".into(), 10),
+            ("beet".into(), 7),
+            ("cherry".into(), 4),
+        ])
+    ); // sum: apple 1+3+6, beet 2+5, cherry 4
+}
+
+#[test]
+fn group_by_long_string_key() {
+    // Strings >12 bytes: their Utf8View carries a buffer index/offset that differs
+    // per occurrence, so grouping MUST hash/compare content, not the raw view.
+    let long_a = "this is a long grouping key over twelve bytes";
+    let long_b = "another sufficiently long key value here!!";
+    let rb = batch_str(
+        vec![long_a, long_b, long_a, long_a, long_b],
+        vec![10, 20, 30, 40, 50],
+    );
+    let out = exec_jit("SELECT name, sum(value) FROM t GROUP BY name", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(
+        as_str_map(&out, 1),
+        BTreeMap::from([(long_a.into(), 80), (long_b.into(), 70)])
+    );
+}
+
+#[test]
+fn group_by_string_key_survives_input_drop() {
+    // The key bytes are copied into the table's pool, so the result is valid after
+    // the input batch is dropped — the contract that lets inputs stream.
+    let out = {
+        let rb = batch_str(vec!["x", "yy", "x", "zzz", "yy"], vec![1, 2, 3, 4, 5]);
+        exec_jit("SELECT name, sum(value) FROM t GROUP BY name", "t", &rb).unwrap()
+        // rb dropped here
+    };
+    assert_eq!(
+        as_str_map(&out, 1),
+        BTreeMap::from([("x".into(), 4), ("yy".into(), 7), ("zzz".into(), 4)])
     );
 }
