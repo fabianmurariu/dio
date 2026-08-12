@@ -348,6 +348,18 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
                         key_bits,
                     ))
                 }
+                KeyFields::Float(_) => {
+                    // Key on the f64's bits via the `Int` (`u64`) table: canonicalize
+                    // (so `-0.0`/`+0.0` and all NaNs each group together), then bitcast.
+                    let key = coerce_f64(ctx, key_cv);
+                    let canon = canonical_f64(ctx, key);
+                    let key_bits = ctx.bind(bitcast::<u64, f64, _>(canon));
+                    ctx.bind(call_extern2(
+                        cx_c.rt.group_upsert,
+                        const_opaque_mut::<GroupState>(state),
+                        key_bits,
+                    ))
+                }
                 KeyFields::Str { .. } => {
                     // Pass the key's content bytes; the extern copies them into its pool.
                     let (ptr, len) = resolve(ctx, as_str(key_cv), cx_c.rt.str_ptr);
@@ -381,6 +393,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         let rec = layout.record(ctx, base, g);
         let key_cv = match key_fields {
             KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), Nullness::NonNull),
+            KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), Nullness::NonNull),
             KeyFields::Str { ptr, len } => {
                 // The record's `(ptr, len)` point at the pooled key bytes; produce a
                 // `Bytes` string so the existing output path appends them (copying).
@@ -471,6 +484,9 @@ struct AggFields {
 #[derive(Clone, Copy)]
 enum KeyFields {
     Int(FieldId<i64>),
+    /// A `Float64` key. Stored (by the `Int` upsert extern) as its `u64` bits in the
+    /// leading cell; read back as `f64` at emit (the token reinterprets those bytes).
+    Float(FieldId<f64>),
     Str {
         ptr: FieldId<SPtr<u8>>,
         len: FieldId<u64>,
@@ -493,6 +509,7 @@ struct GroupRecord {
 fn key_fields(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
     match key_ty {
         DataType::Int32 | DataType::Int64 => KeyFields::Int(layout.field::<i64>()),
+        DataType::Float64 => KeyFields::Float(layout.field::<f64>()),
         DataType::Utf8View => KeyFields::Str {
             ptr: layout.field::<SPtr<u8>>(),
             len: layout.field::<u64>(),
@@ -1285,6 +1302,16 @@ fn as_str(cv: ColVal) -> StrVal {
         ColVal::Str(sv, _) => sv,
         other => panic!("expected string group key, got {}", tag(other)),
     }
+}
+
+/// Canonicalize an `f64` GROUP BY key before bit-keying it, so bit-equality matches
+/// SQL float grouping: map `-0.0` to `+0.0` (they compare equal) and every NaN to one
+/// canonical NaN (NaN ≠ NaN, so distinct payloads would otherwise split). Branchless.
+fn canonical_f64(ctx: &mut Ctx, key: Var<f64>) -> Var<f64> {
+    let is_zero = ctx.bind(eq(key, 0.0f64));
+    let no_neg_zero = ctx.bind(select(is_zero, 0.0f64, key));
+    let is_number = ctx.bind(eq(no_neg_zero, no_neg_zero)); // false only for NaN
+    ctx.bind(select(is_number, no_neg_zero, f64::NAN))
 }
 
 fn tag(cv: ColVal) -> &'static str {

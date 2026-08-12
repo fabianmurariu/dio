@@ -142,6 +142,7 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
 fn key_kind(dt: &DataType) -> Option<KeyKind> {
     match dt {
         DataType::Int32 | DataType::Int64 => Some(KeyKind::Int),
+        DataType::Float64 => Some(KeyKind::Float),
         DataType::Utf8View => Some(KeyKind::Str),
         _ => None,
     }

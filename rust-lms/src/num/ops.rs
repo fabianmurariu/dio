@@ -1,6 +1,6 @@
 //! Operation structs for numeric staged computations.
 
-use cranelift_codegen::ir::{InstBuilder, Value};
+use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
 use std::marker::PhantomData;
 
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
@@ -525,6 +525,53 @@ where
     E: IntoStaged<FROM>,
 {
     IntCast {
+        expr: expr.into_staged(),
+        _to: PhantomData,
+    }
+}
+
+/// Reinterpret the bits of a value as another same-sized type — e.g. `f64` ↔ `u64`.
+/// No value conversion, just a type change (Cranelift `bitcast` when the register
+/// class differs, otherwise a no-op). Used to key a `Float64` GROUP BY on its `u64`
+/// bits, reusing the integer hash table.
+pub struct Bitcast<E, TO> {
+    expr: E,
+    _to: PhantomData<TO>,
+}
+
+impl<E, FROM, TO> Staged for Bitcast<E, TO>
+where
+    E: Staged<Out = FROM>,
+    FROM: StagedType,
+    TO: StagedType,
+{
+    type Out = TO;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        assert_eq!(
+            FROM::size_of(),
+            TO::size_of(),
+            "bitcast between different-sized types",
+        );
+        let value = self.expr.codegen(ctx);
+        let from_ty = FROM::cranelift_type();
+        let to_ty = TO::cranelift_type();
+        if from_ty == to_ty {
+            value
+        } else {
+            ctx.builder.ins().bitcast(to_ty, MemFlags::new(), value)
+        }
+    }
+}
+
+/// Reinterpret `expr`'s bits as `TO` (a same-sized type). See [`Bitcast`].
+pub fn bitcast<TO, FROM, E>(expr: E) -> Bitcast<E::Staged, TO>
+where
+    TO: StagedType,
+    FROM: StagedType,
+    E: IntoStaged<FROM>,
+{
+    Bitcast {
         expr: expr.into_staged(),
         _to: PhantomData,
     }

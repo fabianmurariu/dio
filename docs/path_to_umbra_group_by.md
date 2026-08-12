@@ -327,8 +327,12 @@ Each phase builds, tests, and ships green on its own.
    `FieldId<SPtr<u8>> + FieldId<u64>` for a string — and emit reads it back into a
    `ColVal::Str` through the existing output path. Codegen picks the int/string path
    from the key column's `DataType`; nullable keys still `NotImplemented`.
-   **Deferred:** `Float64` keys (bitcast), composite (`[u64;2]` inline + pool spill),
-   computed string keys (`upper(x)` — needs string functions).
+   **`Float64` keys — ✅ also done:** the kernel canonicalizes (`-0.0`→`+0.0`, any NaN→
+   one canonical NaN — two `fcmp`+`select`) then `bitcast`s the f64 to `u64` bits and
+   reuses the `Int` table (`KeyKind::Float` → `KeyTable::Int`); `KeyFields::Float(FieldId<f64>)`
+   reads the bits back as f64 at emit. Needed one new rust-lms primitive `bitcast<TO,FROM>`
+   (Cranelift `bitcast`, same-sized reinterpret). **Deferred:** composite (`[u64;2]` inline
+   + pool spill), computed string keys (`upper(x)` — needs string functions).
 6. **Nullable/null keys**, then the **parallel partial/final split** (the
    `[keys | payloads]` state is already the mergeable unit).
 

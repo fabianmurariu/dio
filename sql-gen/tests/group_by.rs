@@ -497,3 +497,88 @@ fn group_by_string_key_survives_input_drop() {
         BTreeMap::from([("x".into(), 4), ("yy".into(), 7), ("zzz".into(), 4)])
     );
 }
+
+// --- Float64 group keys: keyed on the f64 bits (via the u64 table), with -0.0/NaN
+// canonicalized so they group per SQL semantics. ---
+
+/// A batch with a non-null `Float64` key column and a non-null Int64 value.
+fn batch_f64_key(keys: Vec<f64>, values: Vec<i64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Float64, false),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(keys)),
+            Arc::new(Int64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Result as a `bits(key) -> agg` map (f64 keys aren't Ord/Hash-friendly, so key on bits).
+fn as_f64key_map(rb: &RecordBatch, agg_col: usize) -> BTreeMap<u64, i64> {
+    let keys = f64s(rb, 0);
+    let aggs = i64s(rb, agg_col);
+    (0..rb.num_rows())
+        .map(|i| (keys.value(i).to_bits(), aggs.value(i)))
+        .collect()
+}
+
+#[test]
+fn group_by_float_key() {
+    // keys 1.5 / 2.5 / 1.5 / 3.5 / 2.5 / 1.5
+    let rb = batch_f64_key(vec![1.5, 2.5, 1.5, 3.5, 2.5, 1.5], vec![1, 2, 3, 4, 5, 6]);
+    let out = exec_jit(
+        "SELECT key, count(*), sum(value) FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 3);
+    assert_eq!(
+        as_f64key_map(&out, 1),
+        BTreeMap::from([
+            (1.5f64.to_bits(), 3),
+            (2.5f64.to_bits(), 2),
+            (3.5f64.to_bits(), 1),
+        ])
+    ); // count
+    assert_eq!(
+        as_f64key_map(&out, 2),
+        BTreeMap::from([
+            (1.5f64.to_bits(), 10), // 1+3+6
+            (2.5f64.to_bits(), 7),  // 2+5
+            (3.5f64.to_bits(), 4),  // 4
+        ])
+    ); // sum
+}
+
+#[test]
+fn group_by_float_key_neg_zero_and_nan() {
+    // -0.0 must group with +0.0 (different bits, equal value), and two NaNs with
+    // *different payloads* must group together (bit grouping alone would split them;
+    // canonicalization collapses them).
+    let nan1 = f64::from_bits(0x7ff8_0000_0000_0001);
+    let nan2 = f64::from_bits(0x7ff8_0000_0000_0002);
+    assert_ne!(nan1.to_bits(), nan2.to_bits());
+    let rb = batch_f64_key(vec![0.0, -0.0, nan1, 0.0, nan2], vec![1, 2, 3, 4, 5]);
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    // two groups: {0.0, -0.0, 0.0} -> 1+2+4=7 ; {nan, nan} -> 3+5=8
+    assert_eq!(out.num_rows(), 2);
+    let keys = f64s(&out, 0);
+    let sums = i64s(&out, 1);
+    let mut zero_sum = None;
+    let mut nan_sum = None;
+    for i in 0..out.num_rows() {
+        if keys.value(i).is_nan() {
+            nan_sum = Some(sums.value(i));
+        } else {
+            assert_eq!(keys.value(i), 0.0);
+            zero_sum = Some(sums.value(i));
+        }
+    }
+    assert_eq!(zero_sum, Some(7));
+    assert_eq!(nan_sum, Some(8));
+}

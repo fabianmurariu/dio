@@ -42,6 +42,9 @@ pub struct GroupState {
 pub enum KeyKind {
     /// A widened `Int32`/`Int64` column, keyed on its `u64` bits.
     Int,
+    /// A `Float64` column, keyed on its `u64` *bits* (reuses the `Int` table — the
+    /// kernel bitcasts the key; equal floats have equal bits).
+    Float,
     /// A `Utf8View` column, keyed on its content bytes (copied into the table's pool).
     Str,
 }
@@ -68,7 +71,8 @@ impl GroupState {
     /// `key` selects the table's key type.
     pub fn new(template: Vec<u64>, key: KeyKind) -> Self {
         let table = match key {
-            KeyKind::Int => KeyTable::Int(GroupTable::new()),
+            // `Float` keys on `u64` bits, so they share the `Int` table.
+            KeyKind::Int | KeyKind::Float => KeyTable::Int(GroupTable::new()),
             KeyKind::Str => KeyTable::Str(GroupTable::new()),
         };
         GroupState {

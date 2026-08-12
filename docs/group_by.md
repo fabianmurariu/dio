@@ -425,11 +425,12 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
 
 ## 8. Limitations & extension points
 
-- **Single, non-null `Int32`/`Int64` or `Utf8View` key.** A nullable key is rejected
-  (`NotImplemented`). Int keys are widened to `u64` bits; string keys hash/compare on
-  content and are copied into a `BytesPool` bundled with the table (so the result
-  survives the input batch — needed once inputs stream). `Float64` and composite keys
-  are the next key-typing step; computed string keys (`upper(x)`) wait on string fns.
+- **Single, non-null `Int32`/`Int64`, `Float64`, or `Utf8View` key.** A nullable key
+  is rejected (`NotImplemented`). Int keys are widened to `u64` bits; `Float64` keys are
+  canonicalized (`-0.0`/NaN) and bit-keyed on the same `u64` table; string keys hash/
+  compare on content and are copied into a `BytesPool` bundled with the table (so the
+  result survives the input batch — needed once inputs stream). Composite keys are the
+  next key-typing step; computed string keys (`upper(x)`) wait on string fns.
 - **Aggregate value types: `i64` and `Float64` done** (`sum`/`min`/`max` pick their
   cell from the output type; `avg` always `f64`). `Decimal`/other numeric inputs
   still fall through to the `to_i64` panic.
