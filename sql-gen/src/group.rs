@@ -35,6 +35,11 @@ pub struct GroupState {
     /// The identity record (per-field start values — see `codegen::group_template`),
     /// copied in whenever a new group is appended.
     template: Vec<u64>,
+    /// The dense index of the *null-key* group (SQL: all NULL keys form one group),
+    /// minted lazily on the first null-key row. Kept **out of the hash table** — the
+    /// null key is never hashed/interned — but it still occupies a normal record slot,
+    /// so the single emit loop covers it. `None` until (and unless) a null key appears.
+    null_gidx: Option<u32>,
 }
 
 /// Which key type a GROUP BY uses — picks the [`GroupTable`] instantiation.
@@ -57,15 +62,6 @@ enum KeyTable {
     Str(GroupTable<StrKey>),
 }
 
-impl KeyTable {
-    fn len(&self) -> usize {
-        match self {
-            KeyTable::Int(t) => t.len(),
-            KeyTable::Str(t) => t.len(),
-        }
-    }
-}
-
 impl GroupState {
     /// A fresh state with no groups; `template` is one identity record's words and
     /// `key` selects the table's key type.
@@ -79,6 +75,7 @@ impl GroupState {
             table,
             records: Vec::new(),
             template,
+            null_gidx: None,
         }
     }
 
@@ -248,20 +245,26 @@ impl<K: GroupKey> GroupTable<K> {
         self.table.is_empty()
     }
 
-    /// Find-or-insert `probe`, returning its dense group index **and the stored key**
-    /// (the pooled copy for a new group, or the existing entry's key). Dense and
-    /// monotonic, so `gidx` doubles as the row cursor into the records buffer.
-    pub fn intern(&mut self, probe: K) -> (u32, K) {
+    /// Find `probe` (returning its `gidx` + stored key), or insert it at `next_gidx`.
+    /// The caller supplies `next_gidx` (the records-buffer count) rather than the
+    /// table's own `len`, so the gidx space stays dense even when a *null* group —
+    /// which bypasses the table — also consumes a record slot.
+    pub fn find_or_insert(&mut self, probe: K, next_gidx: u32) -> (u32, K) {
         let hash = probe.hash_one(&self.state);
         if let Some(entry) = self.table.find(hash, |e| e.key.matches(&probe)) {
             return (entry.gidx, entry.key);
         }
-        let gidx = self.table.len() as u32;
         let stored = probe.store(&mut self.pool); // copy variable data (not borrowing `table`)
         let state = &self.state;
-        self.table
-            .insert_unique(hash, Entry { key: stored, gidx }, |e| e.key.hash_one(state));
-        (gidx, stored)
+        self.table.insert_unique(
+            hash,
+            Entry {
+                key: stored,
+                gidx: next_gidx,
+            },
+            |e| e.key.hash_one(state),
+        );
+        (next_gidx, stored)
     }
 }
 
@@ -280,12 +283,32 @@ impl<K: GroupKey> Default for GroupTable<K> {
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn group_upsert(state: &mut GroupState, key: u64) -> *mut u8 {
+    let next = state.num_records() as u32;
     let (gidx, stored) = match &mut state.table {
-        KeyTable::Int(t) => t.intern(key),
+        KeyTable::Int(t) => t.find_or_insert(key, next),
         KeyTable::Str(_) => unreachable!("group_upsert on a string-keyed table"),
     };
     let mut rec = state.ensure_record(gidx as usize);
     rec.set_int_key(stored);
+    rec.as_ptr()
+}
+
+/// Find-or-insert the **null-key** group and return its record pointer. The null key
+/// bypasses the hash table (see [`GroupState::null_gidx`]); it just gets a record slot
+/// like any other group. No key is written — the emit path reads the record's
+/// key-valid cell to know it is null.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_upsert_null(state: &mut GroupState) -> *mut u8 {
+    let gidx = match state.null_gidx {
+        Some(g) => g,
+        None => {
+            let g = state.num_records() as u32;
+            state.null_gidx = Some(g);
+            g
+        }
+    };
+    let mut rec = state.ensure_record(gidx as usize);
     rec.as_ptr()
 }
 
@@ -300,8 +323,9 @@ pub extern "C" fn group_upsert_str(state: &mut GroupState, ptr: *const u8, len: 
         ptr,
         len: len as usize,
     };
+    let next = state.num_records() as u32;
     let (gidx, stored) = match &mut state.table {
-        KeyTable::Str(t) => t.intern(probe),
+        KeyTable::Str(t) => t.find_or_insert(probe, next),
         KeyTable::Int(_) => unreachable!("group_upsert_str on an int-keyed table"),
     };
     let mut rec = state.ensure_record(gidx as usize);
@@ -316,9 +340,10 @@ pub extern "C" fn group_records_base(state: &mut GroupState) -> *mut u8 {
     state.records_base()
 }
 
-/// The final group count, called once after the fold loop to size the output.
+/// The final group count, called once after the fold loop to size the output —
+/// the number of materialised records (hash groups plus the null group, if any).
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn group_len(state: &GroupState) -> u64 {
-    state.table.len() as u64
+    state.num_records() as u64
 }

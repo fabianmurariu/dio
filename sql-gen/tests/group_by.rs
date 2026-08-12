@@ -582,3 +582,141 @@ fn group_by_float_key_neg_zero_and_nan() {
     assert_eq!(zero_sum, Some(7));
     assert_eq!(nan_sum, Some(8));
 }
+
+// --- Nullable GROUP BY keys: NULLs form one group (SQL semantics), kept out of the
+// hash table (tracked as a separate null group). Works for int / float / string. ---
+
+fn batch_null_int_key(keys: Vec<Option<i64>>, values: Vec<i64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Int64, true), // nullable key
+        Field::new("value", DataType::Int64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(keys)),
+            Arc::new(Int64Array::from(values)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Output `Option<i64> key -> i64 agg`, preserving a NULL key.
+fn as_opt_key_map(rb: &RecordBatch, agg_col: usize) -> BTreeMap<Option<i64>, i64> {
+    let keys = i64s(rb, 0);
+    let aggs = i64s(rb, agg_col);
+    (0..rb.num_rows())
+        .map(|i| {
+            let k = if keys.is_null(i) {
+                None
+            } else {
+                Some(keys.value(i))
+            };
+            (k, aggs.value(i))
+        })
+        .collect()
+}
+
+#[test]
+fn group_by_null_int_key() {
+    // keys 1/null/1/null/2 -> {1: 1+3=4}, {null: 2+4=6}, {2: 5}
+    let rb = batch_null_int_key(
+        vec![Some(1), None, Some(1), None, Some(2)],
+        vec![1, 2, 3, 4, 5],
+    );
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 3);
+    assert_eq!(
+        as_opt_key_map(&out, 1),
+        BTreeMap::from([(Some(1), 4), (None, 6), (Some(2), 5)])
+    );
+}
+
+#[test]
+fn group_by_nullable_key_no_nulls_present() {
+    // A nullable key column but no actual nulls -> no null group is created.
+    let rb = batch_null_int_key(vec![Some(7), Some(7), Some(9)], vec![1, 2, 3]);
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(
+        as_opt_key_map(&out, 1),
+        BTreeMap::from([(Some(7), 3), (Some(9), 3)])
+    );
+}
+
+#[test]
+fn group_by_null_float_key() {
+    // nullable Float64 key: 1.5 / null / 1.5 / null
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("key", DataType::Float64, true),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Float64Array::from(vec![Some(1.5), None, Some(1.5), None])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    let out = exec_jit("SELECT key, sum(value) FROM t GROUP BY key", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 2);
+    let keys = f64s(&out, 0);
+    let sums = i64s(&out, 1);
+    let mut real = None;
+    let mut null = None;
+    for i in 0..out.num_rows() {
+        if keys.is_null(i) {
+            null = Some(sums.value(i));
+        } else {
+            assert_eq!(keys.value(i), 1.5);
+            real = Some(sums.value(i));
+        }
+    }
+    assert_eq!(real, Some(4)); // 1+3
+    assert_eq!(null, Some(6)); // 2+4
+}
+
+#[test]
+fn group_by_null_string_key() {
+    // nullable Utf8View key: "a" / null / "a" / "b" / null
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8View, true),
+        Field::new("value", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringViewArray::from(vec![
+                Some("a"),
+                None,
+                Some("a"),
+                Some("b"),
+                None,
+            ])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4, 5])),
+        ],
+    )
+    .unwrap();
+    let out = exec_jit("SELECT name, sum(value) FROM t GROUP BY name", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 3);
+    let keys: &StringViewArray = out.column(0).as_any().downcast_ref().unwrap();
+    let sums = i64s(&out, 1);
+    let mut map: BTreeMap<Option<String>, i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        let k = if keys.is_null(i) {
+            None
+        } else {
+            Some(keys.value(i).to_string())
+        };
+        map.insert(k, sums.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            (Some("a".into()), 4), // 1+3
+            (Some("b".into()), 4), // 4
+            (None, 7),             // 2+5
+        ])
+    );
+}

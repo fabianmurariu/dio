@@ -55,15 +55,10 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
     let capacity = op.max_output_rows(rb.num_rows());
 
-    // Reject nullable GROUP BY keys (null-grouping is a later phase) and key types we
-    // don't support yet — `Int32`/`Int64` and `Utf8View`.
+    // Reject GROUP BY key types we don't support yet — `Int32`/`Int64`, `Float64`,
+    // and `Utf8View` (nullable or not; null keys form their own group).
     if let Some(Operator::Aggregate { schema, .. }) = find_grouped(&op) {
         let key = schema.field(0);
-        if key.is_nullable() {
-            return Err(DataFusionError::NotImplemented(
-                "nullable GROUP BY key".into(),
-            ));
-        }
         if key_kind(key.data_type()).is_none() {
             return Err(DataFusionError::NotImplemented(format!(
                 "GROUP BY key type {}",
@@ -101,8 +96,9 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
             ..
         }) => {
             let agg_tys = agg_output_types(schema, group_exprs.len());
-            let key_ty = schema.field(0).data_type();
-            let template = group_template(aggs, &agg_tys, key_ty);
+            let key = schema.field(0);
+            let key_ty = key.data_type();
+            let template = group_template(aggs, &agg_tys, key_ty, key.is_nullable());
             Some(GroupState::new(
                 template,
                 key_kind(key_ty).expect("checked above"),

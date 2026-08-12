@@ -297,10 +297,12 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         .clone()
         .expect("grouped aggregate without a baked GroupState");
     let agg_tys = agg_output_types(out_schema, group_exprs.len());
-    let key_ty = out_schema.field(0).data_type().clone();
-    let record = group_record(aggs, &agg_tys, &key_ty);
+    let key_field = out_schema.field(0);
+    let key_ty = key_field.data_type().clone();
+    let record = group_record(aggs, &agg_tys, &key_ty, key_field.is_nullable());
     let layout = record.layout;
     let key_fields = record.key;
+    let key_valid = record.key_valid;
     let state = handle.state;
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
     let resolved: Vec<ResolvedAgg> = record
@@ -336,17 +338,21 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
             // new group, writes the key into the record's leading field(s), and returns
             // the record pointer — so the fold never bakes a records base that a grow
             // could dangle, and never handles the key. Valid until the next `upsert`.
+            // A nullable key column also routes null keys to the null group (see
+            // [`finish_upsert`]); the key computation below runs unconditionally but is
+            // harmless on a null row (unused, and `str_ptr` reads a null row safely).
             let rec_ptr = match key_fields {
                 KeyFields::Int(_) => {
                     // The table keys on `u64` bits (grouping is sign-agnostic); the cast
                     // is a no-op reinterpret.
                     let key = to_i64(ctx, key_cv);
                     let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
-                    ctx.bind(call_extern2(
+                    let call = call_extern2(
                         cx_c.rt.group_upsert,
                         const_opaque_mut::<GroupState>(state),
                         key_bits,
-                    ))
+                    );
+                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
                 }
                 KeyFields::Float(_) => {
                     // Key on the f64's bits via the `Int` (`u64`) table: canonicalize
@@ -354,21 +360,23 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
                     let key = coerce_f64(ctx, key_cv);
                     let canon = canonical_f64(ctx, key);
                     let key_bits = ctx.bind(bitcast::<u64, f64, _>(canon));
-                    ctx.bind(call_extern2(
+                    let call = call_extern2(
                         cx_c.rt.group_upsert,
                         const_opaque_mut::<GroupState>(state),
                         key_bits,
-                    ))
+                    );
+                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
                 }
                 KeyFields::Str { .. } => {
                     // Pass the key's content bytes; the extern copies them into its pool.
                     let (ptr, len) = resolve(ctx, as_str(key_cv), cx_c.rt.str_ptr);
-                    ctx.bind(call_extern3(
+                    let call = call_extern3(
                         cx_c.rt.group_upsert_str,
                         const_opaque_mut::<GroupState>(state),
                         ptr,
                         len,
-                    ))
+                    );
+                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
                 }
             };
             let rec = layout.wrap(rec_ptr);
@@ -391,9 +399,18 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
         let rec = layout.record(ctx, base, g);
+        // For a nullable key, the null group's record carries `key_valid == 0`; emit a
+        // NULL key for it. Non-nullable keys are always valid (no cell, no overhead).
+        let key_null = match key_valid {
+            None => Nullness::NonNull,
+            Some(vf) => {
+                let v = rec.get(ctx, vf);
+                Nullness::Nullable(ctx.bind(gt(v, 0i64)))
+            }
+        };
         let key_cv = match key_fields {
-            KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), Nullness::NonNull),
-            KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), Nullness::NonNull),
+            KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), key_null),
+            KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), key_null),
             KeyFields::Str { ptr, len } => {
                 // The record's `(ptr, len)` point at the pooled key bytes; produce a
                 // `Bytes` string so the existing output path appends them (copying).
@@ -405,7 +422,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
                         len,
                         view: None,
                     },
-                    Nullness::NonNull,
+                    key_null,
                 )
             }
         };
@@ -417,6 +434,43 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         yld(ctx, row);
         ctx.store(g, add(g, 1u64));
     });
+}
+
+/// Complete a fold-row's upsert: for a non-nullable key, just run `valid_call` (the
+/// key-specific `group_upsert*`). For a nullable key, branch on the key's validity —
+/// a real key runs `valid_call`, a NULL key routes to `group_upsert_null` — and record
+/// the validity (`1`/`0`) in the record's key-valid cell for emit. `valid_call`'s key
+/// computation has already run in the caller (harmless on a null row); only the extern
+/// call is guarded by the branch.
+fn finish_upsert<C>(
+    ctx: &mut Ctx,
+    valid_call: C,
+    key_valid: Option<FieldId<i64>>,
+    key_cv: ColVal,
+    state: *mut GroupState,
+    cx: &CodegenCtx,
+    layout: RecordLayout,
+) -> Var<SMutPtr<u8>>
+where
+    C: Staged<Out = SMutPtr<u8>> + 'static,
+{
+    match key_valid {
+        None => ctx.bind(valid_call),
+        Some(valid_field) => {
+            let valid = match key_cv.nullness() {
+                Nullness::Nullable(b) => b,
+                Nullness::NonNull => ctx.bind(Const::<bool>::new(true)),
+            };
+            let null_call = call_extern1(
+                cx.rt.group_upsert_null,
+                const_opaque_mut::<GroupState>(state),
+            );
+            let rec_ptr = ctx.bind(if_then_else(valid, valid_call, null_call));
+            let valid_bits = ctx.bind(select(valid, 1i64, 0i64));
+            layout.wrap(rec_ptr).set(ctx, valid_field, valid_bits);
+            rec_ptr
+        }
+    }
 }
 
 /// The physical cell type an aggregate accumulates in: an `i64` cell or an `f64`
@@ -501,6 +555,10 @@ enum KeyFields {
 struct GroupRecord {
     layout: RecordLayout,
     key: KeyFields,
+    /// A key-validity cell — `Some` only when the key column is **nullable**. The fold
+    /// stores `1` for a real key and `0` for the null group; emit reads it to decide
+    /// whether the key is NULL. Absent (and zero overhead) for non-nullable keys.
+    key_valid: Option<FieldId<i64>>,
     aggs: Vec<AggFields>,
 }
 
@@ -521,9 +579,15 @@ fn key_fields(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
 /// Build the packed-record layout from the key type and the aggregates + their output
 /// `DataType`s (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
 /// `sum`/`min`/`max` over `Float64` fold in an `f64` field, everything else `i64`.
-fn group_record(aggs: &[Expr], agg_tys: &[DataType], key_ty: &DataType) -> GroupRecord {
+fn group_record(
+    aggs: &[Expr],
+    agg_tys: &[DataType],
+    key_ty: &DataType,
+    key_nullable: bool,
+) -> GroupRecord {
     let mut layout = RecordLayout::new();
     let key = key_fields(&mut layout, key_ty);
+    let key_valid = key_nullable.then(|| layout.field::<i64>());
     let mut agg_fields = Vec::with_capacity(aggs.len());
     for (e, out) in aggs.iter().zip(agg_tys) {
         let kind = GroupedAgg::parse(e).kind;
@@ -542,6 +606,7 @@ fn group_record(aggs: &[Expr], agg_tys: &[DataType], key_ty: &DataType) -> Group
     GroupRecord {
         layout,
         key,
+        key_valid,
         aggs: agg_fields,
     }
 }
@@ -563,8 +628,13 @@ fn value_init_bits(kind: AggKind, value: &AggValueField) -> i64 {
 /// value field at its identity, counts `0`). The host fills every group slot with
 /// this before the fold (see `group::GroupState::new`). All fields are 8-byte
 /// `i64`/`f64` cells, so every offset is a whole word.
-pub fn group_template(aggs: &[Expr], agg_tys: &[DataType], key_ty: &DataType) -> Vec<u64> {
-    let record = group_record(aggs, agg_tys, key_ty);
+pub fn group_template(
+    aggs: &[Expr],
+    agg_tys: &[DataType],
+    key_ty: &DataType,
+    key_nullable: bool,
+) -> Vec<u64> {
+    let record = group_record(aggs, agg_tys, key_ty, key_nullable);
     let words = record.layout.stride() / 8;
     let mut template = vec![0u64; words];
     for a in &record.aggs {

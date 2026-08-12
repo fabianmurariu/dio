@@ -333,11 +333,20 @@ Each phase builds, tests, and ships green on its own.
    reads the bits back as f64 at emit. Needed one new rust-lms primitive `bitcast<TO,FROM>`
    (Cranelift `bitcast`, same-sized reinterpret). **Deferred:** composite (`[u64;2]` inline
    + pool spill), computed string keys (`upper(x)` — needs string functions).
-6. **Nullable/null keys**, then the **parallel partial/final split** (the
-   `[keys | payloads]` state is already the mergeable unit).
+6. **✅ DONE — nullable/null keys** (int/float/string, uniformly). A NULL key forms
+   its own group (SQL semantics), kept **out of the hash table**: `GroupState` tracks a
+   lazily-minted `null_gidx`, and `group_upsert_null` routes null-key rows to it (still
+   a normal record slot, so the single emit loop covers it — required because our
+   downstream continuation is single-use). The fold branches only when the key column
+   is nullable (`if_then_else(valid, <type-specific upsert>, group_upsert_null)`), stores
+   the validity in a **key-valid cell** (added to the record only for nullable keys —
+   zero IR for non-nullable), and emit reads it to produce a NULL key. `intern` was
+   refactored to `find_or_insert(probe, next_gidx)` so the null group's slot doesn't
+   collide with hash gidxs (both draw from the records count). Then the **parallel
+   partial/final split** (the `[keys | payloads]` state is already the mergeable unit).
 
-Done in order 1 → 2 → 3 → 4 → 5. Next: composite/`Float64` keys (finish the
-`GroupKey` family) or null-key grouping (Phase 6).
+Done in order 1 → 2 → 3 → 4 → 5 → 6. The scalar-key story is complete (Int32/Int64,
+Float64, Utf8View, each nullable). Next: composite keys, or the parallel split.
 
 ---
 
