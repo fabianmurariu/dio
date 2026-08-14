@@ -381,7 +381,7 @@ Deferred here.
 
 ## 9. Phased plan
 
-1. **`OutCols` `SVec`-backed output.** Host `OutCols` with an `SVec`-backed
+1. **`OutCols` `SVec`-backed output.** ✅ **Done.** Host `OutCols` with an `SVec`-backed
    `HostVec` per fixed-width column (+ a validity `SVec<u8>` for nullable ones) and a
    `StringViewBuilder` per string column; bake each column's `SVec` handle
    (control-block ptr + `svec_grow`). Reroute `write_col` to inline `SVec::push` for

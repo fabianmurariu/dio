@@ -15,14 +15,15 @@ use std::rc::Rc;
 use arrow::array::{StringViewArray, StringViewBuilder};
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use arrow_lms::ffi::FfiArrayType;
-use arrow_lms::{ArrayBatchOps, FfiArray, MutBatchOps, PrimitiveArrayView};
+use arrow_lms::{ArrayBatchOps, FfiArray, PrimitiveArrayView};
 use datafusion_common::ScalarValue;
 use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
-use rust_lms_std::{DynamicRecord, FieldId, RecordLayout};
+use rust_lms_std::{DynamicRecord, FieldId, RecordLayout, SVec};
 
 use crate::group::GroupState;
+use crate::output::{OutColHandle, OutputHandle};
 use crate::plan::Operator;
 use crate::runtime::{Runtime, StrPtrExtern};
 use crate::value::{ColVal, Nullness, Row, StrVal};
@@ -38,6 +39,9 @@ pub struct CodegenCtx {
     /// Baked pointers to the GROUP BY's host-side state, when the plan has one.
     /// Single group-by for now; a `Vec` indexed by plan order generalizes to CTEs.
     pub group: Option<Rc<GroupHandle>>,
+    /// Baked pointers to the growable output columns (see `output::OutCols`). The
+    /// kernel appends each emitted row into these via `SVec::push` / a string builder.
+    pub out: Rc<OutputHandle>,
 }
 
 /// Typed host pointers into a GROUP BY's Rust-hosted state (see `group::GroupState`),
@@ -150,21 +154,16 @@ impl Prim for f64 {
 pub trait BatchSource: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
 impl<T> BatchSource for T where T: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
 
-/// A staged expression yielding the `&mut` output batch (`&mut [FfiArray]`).
-pub trait OutSink: Staged<Out = SRefMut<'static, Slice<FfiArray>>> + Copy + 'static {}
-impl<T> OutSink for T where T: Staged<Out = SRefMut<'static, Slice<FfiArray>>> + Copy + 'static {}
-
 /// Downstream continuation, invoked once per emitted row at code-generation
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
 type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
 
-/// Emit a kernel that writes `plan`'s emitted rows into `out` at a running
-/// cursor and returns the row count. The single entry point — a scalar
+/// Emit a kernel that appends `plan`'s emitted rows into the baked output columns
+/// (`cx.out`) and returns the row count. The single entry point — a scalar
 /// `Aggregate` is just a push operator that emits one row (see [`gen_op`]).
-pub fn gen_collect<B: BatchSource, O: OutSink>(
+pub fn gen_collect<B: BatchSource>(
     ctx: &mut Ctx,
     batch: B,
-    out: O,
     plan: &Operator,
     out_schema: &SchemaRef,
     cx: &CodegenCtx,
@@ -179,7 +178,7 @@ pub fn gen_collect<B: BatchSource, O: OutSink>(
         cx,
         Box::new(move |ctx, row| {
             for (c, (cv, field)) in row.iter().zip(fields.iter()).enumerate() {
-                write_col(ctx, out, c, field, n, *cv, &cx_c);
+                write_col(ctx, c, field, *cv, &cx_c);
             }
             ctx.store(n, add(n, 1u64));
         }),
@@ -1376,32 +1375,37 @@ where
 // Output materialization
 // =============================================================================
 
-fn write_col<O: OutSink>(
-    ctx: &mut Ctx,
-    out: O,
-    c: usize,
-    field: &Field,
-    n: Var<u64>,
-    cv: ColVal,
-    cx: &CodegenCtx,
-) {
-    if matches!(field.data_type(), DataType::Utf8View) {
-        return write_str_col(ctx, out, c, cv, cx);
+/// Append column `c`'s value to its baked output buffer (see [`crate::output`]).
+/// Fixed-width columns `SVec::push` the value inline (and, if nullable, push a
+/// `bool` validity flag to a parallel `SVec` so the two stay length-aligned);
+/// string columns append through the builder. One append per emitted row, in
+/// order, so every column ends at the same length.
+fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: &CodegenCtx) {
+    match &cx.out.cols[c] {
+        OutColHandle::Str { builder } => write_str_col(ctx, *builder, cv, cx),
+        OutColHandle::Fixed { values, validity } => {
+            dispatch_prim!(field.data_type(), M => {
+                let vals = SVec::<M>::new(*values, cx.rt.svec_grow);
+                let v = M::coerce(ctx, cv);
+                vals.push(ctx, v);
+                // A nullable column pushes a validity flag for *every* row (the
+                // value is pushed unconditionally, so no branch is needed).
+                if let Some(valid_ctrl) = validity {
+                    let flag = match cv.nullness() {
+                        Nullness::NonNull => ctx.bind(Const::<bool>::new(true)),
+                        Nullness::Nullable(valid) => valid,
+                    };
+                    SVec::<bool>::new(*valid_ctrl, cx.rt.svec_grow).push(ctx, flag);
+                }
+            })
+        }
     }
-    dispatch_prim!(field.data_type(), M => {
-        let view = out.column_mut::<M>(c);
-        let v = M::coerce(ctx, cv);
-        view.set(ctx, n, v);
-        write_null(ctx, view, field, n, cv);
-    })
 }
 
-/// Append a `Utf8View` value to output column `c`'s builder (whose pointer rides
-/// in the output descriptor's opaque `array` field). Any string container works:
-/// the value is `resolve`d to bytes and appended. A null row appends a null.
-/// Appends happen once per emitted row, in order, so the builder ends
-/// length-aligned with the fixed-width columns.
-fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, cx: &CodegenCtx) {
+/// Append a `Utf8View` value to the baked output `StringViewBuilder`. Any string
+/// container works: the value is `resolve`d to bytes and appended; a null row
+/// appends a null.
+fn write_str_col(ctx: &mut Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx: &CodegenCtx) {
     let sv = match cv {
         ColVal::Str(sv, _) => sv,
         other => panic!(
@@ -1409,10 +1413,6 @@ fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, 
             tag(other)
         ),
     };
-    let builder = ctx.bind(load_field(
-        out.get_mut_unchecked(col_idx as u64),
-        FfiArrayType::array(),
-    ));
     let append = cx.rt.strview_append_bytes;
     let append_null = cx.rt.strview_append_null;
     // `resolve` is safe even on a null row (its `str_ptr` reads an empty view), so
@@ -1421,7 +1421,7 @@ fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, 
     let emit_append = move |ctx: &mut Ctx| {
         ctx.emit(call_extern2(
             append,
-            opaque_ref_mut::<StringViewBuilder, _>(builder),
+            const_opaque_mut::<StringViewBuilder>(builder),
             slice_from_raw_parts::<u8, _, _>(ptr, len),
         ));
     };
@@ -1432,28 +1432,10 @@ fn write_str_col<O: OutSink>(ctx: &mut Ctx, out: O, col_idx: usize, cv: ColVal, 
             ctx.if_then(not(valid), move |ctx| {
                 ctx.emit(call_extern1(
                     append_null,
-                    opaque_ref_mut::<StringViewBuilder, _>(builder),
+                    const_opaque_mut::<StringViewBuilder>(builder),
                 ));
             });
         }
-    }
-}
-
-fn write_null<P, M>(
-    ctx: &mut Ctx,
-    view: PrimitiveArrayView<P, M>,
-    field: &Field,
-    n: Var<u64>,
-    cv: ColVal,
-) where
-    P: Staged<Out = SRefMut<'static, FfiArray>> + Clone + 'static,
-    M: StagedType + 'static,
-{
-    // Only nullable outputs need validity writes, and only nullable values can
-    // be null (the bitmap starts all-valid, so non-null rows need no write).
-    if let (true, Nullness::Nullable(valid)) = (field.is_nullable(), cv.nullness()) {
-        let validity = view.validity_mut();
-        ctx.if_then(not(valid), move |ctx| validity.set_null(ctx, n));
     }
 }
 

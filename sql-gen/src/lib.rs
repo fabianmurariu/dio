@@ -15,6 +15,7 @@
 pub mod catalog;
 pub mod codegen;
 pub mod group;
+pub mod output;
 pub mod plan;
 pub mod run;
 pub mod runtime;
@@ -22,7 +23,7 @@ pub mod sql;
 pub mod value;
 
 pub use catalog::Catalog;
-pub use codegen::{BatchSource, OutSink, gen_collect, group_template};
+pub use codegen::{BatchSource, gen_collect, group_template};
 pub use plan::Operator;
 pub use run::exec_jit;
 pub use sql::sql_to_operator;

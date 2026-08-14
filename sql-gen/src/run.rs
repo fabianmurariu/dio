@@ -7,7 +7,7 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArray, PreparedOutput, prepare_record_batch};
+use arrow_lms::{FfiArray, prepare_record_batch};
 use datafusion_common::{DataFusionError, Result};
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
@@ -16,6 +16,7 @@ use crate::codegen::{
     CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_template,
 };
 use crate::group::{GroupState, KeyKind};
+use crate::output::OutCols;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
 use crate::sql::sql_to_operator;
@@ -53,7 +54,6 @@ pub fn exec_jit(sql: &str, table: &str, rb: &RecordBatch) -> Result<RecordBatch>
 /// projection/filter above it run in the same kernel.
 fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
-    let capacity = op.max_output_rows(rb.num_rows());
 
     // Reject GROUP BY key types we don't support yet. A single key may be
     // `Int32`/`Int64`, `Float64`, or `Utf8View` (nullable or not). A composite
@@ -69,7 +69,7 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     }
 
     let prepared_in = prepare_record_batch(rb).map_err(exec_err)?;
-    let mut out = PreparedOutput::alloc(out_schema.clone(), capacity);
+    let mut out = OutCols::alloc(&out_schema);
 
     let mut compiler = Compiler::new();
     let rt = Runtime::register(&mut compiler);
@@ -111,21 +111,22 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
         })
     });
 
+    // Bake the growable output columns' stable pointers into the codegen context
+    // (like the GROUP BY state). The kernel appends rows through them; `out` must
+    // outlive the run (its control blocks / builders are referenced by the kernel).
     let cx = CodegenCtx {
         rt,
         lits: Rc::new(lits),
         group,
+        out: Rc::new(out.handle()),
     };
 
-    let f = compiler.fun2(
-        "query",
-        move |ctx, batch: Var<SRef<Slice<FfiArray>>>, sink: Var<SRefMut<Slice<FfiArray>>>| {
-            gen_collect(ctx, batch, sink, &op, &out_schema, &cx)
-        },
-    );
+    let f = compiler.fun1("query", move |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
+        gen_collect(ctx, batch, &op, &out_schema, &cx)
+    });
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
-    let n = compiled.as_fn()(prepared_in.arrays(), out.as_ffi_mut());
+    let n = compiled.as_fn()(prepared_in.arrays());
     let result = out.into_record_batch(n as usize);
     // Keep the interned-literal bytes and the group state alive across the run.
     drop(pool);

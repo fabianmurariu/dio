@@ -2,9 +2,10 @@
 //!
 //! Bridges primitive Apache Arrow arrays into staged `rust-lms` kernels. A batch
 //! is a `Slice<FfiArray>`: host code prepares one with [`prepare_record_batch`]
-//! (read) or [`PreparedOutput`] (write), and staged code recovers typed columns
-//! with `batch.primitive::<T>(idx)`. Mutability is the reference flavor — `SRef`
-//! reads, `SRefMut` writes — over one lifetime-free [`FfiArray`] type.
+//! (read), and staged code recovers typed columns with `batch.primitive::<T>(idx)`.
+//! Output materialization lives in the consumer (`sql-gen`'s `SVec`-backed
+//! `OutCols`). Mutability is the reference flavor — `SRef` reads, `SRefMut`
+//! writes — over one lifetime-free [`FfiArray`] type.
 //!
 //! Scope: primitive arrays only. Validity is a first-class staged view.
 
@@ -25,4 +26,5 @@ pub use ffi::{
     prepare_dyn_arrays, prepare_record_batch, FfiArray, FfiBuffer, FfiError, FfiValidity,
     PreparedFfiBatch,
 };
-pub use ffi_mut::{MutBatchOps, PreparedOutput};
+// `ffi_mut` now holds only the standalone `ValidityView` write ops (re-exported
+// from `array`); the host output path moved to the consumer.

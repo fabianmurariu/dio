@@ -10,6 +10,7 @@
 
 use arrow::array::{StringViewArray, StringViewBuilder};
 use rust_lms::prelude::*;
+use rust_lms_std::SvecGrowExtern;
 
 use crate::group::{
     GroupKeyPushBytesExtern, GroupKeyPushU64Extern, GroupKeyResetExtern, GroupLenExtern,
@@ -68,6 +69,8 @@ pub struct Runtime {
     pub group_upsert_composite: ExternRef<GroupUpsertCompositeExtern>,
     pub group_records_base: ExternRef<GroupRecordsBaseExtern>,
     pub group_len: ExternRef<GroupLenExtern>,
+    /// Grow an output column's `SVec` (cold path of `SVec::push`). See `output.rs`.
+    pub svec_grow: ExternRef<SvecGrowExtern>,
 }
 
 impl Runtime {
@@ -87,6 +90,7 @@ impl Runtime {
             group_upsert_composite: compiler.extern_fn::<GroupUpsertCompositeExtern>(),
             group_records_base: compiler.extern_fn::<GroupRecordsBaseExtern>(),
             group_len: compiler.extern_fn::<GroupLenExtern>(),
+            svec_grow: compiler.extern_fn::<SvecGrowExtern>(),
         }
     }
 }
