@@ -1043,3 +1043,42 @@ fn having_no_groups_pass() {
     .unwrap();
     assert_eq!(out.num_rows(), 0);
 }
+
+#[test]
+fn group_by_aliased_aggregate() {
+    let rb = batch(vec![1, 1, 2, 1, 2], vec![10, 20, 30, 40, 50]);
+    let out = exec_jit(
+        "SELECT key, sum(value) as total FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(1, 70), (2, 80)]));
+}
+
+#[test]
+fn group_by_aliased_key_and_agg() {
+    let rb = batch(vec![1, 1, 2, 1, 2], vec![10, 20, 30, 40, 50]);
+    let out = exec_jit(
+        "SELECT key as k, sum(value) as total FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(1, 70), (2, 80)]));
+}
+
+#[test]
+fn group_by_aliased_expr() {
+    let rb = batch(vec![1, 2, 1, 2, 1], vec![1, 2, 3, 4, 5]);
+    let out = exec_jit(
+        "SELECT key, sum(value) + 2 as bumped FROM t GROUP BY key",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 2);
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(1, 11), (2, 8)]));
+}

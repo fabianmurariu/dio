@@ -1488,6 +1488,9 @@ fn gen_expr(ctx: &mut Ctx, e: &Expr, schema: &SchemaRef, row: &Row, cx: &Codegen
         Expr::Literal(sv, _) => gen_literal(ctx, sv, cx),
         Expr::BinaryExpr(be) => gen_binary(ctx, be, schema, row, cx),
         Expr::ScalarFunction(f) => gen_scalar_fn(ctx, f, schema, row, cx),
+        // An alias is a pure rename: evaluate the inner expression. The output
+        // schema already carries the alias name, so nothing else is needed.
+        Expr::Alias(a) => gen_expr(ctx, &a.expr, schema, row, cx),
         other => panic!("unsupported expression: {other:?}"),
     }
 }
