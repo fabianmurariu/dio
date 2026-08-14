@@ -6,6 +6,11 @@ an ordinary **push operator** inside the JIT kernel. It folds its input into
 downstream — so any projection/filter above it (including `HAVING`) runs in the
 *same* JIT unit. There is no second compiler and no second pass.
 
+`HAVING` needs **no special code**: datafusion lowers it to a `Filter` *above* the
+`Aggregate`, and our emit already `yld`s each group's row up through any parent filter
+in the same kernel — so it filters the *emitted groups* (once per group, after the
+fold), composing for free with the projection above it.
+
 Scope today: a single `Int64` (non-null) group key; `count(*)`, `count(col)`,
 `sum`, `min`, `max`, `avg` over **integer *or* `Float64`** inputs, with full null
 handling. The accumulator cell type (`i64` vs `f64`) is chosen per aggregate from its
@@ -432,11 +437,14 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
   once inputs stream). A NULL key forms its own group, tracked outside the hash table
   (a lazily-minted `null_gidx` + a per-record key-valid cell, added only for nullable
   columns).
-- **Composite (multi-column) keys — fixed-width.** `GROUP BY a, b, …` over
-  `Int32`/`Int64`/`Float64` columns (nullable or not): the key is *packed* into bytes
-  (per-column canonicalized cells + a `u64` null bitmap) in a stack scratch and reuses
-  the string/bytes table + pool; emit unpacks it into N output columns. String columns
-  *inside* a composite key, and computed keys (`upper(x)`), are still to come.
+- **Composite (multi-column) keys — any mix of int/float/string.** `GROUP BY a, b, …`.
+  An **all-fixed-width** composite is packed into a fixed-size stack scratch (per-column
+  canonicalized cells + a `u64` null bitmap) — the fast path. A composite with **any
+  string column** is built via a host key-builder: the kernel pushes each column's bytes
+  (`[len | content]` for strings) into a reusable scratch, and it's interned as a flat
+  byte key (same `Str` table + pool). Emit unpacks either into N output columns (fixed:
+  typed tokens; variable: a running byte offset). Computed keys (`upper(x)`) wait on
+  string fns.
 - **Aggregate value types: `i64` and `Float64` done** (`sum`/`min`/`max` pick their
   cell from the output type; `avg` always `f64`). `Decimal`/other numeric inputs
   still fall through to the `to_i64` panic.

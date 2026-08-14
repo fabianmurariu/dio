@@ -838,3 +838,208 @@ fn group_by_composite_with_nulls() {
         ])
     );
 }
+
+// --- Composite keys containing string columns: built via the host key-builder into a
+// flat byte key (per-column [len|content] for strings), unpacked with a running offset. ---
+
+#[test]
+fn group_by_string_int_composite() {
+    // (name: Utf8View, cat: Int64): ("a",1),("a",1),("b",1),("a",2)
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8View, false),
+        Field::new("cat", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringViewArray::from(vec!["a", "a", "b", "a"])),
+            Arc::new(Int64Array::from(vec![1, 1, 1, 2])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    let out = exec_jit(
+        "SELECT name, cat, sum(v) FROM t GROUP BY name, cat",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 3);
+    let name: &StringViewArray = out.column(0).as_any().downcast_ref().unwrap();
+    let cat = i64s(&out, 1);
+    let s = i64s(&out, 2);
+    let mut map: BTreeMap<(String, i64), i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        map.insert((name.value(i).to_string(), cat.value(i)), s.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            (("a".into(), 1), 3), // 1+2
+            (("b".into(), 1), 3),
+            (("a".into(), 2), 4),
+        ])
+    );
+}
+
+#[test]
+fn group_by_two_string_composite_long() {
+    // Two string columns, including >12-byte content (view differs per occurrence, so
+    // grouping must be on content). ("first", LONG), (LONG, "x"), ("first", LONG)
+    let long = "a sufficiently long string over twelve bytes";
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Utf8View, false),
+        Field::new("b", DataType::Utf8View, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringViewArray::from(vec!["first", long, "first"])),
+            Arc::new(StringViewArray::from(vec![long, "x", long])),
+            Arc::new(Int64Array::from(vec![10, 20, 30])),
+        ],
+    )
+    .unwrap();
+    let out = exec_jit("SELECT a, b, sum(v) FROM t GROUP BY a, b", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 2);
+    let a: &StringViewArray = out.column(0).as_any().downcast_ref().unwrap();
+    let b: &StringViewArray = out.column(1).as_any().downcast_ref().unwrap();
+    let s = i64s(&out, 2);
+    let mut map: BTreeMap<(String, String), i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        map.insert((a.value(i).to_string(), b.value(i).to_string()), s.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            (("first".into(), long.into()), 40), // 10+30
+            ((long.into(), "x".into()), 20),
+        ])
+    );
+}
+
+#[test]
+fn group_by_string_composite_with_nulls() {
+    // (name?: Utf8View, cat: Int64): (NULL,1),("a",1),(NULL,1),("a",NULL)
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("name", DataType::Utf8View, true),
+        Field::new("cat", DataType::Int64, true),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(StringViewArray::from(vec![
+                None,
+                Some("a"),
+                None,
+                Some("a"),
+            ])),
+            Arc::new(Int64Array::from(vec![Some(1), Some(1), Some(1), None])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    // (NULL,1):1+3=4 ; ("a",1):2 ; ("a",NULL):4
+    let out = exec_jit(
+        "SELECT name, cat, sum(v) FROM t GROUP BY name, cat",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 3);
+    let name: &StringViewArray = out.column(0).as_any().downcast_ref().unwrap();
+    let cat = i64s(&out, 1);
+    let s = i64s(&out, 2);
+    let mut map: BTreeMap<(Option<String>, Option<i64>), i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        let kn = if name.is_null(i) {
+            None
+        } else {
+            Some(name.value(i).to_string())
+        };
+        let kc = if cat.is_null(i) {
+            None
+        } else {
+            Some(cat.value(i))
+        };
+        map.insert((kn, kc), s.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            ((None, Some(1)), 4),
+            ((Some("a".into()), Some(1)), 2),
+            ((Some("a".into()), None), 4),
+        ])
+    );
+}
+
+// --- HAVING: a post-aggregation filter on the emitted groups. It's just a `Filter`
+// above the `Aggregate`, so it composes for free with the push-model emit. ---
+
+#[test]
+fn having_on_aggregate() {
+    // key 1: sum 70 ; key 2: sum 80 ; HAVING sum(value) > 75 -> only key 2
+    let rb = batch(vec![1, 1, 2, 1, 2], vec![10, 20, 30, 40, 50]);
+    let out = exec_jit(
+        "SELECT key, sum(value) FROM t GROUP BY key HAVING sum(value) > 75",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(2, 80)]));
+}
+
+#[test]
+fn having_with_projection_expr() {
+    // HAVING references the raw aggregate while the projection transforms it.
+    let rb = batch(vec![1, 1, 2, 1, 2], vec![10, 20, 30, 40, 50]);
+    let out = exec_jit(
+        "SELECT key, sum(value) + 1 FROM t GROUP BY key HAVING sum(value) > 75",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(2, 81)])); // 80 + 1
+}
+
+#[test]
+fn having_on_count_and_where() {
+    // WHERE filters rows pre-aggregation; HAVING filters groups post-aggregation.
+    let rb = batch(vec![1, 1, 2, 1, 2, 3], vec![10, 20, 30, 40, 50, 5]);
+    let out = exec_jit(
+        "SELECT key, count(*) FROM t WHERE value > 8 GROUP BY key HAVING count(*) >= 2",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    // after WHERE value>8: key1×3, key2×2, key3×0 (row dropped) -> HAVING count>=2: key1,key2
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(1, 3), (2, 2)]));
+}
+
+#[test]
+fn having_all_groups_pass() {
+    let rb = batch(vec![1, 2, 3], vec![10, 20, 30]);
+    let out = exec_jit(
+        "SELECT key, sum(value) FROM t GROUP BY key HAVING sum(value) > 0",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 3);
+}
+
+#[test]
+fn having_no_groups_pass() {
+    let rb = batch(vec![1, 2, 3], vec![10, 20, 30]);
+    let out = exec_jit(
+        "SELECT key, sum(value) as s FROM t GROUP BY key HAVING s > 1000",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 0);
+}

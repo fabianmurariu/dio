@@ -354,12 +354,20 @@ Each phase builds, tests, and ships green on its own.
    `(a, b, …)` combination (nulls included) is its own group — no `null_gidx` for
    composite. Two new rust-lms primitives: `stack_alloc(size) -> SMutPtr<u8>` (runtime
    stack scratch — broadly useful) and `ptr_as_const` (`*mut`→`*const` for the extern).
-   **Deferred:** string columns *inside* a composite (variable-length packing), and the
-   `[u64; 2]` inline fast path (skip the pool for ≤2 small fixed-width columns).
+8. **✅ DONE — string columns inside a composite key** (variable-length). Fixed-only
+   composites keep the fast stack path (7); a composite with **any string column** uses
+   a **host key-builder**: the kernel pushes each column's bytes into a reusable scratch
+   (`group_key_reset`, `group_key_push_u64` for the bitmap + fixed cols, `group_key_push_bytes`
+   for a string's `[len | content]`), then `group_upsert_composite` interns the assembled
+   flat byte key (still the `Str` table's content hash/eq + pool). Emit **unpacks** the
+   pooled flat key with a **running byte offset** (a string advances the cursor by
+   `8 + len` at runtime). **Deferred:** the `[u64; 2]` inline fast path (skip the pool for
+   ≤2 small fixed-width columns).
 
-Done 1 → 2 → 3 → 4 → 5 → 6 → 7. Keys are now Int32/Int64, Float64, Utf8View (each
-nullable), and fixed-width composites. Next: the **parallel partial/final split** (the
-`[keys | payloads]` state is already the mergeable unit), or strings-in-composite.
+Done 1 → 2 → 3 → 4 → 5 → 6 → 7 → 8. Keys are now Int32/Int64, Float64, Utf8View (each
+nullable), and composites of any mix (fixed fast path, strings via the builder). Next:
+the **parallel partial/final split** (the `[keys | payloads]` state is already the
+mergeable unit), or computed keys once we have string functions.
 
 ---
 

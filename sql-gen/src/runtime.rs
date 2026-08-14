@@ -12,7 +12,8 @@ use arrow::array::{StringViewArray, StringViewBuilder};
 use rust_lms::prelude::*;
 
 use crate::group::{
-    GroupLenExtern, GroupRecordsBaseExtern, GroupUpsertExtern, GroupUpsertNullExtern,
+    GroupKeyPushBytesExtern, GroupKeyPushU64Extern, GroupKeyResetExtern, GroupLenExtern,
+    GroupRecordsBaseExtern, GroupUpsertCompositeExtern, GroupUpsertExtern, GroupUpsertNullExtern,
     GroupUpsertStrExtern,
 };
 
@@ -61,6 +62,10 @@ pub struct Runtime {
     pub group_upsert: ExternRef<GroupUpsertExtern>,
     pub group_upsert_str: ExternRef<GroupUpsertStrExtern>,
     pub group_upsert_null: ExternRef<GroupUpsertNullExtern>,
+    pub group_key_reset: ExternRef<GroupKeyResetExtern>,
+    pub group_key_push_u64: ExternRef<GroupKeyPushU64Extern>,
+    pub group_key_push_bytes: ExternRef<GroupKeyPushBytesExtern>,
+    pub group_upsert_composite: ExternRef<GroupUpsertCompositeExtern>,
     pub group_records_base: ExternRef<GroupRecordsBaseExtern>,
     pub group_len: ExternRef<GroupLenExtern>,
 }
@@ -76,6 +81,10 @@ impl Runtime {
             group_upsert: compiler.extern_fn::<GroupUpsertExtern>(),
             group_upsert_str: compiler.extern_fn::<GroupUpsertStrExtern>(),
             group_upsert_null: compiler.extern_fn::<GroupUpsertNullExtern>(),
+            group_key_reset: compiler.extern_fn::<GroupKeyResetExtern>(),
+            group_key_push_u64: compiler.extern_fn::<GroupKeyPushU64Extern>(),
+            group_key_push_bytes: compiler.extern_fn::<GroupKeyPushBytesExtern>(),
+            group_upsert_composite: compiler.extern_fn::<GroupUpsertCompositeExtern>(),
             group_records_base: compiler.extern_fn::<GroupRecordsBaseExtern>(),
             group_len: compiler.extern_fn::<GroupLenExtern>(),
         }

@@ -40,6 +40,10 @@ pub struct GroupState {
     /// null key is never hashed/interned — but it still occupies a normal record slot,
     /// so the single emit loop covers it. `None` until (and unless) a null key appears.
     null_gidx: Option<u32>,
+    /// Reused scratch for building a *variable-length* composite key (columns with a
+    /// string): the kernel pushes each column's bytes (`group_key_*`), then
+    /// `group_upsert_composite` interns the assembled bytes. Cleared per row.
+    key_scratch: Vec<u8>,
 }
 
 /// Which key type a GROUP BY uses — picks the [`GroupTable`] instantiation.
@@ -76,6 +80,7 @@ impl GroupState {
             records: Vec::new(),
             template,
             null_gidx: None,
+            key_scratch: Vec::new(),
         }
     }
 
@@ -327,6 +332,59 @@ pub extern "C" fn group_upsert_str(state: &mut GroupState, ptr: *const u8, len: 
     let (gidx, stored) = match &mut state.table {
         KeyTable::Str(t) => t.find_or_insert(probe, next),
         KeyTable::Int(_) => unreachable!("group_upsert_str on an int-keyed table"),
+    };
+    let mut rec = state.ensure_record(gidx as usize);
+    rec.set_str_key(stored.ptr, stored.len);
+    rec.as_ptr()
+}
+
+// --- Variable-length composite key builder: the kernel pushes each key column's
+// bytes into `key_scratch`, then `group_upsert_composite` interns the assembled bytes
+// (a flat byte key, so the `Str` table's content hash/eq apply). ---
+
+/// Start a new composite key (clear the scratch).
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_key_reset(state: &mut GroupState) {
+    state.key_scratch.clear();
+}
+
+/// Append 8 bytes (a fixed-width column's canonicalized bits, or the null bitmap).
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_key_push_u64(state: &mut GroupState, v: u64) {
+    state.key_scratch.extend_from_slice(&v.to_le_bytes());
+}
+
+/// Append a string column: an 8-byte length prefix then the content bytes (so
+/// `"ab"+"c"` and `"a"+"bc"` can't collide). A null column pushes length 0 (the null
+/// bitmap tells it apart from an empty string).
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_key_push_bytes(state: &mut GroupState, ptr: *const u8, len: u64) {
+    state.key_scratch.extend_from_slice(&len.to_le_bytes());
+    if len != 0 {
+        // SAFETY: `(ptr, len)` is a valid byte range produced by staged code for this call.
+        let content = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
+        state.key_scratch.extend_from_slice(content);
+    }
+}
+
+/// Intern the assembled composite key (the current `key_scratch`) and return its
+/// record pointer — the composite counterpart of `group_upsert_str`. The scratch is a
+/// flat byte key, so the `Str` table's content hash/eq apply; it's copied into the
+/// pool on a miss.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn group_upsert_composite(state: &mut GroupState) -> *mut u8 {
+    let probe = StrKey {
+        ptr: state.key_scratch.as_ptr(),
+        len: state.key_scratch.len(),
+    };
+    let next = state.num_records() as u32;
+    let (gidx, stored) = match &mut state.table {
+        KeyTable::Str(t) => t.find_or_insert(probe, next),
+        KeyTable::Int(_) => unreachable!("group_upsert_composite on an int-keyed table"),
     };
     let mut rec = state.ensure_record(gidx as usize);
     rec.set_str_key(stored.ptr, stored.len);

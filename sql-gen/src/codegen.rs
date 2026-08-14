@@ -302,7 +302,15 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     // over all key columns (composite).
     let key_source = match &key_spec {
         KeySpec::Single { .. } => KeySource::Single(group_exprs[0].clone()),
-        KeySpec::Composite(cols) => KeySource::Composite(packed_key(group_exprs, cols)),
+        KeySpec::Composite(cols) => {
+            // A string column forces the variable-length builder; otherwise the fast
+            // fixed-size stack pack.
+            if cols.iter().any(|(ty, _)| *ty == DataType::Utf8View) {
+                KeySource::CompositeBytes(bytes_key(group_exprs, cols))
+            } else {
+                KeySource::CompositeFixed(packed_key(group_exprs, cols))
+            }
+        }
     };
     let n_keys = group_exprs.len();
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
@@ -339,8 +347,11 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
                     let key_cv = gen_expr(ctx, expr, &schema_f, &row, &cx_c);
                     fold_single_key(ctx, key_fields, key_valid, key_cv, state, &cx_c, layout)
                 }
-                KeySource::Composite(packed) => {
+                KeySource::CompositeFixed(packed) => {
                     pack_and_upsert(ctx, packed, &row, &schema_f, &cx_c, state)
+                }
+                KeySource::CompositeBytes(bk) => {
+                    build_bytes_key(ctx, bk, &row, &schema_f, &cx_c, state)
                 }
             };
             let rec = layout.wrap(rec_ptr);
@@ -367,12 +378,19 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
             KeySource::Single(_) => {
                 vec![emit_single_key(ctx, key_fields, key_valid, rec)]
             }
-            KeySource::Composite(packed) => {
-                let KeyFields::Composite { ptr, .. } = key_fields else {
+            KeySource::CompositeFixed(packed) => {
+                let KeyFields::Composite { ptr } = key_fields else {
                     unreachable!("composite key source without composite key fields")
                 };
                 let packed_ptr = rec.get(ctx, ptr);
                 unpack_composite(ctx, packed, packed_ptr)
+            }
+            KeySource::CompositeBytes(bk) => {
+                let KeyFields::Composite { ptr } = key_fields else {
+                    unreachable!("composite key source without composite key fields")
+                };
+                let flat_ptr = rec.get(ctx, ptr);
+                unpack_bytes(ctx, bk, flat_ptr)
             }
         };
         let mut row: Row = Vec::with_capacity(n_keys + resolved.len());
@@ -514,7 +532,60 @@ where
 #[derive(Clone)]
 enum KeySource {
     Single(Expr),
-    Composite(PackedKey),
+    /// All-fixed-width composite — packed into a fixed-size stack key (fast path).
+    CompositeFixed(PackedKey),
+    /// Composite with ≥1 variable-length (string) column — built via the host key
+    /// builder into a flat byte key (`group_key_*` + `group_upsert_composite`).
+    CompositeBytes(BytesKey),
+}
+
+/// A composite key containing string columns: an ordered list of columns (fixed or
+/// string) plus a null bitmap. The fold pushes each column's bytes into the host
+/// scratch (`group_key_*`), then interns the assembled flat key; emit unpacks it with
+/// a running byte offset (string lengths make offsets runtime-dependent).
+#[derive(Clone)]
+struct BytesKey {
+    cols: Vec<BytesCol>,
+}
+
+#[derive(Clone)]
+struct BytesCol {
+    kind: BytesColKind,
+    /// Null-bitmap bit index (= column position).
+    bit: usize,
+    nullable: bool,
+    expr: Expr,
+}
+
+#[derive(Clone, Copy, PartialEq)]
+enum BytesColKind {
+    I64,
+    F64,
+    Str,
+}
+
+/// Build the byte-key descriptor for a string-containing composite key.
+fn bytes_key(group_exprs: &[Expr], cols: &[(DataType, bool)]) -> BytesKey {
+    let cols = group_exprs
+        .iter()
+        .zip(cols)
+        .enumerate()
+        .map(|(i, (expr, (ty, nullable)))| {
+            let kind = match ty {
+                DataType::Int32 | DataType::Int64 => BytesColKind::I64,
+                DataType::Float64 => BytesColKind::F64,
+                DataType::Utf8View => BytesColKind::Str,
+                other => panic!("unsupported composite key column type: {other}"),
+            };
+            BytesCol {
+                kind,
+                bit: i,
+                nullable: *nullable,
+                expr: expr.clone(),
+            }
+        })
+        .collect();
+    BytesKey { cols }
 }
 
 /// A composite key's **packed** layout: one 8-byte cell per key column (`i64`/`f64`)
@@ -659,6 +730,162 @@ fn unpack_composite(
             }
         })
         .collect()
+}
+
+/// A column's pushable form for the variable-length composite key builder.
+enum Pushable {
+    /// A fixed-width column's canonicalized bits (or the null bitmap).
+    U64(Var<u64>),
+    /// A string column's content reference.
+    Bytes(Var<SPtr<u8>>, Var<u64>),
+}
+
+/// Build a **variable-length** composite key: evaluate each column (computing its
+/// pushable form + the null bitmap), then push the bitmap and each column's bytes into
+/// the host scratch (`group_key_*`) and intern the assembled flat key
+/// (`group_upsert_composite`). Returns the group's record pointer.
+fn build_bytes_key(
+    ctx: &mut Ctx,
+    bk: &BytesKey,
+    row: &Row,
+    schema: &SchemaRef,
+    cx: &CodegenCtx,
+    state: *mut GroupState,
+) -> Var<SMutPtr<u8>> {
+    ctx.emit(call_extern1(
+        cx.rt.group_key_reset,
+        const_opaque_mut::<GroupState>(state),
+    ));
+    let bitmap = ctx.var(0u64);
+    let mut pushables = Vec::with_capacity(bk.cols.len());
+    for col in &bk.cols {
+        let cv = gen_expr(ctx, &col.expr, schema, row, cx);
+        let valid = match cv.nullness() {
+            Nullness::Nullable(b) => Some(b),
+            Nullness::NonNull => None,
+        };
+        // NULL columns push a canonical value (0 / +0.0 / empty); the bitmap tells apart.
+        let pushable = match col.kind {
+            BytesColKind::I64 => {
+                let v = to_i64(ctx, cv);
+                let v = match valid {
+                    Some(vb) => ctx.bind(select(vb, v, 0i64)),
+                    None => v,
+                };
+                Pushable::U64(ctx.bind(int_cast::<u64, i64, _>(v)))
+            }
+            BytesColKind::F64 => {
+                let v = coerce_f64(ctx, cv);
+                let canon = canonical_f64(ctx, v);
+                let v = match valid {
+                    Some(vb) => ctx.bind(select(vb, canon, 0.0f64)),
+                    None => canon,
+                };
+                Pushable::U64(ctx.bind(bitcast::<u64, f64, _>(v)))
+            }
+            BytesColKind::Str => {
+                let (ptr, len) = resolve(ctx, as_str(cv), cx.rt.str_ptr);
+                Pushable::Bytes(ptr, len)
+            }
+        };
+        if let Some(vb) = valid {
+            let bit = ctx.bind(select(vb, 0u64, 1u64 << col.bit));
+            let next = ctx.bind(bitor(bitmap, bit));
+            ctx.store(bitmap, next);
+        }
+        pushables.push(pushable);
+    }
+    // Push the bitmap first, then each column in order.
+    ctx.emit(call_extern2(
+        cx.rt.group_key_push_u64,
+        const_opaque_mut::<GroupState>(state),
+        bitmap,
+    ));
+    for p in pushables {
+        match p {
+            Pushable::U64(v) => ctx.emit(call_extern2(
+                cx.rt.group_key_push_u64,
+                const_opaque_mut::<GroupState>(state),
+                v,
+            )),
+            Pushable::Bytes(ptr, len) => ctx.emit(call_extern3(
+                cx.rt.group_key_push_bytes,
+                const_opaque_mut::<GroupState>(state),
+                ptr,
+                len,
+            )),
+        }
+    }
+    ctx.bind(call_extern1(
+        cx.rt.group_upsert_composite,
+        const_opaque_mut::<GroupState>(state),
+    ))
+}
+
+/// Load a value of type `T` at byte offset `off` in `base` (a runtime offset, since a
+/// string column's length shifts everything after it).
+fn load_at<T: StagedType + CopyType + 'static>(
+    ctx: &mut Ctx,
+    base: Var<SMutPtr<u8>>,
+    off: Var<i64>,
+) -> Var<T> {
+    ctx.bind(load_ref_mut(ptr_cast_mut::<T, u8, _>(ptr_offset_mut(
+        base, off,
+    ))))
+}
+
+/// A `*const u8` at byte offset `off` in `base`.
+fn ptr_at(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
+    ctx.bind(ptr_as_const(ptr_offset_mut(base, off)))
+}
+
+/// Unpack a variable-length composite key (the pooled flat bytes: `[bitmap | col0 |
+/// …]`, each fixed column 8 bytes, each string `[len | content]`) into its output key
+/// `ColVal`s, walking a running byte offset.
+fn unpack_bytes(ctx: &mut Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec<ColVal> {
+    let off0 = ctx.var(0i64);
+    let bitmap = load_at::<u64>(ctx, flat_ptr, off0);
+    let offset = ctx.var(8i64); // running byte offset (past the bitmap)
+    let mut out = Vec::with_capacity(bk.cols.len());
+    for col in &bk.cols {
+        let null = if col.nullable {
+            let shifted = ctx.bind(shr(bitmap, col.bit as u64));
+            let bit = ctx.bind(bitand(shifted, 1u64));
+            Nullness::Nullable(ctx.bind(eq(bit, 0u64)))
+        } else {
+            Nullness::NonNull
+        };
+        match col.kind {
+            BytesColKind::I64 => {
+                out.push(ColVal::I64(load_at::<i64>(ctx, flat_ptr, offset), null));
+                let next = ctx.bind(add(offset, 8i64));
+                ctx.store(offset, next);
+            }
+            BytesColKind::F64 => {
+                out.push(ColVal::F64(load_at::<f64>(ctx, flat_ptr, offset), null));
+                let next = ctx.bind(add(offset, 8i64));
+                ctx.store(offset, next);
+            }
+            BytesColKind::Str => {
+                let len = load_at::<u64>(ctx, flat_ptr, offset);
+                let content_off = ctx.bind(add(offset, 8i64));
+                let ptr = ptr_at(ctx, flat_ptr, content_off);
+                out.push(ColVal::Str(
+                    StrVal::Bytes {
+                        ptr,
+                        len,
+                        view: None,
+                    },
+                    null,
+                ));
+                // advance past [len | content] = 8 + len.
+                let len_i = ctx.bind(int_cast::<i64, u64, _>(len));
+                let next = ctx.bind(add(content_off, len_i));
+                ctx.store(offset, next);
+            }
+        }
+    }
+    out
 }
 
 /// The physical cell type an aggregate accumulates in: an `i64` cell or an `f64`

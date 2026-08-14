@@ -154,7 +154,7 @@ fn group_key_kind(schema: &SchemaRef, n_keys: usize) -> KeyKind {
 }
 
 /// Reject unsupported GROUP BY key columns (single: int/float/string; composite:
-/// fixed-width int/float only, for now).
+/// int/float/string columns).
 fn check_group_key(schema: &SchemaRef, n_keys: usize) -> Result<()> {
     if n_keys == 1 {
         let ty = schema.field(0).data_type();
@@ -166,9 +166,12 @@ fn check_group_key(schema: &SchemaRef, n_keys: usize) -> Result<()> {
     } else {
         for i in 0..n_keys {
             let ty = schema.field(i).data_type();
-            if !matches!(ty, DataType::Int32 | DataType::Int64 | DataType::Float64) {
+            if !matches!(
+                ty,
+                DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8View
+            ) {
                 return Err(DataFusionError::NotImplemented(format!(
-                    "composite GROUP BY key column type {ty} (fixed-width only for now)"
+                    "composite GROUP BY key column type {ty}"
                 )));
             }
         }
