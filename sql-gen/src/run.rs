@@ -55,16 +55,17 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
     let capacity = op.max_output_rows(rb.num_rows());
 
-    // Reject GROUP BY key types we don't support yet — `Int32`/`Int64`, `Float64`,
-    // and `Utf8View` (nullable or not; null keys form their own group).
-    if let Some(Operator::Aggregate { schema, .. }) = find_grouped(&op) {
-        let key = schema.field(0);
-        if key_kind(key.data_type()).is_none() {
-            return Err(DataFusionError::NotImplemented(format!(
-                "GROUP BY key type {}",
-                key.data_type()
-            )));
-        }
+    // Reject GROUP BY key types we don't support yet. A single key may be
+    // `Int32`/`Int64`, `Float64`, or `Utf8View` (nullable or not). A composite
+    // (multi-column) key is fixed-width only for now — each column `Int32`/`Int64`/
+    // `Float64` (strings inside a composite key are a follow-up).
+    if let Some(Operator::Aggregate {
+        schema,
+        group_exprs,
+        ..
+    }) = find_grouped(&op)
+    {
+        check_group_key(schema, group_exprs.len())?;
     }
 
     let prepared_in = prepare_record_batch(rb).map_err(exec_err)?;
@@ -96,12 +97,10 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
             ..
         }) => {
             let agg_tys = agg_output_types(schema, group_exprs.len());
-            let key = schema.field(0);
-            let key_ty = key.data_type();
-            let template = group_template(aggs, &agg_tys, key_ty, key.is_nullable());
+            let template = group_template(aggs, &agg_tys, schema);
             Some(GroupState::new(
                 template,
-                key_kind(key_ty).expect("checked above"),
+                group_key_kind(schema, group_exprs.len()),
             ))
         }
         _ => None,
@@ -134,7 +133,7 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
     Ok(result)
 }
 
-/// The [`KeyKind`] for a GROUP BY key column type, or `None` if unsupported.
+/// The [`KeyKind`] for a single GROUP BY key column type, or `None` if unsupported.
 fn key_kind(dt: &DataType) -> Option<KeyKind> {
     match dt {
         DataType::Int32 | DataType::Int64 => Some(KeyKind::Int),
@@ -142,6 +141,39 @@ fn key_kind(dt: &DataType) -> Option<KeyKind> {
         DataType::Utf8View => Some(KeyKind::Str),
         _ => None,
     }
+}
+
+/// The [`KeyKind`] for the whole GROUP BY key — a composite key is a packed byte key,
+/// so it uses the `Str` (bytes) table. Assumes [`check_group_key`] already passed.
+fn group_key_kind(schema: &SchemaRef, n_keys: usize) -> KeyKind {
+    if n_keys > 1 {
+        KeyKind::Str
+    } else {
+        key_kind(schema.field(0).data_type()).expect("checked")
+    }
+}
+
+/// Reject unsupported GROUP BY key columns (single: int/float/string; composite:
+/// fixed-width int/float only, for now).
+fn check_group_key(schema: &SchemaRef, n_keys: usize) -> Result<()> {
+    if n_keys == 1 {
+        let ty = schema.field(0).data_type();
+        if key_kind(ty).is_none() {
+            return Err(DataFusionError::NotImplemented(format!(
+                "GROUP BY key type {ty}"
+            )));
+        }
+    } else {
+        for i in 0..n_keys {
+            let ty = schema.field(i).data_type();
+            if !matches!(ty, DataType::Int32 | DataType::Int64 | DataType::Float64) {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "composite GROUP BY key column type {ty} (fixed-width only for now)"
+                )));
+            }
+        }
+    }
+    Ok(())
 }
 
 /// Find the (single) grouped `Aggregate` node in the plan, if any.

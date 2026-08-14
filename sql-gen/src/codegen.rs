@@ -287,23 +287,24 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     else {
         unreachable!("gen_grouped called on a non-Aggregate operator")
     };
-    assert_eq!(
-        group_exprs.len(),
-        1,
-        "only a single GROUP BY key is supported"
-    );
     let handle = cx
         .group
         .clone()
         .expect("grouped aggregate without a baked GroupState");
     let agg_tys = agg_output_types(out_schema, group_exprs.len());
-    let key_field = out_schema.field(0);
-    let key_ty = key_field.data_type().clone();
-    let record = group_record(aggs, &agg_tys, &key_ty, key_field.is_nullable());
+    let key_spec = KeySpec::from_schema(out_schema, group_exprs.len());
+    let record = group_record(aggs, &agg_tys, &key_spec);
     let layout = record.layout;
     let key_fields = record.key;
     let key_valid = record.key_valid;
     let state = handle.state;
+    // How the fold computes the key: one expression (single key) or a packed layout
+    // over all key columns (composite).
+    let key_source = match &key_spec {
+        KeySpec::Single { .. } => KeySource::Single(group_exprs[0].clone()),
+        KeySpec::Composite(cols) => KeySource::Composite(packed_key(group_exprs, cols)),
+    };
+    let n_keys = group_exprs.len();
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
     let resolved: Vec<ResolvedAgg> = record
         .aggs
@@ -317,14 +318,15 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         })
         .collect();
 
-    let group_expr = group_exprs[0].clone();
     let input_schema = input.output_schema();
 
-    // Fold: per input row, intern the key and fold each aggregate into the group's
-    // packed record at `records[gidx]`.
+    // Fold: per input row, find-or-insert the group and fold each aggregate into its
+    // packed record. The `upsert` extern grows the records buffer (host-side), writes
+    // the key into the record, and returns the record pointer — valid until the next
+    // `upsert`.
     let cx_c = cx.clone();
     let resolved_f = resolved.clone();
-    let group_expr_f = group_expr.clone();
+    let key_source_f = key_source.clone();
     let schema_f = input_schema.clone();
     gen_op(
         input,
@@ -332,51 +334,13 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
         batch,
         cx,
         Box::new(move |ctx, row| {
-            let key_cv = gen_expr(ctx, &group_expr_f, &schema_f, &row, &cx_c);
-            // Find-or-insert the group AND materialise its record in one proxy call:
-            // the `upsert` extern grows the records buffer (host-side) when it mints a
-            // new group, writes the key into the record's leading field(s), and returns
-            // the record pointer — so the fold never bakes a records base that a grow
-            // could dangle, and never handles the key. Valid until the next `upsert`.
-            // A nullable key column also routes null keys to the null group (see
-            // [`finish_upsert`]); the key computation below runs unconditionally but is
-            // harmless on a null row (unused, and `str_ptr` reads a null row safely).
-            let rec_ptr = match key_fields {
-                KeyFields::Int(_) => {
-                    // The table keys on `u64` bits (grouping is sign-agnostic); the cast
-                    // is a no-op reinterpret.
-                    let key = to_i64(ctx, key_cv);
-                    let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
-                    let call = call_extern2(
-                        cx_c.rt.group_upsert,
-                        const_opaque_mut::<GroupState>(state),
-                        key_bits,
-                    );
-                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
+            let rec_ptr = match &key_source_f {
+                KeySource::Single(expr) => {
+                    let key_cv = gen_expr(ctx, expr, &schema_f, &row, &cx_c);
+                    fold_single_key(ctx, key_fields, key_valid, key_cv, state, &cx_c, layout)
                 }
-                KeyFields::Float(_) => {
-                    // Key on the f64's bits via the `Int` (`u64`) table: canonicalize
-                    // (so `-0.0`/`+0.0` and all NaNs each group together), then bitcast.
-                    let key = coerce_f64(ctx, key_cv);
-                    let canon = canonical_f64(ctx, key);
-                    let key_bits = ctx.bind(bitcast::<u64, f64, _>(canon));
-                    let call = call_extern2(
-                        cx_c.rt.group_upsert,
-                        const_opaque_mut::<GroupState>(state),
-                        key_bits,
-                    );
-                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
-                }
-                KeyFields::Str { .. } => {
-                    // Pass the key's content bytes; the extern copies them into its pool.
-                    let (ptr, len) = resolve(ctx, as_str(key_cv), cx_c.rt.str_ptr);
-                    let call = call_extern3(
-                        cx_c.rt.group_upsert_str,
-                        const_opaque_mut::<GroupState>(state),
-                        ptr,
-                        len,
-                    );
-                    finish_upsert(ctx, call, key_valid, key_cv, state, &cx_c, layout)
+                KeySource::Composite(packed) => {
+                    pack_and_upsert(ctx, packed, &row, &schema_f, &cx_c, state)
                 }
             };
             let rec = layout.wrap(rec_ptr);
@@ -399,41 +363,113 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
         let rec = layout.record(ctx, base, g);
-        // For a nullable key, the null group's record carries `key_valid == 0`; emit a
-        // NULL key for it. Non-nullable keys are always valid (no cell, no overhead).
-        let key_null = match key_valid {
-            None => Nullness::NonNull,
-            Some(vf) => {
-                let v = rec.get(ctx, vf);
-                Nullness::Nullable(ctx.bind(gt(v, 0i64)))
+        let key_cols = match &key_source {
+            KeySource::Single(_) => {
+                vec![emit_single_key(ctx, key_fields, key_valid, rec)]
+            }
+            KeySource::Composite(packed) => {
+                let KeyFields::Composite { ptr, .. } = key_fields else {
+                    unreachable!("composite key source without composite key fields")
+                };
+                let packed_ptr = rec.get(ctx, ptr);
+                unpack_composite(ctx, packed, packed_ptr)
             }
         };
-        let key_cv = match key_fields {
-            KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), key_null),
-            KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), key_null),
-            KeyFields::Str { ptr, len } => {
-                // The record's `(ptr, len)` point at the pooled key bytes; produce a
-                // `Bytes` string so the existing output path appends them (copying).
-                let ptr = rec.get(ctx, ptr);
-                let len = rec.get(ctx, len);
-                ColVal::Str(
-                    StrVal::Bytes {
-                        ptr,
-                        len,
-                        view: None,
-                    },
-                    key_null,
-                )
-            }
-        };
-        let mut row: Row = Vec::with_capacity(1 + resolved.len());
-        row.push(key_cv);
+        let mut row: Row = Vec::with_capacity(n_keys + resolved.len());
+        row.extend(key_cols);
         for agg in &resolved {
             row.push(agg.finalize(ctx, rec));
         }
         yld(ctx, row);
         ctx.store(g, add(g, 1u64));
     });
+}
+
+/// Fold-time upsert for a **single** key: dispatch on the key type, then finish (null
+/// handling) via [`finish_upsert`]. The key computation runs unconditionally but is
+/// harmless on a null row (unused; `str_ptr` reads a null row safely).
+fn fold_single_key(
+    ctx: &mut Ctx,
+    key_fields: KeyFields,
+    key_valid: Option<FieldId<i64>>,
+    key_cv: ColVal,
+    state: *mut GroupState,
+    cx: &CodegenCtx,
+    layout: RecordLayout,
+) -> Var<SMutPtr<u8>> {
+    match key_fields {
+        KeyFields::Int(_) => {
+            // The table keys on `u64` bits (grouping is sign-agnostic); a no-op cast.
+            let key = to_i64(ctx, key_cv);
+            let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
+            let call = call_extern2(
+                cx.rt.group_upsert,
+                const_opaque_mut::<GroupState>(state),
+                key_bits,
+            );
+            finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
+        }
+        KeyFields::Float(_) => {
+            // Key on the f64's bits: canonicalize (`-0.0`/NaN), then bitcast.
+            let key = coerce_f64(ctx, key_cv);
+            let canon = canonical_f64(ctx, key);
+            let key_bits = ctx.bind(bitcast::<u64, f64, _>(canon));
+            let call = call_extern2(
+                cx.rt.group_upsert,
+                const_opaque_mut::<GroupState>(state),
+                key_bits,
+            );
+            finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
+        }
+        KeyFields::Str { .. } => {
+            // Pass the key's content bytes; the extern copies them into its pool.
+            let (ptr, len) = resolve(ctx, as_str(key_cv), cx.rt.str_ptr);
+            let call = call_extern3(
+                cx.rt.group_upsert_str,
+                const_opaque_mut::<GroupState>(state),
+                ptr,
+                len,
+            );
+            finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
+        }
+        KeyFields::Composite { .. } => {
+            unreachable!("composite key in the single-key fold")
+        }
+    }
+}
+
+/// Emit the single key `ColVal` for one group's record.
+fn emit_single_key(
+    ctx: &mut Ctx,
+    key_fields: KeyFields,
+    key_valid: Option<FieldId<i64>>,
+    rec: DynamicRecord,
+) -> ColVal {
+    // For a nullable key, the null group's record carries `key_valid == 0`; emit NULL.
+    let key_null = match key_valid {
+        None => Nullness::NonNull,
+        Some(vf) => {
+            let v = rec.get(ctx, vf);
+            Nullness::Nullable(ctx.bind(gt(v, 0i64)))
+        }
+    };
+    match key_fields {
+        KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), key_null),
+        KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), key_null),
+        KeyFields::Str { ptr, len } => {
+            let ptr = rec.get(ctx, ptr);
+            let len = rec.get(ctx, len);
+            ColVal::Str(
+                StrVal::Bytes {
+                    ptr,
+                    len,
+                    view: None,
+                },
+                key_null,
+            )
+        }
+        KeyFields::Composite { .. } => unreachable!("composite key in the single-key emit"),
+    }
 }
 
 /// Complete a fold-row's upsert: for a non-nullable key, just run `valid_call` (the
@@ -471,6 +507,158 @@ where
             rec_ptr
         }
     }
+}
+
+/// How the fold obtains the key: a single key expression, or a packed layout over all
+/// key columns (composite). Cloned into the fold closure and kept for emit.
+#[derive(Clone)]
+enum KeySource {
+    Single(Expr),
+    Composite(PackedKey),
+}
+
+/// A composite key's **packed** layout: one 8-byte cell per key column (`i64`/`f64`)
+/// plus a trailing `u64` null bitmap (bit `i` = column `i` is NULL). The fold writes
+/// the canonicalized column values + bitmap into a stack scratch of this shape — the
+/// bytes handed to `group_upsert_str` — and emit reads them back to produce the output
+/// key columns. One `RecordLayout` is shared by pack and unpack, so offsets agree.
+#[derive(Clone)]
+struct PackedKey {
+    layout: RecordLayout,
+    cols: Vec<PackedCol>,
+    bitmap: FieldId<u64>,
+    nbytes: usize,
+}
+
+#[derive(Clone)]
+struct PackedCol {
+    field: PackedColField,
+    /// Null-bitmap bit index (= column position).
+    bit: usize,
+    nullable: bool,
+    /// The group-by expression producing this column's value.
+    expr: Expr,
+}
+
+#[derive(Clone, Copy)]
+enum PackedColField {
+    I64(FieldId<i64>),
+    F64(FieldId<f64>),
+}
+
+/// Build the packed-key layout from the key columns (fixed-width only for now).
+fn packed_key(group_exprs: &[Expr], cols: &[(DataType, bool)]) -> PackedKey {
+    let mut layout = RecordLayout::new();
+    let packed_cols = group_exprs
+        .iter()
+        .zip(cols)
+        .enumerate()
+        .map(|(i, (expr, (ty, nullable)))| {
+            let field = match ty {
+                DataType::Int32 | DataType::Int64 => PackedColField::I64(layout.field::<i64>()),
+                DataType::Float64 => PackedColField::F64(layout.field::<f64>()),
+                other => panic!("unsupported composite key column type: {other}"),
+            };
+            PackedCol {
+                field,
+                bit: i,
+                nullable: *nullable,
+                expr: expr.clone(),
+            }
+        })
+        .collect();
+    let bitmap = layout.field::<u64>();
+    let nbytes = layout.stride();
+    PackedKey {
+        layout,
+        cols: packed_cols,
+        bitmap,
+        nbytes,
+    }
+}
+
+/// Pack the composite key columns into a fresh stack scratch (canonicalized values +
+/// null bitmap) then find-or-insert via `group_upsert_str` (which copies the packed
+/// bytes into the pool on a miss). Returns the group's record pointer.
+fn pack_and_upsert(
+    ctx: &mut Ctx,
+    packed: &PackedKey,
+    row: &Row,
+    schema: &SchemaRef,
+    cx: &CodegenCtx,
+    state: *mut GroupState,
+) -> Var<SMutPtr<u8>> {
+    let scratch = ctx.bind(stack_alloc(packed.nbytes));
+    let prec = packed.layout.wrap(scratch);
+    let bitmap = ctx.var(0u64);
+    for col in &packed.cols {
+        let cv = gen_expr(ctx, &col.expr, schema, row, cx);
+        let valid = match cv.nullness() {
+            Nullness::Nullable(b) => Some(b),
+            Nullness::NonNull => None,
+        };
+        // NULL columns pack a canonical value (0 / +0.0); the bitmap distinguishes them.
+        match col.field {
+            PackedColField::I64(f) => {
+                let v = to_i64(ctx, cv);
+                let stored = match valid {
+                    Some(vb) => ctx.bind(select(vb, v, 0i64)),
+                    None => v,
+                };
+                prec.set(ctx, f, stored);
+            }
+            PackedColField::F64(f) => {
+                let v = coerce_f64(ctx, cv);
+                let canon = canonical_f64(ctx, v);
+                let stored = match valid {
+                    Some(vb) => ctx.bind(select(vb, canon, 0.0f64)),
+                    None => canon,
+                };
+                prec.set(ctx, f, stored);
+            }
+        }
+        if let Some(vb) = valid {
+            // null → set bit `col.bit`; valid → 0.
+            let bit = ctx.bind(select(vb, 0u64, 1u64 << col.bit));
+            let next = ctx.bind(bitor(bitmap, bit));
+            ctx.store(bitmap, next);
+        }
+    }
+    prec.set(ctx, packed.bitmap, bitmap);
+    ctx.bind(call_extern3(
+        cx.rt.group_upsert_str,
+        const_opaque_mut::<GroupState>(state),
+        ptr_as_const(scratch),
+        Const::<u64>::new(packed.nbytes as u64),
+    ))
+}
+
+/// Unpack a group's pooled packed key into its output key `ColVal`s (nulls from the
+/// bitmap).
+fn unpack_composite(
+    ctx: &mut Ctx,
+    packed: &PackedKey,
+    packed_ptr: Var<SMutPtr<u8>>,
+) -> Vec<ColVal> {
+    let prec = packed.layout.wrap(packed_ptr);
+    let bitmap = prec.get(ctx, packed.bitmap);
+    packed
+        .cols
+        .iter()
+        .map(|col| {
+            let null = if col.nullable {
+                let shifted = ctx.bind(shr(bitmap, col.bit as u64));
+                let bit = ctx.bind(bitand(shifted, 1u64));
+                Nullness::Nullable(ctx.bind(eq(bit, 0u64)))
+            } else {
+                Nullness::NonNull
+            };
+            match col.field {
+                PackedColField::I64(f) => ColVal::I64(prec.get(ctx, f), null),
+                PackedColField::F64(f) => ColVal::F64(prec.get(ctx, f), null),
+            }
+        })
+        .collect()
 }
 
 /// The physical cell type an aggregate accumulates in: an `i64` cell or an `f64`
@@ -545,6 +733,44 @@ enum KeyFields {
         ptr: FieldId<SPtr<u8>>,
         len: FieldId<u64>,
     },
+    /// A **composite** (multi-column) key, stored like a string key — a pointer to the
+    /// pooled *packed* key bytes (the `len` cell the extern also writes is reserved but
+    /// unread; the packed length is a compile-time constant). The fold packs the
+    /// columns; emit unpacks them (see [`PackedKey`]). Nulls ride in the packed bitmap,
+    /// not a `key_valid` cell, so each `(a, b, …)` combination is its own group.
+    Composite {
+        ptr: FieldId<SMutPtr<u8>>,
+    },
+}
+
+/// What the GROUP BY key is: one column (specialised int/float/string paths) or
+/// several (a packed byte key). Drives the record's key fields and the fold/emit.
+enum KeySpec {
+    Single { ty: DataType, nullable: bool },
+    Composite(Vec<(DataType, bool)>), // (type, nullable) per key column, in order
+}
+
+impl KeySpec {
+    /// Derive the key spec from the aggregate's output schema (its first `n_keys`
+    /// fields are the group keys).
+    fn from_schema(out_schema: &SchemaRef, n_keys: usize) -> KeySpec {
+        if n_keys == 1 {
+            let f = out_schema.field(0);
+            KeySpec::Single {
+                ty: f.data_type().clone(),
+                nullable: f.is_nullable(),
+            }
+        } else {
+            KeySpec::Composite(
+                (0..n_keys)
+                    .map(|i| {
+                        let f = out_schema.field(i);
+                        (f.data_type().clone(), f.is_nullable())
+                    })
+                    .collect(),
+            )
+        }
+    }
 }
 
 /// The packed record of a group-by's state: the key field(s), then a value (+ count)
@@ -562,9 +788,9 @@ struct GroupRecord {
     aggs: Vec<AggFields>,
 }
 
-/// Reserve the leading key field(s) for `key_ty`. Must be first (offset 0) — the
-/// `group_upsert*` externs write the key there.
-fn key_fields(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
+/// Reserve the leading key field(s) for a single-column key of type `key_ty`. Must be
+/// first (offset 0) — the `group_upsert*` externs write the key there.
+fn key_fields_single(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
     match key_ty {
         DataType::Int32 | DataType::Int64 => KeyFields::Int(layout.field::<i64>()),
         DataType::Float64 => KeyFields::Float(layout.field::<f64>()),
@@ -576,18 +802,25 @@ fn key_fields(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
     }
 }
 
-/// Build the packed-record layout from the key type and the aggregates + their output
+/// Build the packed-record layout from the key spec and the aggregates + their output
 /// `DataType`s (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
 /// `sum`/`min`/`max` over `Float64` fold in an `f64` field, everything else `i64`.
-fn group_record(
-    aggs: &[Expr],
-    agg_tys: &[DataType],
-    key_ty: &DataType,
-    key_nullable: bool,
-) -> GroupRecord {
+fn group_record(aggs: &[Expr], agg_tys: &[DataType], key_spec: &KeySpec) -> GroupRecord {
     let mut layout = RecordLayout::new();
-    let key = key_fields(&mut layout, key_ty);
-    let key_valid = key_nullable.then(|| layout.field::<i64>());
+    let (key, key_valid) = match key_spec {
+        KeySpec::Single { ty, nullable } => {
+            let key = key_fields_single(&mut layout, ty);
+            // A nullable single key routes NULLs to the null group via a validity cell.
+            (key, nullable.then(|| layout.field::<i64>()))
+        }
+        KeySpec::Composite(_) => {
+            // A `(ptr, len)` to the pooled packed key (like a string key); nulls are in
+            // the packed bitmap, so no separate validity cell.
+            let ptr = layout.field::<SMutPtr<u8>>();
+            let _len = layout.field::<u64>(); // reserved for the extern's len write; unread
+            (KeyFields::Composite { ptr }, None)
+        }
+    };
     let mut agg_fields = Vec::with_capacity(aggs.len());
     for (e, out) in aggs.iter().zip(agg_tys) {
         let kind = GroupedAgg::parse(e).kind;
@@ -628,13 +861,10 @@ fn value_init_bits(kind: AggKind, value: &AggValueField) -> i64 {
 /// value field at its identity, counts `0`). The host fills every group slot with
 /// this before the fold (see `group::GroupState::new`). All fields are 8-byte
 /// `i64`/`f64` cells, so every offset is a whole word.
-pub fn group_template(
-    aggs: &[Expr],
-    agg_tys: &[DataType],
-    key_ty: &DataType,
-    key_nullable: bool,
-) -> Vec<u64> {
-    let record = group_record(aggs, agg_tys, key_ty, key_nullable);
+pub fn group_template(aggs: &[Expr], agg_tys: &[DataType], out_schema: &SchemaRef) -> Vec<u64> {
+    let n_keys = out_schema.fields().len() - agg_tys.len();
+    let key_spec = KeySpec::from_schema(out_schema, n_keys);
+    let record = group_record(aggs, agg_tys, &key_spec);
     let words = record.layout.stride() / 8;
     let mut template = vec![0u64; words];
     for a in &record.aggs {

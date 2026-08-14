@@ -24,7 +24,7 @@
 use std::marker::PhantomData;
 use std::slice;
 
-use crate::refer::SPtr;
+use crate::refer::{SMutPtr, SPtr};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
@@ -369,6 +369,42 @@ pub fn stack_bytes(bytes: &[u8]) -> StackBytes {
     StackBytes {
         bytes: bytes.to_vec(),
     }
+}
+
+// =============================================================================
+// StackAlloc: reserve a mutable kernel-frame stack slot for runtime scratch
+// =============================================================================
+
+/// A fresh, **uninitialised**, 8-byte-aligned stack slot of `size` bytes, as a
+/// `SMutPtr<u8>` the kernel writes into — the runtime counterpart of [`StackBytes`]
+/// (which stores *constant* bytes). Scratch space for building a value at runtime:
+/// packing a composite GROUP BY key, a temporary buffer for an extern, etc.
+///
+/// The slot lives in the function frame and is allocated **once**, so evaluating this
+/// inside a loop reuses the same slot every iteration (bind it once and reuse the
+/// pointer). Its contents are undefined until the kernel writes them.
+pub struct StackAlloc {
+    size: usize,
+}
+
+impl Staged for StackAlloc {
+    type Out = SMutPtr<u8>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Round up to a whole number of 8-byte words (min one word).
+        let slot_len = ((self.size + 7) & !7).max(8);
+        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            slot_len as u32,
+            3, // align_shift = 3 → 8-byte aligned
+        ));
+        ctx.builder.ins().stack_addr(types::I64, slot, 0)
+    }
+}
+
+/// Reserve `size` bytes of uninitialised, 8-byte-aligned stack scratch. See [`StackAlloc`].
+pub fn stack_alloc(size: usize) -> StackAlloc {
+    StackAlloc { size }
 }
 
 // =============================================================================

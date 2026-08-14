@@ -135,8 +135,9 @@ pub mod prelude {
     };
     pub use crate::ffi::{
         call_extern0, call_extern1, call_extern2, call_extern3, call_extern4, slice_from_raw_parts,
-        stack_bytes, ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType,
-        FfiSlice, FfiSliceMut, FfiSliceMutType, FfiSliceType, SliceFromRawParts, StackBytes,
+        stack_alloc, stack_bytes, ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType,
+        FatSliceType, FfiSlice, FfiSliceMut, FfiSliceMutType, FfiSliceType, SliceFromRawParts,
+        StackAlloc, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,
@@ -170,10 +171,10 @@ pub mod prelude {
         FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,
     };
     pub use crate::refer::{
-        array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut, ptr_cast,
-        ptr_cast_mut, ptr_offset, ptr_offset_mut, store, store_ref, ArrayIndex, ConstPtr,
-        LoadMutRef, LoadRef, PtrCast, PtrOffset, PtrOffsetMut, RustPtr, RustRef, SMutPtr, SPtr,
-        SRef, SRefMut, Store,
+        array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
+        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_offset, ptr_offset_mut, store, store_ref,
+        ArrayIndex, ConstPtr, LoadMutRef, LoadRef, PtrCast, PtrOffset, PtrOffsetMut, RustPtr,
+        RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
         AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,

@@ -342,11 +342,24 @@ Each phase builds, tests, and ships green on its own.
    the validity in a **key-valid cell** (added to the record only for nullable keys —
    zero IR for non-nullable), and emit reads it to produce a NULL key. `intern` was
    refactored to `find_or_insert(probe, next_gidx)` so the null group's slot doesn't
-   collide with hash gidxs (both draw from the records count). Then the **parallel
-   partial/final split** (the `[keys | payloads]` state is already the mergeable unit).
+   collide with hash gidxs (both draw from the records count).
+7. **✅ DONE — composite (multi-column) keys** (fixed-width, approach A). A composite
+   key is a **packed byte key** — it reuses the string path entirely (`Str` table,
+   `group_upsert_str`, pool, the record's `(ptr, len)` key). The fold packs each key
+   column's canonicalized bits (float: `-0.0`/NaN canonicalize + bitcast; int: bits) +
+   a `u64` null bitmap into a **stack scratch** (`PackedKey` = a `RecordLayout` of
+   8-byte cells + bitmap, written via `DynamicRecord`), and hands `(ptr, len)` to
+   `group_upsert_str` (which copies to the pool on a miss). Emit **unpacks** the pooled
+   packed key back into N typed `ColVal`s; nulls come from the bitmap, so each
+   `(a, b, …)` combination (nulls included) is its own group — no `null_gidx` for
+   composite. Two new rust-lms primitives: `stack_alloc(size) -> SMutPtr<u8>` (runtime
+   stack scratch — broadly useful) and `ptr_as_const` (`*mut`→`*const` for the extern).
+   **Deferred:** string columns *inside* a composite (variable-length packing), and the
+   `[u64; 2]` inline fast path (skip the pool for ≤2 small fixed-width columns).
 
-Done in order 1 → 2 → 3 → 4 → 5 → 6. The scalar-key story is complete (Int32/Int64,
-Float64, Utf8View, each nullable). Next: composite keys, or the parallel split.
+Done 1 → 2 → 3 → 4 → 5 → 6 → 7. Keys are now Int32/Int64, Float64, Utf8View (each
+nullable), and fixed-width composites. Next: the **parallel partial/final split** (the
+`[keys | payloads]` state is already the mergeable unit), or strings-in-composite.
 
 ---
 

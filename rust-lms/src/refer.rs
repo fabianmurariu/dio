@@ -539,6 +539,19 @@ where
     }
 }
 
+/// Demote `*mut T` to `*const T` at the same address (no code emitted) — e.g. to
+/// hand a runtime scratch buffer to an extern taking `*const T`.
+pub fn ptr_as_const<T, P>(ptr: P) -> PtrCast<P, SPtr<T>>
+where
+    T: StagedType + 'static,
+    P: Staged<Out = SMutPtr<T>>,
+{
+    PtrCast {
+        ptr,
+        _s: PhantomData,
+    }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

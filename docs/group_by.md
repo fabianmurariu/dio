@@ -431,8 +431,12 @@ loop computes `sum / count` (NULL when `count == 0`) before handing the row up.
   `BytesPool` bundled with the table (so the result survives the input batch — needed
   once inputs stream). A NULL key forms its own group, tracked outside the hash table
   (a lazily-minted `null_gidx` + a per-record key-valid cell, added only for nullable
-  columns). **Composite** keys are the next key-typing step; computed string keys
-  (`upper(x)`) wait on string fns.
+  columns).
+- **Composite (multi-column) keys — fixed-width.** `GROUP BY a, b, …` over
+  `Int32`/`Int64`/`Float64` columns (nullable or not): the key is *packed* into bytes
+  (per-column canonicalized cells + a `u64` null bitmap) in a stack scratch and reuses
+  the string/bytes table + pool; emit unpacks it into N output columns. String columns
+  *inside* a composite key, and computed keys (`upper(x)`), are still to come.
 - **Aggregate value types: `i64` and `Float64` done** (`sum`/`min`/`max` pick their
   cell from the output type; `avg` always `f64`). `Decimal`/other numeric inputs
   still fall through to the `to_i64` panic.

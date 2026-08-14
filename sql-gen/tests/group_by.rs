@@ -720,3 +720,121 @@ fn group_by_null_string_key() {
         ])
     );
 }
+
+// --- Composite (multi-column) keys: packed into a byte key (fixed-width columns),
+// nulls in the packed bitmap so each (a, b, ...) combination is its own group. ---
+
+fn batch_2int(a: Vec<i64>, b: Vec<i64>, v: Vec<i64>) -> RecordBatch {
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, false),
+        Field::new("b", DataType::Int64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(a)),
+            Arc::new(Int64Array::from(b)),
+            Arc::new(Int64Array::from(v)),
+        ],
+    )
+    .unwrap()
+}
+
+/// Output `(a, b) -> agg` map for a two-int-key result.
+fn as_pair_map(rb: &RecordBatch, agg_col: usize) -> BTreeMap<(i64, i64), i64> {
+    let a = i64s(rb, 0);
+    let b = i64s(rb, 1);
+    let agg = i64s(rb, agg_col);
+    (0..rb.num_rows())
+        .map(|i| ((a.value(i), b.value(i)), agg.value(i)))
+        .collect()
+}
+
+#[test]
+fn group_by_two_int_keys() {
+    // (a,b): (1,10),(1,10),(2,20),(1,30) -> (1,10):1+2=3, (2,20):3, (1,30):4
+    let rb = batch_2int(vec![1, 1, 2, 1], vec![10, 10, 20, 30], vec![1, 2, 3, 4]);
+    let out = exec_jit("SELECT a, b, sum(v) FROM t GROUP BY a, b", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 3);
+    assert_eq!(
+        as_pair_map(&out, 2),
+        BTreeMap::from([((1, 10), 3), ((2, 20), 3), ((1, 30), 4)])
+    );
+}
+
+#[test]
+fn group_by_int_float_composite() {
+    // key (int a, float b): (1,1.5),(1,1.5),(2,1.5),(1,2.5)
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, false),
+        Field::new("b", DataType::Float64, false),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![1, 1, 2, 1])),
+            Arc::new(Float64Array::from(vec![1.5, 1.5, 1.5, 2.5])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    let out = exec_jit("SELECT a, b, sum(v) FROM t GROUP BY a, b", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 3);
+    let a = i64s(&out, 0);
+    let b = f64s(&out, 1);
+    let s = i64s(&out, 2);
+    let mut map: BTreeMap<(i64, u64), i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        map.insert((a.value(i), b.value(i).to_bits()), s.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            ((1, 1.5f64.to_bits()), 3), // 1+2
+            ((2, 1.5f64.to_bits()), 3),
+            ((1, 2.5f64.to_bits()), 4),
+        ])
+    );
+}
+
+#[test]
+fn group_by_composite_with_nulls() {
+    // Nullable columns: (NULL,5) must differ from (0,5), and group with other (NULL,5).
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("a", DataType::Int64, true),
+        Field::new("b", DataType::Int64, true),
+        Field::new("v", DataType::Int64, false),
+    ]));
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![
+            Arc::new(Int64Array::from(vec![None, Some(0), None, Some(0)])),
+            Arc::new(Int64Array::from(vec![Some(5), Some(5), Some(5), None])),
+            Arc::new(Int64Array::from(vec![1, 2, 3, 4])),
+        ],
+    )
+    .unwrap();
+    // rows: (NULL,5):1, (0,5):2, (NULL,5):3, (0,NULL):4
+    //  -> (NULL,5): 1+3=4 ; (0,5): 2 ; (0,NULL): 4
+    let out = exec_jit("SELECT a, b, sum(v) FROM t GROUP BY a, b", "t", &rb).unwrap();
+    assert_eq!(out.num_rows(), 3);
+    let a = i64s(&out, 0);
+    let b = i64s(&out, 1);
+    let s = i64s(&out, 2);
+    let mut map: BTreeMap<(Option<i64>, Option<i64>), i64> = BTreeMap::new();
+    for i in 0..out.num_rows() {
+        let ka = if a.is_null(i) { None } else { Some(a.value(i)) };
+        let kb = if b.is_null(i) { None } else { Some(b.value(i)) };
+        map.insert((ka, kb), s.value(i));
+    }
+    assert_eq!(
+        map,
+        BTreeMap::from([
+            ((None, Some(5)), 4),
+            ((Some(0), Some(5)), 2),
+            ((Some(0), None), 4),
+        ])
+    );
+}
