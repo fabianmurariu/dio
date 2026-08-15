@@ -552,6 +552,40 @@ where
     }
 }
 
+/// True iff the pointer is null (`ptr == 0`) — the staged twin of `p.is_null()`.
+/// The sentinel test for an extern returning a nullable `*const T` / `*mut T`
+/// (e.g. a scan stream's "no more batches"). Emits a single `icmp eq ptr, 0`.
+pub struct PtrIsNull<P> {
+    ptr: P,
+}
+
+impl<P: Clone> Clone for PtrIsNull<P> {
+    fn clone(&self) -> Self {
+        PtrIsNull {
+            ptr: self.ptr.clone(),
+        }
+    }
+}
+impl<P: Copy> Copy for PtrIsNull<P> {}
+
+impl<P: Staged> Staged for PtrIsNull<P> {
+    type Out = bool;
+    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+        let p = self.ptr.codegen(ctx);
+        ctx.builder
+            .ins()
+            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
+    }
+}
+
+/// Build a staged null-check over any pointer (`SPtr<T>` / `SMutPtr<T>`).
+pub fn ptr_is_null<P>(ptr: P) -> PtrIsNull<P>
+where
+    P: Staged,
+{
+    PtrIsNull { ptr }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

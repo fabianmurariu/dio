@@ -7,8 +7,8 @@ use std::sync::Arc;
 
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArray, prepare_record_batch};
 use datafusion_common::{DataFusionError, Result};
+use rust_lms::opaque::Opaque;
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
@@ -19,6 +19,7 @@ use crate::group::{GroupState, KeyKind};
 use crate::output::OutCols;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
+use crate::scan::{Inputs, ScanStream};
 use crate::sql::sql_to_operator;
 
 /// Normalize a plan's output schema for materialization: every string type maps
@@ -45,14 +46,35 @@ fn normalize_out_schema(schema: &SchemaRef) -> SchemaRef {
 /// aggregates like `count(*)`, `min`/`max`/`sum`).
 pub fn exec_jit(sql: &str, table: &str, rb: &RecordBatch) -> Result<RecordBatch> {
     let op = sql_to_operator(sql, table, rb.schema())?;
-    run_operator(op, rb)
+    run_operator(op, Inputs::single(rb.clone()))
 }
 
-/// Compile and run a whole operator tree over `rb` in ONE kernel. A GROUP BY is a
-/// push operator inside it — we just allocate its Rust-hosted [`GroupState`] up
+/// Like [`exec_jit`] but over a **stream** of batches (all sharing `schema`): the
+/// kernel pulls one batch at a time, so only one input batch is resident at once
+/// (except where an operator deliberately retains — a future JOIN build side).
+/// Scalar aggregates and GROUP BY fold across the whole stream in a single kernel.
+/// `batches` is any `'static` iterator of same-schema batches (a `Vec`, a file
+/// reader, …).
+pub fn exec_jit_stream<I>(
+    sql: &str,
+    table: &str,
+    schema: SchemaRef,
+    batches: I,
+) -> Result<RecordBatch>
+where
+    I: IntoIterator<Item = RecordBatch>,
+    I::IntoIter: 'static,
+{
+    let op = sql_to_operator(sql, table, schema)?;
+    let inputs = Inputs::new(vec![ScanStream::new(Box::new(batches.into_iter()))]);
+    run_operator(op, inputs)
+}
+
+/// Compile and run a whole operator tree over `inputs` in ONE kernel. A GROUP BY is
+/// a push operator inside it — we just allocate its Rust-hosted [`GroupState`] up
 /// front (it outlives the run) and bake the pointers into the codegen context; the
 /// projection/filter above it run in the same kernel.
-fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
+fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
 
     // Reject GROUP BY key types we don't support yet. A single key may be
@@ -68,7 +90,6 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
         check_group_key(schema, group_exprs.len())?;
     }
 
-    let prepared_in = prepare_record_batch(rb).map_err(exec_err)?;
     let mut out = OutCols::alloc(&out_schema);
 
     let mut compiler = Compiler::new();
@@ -121,16 +142,18 @@ fn run_operator(op: Operator, rb: &RecordBatch) -> Result<RecordBatch> {
         out: Rc::new(out.handle()),
     };
 
-    let f = compiler.fun1("query", move |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        gen_collect(ctx, batch, &op, &out_schema, &cx)
+    let f = compiler.fun1("query", move |ctx, inputs: Var<SRefMut<Opaque<Inputs>>>| {
+        gen_collect(ctx, inputs, &op, &out_schema, &cx)
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
-    let n = compiled.as_fn()(prepared_in.arrays());
+    let n = compiled.as_fn()(&mut inputs);
     let result = out.into_record_batch(n as usize);
-    // Keep the interned-literal bytes and the group state alive across the run.
+    // Keep the interned-literal bytes, group state, and input streams alive across
+    // the run (the kernel holds pointers into them).
     drop(pool);
     drop(group_state);
+    drop(inputs);
     Ok(result)
 }
 

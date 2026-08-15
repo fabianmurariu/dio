@@ -390,16 +390,26 @@ Deferred here.
    array (zero-copy via `Buffer::from_vec` for numerics; pack validity bytes→bits).
    Keep a single in-memory batch as input for now. All existing tests must stay green
    (output shape unchanged; only how it's built changes).
-2. **`ScanStream` + `Inputs` + `scan_next`.** Wrap the single batch as a
-   one-element iterator; rewrite `gen_scan` as the two-level loop pulling from
-   `scan_next`. Kernel ABI → `fun2(inputs, out)`. Existing single-batch tests must
-   stay green.
-3. **Real streaming.** `exec_jit_stream(sql, tables: HashMap<String, Box<dyn
-   Iterator<Item=RecordBatch>>>, schemas)`. Keep `exec_jit(sql, table, &rb)` as a
-   single-batch wrapper. Add tests: a table split across several `RecordBatch`es
-   feeding `sum`/`count`/GROUP BY/filter — assert identical results to the
-   single-batch oracle, and assert (via a Drop-counting iterator) that only one
-   input batch is resident at a time.
+2. **`ScanStream` + `Inputs` + `scan_next`.** ✅ **Done.** `scan.rs` holds
+   `ScanStream`/`Inputs` + the `scan_next(&mut Inputs, table) -> *const FfiArray`
+   extern (null = exhausted). `gen_scan` is now the two-level loop: outer
+   `while true { descs = scan_next(inputs, 0); if ptr_is_null(descs) break;
+   batch = slice_ref_from_raw_parts(descs, ncols); <inner row loop> }`. Output stays
+   baked, so the kernel is `fun1(inputs: &mut Inputs)`. `Inputs::single(rb.clone())`
+   wraps the single batch as a one-element stream. NEW rust-lms prims: `ptr_is_null`,
+   `slice_ref_from_raw_parts`. All existing single-batch tests green; IR-verified
+   two-level loop; `ScanStream` host unit test (refill/drop/null). Kernel-level
+   multi-batch execution is validated in step 3.
+3. **Real streaming.** ✅ **Done.** `exec_jit_stream(sql, table, schema, batches:
+   impl IntoIterator<Item=RecordBatch>)` runs a whole query over a batch stream in
+   one kernel; `run_operator(op, inputs: Inputs)` now takes an owned `Inputs`, and
+   `exec_jit(sql, table, &rb)` is the `Inputs::single(rb.clone())` wrapper. Tests
+   (`tests/streaming.rs`, 7): passthrough / filter / scalar `sum`+`count` / GROUP BY
+   all across 3 batches; a split-vs-whole oracle equality; string output across
+   batches surviving input drop; and `only_one_input_batch_resident_at_a_time` — a
+   `Weak`-based iterator that asserts each batch is dropped before the next is
+   pulled. (A multi-table streaming API — `HashMap<table, stream>` — comes with the
+   table ids in step 4.)
 4. **Table ids / multi-table plumbing.** `Scan { table }`, id assignment in
    lowering, `Inputs` with N streams. No JOIN yet — validate with two independent
    scans if needed.

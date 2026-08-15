@@ -26,6 +26,7 @@ use crate::group::GroupState;
 use crate::output::{OutColHandle, OutputHandle};
 use crate::plan::Operator;
 use crate::runtime::{Runtime, StrPtrExtern};
+use crate::scan::Inputs;
 use crate::value::{ColVal, Nullness, Row, StrVal};
 
 /// Codegen context threaded through the walk: the runtime extern handles plus the
@@ -150,9 +151,15 @@ impl Prim for f64 {
     }
 }
 
-/// A staged expression yielding the read-only input batch (`&[FfiArray]`).
+/// A staged expression yielding a single read-only input batch (`&[FfiArray]`) —
+/// one stream batch, produced inside [`gen_scan`] and consumed by the row reads.
 pub trait BatchSource: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
 impl<T> BatchSource for T where T: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
+
+/// A staged expression yielding the input streams (`&mut Inputs`), threaded through
+/// the operator walk so [`gen_scan`] can pull batches via `scan_next`.
+pub trait InputsSource: Staged<Out = SRefMut<'static, Opaque<Inputs>>> + Copy + 'static {}
+impl<T> InputsSource for T where T: Staged<Out = SRefMut<'static, Opaque<Inputs>>> + Copy + 'static {}
 
 /// Downstream continuation, invoked once per emitted row at code-generation
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
@@ -161,9 +168,9 @@ type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
 /// Emit a kernel that appends `plan`'s emitted rows into the baked output columns
 /// (`cx.out`) and returns the row count. The single entry point — a scalar
 /// `Aggregate` is just a push operator that emits one row (see [`gen_op`]).
-pub fn gen_collect<B: BatchSource>(
+pub fn gen_collect<I: InputsSource>(
     ctx: &mut Ctx,
-    batch: B,
+    inputs: I,
     plan: &Operator,
     out_schema: &SchemaRef,
     cx: &CodegenCtx,
@@ -174,7 +181,7 @@ pub fn gen_collect<B: BatchSource>(
     gen_op(
         plan,
         ctx,
-        batch,
+        inputs,
         cx,
         Box::new(move |ctx, row| {
             for (c, (cv, field)) in row.iter().zip(fields.iter()).enumerate() {
@@ -186,9 +193,9 @@ pub fn gen_collect<B: BatchSource>(
     n
 }
 
-fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCtx, yld: Yld) {
+fn gen_op<I: InputsSource>(op: &Operator, ctx: &mut Ctx, inputs: I, cx: &CodegenCtx, yld: Yld) {
     match op {
-        Operator::Scan { schema } => gen_scan(ctx, batch, schema.clone(), yld),
+        Operator::Scan { schema } => gen_scan(ctx, inputs, schema.clone(), cx, yld),
 
         Operator::Filter { predicate, input } => {
             let predicate = predicate.clone();
@@ -197,7 +204,7 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCt
             gen_op(
                 input,
                 ctx,
-                batch,
+                inputs,
                 cx,
                 Box::new(move |ctx, row| {
                     let keep = gen_predicate(ctx, &predicate, &schema, &row, &cx_c);
@@ -213,7 +220,7 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCt
             gen_op(
                 input,
                 ctx,
-                batch,
+                inputs,
                 cx,
                 Box::new(move |ctx, row| {
                     let projected: Row = exprs
@@ -229,7 +236,7 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCt
         // group downstream — a normal push operator, so the projection/filter
         // above it run in the same kernel.
         Operator::Aggregate { group_exprs, .. } if !group_exprs.is_empty() => {
-            gen_grouped(ctx, batch, op, cx, yld);
+            gen_grouped(ctx, inputs, op, cx, yld);
         }
 
         // Scalar aggregate: fold every input row into accumulators, then emit
@@ -253,7 +260,7 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCt
             gen_op(
                 input,
                 ctx,
-                batch,
+                inputs,
                 cx,
                 Box::new(move |ctx, row| {
                     for agg in &loop_accs {
@@ -276,7 +283,13 @@ fn gen_op<B: BatchSource>(op: &Operator, ctx: &mut Ctx, batch: B, cx: &CodegenCt
 /// group downstream. Keeps the hot fold loop in the JIT and lets the projection /
 /// filter above it run in the same kernel (see [`CodegenCtx::group`]). `avg` divides at
 /// emit; nullability rides in the emitted `ColVal` (so `write_col` handles nulls).
-fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &CodegenCtx, yld: Yld) {
+fn gen_grouped<I: InputsSource>(
+    ctx: &mut Ctx,
+    inputs: I,
+    op: &Operator,
+    cx: &CodegenCtx,
+    yld: Yld,
+) {
     let Operator::Aggregate {
         group_exprs,
         aggs,
@@ -338,7 +351,7 @@ fn gen_grouped<B: BatchSource>(ctx: &mut Ctx, batch: B, op: &Operator, cx: &Code
     gen_op(
         input,
         ctx,
-        batch,
+        inputs,
         cx,
         Box::new(move |ctx, row| {
             let rec_ptr = match &key_source_f {
@@ -1279,19 +1292,46 @@ fn combine_f64(ctx: &mut Ctx, kind: AggKind, cur: Var<f64>, v: Var<f64>) -> Var<
     }
 }
 
-fn gen_scan<B: BatchSource>(ctx: &mut Ctx, batch: B, schema: SchemaRef, yld: Yld) {
-    let len = gen_len(ctx, batch, schema.field(0).data_type());
-    let i = ctx.var(0u64);
+/// Scan a table: the kernel drives a two-level loop — an OUTER loop pulling
+/// batches from the stream (`scan_next`, null = exhausted → break), and an INNER
+/// row loop over each batch. Cross-batch accumulators (scalar aggs, the group
+/// table) live in registers/host state above this, so folding across the whole
+/// stream is free (see `docs/table_scan.md` §6). Single table (id 0) for now;
+/// per-scan table ids are a later milestone.
+fn gen_scan<I: InputsSource>(
+    ctx: &mut Ctx,
+    inputs: I,
+    schema: SchemaRef,
+    cx: &CodegenCtx,
+    yld: Yld,
+) {
+    const TABLE: u64 = 0;
+    let ncols = schema.fields().len() as u64;
+    let key_dt = schema.field(0).data_type().clone();
     let fields = schema.fields().clone();
+    let scan_next = cx.rt.scan_next;
+    let i = ctx.var(0u64);
 
-    ctx.while_loop(lt(i, len), move |ctx| {
-        let row: Row = fields
-            .iter()
-            .enumerate()
-            .map(|(col, f)| gen_read(ctx, batch, col, f, i))
-            .collect();
-        yld(ctx, row);
-        ctx.store(i, add(i, 1u64));
+    ctx.while_loop(Const::<bool>::new(true), move |ctx| {
+        // Pull the next batch; a null descriptor pointer means the stream is done.
+        let descs = ctx.bind(call_extern2(scan_next, inputs, Const::<u64>::new(TABLE)));
+        ctx.if_then(ptr_is_null(descs), |ctx| ctx.break_loop());
+        // Rebuild the borrowed batch (`&[FfiArray]`) from (ptr, column count).
+        let batch = ctx.bind(slice_ref_from_raw_parts::<FfiArray, _, _>(
+            descs,
+            Const::<u64>::new(ncols),
+        ));
+        let len = gen_len(ctx, batch, &key_dt);
+        ctx.store(i, 0u64);
+        ctx.while_loop(lt(i, len), move |ctx| {
+            let row: Row = fields
+                .iter()
+                .enumerate()
+                .map(|(col, f)| gen_read(ctx, batch, col, f, i))
+                .collect();
+            yld(ctx, row);
+            ctx.store(i, add(i, 1u64));
+        });
     });
 }
 

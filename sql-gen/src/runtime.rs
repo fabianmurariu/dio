@@ -17,6 +17,7 @@ use crate::group::{
     GroupRecordsBaseExtern, GroupUpsertCompositeExtern, GroupUpsertExtern, GroupUpsertNullExtern,
     GroupUpsertStrExtern,
 };
+use crate::scan::ScanNextExtern;
 
 /// The byte pointer of a `Utf8View` row: `arr.value(row).as_ptr()`. Valid for the
 /// life of the source array (points into its views/data buffers); the length
@@ -71,6 +72,8 @@ pub struct Runtime {
     pub group_len: ExternRef<GroupLenExtern>,
     /// Grow an output column's `SVec` (cold path of `SVec::push`). See `output.rs`.
     pub svec_grow: ExternRef<SvecGrowExtern>,
+    /// Pull the next input batch of a table (null = exhausted). See `scan.rs`.
+    pub scan_next: ExternRef<ScanNextExtern>,
 }
 
 impl Runtime {
@@ -91,6 +94,7 @@ impl Runtime {
             group_records_base: compiler.extern_fn::<GroupRecordsBaseExtern>(),
             group_len: compiler.extern_fn::<GroupLenExtern>(),
             svec_grow: compiler.extern_fn::<SvecGrowExtern>(),
+            scan_next: compiler.extern_fn::<ScanNextExtern>(),
         }
     }
 }

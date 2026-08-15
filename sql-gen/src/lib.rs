@@ -19,12 +19,13 @@ pub mod output;
 pub mod plan;
 pub mod run;
 pub mod runtime;
+pub mod scan;
 pub mod sql;
 pub mod value;
 
 pub use catalog::Catalog;
 pub use codegen::{BatchSource, gen_collect, group_template};
 pub use plan::Operator;
-pub use run::exec_jit;
+pub use run::{exec_jit, exec_jit_stream};
 pub use sql::sql_to_operator;
 pub use value::{ColVal, Nullness, Row};
