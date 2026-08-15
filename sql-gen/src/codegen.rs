@@ -195,7 +195,9 @@ pub fn gen_collect<I: InputsSource>(
 
 fn gen_op<I: InputsSource>(op: &Operator, ctx: &mut Ctx, inputs: I, cx: &CodegenCtx, yld: Yld) {
     match op {
-        Operator::Scan { schema } => gen_scan(ctx, inputs, schema.clone(), cx, yld),
+        Operator::Scan { table, schema } => {
+            gen_scan(ctx, inputs, *table as u64, schema.clone(), cx, yld)
+        }
 
         Operator::Filter { predicate, input } => {
             let predicate = predicate.clone();
@@ -1296,16 +1298,16 @@ fn combine_f64(ctx: &mut Ctx, kind: AggKind, cur: Var<f64>, v: Var<f64>) -> Var<
 /// batches from the stream (`scan_next`, null = exhausted → break), and an INNER
 /// row loop over each batch. Cross-batch accumulators (scalar aggs, the group
 /// table) live in registers/host state above this, so folding across the whole
-/// stream is free (see `docs/table_scan.md` §6). Single table (id 0) for now;
-/// per-scan table ids are a later milestone.
+/// stream is free (see `docs/table_scan.md` §6). `table` is baked as a stage-0
+/// constant, so the multi-stream dispatch inside `scan_next` costs nothing.
 fn gen_scan<I: InputsSource>(
     ctx: &mut Ctx,
     inputs: I,
+    table: u64,
     schema: SchemaRef,
     cx: &CodegenCtx,
     yld: Yld,
 ) {
-    const TABLE: u64 = 0;
     let ncols = schema.fields().len() as u64;
     let key_dt = schema.field(0).data_type().clone();
     let fields = schema.fields().clone();
@@ -1314,7 +1316,7 @@ fn gen_scan<I: InputsSource>(
 
     ctx.while_loop(Const::<bool>::new(true), move |ctx| {
         // Pull the next batch; a null descriptor pointer means the stream is done.
-        let descs = ctx.bind(call_extern2(scan_next, inputs, Const::<u64>::new(TABLE)));
+        let descs = ctx.bind(call_extern2(scan_next, inputs, Const::<u64>::new(table)));
         ctx.if_then(ptr_is_null(descs), |ctx| ctx.break_loop());
         // Rebuild the borrowed batch (`&[FfiArray]`) from (ptr, column count).
         let batch = ctx.bind(slice_ref_from_raw_parts::<FfiArray, _, _>(

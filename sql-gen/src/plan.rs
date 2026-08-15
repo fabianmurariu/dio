@@ -17,6 +17,9 @@ use datafusion_expr::Expr;
 #[derive(Clone, Debug)]
 pub enum Operator {
     Scan {
+        /// Table id — an index into the kernel's `Inputs.streams`, assigned during
+        /// lowering (registration order). A single-table query is always id 0.
+        table: usize,
         schema: SchemaRef,
     },
     Filter {
@@ -46,7 +49,7 @@ impl Operator {
     /// Schema of the rows this operator *emits*.
     pub fn output_schema(&self) -> SchemaRef {
         match self {
-            Operator::Scan { schema } => schema.clone(),
+            Operator::Scan { schema, .. } => schema.clone(),
             Operator::Filter { input, .. } => input.output_schema(),
             Operator::Project { schema, .. } | Operator::Aggregate { schema, .. } => schema.clone(),
         }

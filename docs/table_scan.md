@@ -410,9 +410,15 @@ Deferred here.
    `Weak`-based iterator that asserts each batch is dropped before the next is
    pulled. (A multi-table streaming API — `HashMap<table, stream>` — comes with the
    table ids in step 4.)
-4. **Table ids / multi-table plumbing.** `Scan { table }`, id assignment in
-   lowering, `Inputs` with N streams. No JOIN yet — validate with two independent
-   scans if needed.
+4. **Table ids / multi-table plumbing.** ✅ **Done.** `Operator::Scan { table:
+   usize, schema }`; `sql.rs` lowering resolves each `TableScan`'s name → id via an
+   ordered registry (`sql_to_operator_multi(sql, &[(name, schema)])`, id = position);
+   `gen_scan` bakes the id as the `scan_next` table constant. `exec_jit_multi(sql,
+   Vec<StreamTable{name,schema,batches}>)` builds one `ScanStream` per table in id
+   order. Tests (`tests/multi_table.rs`, 6): scanning the id-1 table reads *its*
+   stream (not id 0), routing follows registration order (reversed → still correct),
+   filter + GROUP-BY-across-batches over a non-zero id, and an unregistered-table
+   error. No JOIN yet (a query scans one table); this is the routing a JOIN threads.
 5. **`count(*)` whole-batch shortcut** (§6) as the first optimization that pays off
    the in-kernel loop.
 

@@ -41,12 +41,10 @@ impl ScanStream {
 
     /// Advance to the next batch; return a pointer to its descriptor buffer, or
     /// null when the stream is exhausted. Drops the previous batch first.
-    fn next_batch(&mut self) -> *const FfiArray {
+    fn next_batch(&mut self) -> Option<&Vec<FfiArray>> {
         // Release the previous batch (its Arrow buffers are freed here).
         self.current = None;
-        let Some(rb) = self.iter.next() else {
-            return ptr::null();
-        };
+        let rb = self.iter.next()?;
         // Build the descriptors while borrowing `rb`, copy them into the reused
         // buffer (they're `Copy`, holding only pointers into `rb`'s buffers), then
         // release the borrow and keep `rb` alive so those pointers stay valid.
@@ -55,7 +53,7 @@ impl ScanStream {
         self.descs.extend_from_slice(prepared.arrays());
         drop(prepared);
         self.current = Some(rb);
-        self.descs.as_ptr()
+        Some(&self.descs)
     }
 }
 
@@ -82,7 +80,11 @@ impl Inputs {
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn scan_next(inputs: &mut Inputs, table: u64) -> *const FfiArray {
-    inputs.streams[table as usize].next_batch()
+    if let Some(arrs) = inputs.streams[table as usize].next_batch() {
+        arrs.as_ptr()
+    } else {
+        ptr::null()
+    }
 }
 
 #[cfg(test)]
@@ -107,17 +109,19 @@ mod tests {
             vec![batch(vec![1, 2, 3]), batch(vec![4, 5])].into_iter(),
         ));
 
+        // `v` is the descriptor vec (one `FfiArray` per column); the row count is
+        // column 0's element count (`FfiArray::len`), not the vec length.
         let p1 = s.next_batch();
-        assert!(!p1.is_null());
-        assert_eq!(unsafe { &*p1 }.len(), 3); // batch 1: 3 rows
+        assert_eq!(p1.map(|v| v.len()), Some(1)); // 1 column
+        assert_eq!(p1.map(|v| v[0].len()), Some(3)); // batch 1: 3 rows
         assert!(s.current.is_some()); // one batch resident
 
         let p2 = s.next_batch();
-        assert!(!p2.is_null());
-        assert_eq!(unsafe { &*p2 }.len(), 2); // batch 2: 2 rows
+        assert_eq!(p2.map(|v| v.len()), Some(1)); // 1 column
+        assert_eq!(p2.map(|v| v[0].len()), Some(2)); // batch 2: 2 rows
         assert!(s.current.is_some());
 
-        assert!(s.next_batch().is_null()); // exhausted
+        assert!(s.next_batch().is_none()); // exhausted
         assert!(s.current.is_none()); // last batch dropped
     }
 }

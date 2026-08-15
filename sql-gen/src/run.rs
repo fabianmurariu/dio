@@ -20,7 +20,7 @@ use crate::output::OutCols;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
 use crate::scan::{Inputs, ScanStream};
-use crate::sql::sql_to_operator;
+use crate::sql::{sql_to_operator, sql_to_operator_multi};
 
 /// Normalize a plan's output schema for materialization: every string type maps
 /// to `Utf8View`, since the executor always produces `StringViewArray` output
@@ -68,6 +68,47 @@ where
     let op = sql_to_operator(sql, table, schema)?;
     let inputs = Inputs::new(vec![ScanStream::new(Box::new(batches.into_iter()))]);
     run_operator(op, inputs)
+}
+
+/// One named input table for [`exec_jit_multi`]: its schema and its batch stream.
+/// The table's **id** is its position in the `tables` vector passed to
+/// `exec_jit_multi`, so `Scan`s resolve to the matching stream.
+pub struct StreamTable {
+    pub name: String,
+    pub schema: SchemaRef,
+    pub batches: Box<dyn Iterator<Item = RecordBatch>>,
+}
+
+impl StreamTable {
+    /// A table backed by a fixed set of batches.
+    pub fn new(name: impl Into<String>, schema: SchemaRef, batches: Vec<RecordBatch>) -> Self {
+        StreamTable {
+            name: name.into(),
+            schema,
+            batches: Box::new(batches.into_iter()),
+        }
+    }
+}
+
+/// Run `sql` over several named tables, each with its own batch stream. Table ids
+/// are assigned by position in `tables`, and every `Scan` pulls from the matching
+/// stream. A single query still scans one table (joins arrive later); this is the
+/// id-routing plumbing joins will build on.
+pub fn exec_jit_multi(sql: &str, tables: Vec<StreamTable>) -> Result<RecordBatch> {
+    // Build the plan against the table names/schemas (ids = positions), then take
+    // ownership of each stream in the same id order.
+    let op = {
+        let defs: Vec<(&str, SchemaRef)> = tables
+            .iter()
+            .map(|t| (t.name.as_str(), t.schema.clone()))
+            .collect();
+        sql_to_operator_multi(sql, &defs)?
+    };
+    let streams = tables
+        .into_iter()
+        .map(|t| ScanStream::new(t.batches))
+        .collect();
+    run_operator(op, Inputs::new(streams))
 }
 
 /// Compile and run a whole operator tree over `inputs` in ONE kernel. A GROUP BY is

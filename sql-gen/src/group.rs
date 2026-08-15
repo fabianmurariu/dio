@@ -359,12 +359,12 @@ pub extern "C" fn group_key_push_u64(state: &mut GroupState, v: u64) {
 /// Append a string column: an 8-byte length prefix then the content bytes (so
 /// `"ab"+"c"` and `"a"+"bc"` can't collide). A null column pushes length 0 (the null
 /// bitmap tells it apart from an empty string).
+/// # Safety `(ptr, len)` is a valid byte range produced by staged code for this call.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_key_push_bytes(state: &mut GroupState, ptr: *const u8, len: u64) {
+pub unsafe extern "C" fn group_key_push_bytes(state: &mut GroupState, ptr: *const u8, len: u64) {
     state.key_scratch.extend_from_slice(&len.to_le_bytes());
     if len != 0 {
-        // SAFETY: `(ptr, len)` is a valid byte range produced by staged code for this call.
         let content = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
         state.key_scratch.extend_from_slice(content);
     }
