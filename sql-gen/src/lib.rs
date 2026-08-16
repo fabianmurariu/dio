@@ -15,6 +15,7 @@
 pub mod catalog;
 pub mod codegen;
 pub mod group;
+pub mod join;
 pub mod output;
 pub mod plan;
 pub mod run;

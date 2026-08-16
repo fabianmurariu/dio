@@ -162,13 +162,18 @@ join_type: JoinType, schema }`:
 
 ## 7. Phased plan
 
-1. **Inner equi-join, single Int key, bare-scan left build.** Host-side build:
-   clone left RBs into `InMemoryRelation`, index the Int key column into a
-   `GroupTable<u64>` multimap. Probe (right) is a JIT kernel: lookup → per-match
-   `gen_read` of the located left row → emit `[left | right]`. One join per query.
-   Tests vs a Rust oracle: multi-batch probe, multiple matches per key (row
-   multiplication), no-match rows dropped, empty build side → no output, null keys
-   never match.
+1. **Inner equi-join, single Int key, bare-scan left build.** ✅ **Done.**
+   Host-side build (`join.rs`): clone left RBs into `InMemoryRelation` (behind the
+   `BuildRelation` trait), index the Int key column into a `HashMap<u64,
+   Vec<locator>>` multimap (locator = `(batch_idx<<32)|row_idx`). Probe (right) is a
+   JIT kernel (`codegen/join.rs`): per right row compute the u64 key → `join_probe_
+   count`/`join_probe_base` externs → `while i<count` match loop → `join_left_batch`
+   descriptors + `gen_read` the located left row → emit `[left | right]`. One join
+   per query; `JoinState` baked in `CodegenCtx.join`. Lowering extracts the equijoin
+   pair from `join.filter` (raw `SqlToRel` leaves `on` empty). Null keys never
+   indexed / probe skipped on a null key. Tests (`tests/joins.rs`, 7): multiplicity,
+   no-match/empty-build → empty, negative keys, multi-batch build+probe, null keys
+   never match, join-then-filter.
 2. **All key types + composite keys.** Reuse GROUP BY wholesale — `Float64`
    (canonicalize → bitcast → u64), `Utf8View` (`StrKey`, content hash/eq, bytes in a
    pool), and multi-column `ON` (packed byte key). Still inner, still bare-scan

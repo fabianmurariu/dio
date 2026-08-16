@@ -12,10 +12,14 @@ use rust_lms::opaque::Opaque;
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
+use datafusion_expr::Expr;
+
 use crate::codegen::{
-    CodegenCtx, GroupHandle, agg_output_types, collect_str_literals, gen_collect, group_template,
+    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_collect,
+    group_template,
 };
 use crate::group::{GroupState, KeyKind};
+use crate::join::JoinState;
 use crate::output::OutCols;
 use crate::plan::Operator;
 use crate::runtime::Runtime;
@@ -173,6 +177,40 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         })
     });
 
+    // Build the hash join's left side host-side (Phase 1: a bare `Scan` — clone its
+    // input batches, index the Int key column) and drain that stream so the kernel
+    // only probes the right. Must outlive `as_fn` — kept in `join_state` below.
+    let mut join_state = match find_join(&op) {
+        Some(Operator::Join { left, on, .. }) => {
+            let Operator::Scan {
+                table: left_table,
+                schema: left_schema,
+            } = left.as_ref()
+            else {
+                return Err(DataFusionError::NotImplemented(
+                    "join build (left) side must be a bare Scan for now".into(),
+                ));
+            };
+            let key_col = left_key_col(&on[0].0, left_schema)?;
+            match left_schema.field(key_col).data_type() {
+                DataType::Int32 | DataType::Int64 => {}
+                other => {
+                    return Err(DataFusionError::NotImplemented(format!(
+                        "join key type {other} (only Int for now)"
+                    )));
+                }
+            }
+            let left_batches = inputs.drain_table(*left_table);
+            Some(JoinState::build_int(left_batches, key_col))
+        }
+        _ => None,
+    };
+    let join = join_state.as_mut().map(|js| {
+        Rc::new(JoinHandle {
+            state: js as *mut JoinState,
+        })
+    });
+
     // Bake the growable output columns' stable pointers into the codegen context
     // (like the GROUP BY state). The kernel appends rows through them; `out` must
     // outlive the run (its control blocks / builders are referenced by the kernel).
@@ -181,6 +219,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         lits: Rc::new(lits),
         group,
         out: Rc::new(out.handle()),
+        join,
     };
 
     let f = compiler.fun1("query", move |ctx, inputs: Var<SRefMut<Opaque<Inputs>>>| {
@@ -194,6 +233,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
     // the run (the kernel holds pointers into them).
     drop(pool);
     drop(group_state);
+    drop(join_state);
     drop(inputs);
     Ok(result)
 }
@@ -251,7 +291,32 @@ fn find_grouped(op: &Operator) -> Option<&Operator> {
         Operator::Aggregate { input, .. }
         | Operator::Filter { input, .. }
         | Operator::Project { input, .. } => find_grouped(input),
+        // No GROUP BY inside a join subtree yet (Phase 1 joins have none).
+        Operator::Scan { .. } | Operator::Join { .. } => None,
+    }
+}
+
+/// Find the (single) `Join` node on the plan's spine, if any.
+fn find_join(op: &Operator) -> Option<&Operator> {
+    match op {
+        Operator::Join { .. } => Some(op),
+        Operator::Filter { input, .. }
+        | Operator::Project { input, .. }
+        | Operator::Aggregate { input, .. } => find_join(input),
         Operator::Scan { .. } => None,
+    }
+}
+
+/// Resolve a join key expression to a column index in the build side's schema.
+/// Phase 1: the key must be a plain column (the host build reads it directly).
+fn left_key_col(expr: &Expr, schema: &SchemaRef) -> Result<usize> {
+    match expr {
+        Expr::Column(c) => schema
+            .index_of(&c.name)
+            .map_err(|_| DataFusionError::Plan(format!("join key column not found: {}", c.name))),
+        other => Err(DataFusionError::NotImplemented(format!(
+            "join key must be a column (got {other:?})"
+        ))),
     }
 }
 

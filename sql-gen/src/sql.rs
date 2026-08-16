@@ -80,6 +80,44 @@ fn lower(plan: &LogicalPlan, ids: &HashMap<String, usize>) -> Result<Operator> {
             schema: Arc::new(aggregate.schema.as_arrow().clone()),
             input: Box::new(lower(aggregate.input.as_ref(), ids)?),
         }),
+        LogicalPlan::Join(join) => {
+            // Phase 1: inner equi-join, exactly one key pair.
+            if join.join_type != datafusion_expr::JoinType::Inner {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "join type {:?} (only INNER for now)",
+                    join.join_type
+                )));
+            }
+            // Raw `SqlToRel` (no optimizer) leaves `on` empty and puts the equijoin
+            // in `filter`; the `ExtractEquijoinPredicate` rule normally moves it. We
+            // do that extraction ourselves: accept `on` if populated, else pull the
+            // single `left.col = right.col` pair out of `filter`.
+            let on = if !join.on.is_empty() {
+                if join.on.len() != 1 || join.filter.is_some() {
+                    return Err(DataFusionError::NotImplemented(
+                        "join with composite keys or a residual filter".into(),
+                    ));
+                }
+                join.on.clone()
+            } else if let Some(filter) = &join.filter {
+                vec![extract_equijoin(
+                    filter,
+                    join.left.as_ref(),
+                    join.right.as_ref(),
+                )?]
+            } else {
+                return Err(DataFusionError::NotImplemented(
+                    "cross join (no join condition)".into(),
+                ));
+            };
+            Ok(Operator::Join {
+                left: Box::new(lower(join.left.as_ref(), ids)?),
+                right: Box::new(lower(join.right.as_ref(), ids)?),
+                on,
+                join_type: join.join_type,
+                schema: Arc::new(join.schema.as_arrow().clone()),
+            })
+        }
         other => Err(DataFusionError::NotImplemented(format!(
             "unsupported logical operator: {}",
             other.display()
@@ -92,4 +130,30 @@ fn unwrap_alias(expr: &Expr) -> &Expr {
         Expr::Alias(alias) => &alias.expr,
         other => other,
     }
+}
+
+/// Pull a single `left.col = right.col` equijoin pair out of a join `filter`,
+/// ordered `(left-side expr, right-side expr)` using the input schemas to decide
+/// which column belongs to which side.
+fn extract_equijoin(
+    filter: &Expr,
+    left: &LogicalPlan,
+    right: &LogicalPlan,
+) -> Result<(Expr, Expr)> {
+    if let Expr::BinaryExpr(be) = filter
+        && be.op == datafusion_expr::Operator::Eq
+        && let (Expr::Column(lc), Expr::Column(rc)) = (be.left.as_ref(), be.right.as_ref())
+    {
+        // `lc = rc`: assign each column to its side by which input schema holds it.
+        if left.schema().index_of_column(lc).is_ok() && right.schema().index_of_column(rc).is_ok() {
+            return Ok(((*be.left).clone(), (*be.right).clone()));
+        } else if left.schema().index_of_column(rc).is_ok()
+            && right.schema().index_of_column(lc).is_ok()
+        {
+            return Ok(((*be.right).clone(), (*be.left).clone()));
+        }
+    }
+    Err(DataFusionError::NotImplemented(
+        "join condition must be a single `left.col = right.col` equijoin".into(),
+    ))
 }

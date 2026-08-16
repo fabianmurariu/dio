@@ -73,6 +73,13 @@ impl Inputs {
     pub fn single(rb: RecordBatch) -> Self {
         Inputs::new(vec![ScanStream::new(Box::new(std::iter::once(rb)))])
     }
+
+    /// Take table `table`'s remaining batch iterator, leaving an empty stream in its
+    /// slot (so other tables keep their ids). Used to drain a hash join's build side
+    /// host-side before the probe kernel runs. Valid only on an un-probed stream.
+    pub fn drain_table(&mut self, table: usize) -> Box<dyn Iterator<Item = RecordBatch>> {
+        std::mem::replace(&mut self.streams[table].iter, Box::new(std::iter::empty()))
+    }
 }
 
 /// Pull the next batch of table `table`, returning its descriptor pointer (null =

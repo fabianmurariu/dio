@@ -6,7 +6,7 @@
 //! datafusion `LogicalPlan` is lowered into this tree by [`crate::sql`].
 
 use arrow::datatypes::SchemaRef;
-use datafusion_expr::Expr;
+use datafusion_expr::{Expr, JoinType};
 
 /// Push-model relational operators (a starter subset).
 ///
@@ -43,6 +43,17 @@ pub enum Operator {
         schema: SchemaRef,
         input: Box<Operator>,
     },
+    /// Equi-join. The **left** input is the materialized *build* side; the **right**
+    /// streams as the *probe* side. `on` is the equijoin key pairs `(left, right)`
+    /// (Phase 1: exactly one). Output columns are `[left fields | right fields]`.
+    Join {
+        left: Box<Operator>,
+        right: Box<Operator>,
+        on: Vec<(Expr, Expr)>,
+        join_type: JoinType,
+        /// Output schema (`[left | right]`), from datafusion's `Join`.
+        schema: SchemaRef,
+    },
 }
 
 impl Operator {
@@ -51,7 +62,9 @@ impl Operator {
         match self {
             Operator::Scan { schema, .. } => schema.clone(),
             Operator::Filter { input, .. } => input.output_schema(),
-            Operator::Project { schema, .. } | Operator::Aggregate { schema, .. } => schema.clone(),
+            Operator::Project { schema, .. }
+            | Operator::Aggregate { schema, .. }
+            | Operator::Join { schema, .. } => schema.clone(),
         }
     }
 }

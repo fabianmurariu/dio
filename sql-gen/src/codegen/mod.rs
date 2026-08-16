@@ -12,6 +12,7 @@
 mod aggregate;
 mod expr;
 mod grouping;
+mod join;
 mod numeric;
 mod strings;
 
@@ -30,6 +31,7 @@ use rust_lms::prelude::*;
 use rust_lms_std::SVec;
 
 use crate::group::GroupState;
+use crate::join::JoinState;
 use crate::output::{OutColHandle, OutputHandle};
 use crate::plan::Operator;
 use crate::runtime::Runtime;
@@ -39,6 +41,7 @@ use crate::value::{ColVal, Nullness, Row, StrVal};
 use aggregate::{Agg, CountFast, count_fast};
 use expr::{gen_expr, gen_predicate};
 use grouping::gen_grouped;
+use join::gen_join;
 use numeric::{coerce_f64, coerce_i32, tag, to_i64};
 use strings::resolve;
 
@@ -56,6 +59,9 @@ pub struct CodegenCtx {
     /// Baked pointers to the growable output columns (see `output::OutCols`). The
     /// kernel appends each emitted row into these via `SVec::push` / a string builder.
     pub out: Rc<OutputHandle>,
+    /// Baked pointer to the hash-join build state, when the plan has a join. Single
+    /// join for now; a `Vec` indexed by plan order generalizes to multiple joins.
+    pub join: Option<Rc<JoinHandle>>,
 }
 
 /// Typed host pointers into a GROUP BY's Rust-hosted state (see `group::GroupState`),
@@ -66,6 +72,13 @@ pub struct GroupHandle {
     /// handed to the `group_upsert`/`group_len`/`group_records_base` externs. One
     /// baked pointer: growth happens inside the externs, so nothing here dangles.
     pub state: *mut GroupState,
+}
+
+/// Baked pointer to the hash-join's host-side [`JoinState`] (build relation + index),
+/// handed to the `join_probe_*` / `join_left_batch` externs. Built before compile,
+/// outlives the run.
+pub struct JoinHandle {
+    pub state: *mut JoinState,
 }
 
 /// Collect the string-literal values in `op`'s expressions, so `exec_jit` can
@@ -100,6 +113,10 @@ pub fn collect_str_literals<'a>(op: &'a Operator, out: &mut Vec<&'a str>) {
         Operator::Aggregate { aggs, input, .. } => {
             aggs.iter().for_each(|e| expr_lits(e, out));
             collect_str_literals(input, out);
+        }
+        Operator::Join { left, right, .. } => {
+            collect_str_literals(left, out);
+            collect_str_literals(right, out);
         }
     }
 }
@@ -331,6 +348,10 @@ pub(crate) fn gen_op<I: InputsSource>(
             }
             yld(ctx, result);
         }
+
+        // Hash join: the left (build) side was materialized + indexed host-side
+        // before compile; here we codegen the streaming probe over the right side.
+        Operator::Join { .. } => gen_join(ctx, inputs, op, cx, yld),
     }
 }
 
@@ -408,7 +429,7 @@ fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
 }
 
 /// Read column `col` at row `i`, attaching validity iff the field is nullable.
-fn gen_read<B: BatchSource>(
+pub(crate) fn gen_read<B: BatchSource>(
     ctx: &mut Ctx,
     batch: B,
     col: usize,
