@@ -249,6 +249,41 @@ fn gen_op<I: InputsSource>(op: &Operator, ctx: &mut Ctx, inputs: I, cx: &Codegen
             schema,
             ..
         } => {
+            // Whole-batch fast path: a lone `count(*)` / `count(col)` directly over
+            // a `Scan` (no filter) needs no per-row loop — the answer is the sum of
+            // per-batch counts. `count(*)` adds the row count; `count(col)` adds the
+            // non-null count (`len - null_count`, folding both nullable and
+            // non-nullable columns since `null_count` is 0 for the latter).
+            if aggs.len() == 1
+                && let Operator::Scan {
+                    table,
+                    schema: scan_schema,
+                } = input.as_ref()
+                && let Some(cf) = count_fast(&aggs[0], scan_schema)
+            {
+                let count = ctx.var(0i64);
+                for_each_batch(
+                    ctx,
+                    inputs,
+                    *table as u64,
+                    scan_schema.clone(),
+                    cx,
+                    move |ctx, batch, len| {
+                        let inc = match cf {
+                            CountFast::Star => len,
+                            CountFast::Col(col) => {
+                                let nulls =
+                                    ctx.bind(batch.primitive::<u64>(col).validity().null_count());
+                                ctx.bind(sub(len, nulls))
+                            }
+                        };
+                        ctx.store(count, add(count, int_cast::<i64, u64, _>(inc)));
+                    },
+                );
+                yld(ctx, vec![ColVal::I64(count, Nullness::NonNull)]);
+                return;
+            }
+
             let fields = schema.fields().clone();
             let accs: Vec<Agg> = aggs
                 .iter()
@@ -1294,25 +1329,27 @@ fn combine_f64(ctx: &mut Ctx, kind: AggKind, cur: Var<f64>, v: Var<f64>) -> Var<
     }
 }
 
-/// Scan a table: the kernel drives a two-level loop — an OUTER loop pulling
-/// batches from the stream (`scan_next`, null = exhausted → break), and an INNER
-/// row loop over each batch. Cross-batch accumulators (scalar aggs, the group
-/// table) live in registers/host state above this, so folding across the whole
-/// stream is free (see `docs/table_scan.md` §6). `table` is baked as a stage-0
-/// constant, so the multi-stream dispatch inside `scan_next` costs nothing.
-fn gen_scan<I: InputsSource>(
+/// The staged batch a [`for_each_batch`] body receives: `&[FfiArray]` rebuilt from
+/// the stream's current descriptor pointer (a `BatchSource`).
+type ScanBatch = Var<SRef<'static, Slice<FfiArray>>>;
+
+/// Drive the OUTER batch loop of table `table`: pull batches from the stream
+/// (`scan_next`, null = exhausted → break), rebuild each `&[FfiArray]` batch, and
+/// hand `body` the batch plus its row count. The single place that knows the
+/// batch-pull shape; both the row scan and the `count(*)` shortcut build on it.
+/// `table` is baked as a stage-0 constant, so `scan_next`'s multi-stream dispatch
+/// costs nothing.
+fn for_each_batch<I: InputsSource>(
     ctx: &mut Ctx,
     inputs: I,
     table: u64,
     schema: SchemaRef,
     cx: &CodegenCtx,
-    yld: Yld,
+    body: impl FnOnce(&mut Ctx, ScanBatch, Var<u64>) + 'static,
 ) {
     let ncols = schema.fields().len() as u64;
     let key_dt = schema.field(0).data_type().clone();
-    let fields = schema.fields().clone();
     let scan_next = cx.rt.scan_next;
-    let i = ctx.var(0u64);
 
     ctx.while_loop(Const::<bool>::new(true), move |ctx| {
         // Pull the next batch; a null descriptor pointer means the stream is done.
@@ -1324,6 +1361,25 @@ fn gen_scan<I: InputsSource>(
             Const::<u64>::new(ncols),
         ));
         let len = gen_len(ctx, batch, &key_dt);
+        body(ctx, batch, len);
+    });
+}
+
+/// Scan a table row by row: the outer batch loop ([`for_each_batch`]) wrapping an
+/// inner row loop that reads every column and `yld`s each row. Cross-batch
+/// accumulators live in registers/host state above this, so folding across the
+/// whole stream is free (see `docs/table_scan.md` §6).
+fn gen_scan<I: InputsSource>(
+    ctx: &mut Ctx,
+    inputs: I,
+    table: u64,
+    schema: SchemaRef,
+    cx: &CodegenCtx,
+    yld: Yld,
+) {
+    let fields = schema.fields().clone();
+    let i = ctx.var(0u64);
+    for_each_batch(ctx, inputs, table, schema, cx, move |ctx, batch, len| {
         ctx.store(i, 0u64);
         ctx.while_loop(lt(i, len), move |ctx| {
             let row: Row = fields
@@ -1890,6 +1946,37 @@ enum AggKind {
     Min,
     Max,
     Avg,
+}
+
+/// A `count` aggregate that qualifies for the whole-batch shortcut (see [`gen_op`]).
+#[derive(Clone, Copy)]
+enum CountFast {
+    /// `count(*)` — counts rows: `+= batch_len`.
+    Star,
+    /// `count(col)` — counts non-nulls of column `col`: `+= batch_len - null_count`.
+    Col(usize),
+}
+
+/// Classify `expr` as a whole-batch-countable `count`, resolving a `count(col)`
+/// argument to its column index in `scan_schema`. Returns `None` for anything that
+/// needs per-row work: non-`count` aggregates, `DISTINCT`, a `FILTER (WHERE …)`, or
+/// a computed argument like `count(a + b)`.
+#[allow(deprecated)] // `Expr::Wildcard` is deprecated but still how `*` arrives.
+fn count_fast(expr: &Expr, scan_schema: &SchemaRef) -> Option<CountFast> {
+    let Expr::AggregateFunction(af) = expr else {
+        return None;
+    };
+    if !af.func.name().eq_ignore_ascii_case("count") {
+        return None;
+    }
+    if af.params.distinct || af.params.filter.is_some() || af.params.args.len() != 1 {
+        return None;
+    }
+    match &af.params.args[0] {
+        Expr::Wildcard { .. } => Some(CountFast::Star),
+        Expr::Column(c) => scan_schema.index_of(&c.name).ok().map(CountFast::Col),
+        _ => None,
+    }
 }
 
 #[derive(Clone, Copy)]

@@ -82,6 +82,25 @@ fn filter_across_batches() {
 }
 
 #[test]
+fn count_col_across_batches_sums_nonnull_counts() {
+    // `count(col)` over a stream = sum of per-batch non-null counts (the whole-batch
+    // shortcut adds `batch_len - null_count` per batch). A nullable column split
+    // across batches with different null patterns.
+    let schema = Arc::new(Schema::new(vec![Field::new("v", DataType::Int64, true)]));
+    let nullable = |vals: Vec<Option<i64>>| {
+        RecordBatch::try_new(schema.clone(), vec![Arc::new(Int64Array::from(vals))]).unwrap()
+    };
+    let batches = vec![
+        nullable(vec![Some(1), None, Some(3)]), // 2 non-null
+        nullable(vec![None, None]),             // 0 non-null
+        nullable(vec![Some(9)]),                // 1 non-null
+    ];
+    let out = exec_jit_stream("SELECT count(v) FROM t", "t", schema, batches).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(i64s(&out, 0).value(0), 3); // 2 + 0 + 1
+}
+
+#[test]
 fn scalar_sum_and_count_across_batches() {
     let batches = vec![
         kv_batch(vec![1, 1], vec![10, 20]),
@@ -99,6 +118,30 @@ fn scalar_sum_and_count_across_batches() {
     assert_eq!(out.num_rows(), 1);
     assert_eq!(i64s(&out, 0).value(0), 150); // sum
     assert_eq!(i64s(&out, 1).value(0), 5); // count(*)
+}
+
+#[test]
+fn count_star_across_batches_uses_shortcut() {
+    // `SELECT count(*)` directly over the scan collapses to `count += batch_len`
+    // per batch (no per-row loop); across batches it sums the batch row counts.
+    let batches = vec![
+        kv_batch(vec![1, 2, 3], vec![0, 0, 0]),
+        kv_batch(vec![4, 5], vec![0, 0]),
+        kv_batch(vec![6], vec![0]),
+    ];
+    let out = exec_jit_stream("SELECT count(*) FROM t", "t", schema_kv(), batches).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(i64s(&out, 0).value(0), 6);
+}
+
+#[test]
+fn count_star_empty_stream_is_zero() {
+    // No batches at all: the outer loop breaks immediately, count stays 0, and a
+    // scalar aggregate still emits its one row.
+    let batches: Vec<RecordBatch> = vec![];
+    let out = exec_jit_stream("SELECT count(*) FROM t", "t", schema_kv(), batches).unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(i64s(&out, 0).value(0), 0);
 }
 
 #[test]

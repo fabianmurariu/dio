@@ -419,7 +419,16 @@ Deferred here.
    stream (not id 0), routing follows registration order (reversed → still correct),
    filter + GROUP-BY-across-batches over a non-zero id, and an unregistered-table
    error. No JOIN yet (a query scans one table); this is the routing a JOIN threads.
-5. **`count(*)` whole-batch shortcut** (§6) as the first optimization that pays off
-   the in-kernel loop.
+5. **`count(*)` / `count(col)` whole-batch shortcut** (§6). ✅ **Done.** When a
+   scalar `Aggregate` is a lone `count(*)` or `count(col)` directly over a `Scan`
+   (no filter between), `gen_op` drives only the outer batch loop — `count(*)` adds
+   `batch_len`, `count(col)` adds `batch_len − null_count` (read type-agnostically
+   from the column's validity) — no per-row loop. Shared via `for_each_batch` (the
+   batch-loop core extracted from `gen_scan`); gated by `count_fast` (rejects
+   `DISTINCT`, `FILTER (WHERE …)`, and computed args, so those keep the row path).
+   IR-verified: no inner `icmp ult` for `count(*)`/`count(col)`, present for the
+   filtered variant. Tests: `count_star_across_batches_uses_shortcut`,
+   `count_star_empty_stream_is_zero`, `count_col_across_batches_sums_nonnull_counts`,
+   plus `count_nonnull_col_is_row_count` / `count_all_null_col_is_zero`.
 
 Then the JOIN milestone (§7) sits on top: retain hook + host build table + probe.

@@ -126,6 +126,42 @@ fn count_col_skips_nulls() {
 }
 
 #[test]
+fn count_nonnull_col_is_row_count() {
+    // A non-nullable column: `count(b)` (null_count 0) equals `count(*)`.
+    let rb = batch(
+        Int32Array::from(vec![1, 2, 3, 4, 5]),
+        Int64Array::from(vec![0, 0, 0, 0, 0]),
+    );
+    let out = run("SELECT count(b) FROM t", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 5);
+}
+
+#[test]
+fn count_all_null_col_is_zero() {
+    let a = Int32Array::new(
+        vec![0, 0, 0].into(),
+        Some(NullBuffer::from(vec![false, false, false])),
+    );
+    let rb = batch(a, Int64Array::from(vec![0, 0, 0]));
+    let out = run("SELECT count(a) FROM t", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 0);
+}
+
+#[test]
+fn count_col_with_filter_still_correct() {
+    // A `WHERE` between the aggregate and the scan forces the per-row path (the
+    // batch-level null_count no longer applies); result must still be right.
+    let a = Int32Array::new(
+        vec![10, 0, 30, 40, 0].into(),
+        Some(NullBuffer::from(vec![true, false, true, true, false])),
+    );
+    let rb = batch(a, Int64Array::from(vec![1, 2, 3, 4, 5]));
+    // rows with b > 2: b in {3,4,5} → a = {30(non-null), 40(non-null), null} → 2.
+    let out = run("SELECT count(a) FROM t WHERE b > 2", &rb);
+    assert_eq!(i64s(&out, 0).value(0), 2);
+}
+
+#[test]
 fn min_max_sum() {
     let rb = batch(
         Int32Array::from(vec![3, 1, 4, 1, 5]),
