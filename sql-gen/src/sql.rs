@@ -54,6 +54,8 @@ fn lower(plan: &LogicalPlan, ids: &HashMap<String, usize>) -> Result<Operator> {
                 schema: scan.source.schema(),
             })
         }
+        // A derived table `(SELECT …) alias` — a transparent rename; lower its input.
+        LogicalPlan::SubqueryAlias(sa) => lower(sa.input.as_ref(), ids),
         LogicalPlan::Filter(filter) => Ok(Operator::Filter {
             predicate: filter.predicate.clone(),
             input: Box::new(lower(filter.input.as_ref(), ids)?),

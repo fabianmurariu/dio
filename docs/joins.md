@@ -178,9 +178,14 @@ join_type: JoinType, schema }`:
    (canonicalize → bitcast → u64), `Utf8View` (`StrKey`, content hash/eq, bytes in a
    pool), and multi-column `ON` (packed byte key). Still inner, still bare-scan
    build.
-3. **General build subtree + build kernel.** Materialize a `Filter`/`Project` (etc.)
-   left subtree into fresh RBs via a compiled build step (or in-kernel build-loop),
-   filling the same `BuildRelation`. Lets the build side have a `WHERE`.
+3. **General build subtree (materialized build).** ✅ **Done.** `run_operator` was
+   split into `run_kernel` (compile+run+materialize one kernel over `&mut Inputs`) +
+   a join orchestrator: a bare-`Scan` left still clones its input RBs (cheap), but a
+   `Filter`/`Project`/derived-table left is *run* via `run_kernel(left, …)` and its
+   output materialized into one RB, which `JoinState::build_int` indexes. Both feed
+   the same `BuildRelation`. `SubqueryAlias` lowers transparently (derived tables).
+   Tests: `build_side_filter_is_materialized`, `_multi_batch`, `_empty_result`.
+   (Still Int key / inner — keys are Phase 2.)
 4. **Outer / semi / anti joins.** `LEFT`/`RIGHT`/`FULL` (a `matched` bit per build
    row, swept after the probe to emit unmatched build rows with NULL-padded probe
    columns; NULL-pad the other way for unmatched probe rows), `SEMI`/`ANTI`.

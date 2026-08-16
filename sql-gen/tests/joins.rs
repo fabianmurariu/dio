@@ -200,3 +200,68 @@ fn inner_join_then_filter() {
     .unwrap();
     assert_eq!(rows(&out), vec![vec![2, 200], vec![3, 300]]);
 }
+
+#[test]
+fn build_side_filter_is_materialized() {
+    // The BUILD (left) side has a WHERE, so it can't be a bare-scan clone — the
+    // build subtree runs and materializes its surviving rows, then indexes those.
+    // Only a.av > 15 rows are in the build relation, so ak=1 (av 10) drops out.
+    let sa = schema(&["ak", "av"]);
+    let sb = schema(&["bk", "bv"]);
+    let a_rb = batch(&sa, vec![vec![1, 2, 1, 3], vec![10, 20, 30, 40]]);
+    let b_rb = batch(&sb, vec![vec![1, 2, 3], vec![100, 200, 300]]);
+    let out = exec_jit_multi(
+        // `a WHERE av > 15` materializes to rows (2,20),(1,30),(3,40).
+        "SELECT ak, av, bv FROM (SELECT ak, av FROM a WHERE av > 15) a JOIN b ON a.ak = b.bk",
+        vec![
+            StreamTable::new("a", sa, vec![a_rb]),
+            StreamTable::new("b", sb, vec![b_rb]),
+        ],
+    )
+    .unwrap();
+    // ak=1 with av=10 was filtered out of the build; av=30 (ak=1) survives → joins bk=1.
+    assert_eq!(
+        rows(&out),
+        vec![vec![1, 30, 100], vec![2, 20, 200], vec![3, 40, 300]]
+    );
+}
+
+#[test]
+fn build_side_filter_multi_batch() {
+    // Filtered build across multiple batches → materialized into one relation.
+    let sa = schema(&["ak", "av"]);
+    let sb = schema(&["bk", "bv"]);
+    let a = vec![
+        batch(&sa, vec![vec![1, 2], vec![5, 25]]), // keep 2 (av 25)
+        batch(&sa, vec![vec![1, 3], vec![35, 8]]), // keep 1 (av 35)
+    ];
+    let b_rb = batch(&sb, vec![vec![1, 2, 3], vec![100, 200, 300]]);
+    let out = exec_jit_multi(
+        "SELECT ak, av, bv FROM (SELECT ak, av FROM a WHERE av > 10) a JOIN b ON a.ak = b.bk",
+        vec![
+            StreamTable::new("a", sa, a),
+            StreamTable::new("b", sb, vec![b_rb]),
+        ],
+    )
+    .unwrap();
+    // Build survivors: (2,25),(1,35). Join: (1,35)⋈bk=1, (2,25)⋈bk=2.
+    assert_eq!(rows(&out), vec![vec![1, 35, 100], vec![2, 25, 200]]);
+}
+
+#[test]
+fn build_side_filter_empty_result() {
+    // Build filter removes everything → no matches.
+    let sa = schema(&["ak", "av"]);
+    let sb = schema(&["bk", "bv"]);
+    let a_rb = batch(&sa, vec![vec![1, 2], vec![1, 2]]);
+    let b_rb = batch(&sb, vec![vec![1, 2], vec![100, 200]]);
+    let out = exec_jit_multi(
+        "SELECT ak, bv FROM (SELECT ak, av FROM a WHERE av > 100) a JOIN b ON a.ak = b.bk",
+        vec![
+            StreamTable::new("a", sa, vec![a_rb]),
+            StreamTable::new("b", sb, vec![b_rb]),
+        ],
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 0);
+}

@@ -1,0 +1,3 @@
+[submodule "sql-gen/optd"]
+	path = sql-gen/optd
+	url = git@github.com:cmu-db/optd.git

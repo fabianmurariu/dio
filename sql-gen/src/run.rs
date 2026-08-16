@@ -120,6 +120,53 @@ pub fn exec_jit_multi(sql: &str, tables: Vec<StreamTable>) -> Result<RecordBatch
 /// front (it outlives the run) and bake the pointers into the codegen context; the
 /// projection/filter above it run in the same kernel.
 fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
+    // Hash join: materialize + index the LEFT (build) side first, then run the probe
+    // kernel over the RIGHT with the built `JoinState` baked in.
+    if let Some(Operator::Join { left, on, .. }) = find_join(&op) {
+        let left_schema = left.output_schema();
+        let key_col = left_key_col(&on[0].0, &left_schema)?;
+        match left_schema.field(key_col).data_type() {
+            DataType::Int32 | DataType::Int64 => {}
+            other => {
+                return Err(DataFusionError::NotImplemented(format!(
+                    "join key type {other} (only Int for now)"
+                )));
+            }
+        }
+        // Bare `Scan` build → clone its input batches (cheap). Otherwise (Filter /
+        // Project …) *run* the build subtree and materialize its output into one
+        // batch, then index that.
+        let mut join_state = match left.as_ref() {
+            Operator::Scan { table, .. } => {
+                let batches = inputs.drain_table(*table);
+                JoinState::build_int(batches, key_col)
+            }
+            build_subtree => {
+                let build_rb = run_kernel(build_subtree, &mut inputs, None)?;
+                JoinState::build_int(Box::new(std::iter::once(build_rb)), key_col)
+            }
+        };
+        // The baked pointer aliases `join_state`, which is not touched again until
+        // after the probe kernel runs — the same contract as `GroupState`.
+        let handle = Rc::new(JoinHandle {
+            state: &mut join_state as *mut JoinState,
+        });
+        let result = run_kernel(&op, &mut inputs, Some(handle));
+        drop(join_state);
+        return result;
+    }
+    run_kernel(&op, &mut inputs, None)
+}
+
+/// Compile and run ONE kernel over `inputs`: allocate the output columns and any
+/// GROUP BY state, bake them (plus an optional pre-built join handle) into the
+/// codegen context, and materialize the result into a `RecordBatch`. Reused both
+/// for a whole query and for materializing a join's build subtree.
+fn run_kernel(
+    op: &Operator,
+    inputs: &mut Inputs,
+    join: Option<Rc<JoinHandle>>,
+) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
 
     // Reject GROUP BY key types we don't support yet. A single key may be
@@ -130,7 +177,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         schema,
         group_exprs,
         ..
-    }) = find_grouped(&op)
+    }) = find_grouped(op)
     {
         check_group_key(schema, group_exprs.len())?;
     }
@@ -145,7 +192,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
     // after `as_fn` (the baked pointers reference its bytes).
     let mut pool = BytesPool::new();
     let mut lit_strs = Vec::new();
-    collect_str_literals(&op, &mut lit_strs);
+    collect_str_literals(op, &mut lit_strs);
     let mut lits: HashMap<String, *const u8> = HashMap::new();
     for s in lit_strs {
         if !lits.contains_key(s) {
@@ -155,7 +202,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
 
     // Allocate the GROUP BY state (sized to the row count, groups ≤ rows) and bake
     // its pointers. Must outlive `as_fn` — kept in `group_state` below.
-    let mut group_state = match find_grouped(&op) {
+    let mut group_state = match find_grouped(op) {
         Some(Operator::Aggregate {
             aggs,
             group_exprs,
@@ -177,40 +224,6 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         })
     });
 
-    // Build the hash join's left side host-side (Phase 1: a bare `Scan` — clone its
-    // input batches, index the Int key column) and drain that stream so the kernel
-    // only probes the right. Must outlive `as_fn` — kept in `join_state` below.
-    let mut join_state = match find_join(&op) {
-        Some(Operator::Join { left, on, .. }) => {
-            let Operator::Scan {
-                table: left_table,
-                schema: left_schema,
-            } = left.as_ref()
-            else {
-                return Err(DataFusionError::NotImplemented(
-                    "join build (left) side must be a bare Scan for now".into(),
-                ));
-            };
-            let key_col = left_key_col(&on[0].0, left_schema)?;
-            match left_schema.field(key_col).data_type() {
-                DataType::Int32 | DataType::Int64 => {}
-                other => {
-                    return Err(DataFusionError::NotImplemented(format!(
-                        "join key type {other} (only Int for now)"
-                    )));
-                }
-            }
-            let left_batches = inputs.drain_table(*left_table);
-            Some(JoinState::build_int(left_batches, key_col))
-        }
-        _ => None,
-    };
-    let join = join_state.as_mut().map(|js| {
-        Rc::new(JoinHandle {
-            state: js as *mut JoinState,
-        })
-    });
-
     // Bake the growable output columns' stable pointers into the codegen context
     // (like the GROUP BY state). The kernel appends rows through them; `out` must
     // outlive the run (its control blocks / builders are referenced by the kernel).
@@ -222,19 +235,17 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         join,
     };
 
-    let f = compiler.fun1("query", move |ctx, inputs: Var<SRefMut<Opaque<Inputs>>>| {
-        gen_collect(ctx, inputs, &op, &out_schema, &cx)
+    let f = compiler.fun1("query", move |ctx, in_v: Var<SRefMut<Opaque<Inputs>>>| {
+        gen_collect(ctx, in_v, op, &out_schema, &cx)
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
-    let n = compiled.as_fn()(&mut inputs);
+    let n = compiled.as_fn()(inputs);
     let result = out.into_record_batch(n as usize);
-    // Keep the interned-literal bytes, group state, and input streams alive across
-    // the run (the kernel holds pointers into them).
+    // Keep the interned-literal bytes and group state alive across the run (the
+    // kernel holds pointers into them).
     drop(pool);
     drop(group_state);
-    drop(join_state);
-    drop(inputs);
     Ok(result)
 }
 
