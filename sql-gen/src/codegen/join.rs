@@ -1,29 +1,60 @@
 //! Hash-join codegen — both sides JIT-ed:
-//! - [`gen_build_index`] iterates the build relation (host-owned `RecordBatch`es),
-//!   reads each row's key column with its *known* type (`gen_read`, no dynamic
-//!   dispatch) and calls the `join_insert` proxy — like GROUP BY's fold loop.
-//! - [`gen_join`] emits the streaming probe over the right side: per right row,
-//!   compute the key, walk the matching build-row locators, `gen_read` the located
-//!   left columns, and emit `[left | right]`.
+//! - **Bare-scan build** ([`gen_build_index`]): the input RBs are Arc-cloned into
+//!   the relation host-side; this kernel iterates them, reads each row's key with
+//!   its known type (no dispatch) and `join_insert`s its [`Locator`].
+//! - **Materialized build** ([`gen_build`]): a filtered/projected build subtree —
+//!   ONE fused pass that writes each surviving row's columns into the relation *and*
+//!   `join_insert`s its key+position, exactly the paper's `left.exec { rec => hm +=
+//!   (lkey(rec), rec) }`.
+//! - **Probe** ([`gen_join`]): per right row, compute the key, walk the matching
+//!   `Locator`s, `gen_read` the located left columns, and emit `[left | right]`.
 //!
 //! Phase 1: inner join, single `Int` key.
 
 use arrow::datatypes::{Field, SchemaRef};
 use arrow_lms::FfiArray;
+use datafusion_expr::Expr;
 use rust_lms::prelude::*;
 
-use crate::join::JoinState;
+use crate::join::{JoinState, LocatorType};
 use crate::plan::Operator;
 use crate::value::{Nullness, Row};
 
 use super::expr::gen_expr;
 use super::numeric::to_i64;
-use super::{CodegenCtx, InputsSource, Yld, gen_len, gen_op, gen_read};
+use super::{CodegenCtx, InputsSource, Yld, gen_len, gen_op, gen_read, write_col};
 
-/// Emit the build **index kernel**: iterate the build relation and, per non-null
-/// row, read the `Int` key column (typed — no host dispatch), pack the locator
-/// `(batch_idx<<32)|row`, and `join_insert` it into the host multimap. `rel_schema`
-/// is the relation's schema; `key_col` the key column's index in it.
+/// Insert the current build row's key + `Locator(rb_pos, row)` into the host
+/// multimap (the JIT proxy for `hm += (key, rec)`). `key_cv` is the row's key
+/// value; a NULL key is skipped (it never matches).
+fn emit_key_insert(
+    ctx: &mut Ctx,
+    state: *mut JoinState,
+    rt: crate::runtime::Runtime,
+    key_cv: crate::value::ColVal,
+    rb_pos: Var<u32>,
+    row: Var<u32>,
+) {
+    let key_i64 = to_i64(ctx, key_cv);
+    let key = ctx.bind(int_cast::<u64, i64, _>(key_i64));
+    let insert = move |ctx: &mut Ctx| {
+        ctx.emit(call_extern4(
+            rt.join_insert,
+            const_opaque_mut::<JoinState>(state),
+            key,
+            rb_pos,
+            row,
+        ));
+    };
+    match key_cv.nullness() {
+        Nullness::NonNull => insert(ctx),
+        Nullness::Nullable(valid) => ctx.if_then(valid, insert),
+    }
+}
+
+/// Bare-scan build index kernel: iterate the (host-cloned) relation and, per
+/// non-null row, read the `Int` key column (typed) and `join_insert` its
+/// `Locator(batch_idx, row)`.
 pub(crate) fn gen_build_index(
     ctx: &mut Ctx,
     rel_schema: SchemaRef,
@@ -61,28 +92,58 @@ pub(crate) fn gen_build_index(
         let key_field = key_field.clone();
         ctx.while_loop(lt(row, len), move |ctx| {
             let key_cv = gen_read(ctx, batch, key_col, &key_field, row);
-            let key_i64 = to_i64(ctx, key_cv);
-            let key = ctx.bind(int_cast::<u64, i64, _>(key_i64));
-            // locator = (batch_idx << 32) | row_idx
-            let hi = ctx.bind(shl(b, 32u64));
-            let loc = ctx.bind(bitor(hi, row));
-            // Skip NULL keys (a NULL join key never matches).
-            let insert = move |ctx: &mut Ctx| {
-                ctx.emit(call_extern3(
-                    rt.join_insert,
-                    const_opaque_mut::<JoinState>(state),
-                    key,
-                    loc,
-                ));
-            };
-            match key_cv.nullness() {
-                Nullness::NonNull => insert(ctx),
-                Nullness::Nullable(valid) => ctx.if_then(valid, insert),
-            }
+            let rb_pos = ctx.bind(int_cast::<u32, u64, _>(b));
+            let row_u32 = ctx.bind(int_cast::<u32, u64, _>(row));
+            emit_key_insert(ctx, state, rt, key_cv, rb_pos, row_u32);
             ctx.store(row, add(row, 1u64));
         });
         ctx.store(b, add(b, 1u64));
     });
+}
+
+/// Materialized build kernel — ONE fused pass. Runs the build subtree; per
+/// surviving row it (a) writes the row's columns into the build relation
+/// (`write_col`) and (b) `join_insert`s its key + position `Locator(0, n)` (the
+/// relation is a single batch, so `rb_pos == 0`). Returns the row count `n` (for
+/// finalizing the relation's `RecordBatch`).
+pub(crate) fn gen_build<I: InputsSource>(
+    ctx: &mut Ctx,
+    inputs: I,
+    build: &Operator,
+    key_expr: &Expr,
+    out_schema: &SchemaRef,
+    cx: &CodegenCtx,
+) -> Var<u64> {
+    let handle = cx
+        .join
+        .clone()
+        .expect("fused build without a baked JoinState");
+    let state = handle.state;
+    let rt = cx.rt;
+    let n = ctx.var(0u64);
+    let fields = out_schema.fields().clone();
+    let build_schema = build.output_schema();
+    let key_expr = key_expr.clone();
+    let cx_c = cx.clone();
+    gen_op(
+        build,
+        ctx,
+        inputs,
+        cx,
+        Box::new(move |ctx, row: Row| {
+            // (a) materialize the row into the relation's columns.
+            for (c, (cv, field)) in row.iter().zip(fields.iter()).enumerate() {
+                write_col(ctx, c, field, *cv, &cx_c);
+            }
+            // (b) index: key from the row + Locator(rb_pos=0, row=n).
+            let key_cv = gen_expr(ctx, &key_expr, &build_schema, &row, &cx_c);
+            let rb0 = ctx.bind(Const::<u32>::new(0));
+            let row_u32 = ctx.bind(int_cast::<u32, u64, _>(n));
+            emit_key_insert(ctx, state, rt, key_cv, rb0, row_u32);
+            ctx.store(n, add(n, 1u64));
+        }),
+    );
+    n
 }
 
 /// Emit the probe. `op` is the `Join`; its left side is already built, so we only
@@ -124,8 +185,8 @@ pub(crate) fn gen_join<I: InputsSource>(
             let key_i64 = to_i64(ctx, key_cv);
             let key = ctx.bind(int_cast::<u64, i64, _>(key_i64));
 
-            // The per-match loop: look up the key's locator run, then for each
-            // locator `gen_read` the located left row and emit `[left | right]`.
+            // The per-match loop: look up the key's `Locator` run, then for each
+            // read `.rb_pos`/`.row`, `gen_read` the located left row, emit `[l | r]`.
             let probe = move |ctx: &mut Ctx| {
                 let count = ctx.bind(call_extern2(
                     rt.join_probe_count,
@@ -139,10 +200,11 @@ pub(crate) fn gen_join<I: InputsSource>(
                 ));
                 let i = ctx.var(0u64);
                 ctx.while_loop(lt(i, count), move |ctx| {
-                    // locator = (batch_idx << 32) | row_idx
-                    let loc = ctx.bind(array_index(base, int_cast::<i64, u64, _>(i)));
-                    let b = ctx.bind(shr(loc, 32u64));
-                    let r = ctx.bind(bitand(loc, 0xFFFF_FFFFu64));
+                    let loc = ctx.bind(ptr_offset(base, int_cast::<i64, u64, _>(i)));
+                    let rb_pos = ctx.bind(load_field(loc, LocatorType::rb_pos()));
+                    let row_u32 = ctx.bind(load_field(loc, LocatorType::row()));
+                    let b = ctx.bind(int_cast::<u64, u32, _>(rb_pos));
+                    let r = ctx.bind(int_cast::<u64, u32, _>(row_u32));
                     let descs = ctx.bind(call_extern2(
                         rt.join_left_batch,
                         const_opaque::<JoinState>(state),

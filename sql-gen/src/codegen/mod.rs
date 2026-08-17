@@ -41,8 +41,8 @@ use crate::value::{ColVal, Nullness, Row, StrVal};
 use aggregate::{Agg, CountFast, count_fast};
 use expr::{gen_expr, gen_predicate};
 use grouping::gen_grouped;
-pub(crate) use join::gen_build_index;
 use join::gen_join;
+pub(crate) use join::{gen_build, gen_build_index};
 use numeric::{coerce_f64, coerce_i32, tag, to_i64};
 use strings::resolve;
 
@@ -505,7 +505,7 @@ where
 /// `bool` validity flag to a parallel `SVec` so the two stay length-aligned);
 /// string columns append through the builder. One append per emitted row, in
 /// order, so every column ends at the same length.
-fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: &CodegenCtx) {
+pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: &CodegenCtx) {
     match &cx.out.cols[c] {
         OutColHandle::Str { builder } => write_str_col(ctx, *builder, cv, cx),
         OutColHandle::Fixed { values, validity } => {

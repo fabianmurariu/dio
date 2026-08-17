@@ -15,8 +15,8 @@ use rust_lms::prelude::*;
 use datafusion_expr::Expr;
 
 use crate::codegen::{
-    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_build_index,
-    gen_collect, group_template,
+    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_build,
+    gen_build_index, gen_collect, group_template,
 };
 use crate::group::{GroupState, KeyKind};
 use crate::join::JoinState;
@@ -133,20 +133,22 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
                 )));
             }
         }
-        // Build the relation: a bare `Scan` build → Arc-clone its input batches
-        // (cheap, no column copy). Otherwise (Filter / Project …) *run* the build
-        // subtree and materialize its output into one batch.
+        // `run_operator` owns the `JoinState` for the whole join, so it lives at one
+        // stable address across the build and probe kernels — the builders fill it in
+        // place. Create the empty shell (a bare `Scan` clones its input batches into
+        // the relation; a filtered/projected build starts empty), then fill it: a
+        // bare scan → JIT index over the clone; else → ONE fused kernel that
+        // materializes the surviving rows AND indexes them in a single pass.
         let mut join_state = match left.as_ref() {
-            Operator::Scan { table, .. } => JoinState::new(inputs.drain_table(*table)),
-            build_subtree => {
-                let build_rb = run_kernel(build_subtree, &mut inputs, None)?;
-                JoinState::new(Box::new(std::iter::once(build_rb)))
-            }
+            Operator::Scan { table, .. } => JoinState::from_clone(inputs.drain_table(*table)),
+            _ => JoinState::empty_relation(),
         };
-        // Populate the key index with a JIT kernel: it iterates the relation and
-        // reads each row's key column with its *known* type (no host per-value
-        // dispatch), inserting locators via the `join_insert` proxy.
-        build_join_index(&mut join_state, &left_schema, key_col)?;
+        match left.as_ref() {
+            Operator::Scan { .. } => build_join_index(&mut join_state, &left_schema, key_col)?,
+            build_subtree => {
+                build_join_materialized(&mut join_state, build_subtree, &on[0].0, &mut inputs)?
+            }
+        }
         // The baked pointer aliases `join_state`, which is not touched again until
         // after the probe kernel runs — the same contract as `GroupState`.
         let handle = Rc::new(JoinHandle {
@@ -185,6 +187,60 @@ fn build_join_index(js: &mut JoinState, rel_schema: &SchemaRef, key_col: usize) 
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
     compiled.as_fn()();
+    Ok(())
+}
+
+/// Fill `js` (an empty relation) via the **fused** build kernel for a non-bare-scan
+/// build subtree: ONE pass that runs the subtree, writes each surviving row into the
+/// build relation, and `join_insert`s its key + position — then installs the single
+/// materialized batch, whose row indices the inserted locators reference.
+fn build_join_materialized(
+    js: &mut JoinState,
+    build: &Operator,
+    key_expr: &Expr,
+    inputs: &mut Inputs,
+) -> Result<()> {
+    let out_schema = normalize_out_schema(&build.output_schema());
+    let mut out = OutCols::alloc(&out_schema);
+
+    let mut compiler = Compiler::new();
+    let rt = Runtime::register(&mut compiler);
+
+    // Intern the build subtree's string literals (kept alive until after the run).
+    let mut pool = BytesPool::new();
+    let mut lit_strs = Vec::new();
+    collect_str_literals(build, &mut lit_strs);
+    let mut lits: HashMap<String, *const u8> = HashMap::new();
+    for s in lit_strs {
+        if !lits.contains_key(s) {
+            lits.insert(s.to_string(), pool.append(s.as_bytes()));
+        }
+    }
+
+    let handle = Rc::new(JoinHandle {
+        state: &mut *js as *mut JoinState,
+    });
+    let cx = CodegenCtx {
+        rt,
+        lits: Rc::new(lits),
+        group: None,
+        out: Rc::new(out.handle()),
+        join: Some(handle),
+    };
+    let build_c = build.clone();
+    let key_expr = key_expr.clone();
+    let out_schema_c = out_schema.clone();
+    let f = compiler.fun1(
+        "build_materialize",
+        move |ctx, in_v: Var<SRefMut<Opaque<Inputs>>>| {
+            gen_build(ctx, in_v, &build_c, &key_expr, &out_schema_c, &cx)
+        },
+    );
+    let compiled = compiler.compile(f).map_err(exec_err)?;
+    let n = compiled.as_fn()(inputs);
+    // Install the materialized batch: the locators inserted during the run reference
+    // row indices into it.
+    js.push_batch(out.into_record_batch(n as usize));
     Ok(())
 }
 
