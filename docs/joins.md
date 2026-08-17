@@ -160,6 +160,22 @@ join_type: JoinType, schema }`:
 
 ---
 
+## 6a. Optimizer (predicate pushdown)
+
+`sql.rs` runs a curated pair of datafusion optimizer rules (54.1.0, our version)
+between `SqlToRel` and `lower()`: `ExtractEquijoinPredicate` (populates `join.on`)
+and `PushDownFilter` (pushes a `WHERE` into a join's inputs). So the natural
+`SELECT … FROM a JOIN b ON a.k=b.k WHERE a.x > 1` pushes `a.x > 1` into the **build**
+side (it becomes `Filter(Scan)` → materialized), instead of filtering the join
+output — no derived-table contortion needed. `PushDownFilter` may move predicates
+into `TableScan.filters`; since we don't execute pushed-down filters natively,
+`lower(TableScan)` re-applies them as a `Filter` above the scan. (A full **optd**
+Cascades integration is a later milestone — `optd-core` is datafusion-free, but its
+df connector is pinned to 53.1.0, so it needs its own df54→optd IR + optd→Operator
+lowering.)
+
+---
+
 ## 7. Phased plan
 
 1. **Inner equi-join, single Int key, bare-scan left build.** ✅ **Done.**

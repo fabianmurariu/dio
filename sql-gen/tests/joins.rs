@@ -249,6 +249,60 @@ fn build_side_filter_multi_batch() {
 }
 
 #[test]
+fn natural_where_on_build_side() {
+    // The NATURAL query — no derived table. The optimizer pushes `a.av > 15` down
+    // into the build (left) side, which is then materialized/filtered. Same result
+    // as the derived-table form.
+    let sa = schema(&["ak", "av"]);
+    let sb = schema(&["bk", "bv"]);
+    let a_rb = batch(&sa, vec![vec![1, 2, 1, 3], vec![10, 20, 30, 40]]);
+    let b_rb = batch(&sb, vec![vec![1, 2, 3], vec![100, 200, 300]]);
+    let out = exec_jit_multi(
+        "SELECT a.ak, a.av, b.bv FROM a JOIN b ON a.ak = b.bk WHERE a.av > 15",
+        vec![
+            StreamTable::new("a", sa, vec![a_rb]),
+            StreamTable::new("b", sb, vec![b_rb]),
+        ],
+    )
+    .unwrap();
+    assert_eq!(
+        rows(&out),
+        vec![vec![1, 30, 100], vec![2, 20, 200], vec![3, 40, 300]]
+    );
+}
+
+#[test]
+fn where_is_pushed_into_build_side() {
+    use sql_gen::plan::Operator;
+    use sql_gen::sql::sql_to_operator_multi;
+
+    let op = sql_to_operator_multi(
+        "SELECT a.ak, b.bv FROM a JOIN b ON a.ak = b.bk WHERE a.av > 100",
+        &[("a", schema(&["ak", "av"])), ("b", schema(&["bk", "bv"]))],
+    )
+    .unwrap();
+
+    fn find_join(op: &Operator) -> Option<&Operator> {
+        match op {
+            Operator::Join { .. } => Some(op),
+            Operator::Project { input, .. }
+            | Operator::Filter { input, .. }
+            | Operator::Aggregate { input, .. } => find_join(input),
+            Operator::Scan { .. } => None,
+        }
+    }
+    let Some(Operator::Join { left, .. }) = find_join(&op) else {
+        panic!("expected a Join in the lowered plan");
+    };
+    // The `a.av > 100` predicate must have been pushed INTO the build (left) side,
+    // so it's a `Filter(Scan)` — not a bare `Scan` with the filter left above the join.
+    assert!(
+        matches!(left.as_ref(), Operator::Filter { .. }),
+        "WHERE was not pushed into the build side; left = {left:?}"
+    );
+}
+
+#[test]
 fn build_side_filter_empty_result() {
     // Build filter removes everything → no matches.
     let sa = schema(&["ak", "av"]);

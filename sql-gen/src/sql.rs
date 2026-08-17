@@ -8,11 +8,29 @@ use std::sync::Arc;
 use arrow::datatypes::SchemaRef;
 use datafusion_common::{DataFusionError, Result};
 use datafusion_expr::{Expr, LogicalPlan};
+use datafusion_optimizer::extract_equijoin_predicate::ExtractEquijoinPredicate;
+use datafusion_optimizer::push_down_filter::PushDownFilter;
+use datafusion_optimizer::{Optimizer, OptimizerContext};
 use datafusion_sql::parser::DFParser;
 use datafusion_sql::planner::SqlToRel;
 
 use crate::catalog::Catalog;
 use crate::plan::Operator;
+
+/// Run a small, curated set of datafusion optimizer rules before lowering:
+/// - `ExtractEquijoinPredicate` moves `l.k = r.k` out of the join condition into
+///   `join.on` (so we don't have to dig it out of `join.filter`), and
+/// - `PushDownFilter` pushes a `WHERE` predicate down through the plan — crucially
+///   into a join's build/probe input, so `… JOIN … WHERE a.x > 1` filters the build
+///   side instead of the join output. Both rules are no-ops on queries that don't
+///   use them, so the rest of the suite is unaffected.
+fn optimize(plan: LogicalPlan) -> Result<LogicalPlan> {
+    let optimizer = Optimizer::with_rules(vec![
+        Arc::new(ExtractEquijoinPredicate::new()),
+        Arc::new(PushDownFilter::new()),
+    ]);
+    optimizer.optimize(plan, &OptimizerContext::new(), |_, _| {})
+}
 
 /// Parse `sql` (a single statement over one table) and lower it to an
 /// [`Operator`] tree — the single-table shorthand for [`sql_to_operator_multi`]
@@ -37,6 +55,7 @@ pub fn sql_to_operator_multi(sql: &str, tables: &[(&str, SchemaRef)]) -> Result<
         .pop_front()
         .ok_or_else(|| DataFusionError::Plan("empty SQL statement".into()))?;
     let plan = SqlToRel::new(&catalog).statement_to_plan(statement)?;
+    let plan = optimize(plan)?;
     lower(&plan, &ids)
 }
 
@@ -49,10 +68,20 @@ fn lower(plan: &LogicalPlan, ids: &HashMap<String, usize>) -> Result<Operator> {
             let table = *ids
                 .get(name)
                 .ok_or_else(|| DataFusionError::Plan(format!("table not registered: {name}")))?;
-            Ok(Operator::Scan {
+            let scan_op = Operator::Scan {
                 table,
                 schema: scan.source.schema(),
-            })
+            };
+            // `PushDownFilter` moves predicates INTO `scan.filters` (the source
+            // reports it handles them), but we don't execute pushed-down filters
+            // natively — re-apply them as a `Filter` above the scan so they still run.
+            match scan.filters.iter().cloned().reduce(|a, b| a.and(b)) {
+                None => Ok(scan_op),
+                Some(predicate) => Ok(Operator::Filter {
+                    predicate,
+                    input: Box::new(scan_op),
+                }),
+            }
         }
         // A derived table `(SELECT …) alias` — a transparent rename; lower its input.
         LogicalPlan::SubqueryAlias(sa) => lower(sa.input.as_ref(), ids),
