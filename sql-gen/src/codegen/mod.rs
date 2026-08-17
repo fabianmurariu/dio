@@ -41,6 +41,7 @@ use crate::value::{ColVal, Nullness, Row, StrVal};
 use aggregate::{Agg, CountFast, count_fast};
 use expr::{gen_expr, gen_predicate};
 use grouping::gen_grouped;
+pub(crate) use join::gen_build_index;
 use join::gen_join;
 use numeric::{coerce_f64, coerce_i32, tag, to_i64};
 use strings::resolve;
@@ -419,7 +420,7 @@ fn gen_scan<I: InputsSource>(
     });
 }
 
-fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
+pub(crate) fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
     // A `Utf8View` column's `values` holds one 16-byte view per row, so its
     // element count (read via any type) is the row count.
     if matches!(dt, DataType::Utf8View) {

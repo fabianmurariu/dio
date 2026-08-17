@@ -15,12 +15,12 @@ use rust_lms::prelude::*;
 use datafusion_expr::Expr;
 
 use crate::codegen::{
-    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_collect,
-    group_template,
+    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_build_index,
+    gen_collect, group_template,
 };
 use crate::group::{GroupState, KeyKind};
 use crate::join::JoinState;
-use crate::output::OutCols;
+use crate::output::{OutCols, OutputHandle};
 use crate::plan::Operator;
 use crate::runtime::Runtime;
 use crate::scan::{Inputs, ScanStream};
@@ -133,19 +133,20 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
                 )));
             }
         }
-        // Bare `Scan` build → clone its input batches (cheap). Otherwise (Filter /
-        // Project …) *run* the build subtree and materialize its output into one
-        // batch, then index that.
+        // Build the relation: a bare `Scan` build → Arc-clone its input batches
+        // (cheap, no column copy). Otherwise (Filter / Project …) *run* the build
+        // subtree and materialize its output into one batch.
         let mut join_state = match left.as_ref() {
-            Operator::Scan { table, .. } => {
-                let batches = inputs.drain_table(*table);
-                JoinState::build_int(batches, key_col)
-            }
+            Operator::Scan { table, .. } => JoinState::new(inputs.drain_table(*table)),
             build_subtree => {
                 let build_rb = run_kernel(build_subtree, &mut inputs, None)?;
-                JoinState::build_int(Box::new(std::iter::once(build_rb)), key_col)
+                JoinState::new(Box::new(std::iter::once(build_rb)))
             }
         };
+        // Populate the key index with a JIT kernel: it iterates the relation and
+        // reads each row's key column with its *known* type (no host per-value
+        // dispatch), inserting locators via the `join_insert` proxy.
+        build_join_index(&mut join_state, &left_schema, key_col)?;
         // The baked pointer aliases `join_state`, which is not touched again until
         // after the probe kernel runs — the same contract as `GroupState`.
         let handle = Rc::new(JoinHandle {
@@ -156,6 +157,35 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         return result;
     }
     run_kernel(&op, &mut inputs, None)
+}
+
+/// Compile and run the join **build index kernel**: it iterates the (already
+/// materialized) build relation and, per non-null row, reads the key column with
+/// its known type and `join_insert`s the locator — the JIT counterpart of a host
+/// per-value key loop. Takes no inputs and produces no output; its whole job is the
+/// side effect of populating `js`'s key index.
+fn build_join_index(js: &mut JoinState, rel_schema: &SchemaRef, key_col: usize) -> Result<()> {
+    let mut compiler = Compiler::new();
+    let rt = Runtime::register(&mut compiler);
+    let handle = Rc::new(JoinHandle {
+        state: js as *mut JoinState,
+    });
+    // Minimal codegen context — the index kernel only uses `rt` + `join`.
+    let cx = CodegenCtx {
+        rt,
+        lits: Rc::new(HashMap::new()),
+        group: None,
+        out: Rc::new(OutputHandle { cols: Vec::new() }),
+        join: Some(handle),
+    };
+    let rel_schema = rel_schema.clone();
+    let f = compiler.fun0("build_index", move |ctx| {
+        gen_build_index(ctx, rel_schema.clone(), key_col, &cx);
+        unit()
+    });
+    let compiled = compiler.compile(f).map_err(exec_err)?;
+    compiled.as_fn()();
+    Ok(())
 }
 
 /// Compile and run ONE kernel over `inputs`: allocate the output columns and any

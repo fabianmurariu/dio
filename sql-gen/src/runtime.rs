@@ -17,7 +17,10 @@ use crate::group::{
     GroupRecordsBaseExtern, GroupUpsertCompositeExtern, GroupUpsertExtern, GroupUpsertNullExtern,
     GroupUpsertStrExtern,
 };
-use crate::join::{JoinLeftBatchExtern, JoinProbeBaseExtern, JoinProbeCountExtern};
+use crate::join::{
+    JoinInsertExtern, JoinLeftBatchExtern, JoinProbeBaseExtern, JoinProbeCountExtern,
+    JoinRelCountExtern,
+};
 use crate::scan::ScanNextExtern;
 
 /// The byte pointer of a `Utf8View` row: `arr.value(row).as_ptr()`. Valid for the
@@ -75,6 +78,9 @@ pub struct Runtime {
     pub svec_grow: ExternRef<SvecGrowExtern>,
     /// Pull the next input batch of a table (null = exhausted). See `scan.rs`.
     pub scan_next: ExternRef<ScanNextExtern>,
+    /// Hash-join build index: relation batch count / per-row locator insert.
+    pub join_rel_count: ExternRef<JoinRelCountExtern>,
+    pub join_insert: ExternRef<JoinInsertExtern>,
     /// Hash-join probe: match count / locator-run base / build-batch descriptors.
     pub join_probe_count: ExternRef<JoinProbeCountExtern>,
     pub join_probe_base: ExternRef<JoinProbeBaseExtern>,
@@ -100,6 +106,8 @@ impl Runtime {
             group_len: compiler.extern_fn::<GroupLenExtern>(),
             svec_grow: compiler.extern_fn::<SvecGrowExtern>(),
             scan_next: compiler.extern_fn::<ScanNextExtern>(),
+            join_rel_count: compiler.extern_fn::<JoinRelCountExtern>(),
+            join_insert: compiler.extern_fn::<JoinInsertExtern>(),
             join_probe_count: compiler.extern_fn::<JoinProbeCountExtern>(),
             join_probe_base: compiler.extern_fn::<JoinProbeBaseExtern>(),
             join_left_batch: compiler.extern_fn::<JoinLeftBatchExtern>(),

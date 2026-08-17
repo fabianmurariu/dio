@@ -9,7 +9,6 @@
 use std::collections::HashMap;
 use std::ptr;
 
-use arrow::array::{Array, Int32Array, Int64Array};
 use arrow::record_batch::RecordBatch;
 use arrow_lms::{FfiArray, prepare_record_batch};
 use rust_lms::prelude::*;
@@ -65,26 +64,18 @@ pub struct JoinState {
 }
 
 impl JoinState {
-    /// Build from a bare-`Scan` left side: clone each input batch into the relation
-    /// and index its `Int` key column (Phase 1). Null keys are not indexed (a `NULL`
-    /// join key never matches).
-    pub fn build_int(batches: Box<dyn Iterator<Item = RecordBatch>>, key_col: usize) -> Self {
+    /// Materialize the build relation from its batches (a bare `Scan` clones its
+    /// input RBs; a filtered/projected build passes its one materialized RB). The
+    /// key index starts EMPTY — it is populated by the JIT index kernel via
+    /// [`join_insert`], not by a host per-value loop.
+    pub fn new(batches: Box<dyn Iterator<Item = RecordBatch>>) -> Self {
         let mut relation = InMemoryRelation::default();
-        let mut index: HashMap<u64, Vec<u64>> = HashMap::new();
         for rb in batches {
-            let batch_idx = relation.num_batches() as u64;
-            let col = rb.column(key_col);
-            for row in 0..rb.num_rows() {
-                if let Some(k) = int_at(col, row) {
-                    let loc = (batch_idx << 32) | (row as u64);
-                    index.entry(k as u64).or_default().push(loc);
-                }
-            }
             relation.push(rb);
         }
         JoinState {
             relation,
-            index,
+            index: HashMap::new(),
             empty: Vec::new(),
         }
     }
@@ -96,18 +87,20 @@ impl JoinState {
     }
 }
 
-/// Read an `Int32`/`Int64` array element as `i64`, or `None` if the row is null.
-fn int_at(col: &dyn Array, row: usize) -> Option<i64> {
-    if col.is_null(row) {
-        return None;
-    }
-    if let Some(a) = col.as_any().downcast_ref::<Int64Array>() {
-        Some(a.value(row))
-    } else if let Some(a) = col.as_any().downcast_ref::<Int32Array>() {
-        Some(a.value(row) as i64)
-    } else {
-        panic!("join key column is not Int32/Int64");
-    }
+/// Number of batches in the build relation — the JIT index kernel's outer loop bound.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn join_rel_count(js: &JoinState) -> u64 {
+    js.relation.num_batches() as u64
+}
+
+/// Insert a build row's `locator` under `key` (the proxy the JIT index kernel calls
+/// per non-null build row, like GROUP BY's `group_upsert`). `key` is the row's
+/// join key as `u64`; `locator = (batch_idx << 32) | row_idx`.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn join_insert(js: &mut JoinState, key: u64, locator: u64) {
+    js.index.entry(key).or_default().push(locator);
 }
 
 /// Number of build rows matching `key` (0 = no match).
