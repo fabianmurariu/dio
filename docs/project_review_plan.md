@@ -34,7 +34,7 @@ larger ownership and ABI redesigns.
    ordinary `SRef<T>` cannot become a slice. Covers PR-06. **Status: complete.**
 4. **Mark the trusted trait boundary.** Seal internal layout/codegen traits and
    make supported external implementations unsafe with documented invariants.
-   Reduce `CompilationContext` visibility. Covers PR-02.
+   Reduce `CompilationContext` visibility. Covers PR-02. **Status: complete.**
 5. **Tie compiled entry points to ownership.** Add borrowing `call` wrappers,
    make detached function-pointer extraction an unsafe escape hatch, and define
    an executable-memory reclamation policy. Covers PR-01.

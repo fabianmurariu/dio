@@ -34,7 +34,7 @@ pub struct Opaque<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T> StagedType for Opaque<T> {
+unsafe impl<T> StagedType for Opaque<T> {
     /// Behind a reference this surfaces as `&'a T` / `&'a mut T`.
     type RuntimeValue = T;
 
@@ -63,7 +63,7 @@ impl<E: Clone, T> Clone for OpaqueRef<E, T> {
 
 impl<E: Copy, T> Copy for OpaqueRef<E, T> {}
 
-impl<E, T> Staged for OpaqueRef<E, T>
+unsafe impl<E, T> Staged for OpaqueRef<E, T>
 where
     E: Staged<Out = u64>,
     T: 'static,
@@ -102,7 +102,7 @@ impl<E: Clone, T> Clone for OpaqueRefMut<E, T> {
 
 impl<E: Copy, T> Copy for OpaqueRefMut<E, T> {}
 
-impl<E, T> Staged for OpaqueRefMut<E, T>
+unsafe impl<E, T> Staged for OpaqueRefMut<E, T>
 where
     E: Staged<Out = u64>,
     T: 'static,

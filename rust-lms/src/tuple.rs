@@ -28,7 +28,7 @@ macro_rules! tuple_impls {
         $len:tt => ($($T:ident $idx:tt),*) -> $Last:ident $last_idx:tt
     ),+ $(,)?) => {
         $(
-            impl<$($T,)* $Last, OUT> Staged for ($($T,)* $Last,)
+            unsafe impl<$($T,)* $Last, OUT> Staged for ($($T,)* $Last,)
             where
                 $($T: Staged,)*
                 $Last: Staged<Out = OUT>,

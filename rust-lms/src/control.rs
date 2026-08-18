@@ -32,7 +32,7 @@ pub struct IfThenElse<COND, THEN, ELSE> {
     else_branch: ELSE,
 }
 
-impl<COND, THEN, ELSE, T> Staged for IfThenElse<COND, THEN, ELSE>
+unsafe impl<COND, THEN, ELSE, T> Staged for IfThenElse<COND, THEN, ELSE>
 where
     COND: Staged<Out = bool>,
     THEN: Staged<Out = T>,
@@ -127,7 +127,7 @@ pub struct IfThen<COND, BODY> {
     body: BODY,
 }
 
-impl<COND, BODY> Staged for IfThen<COND, BODY>
+unsafe impl<COND, BODY> Staged for IfThen<COND, BODY>
 where
     COND: Staged<Out = bool>,
     BODY: Staged<Out = ()>,
@@ -211,7 +211,7 @@ pub struct While<COND, BODY> {
     body: BODY,
 }
 
-impl<COND, BODY> Staged for While<COND, BODY>
+unsafe impl<COND, BODY> Staged for While<COND, BODY>
 where
     COND: Staged<Out = bool>,
     BODY: Staged<Out = ()>,
@@ -281,7 +281,7 @@ pub struct Not<C> {
     cond: C,
 }
 
-impl<C> Staged for Not<C>
+unsafe impl<C> Staged for Not<C>
 where
     C: Staged<Out = bool>,
 {

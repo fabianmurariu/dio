@@ -30,7 +30,28 @@ use std::marker::PhantomData;
 /// This trait is implemented by the proc macro for each field of a struct.
 /// It provides type-level information about the field's parent struct,
 /// output type, and memory offset.
-pub trait Field: Copy {
+///
+/// # Safety
+///
+/// `Parent`, `Out`, and `OFFSET` must identify a real `Out` field within the
+/// staged runtime representation of `Parent`. `OFFSET` must satisfy the field's
+/// alignment and bounds requirements. Prefer descriptors emitted by
+/// `#[derive(StagedType)]`.
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[derive(Clone, Copy)]
+/// struct FabricatedField;
+///
+/// impl Field for FabricatedField {
+///     type Parent = i64;
+///     type Out = i64;
+///     const OFFSET: usize = 0;
+///     const INDEX: usize = 0;
+/// }
+/// ```
+pub unsafe trait Field: Copy {
     /// The parent struct type
     type Parent: StagedType;
 
@@ -48,12 +69,31 @@ pub trait Field: Copy {
 // PointerLike: map a pointer-to-parent into a pointer-to-field
 // =============================================================================
 
+mod pointer_like_sealed {
+    pub trait Sealed {}
+}
+
 /// A staged pointer/reference to a parent struct, for field access.
 ///
 /// Carries only the [`Pointee`](Self::Pointee) (the parent struct type), used
 /// to constrain a [`Field`]'s `Parent`. The field-reference type itself comes
-/// from [`FieldRefOf`].
-pub trait PointerLike: StagedType {
+/// from [`FieldRefOf`]. This trait is sealed because pointer flavor and pointee
+/// representation are trusted by field-address lowering.
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct FabricatedPointer {
+///     raw: u64,
+/// }
+///
+/// impl PointerLike for FabricatedPointer {
+///     type Pointee = i64;
+/// }
+/// ```
+pub trait PointerLike: StagedType + pointer_like_sealed::Sealed {
     /// The type this pointer points at (the parent struct, for field access).
     type Pointee: StagedType;
 }
@@ -62,9 +102,13 @@ impl<'a, P: StagedType> PointerLike for SRef<'a, P> {
     type Pointee = P;
 }
 
+impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRef<'a, P> {}
+
 impl<'a, P: StagedType> PointerLike for SRefMut<'a, P> {
     type Pointee = P;
 }
+
+impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRefMut<'a, P> {}
 
 // Raw-pointer (`RustPtr`) flavors — so field access works on *baked* pointers
 // (`const_ptr`/`const_mut_ptr`), not just Rust references. A field of a `*const T`
@@ -73,9 +117,13 @@ impl<'a, P: StagedType> PointerLike for SRef<'a, P, RustPtr> {
     type Pointee = P;
 }
 
+impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRef<'a, P, RustPtr> {}
+
 impl<'a, P: StagedType> PointerLike for SRefMut<'a, P, RustPtr> {
     type Pointee = P;
 }
+
+impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRefMut<'a, P, RustPtr> {}
 
 /// Maps a parent pointer onto a pointer-to-field of the *same flavor*.
 ///
@@ -136,7 +184,7 @@ impl<P: Clone, F> Clone for LoadField<P, F> {
 
 impl<P: Copy, F> Copy for LoadField<P, F> {}
 
-impl<P, F> Staged for LoadField<P, F>
+unsafe impl<P, F> Staged for LoadField<P, F>
 where
     P: Staged,
     P::Out: StagedType,
@@ -202,7 +250,7 @@ impl<S: Clone, F> Clone for FieldAddr<S, F> {
 
 impl<S: Copy, F> Copy for FieldAddr<S, F> {}
 
-impl<S, F> Staged for FieldAddr<S, F>
+unsafe impl<S, F> Staged for FieldAddr<S, F>
 where
     S: Staged,
     S::Out: FieldRefOf<F::Out>,
@@ -261,7 +309,7 @@ where
 
 impl<P, F> Copy for FieldPath<P, F> where P: Copy {}
 
-impl<P, F> Staged for FieldPath<P, F>
+unsafe impl<P, F> Staged for FieldPath<P, F>
 where
     P: Staged,
     P::Out: StagedType,

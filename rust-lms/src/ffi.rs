@@ -176,7 +176,7 @@ pub struct FatSliceType<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> StagedType for FatSliceType<T> {
+unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     type RuntimeValue = FatSlice<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -217,7 +217,7 @@ pub type FfiSliceType<T> = FatSliceType<T>;
 /// Staged type marker for [`FfiSliceMut`].
 pub type FfiSliceMutType<T> = FatSliceMutType<T>;
 
-impl<T: StagedType> StagedType for FatSliceMutType<T> {
+unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     type RuntimeValue = FatSliceMut<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -270,7 +270,7 @@ impl<P: Clone, L: Clone, T> Clone for SliceFromRawParts<P, L, T> {
 
 impl<P: Copy, L: Copy, T> Copy for SliceFromRawParts<P, L, T> {}
 
-impl<P, L, T> Staged for SliceFromRawParts<P, L, T>
+unsafe impl<P, L, T> Staged for SliceFromRawParts<P, L, T>
 where
     P: Staged<Out = SPtr<T>>,
     L: Staged<Out = u64>,
@@ -337,7 +337,7 @@ impl<P: Clone, L: Clone, T> Clone for SliceRefFromRawParts<P, L, T> {
 
 impl<P: Copy, L: Copy, T> Copy for SliceRefFromRawParts<P, L, T> {}
 
-impl<P, L, T> Staged for SliceRefFromRawParts<P, L, T>
+unsafe impl<P, L, T> Staged for SliceRefFromRawParts<P, L, T>
 where
     P: Staged<Out = SPtr<T>>,
     L: Staged<Out = u64>,
@@ -380,7 +380,7 @@ pub struct StackBytes {
     bytes: Vec<u8>,
 }
 
-impl Staged for StackBytes {
+unsafe impl Staged for StackBytes {
     type Out = SPtr<u8>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -439,7 +439,7 @@ pub struct StackAlloc {
     size: usize,
 }
 
-impl Staged for StackAlloc {
+unsafe impl Staged for StackAlloc {
     type Out = SMutPtr<u8>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -626,7 +626,7 @@ pub struct CallExtern0<S: ExternFn> {
     func: ExternRef<S>,
 }
 
-impl<S> Staged for CallExtern0<S>
+unsafe impl<S> Staged for CallExtern0<S>
 where
     S: ExternFn<Args = ()>,
 {
@@ -660,7 +660,7 @@ pub struct CallExtern1<S: ExternFn, A> {
     arg: A,
 }
 
-impl<S, A, AType> Staged for CallExtern1<S, A>
+unsafe impl<S, A, AType> Staged for CallExtern1<S, A>
 where
     S: ExternFn<Args = (AType,)>,
     A: Staged<Out = AType>,
@@ -758,7 +758,7 @@ pub struct CallExtern2<S: ExternFn, A, B> {
     arg1: B,
 }
 
-impl<S, A, B, AType, BType> Staged for CallExtern2<S, A, B>
+unsafe impl<S, A, B, AType, BType> Staged for CallExtern2<S, A, B>
 where
     S: ExternFn<Args = (AType, BType)>,
     A: Staged<Out = AType>,
@@ -878,7 +878,7 @@ pub struct CallExtern3<S: ExternFn, A, B, C> {
     arg2: C,
 }
 
-impl<S, A, B, C, AType, BType, CType> Staged for CallExtern3<S, A, B, C>
+unsafe impl<S, A, B, C, AType, BType, CType> Staged for CallExtern3<S, A, B, C>
 where
     S: ExternFn<Args = (AType, BType, CType)>,
     A: Staged<Out = AType>,
@@ -968,7 +968,7 @@ pub struct CallExtern4<S: ExternFn, A, B, C, D> {
     arg3: D,
 }
 
-impl<S, A, B, C, D, AType, BType, CType, DType> Staged for CallExtern4<S, A, B, C, D>
+unsafe impl<S, A, B, C, D, AType, BType, CType, DType> Staged for CallExtern4<S, A, B, C, D>
 where
     S: ExternFn<Args = (AType, BType, CType, DType)>,
     A: Staged<Out = AType>,

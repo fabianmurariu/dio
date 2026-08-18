@@ -19,7 +19,7 @@ pub struct Add<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Add<L, R>
+unsafe impl<L, R, T> Staged for Add<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -41,7 +41,7 @@ pub struct Sub<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Sub<L, R>
+unsafe impl<L, R, T> Staged for Sub<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -63,7 +63,7 @@ pub struct Mul<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Mul<L, R>
+unsafe impl<L, R, T> Staged for Mul<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -85,7 +85,7 @@ pub struct Div<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Div<L, R>
+unsafe impl<L, R, T> Staged for Div<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -107,7 +107,7 @@ pub struct Rem<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Rem<L, R>
+unsafe impl<L, R, T> Staged for Rem<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -133,7 +133,7 @@ pub struct BitAnd<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for BitAnd<L, R>
+unsafe impl<L, R, T> Staged for BitAnd<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -155,7 +155,7 @@ pub struct BitOr<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for BitOr<L, R>
+unsafe impl<L, R, T> Staged for BitOr<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -177,7 +177,7 @@ pub struct BitXor<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for BitXor<L, R>
+unsafe impl<L, R, T> Staged for BitXor<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -199,7 +199,7 @@ pub struct Shl<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Shl<L, R>
+unsafe impl<L, R, T> Staged for Shl<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -221,7 +221,7 @@ pub struct Shr<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Shr<L, R>
+unsafe impl<L, R, T> Staged for Shr<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -254,7 +254,7 @@ impl<E: Clone, TO> Clone for IntCast<E, TO> {
 
 impl<E: Copy, TO> Copy for IntCast<E, TO> {}
 
-impl<E, FROM, TO> Staged for IntCast<E, TO>
+unsafe impl<E, FROM, TO> Staged for IntCast<E, TO>
 where
     E: Staged<Out = FROM>,
     FROM: IntNum,
@@ -294,7 +294,7 @@ impl<E: Clone, TO> Clone for IntToFloat<E, TO> {
 
 impl<E: Copy, TO> Copy for IntToFloat<E, TO> {}
 
-impl<E, FROM, TO> Staged for IntToFloat<E, TO>
+unsafe impl<E, FROM, TO> Staged for IntToFloat<E, TO>
 where
     E: Staged<Out = FROM>,
     FROM: IntNum,
@@ -324,7 +324,7 @@ pub struct Lt<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Lt<L, R>
+unsafe impl<L, R, T> Staged for Lt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -346,7 +346,7 @@ pub struct Gt<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Gt<L, R>
+unsafe impl<L, R, T> Staged for Gt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -368,7 +368,7 @@ pub struct Eq<L, R> {
     right: R,
 }
 
-impl<L, R, T> Staged for Eq<L, R>
+unsafe impl<L, R, T> Staged for Eq<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
@@ -539,7 +539,7 @@ pub struct Bitcast<E, TO> {
     _to: PhantomData<TO>,
 }
 
-impl<E, FROM, TO> Staged for Bitcast<E, TO>
+unsafe impl<E, FROM, TO> Staged for Bitcast<E, TO>
 where
     E: Staged<Out = FROM>,
     FROM: StagedType,
@@ -641,7 +641,7 @@ pub struct Select<C, T, F> {
     if_false: F,
 }
 
-impl<C, T, F, Out> Staged for Select<C, T, F>
+unsafe impl<C, T, F, Out> Staged for Select<C, T, F>
 where
     C: Staged<Out = bool>,
     T: Staged<Out = Out>,

@@ -26,7 +26,7 @@ use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
 use crate::refer::SMutPtr;
 use crate::staged::{Staged, Var};
-use crate::types::StagedType;
+use crate::types::{CopyType, StagedType};
 
 use super::traits::StagedIterator;
 
@@ -46,7 +46,7 @@ pub type OpaqueHandle = SMutPtr<()>;
 /// - `Drop`: `extern "C" fn(*mut ())`
 pub trait OpaqueIterKind: 'static {
     /// The element type (an integer ≤ 64 bits for the `next` register path).
-    type Item: StagedType + 'static;
+    type Item: RegisterScalar;
     /// `next(it) -> COption<Item>`.
     type Next: ExternFn<Args = (OpaqueHandle,), Ret = COptionType<Self::Item>>;
     /// `drop(it)`.
@@ -259,18 +259,25 @@ where
 
 /// Staged scalar item whose `COption` fits in registers (≤ 16 bytes), so the
 /// register-consume `next` path is valid.
-pub trait RegisterScalar: StagedType<RuntimeValue: Copy> + Copy + 'static {}
-impl RegisterScalar for u64 {}
-impl RegisterScalar for i64 {}
-impl RegisterScalar for u32 {}
-impl RegisterScalar for i32 {}
-impl RegisterScalar for u16 {}
-impl RegisterScalar for i16 {}
-impl RegisterScalar for u8 {}
-impl RegisterScalar for i8 {}
-impl RegisterScalar for f32 {}
-impl RegisterScalar for f64 {}
-impl RegisterScalar for bool {}
+mod register_scalar_sealed {
+    pub trait Sealed {}
+}
+
+pub trait RegisterScalar:
+    StagedType<RuntimeValue = Self> + CopyType + register_scalar_sealed::Sealed + 'static
+{
+}
+
+macro_rules! impl_register_scalar {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl register_scalar_sealed::Sealed for $ty {}
+            impl RegisterScalar for $ty {}
+        )+
+    };
+}
+
+impl_register_scalar!(u64, i64, u32, i32, u16, i16, u8, i8, f32, f64, bool);
 
 /// Double-box an iterator into a thin `*mut ()` handle (the inner `Box<dyn ..>`
 /// is a fat pointer; the outer box makes the handle a single pointer).
@@ -472,7 +479,7 @@ where
 /// iterator into a caller-provided slot (`init(args.., slot: *mut ())`).
 pub trait ReusedOpaqueIterKind: 'static {
     /// Element type (scalar; `T == T::RuntimeValue`).
-    type Item: StagedType + Copy + 'static;
+    type Item: RegisterScalar;
     /// `init(args.., slot: *mut ())` — calls [`emplace_iter`].
     type Init: ExternFn<Ret = ()>;
 }

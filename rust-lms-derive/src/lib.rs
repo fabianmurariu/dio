@@ -18,7 +18,26 @@
 
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
-use syn::{parse_macro_input, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnType, Type};
+use syn::{
+    parse_macro_input, parse_quote, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnType, Type,
+};
+
+fn is_path(ty: &Type, expected: &str) -> bool {
+    matches!(ty, Type::Path(path) if path.qself.is_none() && path.path.is_ident(expected))
+}
+
+/// These mappings intentionally erase a Rust field to an integer with the same
+/// bits. All other fields must use a staged marker whose `RuntimeValue` is the
+/// field's actual Rust type.
+fn is_supported_erased_field(field_ty: &Type, staged_ty: &Type) -> bool {
+    (is_path(field_ty, "usize") && is_path(staged_ty, "u64"))
+        || (is_path(field_ty, "isize") && is_path(staged_ty, "i64"))
+        || (matches!(field_ty, Type::Ptr(_)) && is_path(staged_ty, "u64"))
+}
+
+fn is_marker_runtime_value(field_ty: &Type, staged_ty: &Type) -> bool {
+    quote!(#field_ty).to_string() == quote!(#staged_ty :: RuntimeValue).to_string()
+}
 
 /// Derive macro for generating StagedType implementation for structs.
 ///
@@ -95,7 +114,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     // `<'a, M: StagedType>` -> impl_generics (with bounds), ty_generics (`<'a, M>`),
     // where_clause (the struct's own `where`, if any).
     let generics = &input.generics;
-    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let (impl_generics, ty_generics, _) = generics.split_for_impl();
 
     // A PhantomData tuple covering every generic param, so the (generic) field
     // marker structs use all of them (no "unused parameter" error). Const params
@@ -140,6 +159,45 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     // a constructor fn named after the field (the public call surface,
     // `PointType::x()`), with generic params inferred from the receiver.
     let staged_types: Vec<Type> = named_fields.iter().map(&resolve_staged_ty).collect();
+
+    // The derive itself emits unsafe trait implementations, so safe input must
+    // prove the representation facts those traits require. Ordinary fields use
+    // exact RuntimeValue equality. The small allowlist above covers the existing
+    // pointer/usize-to-integer erasures and is checked by LAYOUT_VALID below.
+    let mut trusted_generics = input.generics.clone();
+    trusted_generics
+        .make_where_clause()
+        .predicates
+        .push(parse_quote!(#struct_name #ty_generics: ::core::marker::Copy));
+    for (field, staged_ty) in named_fields.iter().zip(&staged_types) {
+        let field_ty = &field.ty;
+        if !is_supported_erased_field(field_ty, staged_ty)
+            && !is_marker_runtime_value(field_ty, staged_ty)
+        {
+            trusted_generics
+                .make_where_clause()
+                .predicates
+                .push(parse_quote!(
+                    #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #field_ty>
+                ));
+        }
+    }
+    let (trusted_impl_generics, _, trusted_where_clause) = trusted_generics.split_for_impl();
+
+    let layout_checks = named_fields.iter().zip(&staged_types).map(|(field, staged_ty)| {
+        let field_ty = &field.ty;
+        quote! {
+            assert!(
+                ::core::mem::size_of::<#field_ty>()
+                    == ::core::mem::size_of::<<#staged_ty as ::rust_lms::types::StagedType>::RuntimeValue>()
+            );
+            assert!(
+                ::core::mem::align_of::<#field_ty>()
+                    == ::core::mem::align_of::<<#staged_ty as ::rust_lms::types::StagedType>::RuntimeValue>()
+            );
+        }
+    });
+
     let field_items = named_fields.iter().enumerate().map(|(idx, field)| {
         let field_name = field.ident.as_ref().unwrap();
         let marker = format_ident!("__field_{}", field_name);
@@ -156,10 +214,13 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             }
             impl #impl_generics ::core::marker::Copy for #marker #ty_generics {}
 
-            impl #impl_generics ::rust_lms::_internal::Field for #marker #ty_generics #where_clause {
+            unsafe impl #trusted_impl_generics ::rust_lms::_internal::Field for #marker #ty_generics #trusted_where_clause {
                 type Parent = #struct_name #ty_generics;
                 type Out = #staged_ty;
-                const OFFSET: usize = ::core::mem::offset_of!(#struct_name #ty_generics, #field_name);
+                const OFFSET: usize = {
+                    let () = <#struct_name #ty_generics as ::rust_lms::types::StagedType>::LAYOUT_VALID;
+                    ::core::mem::offset_of!(#struct_name #ty_generics, #field_name)
+                };
                 const INDEX: usize = #idx;
             }
 
@@ -176,7 +237,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         // conditionally-`Copy` generic structs (where the inline bounds alone
         // don't imply it), and is trivially true for plain `Copy` structs.
         let mut preds: Vec<proc_macro2::TokenStream> = vec![quote! { Self: ::core::marker::Copy }];
-        if let Some(wc) = where_clause {
+        if let Some(wc) = trusted_where_clause {
             preds.extend(wc.predicates.iter().map(|p| quote! { #p }));
         }
         for ty in &staged_types {
@@ -196,8 +257,12 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             #(#field_items)*
         }
 
-        impl #impl_generics ::rust_lms::types::StagedType for #struct_name #ty_generics #where_clause {
+        unsafe impl #trusted_impl_generics ::rust_lms::types::StagedType for #struct_name #ty_generics #trusted_where_clause {
             type RuntimeValue = #struct_name #ty_generics;
+
+            const LAYOUT_VALID: () = {
+                #(#layout_checks)*
+            };
 
             fn cranelift_type() -> ::cranelift_codegen::ir::Type {
                 // Internally we use I64 (pointer to stack slot)
@@ -205,10 +270,12 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             }
 
             fn size_of() -> usize {
+                let () = Self::LAYOUT_VALID;
                 ::std::mem::size_of::<#struct_name #ty_generics>()
             }
 
             fn align_of() -> usize {
+                let () = Self::LAYOUT_VALID;
                 ::std::mem::align_of::<#struct_name #ty_generics>()
             }
 
@@ -228,7 +295,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             }
         }
 
-        impl #impl_generics ::rust_lms::types::CopyType for #struct_name #ty_generics #copy_where {}
+        unsafe impl #trusted_impl_generics ::rust_lms::types::CopyType for #struct_name #ty_generics #copy_where {}
     };
 
     TokenStream::from(expanded)

@@ -54,28 +54,22 @@ where
 /// Convenience field access for staged zipped items.
 pub trait ZipItemAccess<A, B>: Staged<Out = ZipItem<A, B>> + Sized
 where
-    A: StagedType,
-    B: StagedType,
+    A: CopyType,
+    B: CopyType,
 {
-    fn first(self) -> LoadField<Self, ZipItemType::__field_first<A, B>>
-    where
-        A: CopyType,
-    {
+    fn first(self) -> LoadField<Self, ZipItemType::__field_first<A, B>> {
         load_field(self, ZipItemType::first::<A, B>())
     }
 
-    fn second(self) -> LoadField<Self, ZipItemType::__field_second<A, B>>
-    where
-        B: CopyType,
-    {
+    fn second(self) -> LoadField<Self, ZipItemType::__field_second<A, B>> {
         load_field(self, ZipItemType::second::<A, B>())
     }
 }
 
 impl<A, B, S> ZipItemAccess<A, B> for S
 where
-    A: StagedType,
-    B: StagedType,
+    A: CopyType,
+    B: CopyType,
     S: Staged<Out = ZipItem<A, B>> + Sized,
 {
 }
@@ -130,7 +124,7 @@ impl<I: Clone, S: Clone> Clone for ZipGetAt<I, S> {
 
 impl<I: Copy, S: Copy> Copy for ZipGetAt<I, S> {}
 
-impl<I, S> Staged for ZipGetAt<I, S>
+unsafe impl<I, S> Staged for ZipGetAt<I, S>
 where
     I: IndexedSource + Clone,
     S: IndexedSource + Clone,

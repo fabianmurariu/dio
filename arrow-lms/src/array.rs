@@ -227,7 +227,7 @@ impl<V: Clone, I: Clone> Clone for ValidityIsValid<V, I> {
 
 impl<V: Copy, I: Copy> Copy for ValidityIsValid<V, I> {}
 
-impl<'r, V, I> Staged for ValidityIsValid<V, I>
+unsafe impl<'r, V, I> Staged for ValidityIsValid<V, I>
 where
     V: ValiditySource<'r>,
     I: Staged<Out = u64> + Clone + 'r,

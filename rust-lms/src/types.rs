@@ -18,9 +18,39 @@ use cranelift_frontend::FunctionBuilder;
 /// - Its runtime value representation
 /// - Its Cranelift IR type
 /// - Size and alignment information for struct layout
-pub trait StagedType {
+///
+/// Prefer `#[derive(StagedType)]` for `#[repr(C)]` structs. Manual
+/// implementations are part of the compiler's trusted boundary.
+///
+/// # Safety
+///
+/// `RuntimeValue`, `cranelift_type`, `size_of`, and `align_of` must describe one
+/// consistent runtime representation. The ABI methods must classify that same
+/// representation correctly, and every value produced for this type must be a
+/// valid `RuntimeValue`. Incorrect implementations can make generated code
+/// perform invalid loads, stores, calls, or Rust function-pointer conversions.
+///
+/// The derive macro rejects field markers with incompatible runtime types:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct InvalidField {
+///     #[staged(bool)]
+///     byte: u8,
+/// }
+/// ```
+pub unsafe trait StagedType {
     /// The actual runtime type (e.g., i64 for i64)
     type RuntimeValue;
+
+    /// Compile-time representation checks emitted by `#[derive(StagedType)]`.
+    /// Manual unsafe implementations are responsible for validating their own
+    /// layout and may use the default.
+    #[doc(hidden)]
+    const LAYOUT_VALID: () = ();
 
     /// Get the Cranelift IR type representation.
     /// For primitives, this is the actual type (I64, F64, etc.)
@@ -92,7 +122,11 @@ pub trait StagedType {
 ///
 /// Not all StagedType values can be constants (e.g., function types cannot),
 /// so this is a separate trait.
-pub trait ConstantType: StagedType {
+/// # Safety
+///
+/// [`Self::codegen_constant`] must produce the exact IR type and bit-level
+/// representation declared by [`StagedType`] and must represent `value`.
+pub unsafe trait ConstantType: StagedType {
     /// Generate code for a constant value
     fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
 }
@@ -104,7 +138,12 @@ pub trait ConstantType: StagedType {
 ///
 /// Primitive types (i64, f64, bool) are always CopyType.
 /// Structs are CopyType only if all their fields are CopyType.
-pub trait CopyType: StagedType + Copy {}
+/// # Safety
+///
+/// Values using this staged representation must be valid to duplicate by
+/// copying [`StagedType::size_of`] bytes, and the associated `RuntimeValue`
+/// must have ordinary Rust copy semantics.
+pub unsafe trait CopyType: StagedType<RuntimeValue: Copy> + Copy {}
 
 // =============================================================================
 // Concrete Type Markers
@@ -120,7 +159,7 @@ pub trait CopyType: StagedType + Copy {}
 
 macro_rules! impl_int_staged_type {
     ($ty:ty, $ir_ty:expr) => {
-        impl StagedType for $ty {
+        unsafe impl StagedType for $ty {
             type RuntimeValue = $ty;
 
             fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -136,13 +175,13 @@ macro_rules! impl_int_staged_type {
             }
         }
 
-        impl ConstantType for $ty {
+        unsafe impl ConstantType for $ty {
             fn codegen_constant(value: &$ty, builder: &mut FunctionBuilder) -> Value {
                 builder.ins().iconst($ir_ty, *value as i64)
             }
         }
 
-        impl CopyType for $ty {}
+        unsafe impl CopyType for $ty {}
     };
 }
 
@@ -151,7 +190,7 @@ impl_int_staged_type!(u8, types::I8);
 impl_int_staged_type!(i16, types::I16);
 impl_int_staged_type!(u16, types::I16);
 
-impl StagedType for i64 {
+unsafe impl StagedType for i64 {
     type RuntimeValue = i64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -167,15 +206,15 @@ impl StagedType for i64 {
     }
 }
 
-impl ConstantType for i64 {
+unsafe impl ConstantType for i64 {
     fn codegen_constant(value: &i64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value)
     }
 }
 
-impl CopyType for i64 {}
+unsafe impl CopyType for i64 {}
 
-impl StagedType for u64 {
+unsafe impl StagedType for u64 {
     type RuntimeValue = u64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -191,15 +230,15 @@ impl StagedType for u64 {
     }
 }
 
-impl ConstantType for u64 {
+unsafe impl ConstantType for u64 {
     fn codegen_constant(value: &u64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I64, *value as i64)
     }
 }
 
-impl CopyType for u64 {}
+unsafe impl CopyType for u64 {}
 
-impl StagedType for i32 {
+unsafe impl StagedType for i32 {
     type RuntimeValue = i32;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -215,15 +254,15 @@ impl StagedType for i32 {
     }
 }
 
-impl ConstantType for i32 {
+unsafe impl ConstantType for i32 {
     fn codegen_constant(value: &i32, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I32, *value as i64)
     }
 }
 
-impl CopyType for i32 {}
+unsafe impl CopyType for i32 {}
 
-impl StagedType for u32 {
+unsafe impl StagedType for u32 {
     type RuntimeValue = u32;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -239,15 +278,15 @@ impl StagedType for u32 {
     }
 }
 
-impl ConstantType for u32 {
+unsafe impl ConstantType for u32 {
     fn codegen_constant(value: &u32, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I32, *value as i64)
     }
 }
 
-impl CopyType for u32 {}
+unsafe impl CopyType for u32 {}
 
-impl StagedType for f32 {
+unsafe impl StagedType for f32 {
     type RuntimeValue = f32;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -263,15 +302,15 @@ impl StagedType for f32 {
     }
 }
 
-impl ConstantType for f32 {
+unsafe impl ConstantType for f32 {
     fn codegen_constant(value: &f32, builder: &mut FunctionBuilder) -> Value {
         builder.ins().f32const(*value)
     }
 }
 
-impl CopyType for f32 {}
+unsafe impl CopyType for f32 {}
 
-impl StagedType for bool {
+unsafe impl StagedType for bool {
     type RuntimeValue = bool;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -287,15 +326,15 @@ impl StagedType for bool {
     }
 }
 
-impl ConstantType for bool {
+unsafe impl ConstantType for bool {
     fn codegen_constant(value: &bool, builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I8, if *value { 1 } else { 0 })
     }
 }
 
-impl CopyType for bool {}
+unsafe impl CopyType for bool {}
 
-impl StagedType for f64 {
+unsafe impl StagedType for f64 {
     type RuntimeValue = f64;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -311,15 +350,15 @@ impl StagedType for f64 {
     }
 }
 
-impl ConstantType for f64 {
+unsafe impl ConstantType for f64 {
     fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
         builder.ins().f64const(*value)
     }
 }
 
-impl CopyType for f64 {}
+unsafe impl CopyType for f64 {}
 
-impl StagedType for () {
+unsafe impl StagedType for () {
     type RuntimeValue = ();
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -335,10 +374,10 @@ impl StagedType for () {
     }
 }
 
-impl ConstantType for () {
+unsafe impl ConstantType for () {
     fn codegen_constant(_value: &(), builder: &mut FunctionBuilder) -> Value {
         builder.ins().iconst(types::I8, 0)
     }
 }
 
-impl CopyType for () {}
+unsafe impl CopyType for () {}

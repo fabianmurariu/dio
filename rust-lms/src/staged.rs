@@ -21,43 +21,55 @@ use cranelift_codegen::ir::types;
 /// Optimized storage for slice parameters (ptr and len as separate variables).
 /// This avoids the need for stack slot loads in tight loops.
 #[derive(Clone, Copy)]
-pub struct SliceVars {
-    pub ptr_var: Variable,
-    pub len_var: Variable,
+pub(crate) struct SliceVars {
+    pub(crate) ptr_var: Variable,
+    pub(crate) len_var: Variable,
 }
 
 /// Context provided during code generation.
 ///
-/// This gives access to the function builder, JIT module, and mappings from
-/// our internal IDs to Cranelift entities.
+/// This type is exposed so downstream implementations of [`Staged`] can name
+/// the codegen method's argument. Its backend state is intentionally private;
+/// downstream expressions should lower by composing existing staged nodes.
+///
+/// ```compile_fail
+/// use rust_lms::prelude::CompilationContext;
+///
+/// fn cannot_mutate_the_backend(ctx: &mut CompilationContext<'_, '_>) {
+///     let _ = &mut ctx.builder;
+/// }
+/// ```
 pub struct CompilationContext<'a, 'b> {
     /// The function builder for the current function
-    pub builder: &'b mut FunctionBuilder<'a>,
+    pub(crate) builder: &'b mut FunctionBuilder<'a>,
     /// The JIT module for creating new functions
-    pub module: &'b mut JITModule,
+    pub(crate) module: &'b mut JITModule,
     /// Mapping from our variable IDs to Cranelift Variables
-    pub var_map: &'b mut HashMap<usize, Variable>,
+    pub(crate) var_map: &'b mut HashMap<usize, Variable>,
     /// Mapping from our function IDs to Cranelift FuncIds
-    pub func_map: &'b HashMap<usize, cranelift_module::FuncId>,
+    pub(crate) func_map: &'b HashMap<usize, cranelift_module::FuncId>,
     /// Mapping from extern function IDs to Cranelift FuncRefs (per-function)
-    pub extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
+    pub(crate) extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
     /// Mapping from extern function IDs to module FuncIds
-    pub extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
+    pub(crate) extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
     /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
     /// For slice parameters, this allows direct register access instead of stack loads
-    pub slice_vars: &'b mut HashMap<usize, SliceVars>,
+    pub(crate) slice_vars: &'b mut HashMap<usize, SliceVars>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
-    pub unit_value: Option<Value>,
+    pub(crate) unit_value: Option<Value>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
     /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
-    pub loop_exit_stack: Vec<Block>,
+    pub(crate) loop_exit_stack: Vec<Block>,
 }
 
 impl<'a, 'b> CompilationContext<'a, 'b> {
     /// Get or create a FuncRef for an external function.
     ///
     /// FuncRefs are per-function, so we cache them in extern_func_refs.
-    pub fn get_extern_func_ref(&mut self, extern_id: usize) -> cranelift_codegen::ir::FuncRef {
+    pub(crate) fn get_extern_func_ref(
+        &mut self,
+        extern_id: usize,
+    ) -> cranelift_codegen::ir::FuncRef {
         if let Some(&func_ref) = self.extern_func_refs.get(&extern_id) {
             return func_ref;
         }
@@ -78,7 +90,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     ///
     /// This avoids creating duplicate dead values when sequencing side-effecting
     /// operations like `Assign` and `InitVar`.
-    pub fn get_unit_value(&mut self) -> Value {
+    pub(crate) fn get_unit_value(&mut self) -> Value {
         if let Some(val) = self.unit_value {
             val
         } else {
@@ -101,7 +113,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     /// This pair of helpers ([`Self::slice_data_ptr`] / [`Self::slice_len`]) is
     /// the single place that knows about slice layout; slice ops call into it
     /// rather than re-deriving the pointer themselves.
-    pub fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
                 return self.builder.use_var(sv.ptr_var);
@@ -118,7 +130,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     ///
     /// See [`Self::slice_data_ptr`] for the two encodings; `len` is the second
     /// register variable, or offset 8 of the `(ptr, len)` pair.
-    pub fn slice_len(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> Value {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
                 return self.builder.use_var(sv.len_var);
@@ -139,7 +151,32 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
 ///
 /// Types implementing this trait can generate Cranelift IR code that produces
 /// a value of type `Self::Out` at runtime.
-pub trait Staged {
+///
+/// # Safety
+///
+/// [`Self::codegen`] must return a value whose IR type and runtime encoding
+/// exactly match `Self::Out`. Any emitted memory access, call, or control flow
+/// must uphold the contracts of the staged operands it consumes. If `var_id`
+/// returns an ID, it must identify a compiler variable containing that same
+/// output representation.
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// struct UntrustedExpression;
+///
+/// impl Staged for UntrustedExpression {
+///     type Out = i64;
+///
+///     fn codegen(
+///         &self,
+///         _ctx: &mut CompilationContext<'_, '_>,
+///     ) -> cranelift_codegen::ir::Value {
+///         unimplemented!()
+///     }
+/// }
+/// ```
+pub unsafe trait Staged {
     /// The output type this staged computation produces
     type Out: StagedType;
 
@@ -193,7 +230,7 @@ impl<T: StagedType> Var<T> {
     }
 }
 
-impl<T: StagedType> Staged for Var<T> {
+unsafe impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -244,7 +281,7 @@ impl<T: ConstantType> Const<T> {
 // Conditionally implement Copy when T and T::RuntimeValue are Copy
 impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
 
-impl<T: ConstantType> Staged for Const<T> {
+unsafe impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -480,7 +517,7 @@ pub struct Assign<V, EXPR> {
     expr: EXPR,
 }
 
-impl<T, EXPR> Staged for Assign<Var<T>, EXPR>
+unsafe impl<T, EXPR> Staged for Assign<Var<T>, EXPR>
 where
     T: StagedType,
     EXPR: Staged<Out = T>,
@@ -589,7 +626,7 @@ impl<T: StagedType, EXPR> std::ops::Deref for LetVar<T, EXPR> {
 }
 
 // When InitVar is staged, it performs the initialization
-impl<T, EXPR> Staged for LetVar<T, EXPR>
+unsafe impl<T, EXPR> Staged for LetVar<T, EXPR>
 where
     T: StagedType,
     EXPR: Staged<Out = T>,

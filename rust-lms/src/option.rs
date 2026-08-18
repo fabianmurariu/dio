@@ -108,7 +108,7 @@ pub struct COptionType<T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> StagedType for COptionType<T> {
+unsafe impl<T: StagedType> StagedType for COptionType<T> {
     type RuntimeValue = COption<T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -153,7 +153,7 @@ pub struct OptRefType<'a, T: StagedType> {
     _phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
+unsafe impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
     type RuntimeValue = Option<&'a T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -169,7 +169,7 @@ pub struct OptMutRefType<'a, T: StagedType> {
     _phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
+unsafe impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
     type RuntimeValue = Option<&'a mut T::RuntimeValue>;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -188,7 +188,7 @@ pub struct CSome<T: StagedType, E> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
+unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     type Out = COptionType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -246,7 +246,7 @@ pub struct CNone<T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType> Staged for CNone<T> {
+unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -285,7 +285,7 @@ pub struct OptRefSome<'a, T: StagedType, E> {
     _phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
+unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
     type Out = OptRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -310,7 +310,7 @@ pub struct OptRefNone<'a, T: StagedType> {
     _phantom: PhantomData<&'a T>,
 }
 
-impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
+unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -333,7 +333,7 @@ pub struct OptMutRefSome<'a, T: StagedType, E> {
     _phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
+unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -357,7 +357,7 @@ pub struct OptMutRefNone<'a, T: StagedType> {
     _phantom: PhantomData<&'a mut T>,
 }
 
-impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
+unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -382,7 +382,7 @@ pub struct IsSome<E> {
     opt: E,
 }
 
-impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
+unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -412,7 +412,7 @@ pub struct IsNone<E> {
     opt: E,
 }
 
-impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
+unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -445,7 +445,7 @@ pub struct IsRefSome<E> {
     opt: E,
 }
 
-impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
+unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -470,7 +470,7 @@ pub struct IsRefNone<E> {
     opt: E,
 }
 
-impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
+unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -496,7 +496,9 @@ pub struct IsMutRefSome<E> {
     opt: E,
 }
 
-impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged for IsMutRefSome<E> {
+unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged
+    for IsMutRefSome<E>
+{
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -519,7 +521,9 @@ pub struct IsMutRefNone<E> {
     opt: E,
 }
 
-impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged for IsMutRefNone<E> {
+unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged
+    for IsMutRefNone<E>
+{
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -548,7 +552,7 @@ pub struct UnwrapOr<E, D, T: StagedType> {
     _phantom: PhantomData<T>,
 }
 
-impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> Staged
+unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> Staged
     for UnwrapOr<E, D, T>
 {
     type Out = T;
@@ -641,7 +645,7 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOpt<T, OUT, OPT, SomeBody, NoneBody>
+unsafe impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOpt<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType,
     OUT: StagedType,
@@ -776,7 +780,8 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
+unsafe impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged
+    for MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType + 'a,
     OUT: StagedType,
@@ -874,7 +879,8 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
+unsafe impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged
+    for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
     T: StagedType + 'a,
     OUT: StagedType,

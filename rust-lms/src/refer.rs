@@ -57,7 +57,7 @@ impl<'a, T, Tag> Clone for SRef<'a, T, Tag> {
 }
 impl<'a, T, Tag> Copy for SRef<'a, T, Tag> {}
 
-impl<'a, T: StagedType> StagedType for SRef<'a, T, RustRef> {
+unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T, RustRef> {
     type RuntimeValue = &'a T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -65,7 +65,7 @@ impl<'a, T: StagedType> StagedType for SRef<'a, T, RustRef> {
     }
 }
 
-impl<'a, T: StagedType> StagedType for SRef<'a, T, RustPtr> {
+unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T, RustPtr> {
     type RuntimeValue = *const T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -96,7 +96,7 @@ impl<'a, T, Tag> Clone for SRefMut<'a, T, Tag> {
 }
 impl<'a, T, Tag> Copy for SRefMut<'a, T, Tag> {}
 
-impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustRef> {
+unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustRef> {
     type RuntimeValue = &'a mut T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -104,7 +104,7 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustRef> {
     }
 }
 
-impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustPtr> {
+unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustPtr> {
     type RuntimeValue = *mut T::RuntimeValue;
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -116,8 +116,8 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, T, RustPtr> {
 // be loaded from a field / bound to a `Var` (e.g. a `SVec`'s buffer pointer read
 // out of its control block). Only the raw-pointer (`RustPtr`) flavors: a `&T`
 // (`RustRef`) stays off the copy path.
-impl<'a, T: StagedType> CopyType for SRef<'a, T, RustPtr> {}
-impl<'a, T: StagedType> CopyType for SRefMut<'a, T, RustPtr> {}
+unsafe impl<'a, T: StagedType> CopyType for SRef<'a, T, RustPtr> {}
+unsafe impl<'a, T: StagedType> CopyType for SRefMut<'a, T, RustPtr> {}
 
 // =============================================================================
 // Type Aliases for Convenience
@@ -141,7 +141,7 @@ pub struct LoadRef<'a, P> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, P, T, Tag> Staged for LoadRef<'a, P>
+unsafe impl<'a, P, T, Tag> Staged for LoadRef<'a, P>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     T: StagedType + 'a,
@@ -188,7 +188,7 @@ pub struct LoadMutRef<'a, P> {
     _marker: PhantomData<&'a mut ()>,
 }
 
-impl<'a, P, T, Tag> Staged for LoadMutRef<'a, P>
+unsafe impl<'a, P, T, Tag> Staged for LoadMutRef<'a, P>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     T: StagedType + 'a,
@@ -240,7 +240,7 @@ pub struct Store<'a, P, V> {
     _marker: PhantomData<&'a mut ()>,
 }
 
-impl<'a, P, V, T, Tag> Staged for Store<'a, P, V>
+unsafe impl<'a, P, V, T, Tag> Staged for Store<'a, P, V>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     V: Staged<Out = T>,
@@ -302,7 +302,7 @@ pub struct PtrOffset<'a, P, I> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, P, I, T, Tag: 'a> Staged for PtrOffset<'a, P, I>
+unsafe impl<'a, P, I, T, Tag: 'a> Staged for PtrOffset<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = i64>,
@@ -346,7 +346,7 @@ pub struct PtrOffsetMut<'a, P, I> {
     _marker: PhantomData<&'a mut ()>,
 }
 
-impl<'a, P, I, T, Tag: 'a> Staged for PtrOffsetMut<'a, P, I>
+unsafe impl<'a, P, I, T, Tag: 'a> Staged for PtrOffsetMut<'a, P, I>
 where
     P: Staged<Out = SRefMut<'a, T, Tag>>,
     I: Staged<Out = i64>,
@@ -393,7 +393,7 @@ pub struct ArrayIndex<'a, P, I> {
     _marker: PhantomData<&'a ()>,
 }
 
-impl<'a, P, I, T, Tag: 'a> Staged for ArrayIndex<'a, P, I>
+unsafe impl<'a, P, I, T, Tag: 'a> Staged for ArrayIndex<'a, P, I>
 where
     P: Staged<Out = SRef<'a, T, Tag>>,
     I: Staged<Out = i64>,
@@ -455,7 +455,7 @@ impl<S> Clone for ConstPtr<S> {
 }
 impl<S> Copy for ConstPtr<S> {}
 
-impl<S: StagedType> Staged for ConstPtr<S> {
+unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         ctx.builder.ins().iconst(types::I64, self.addr as i64)
@@ -505,7 +505,7 @@ impl<P: Clone, S> Clone for PtrCast<P, S> {
 }
 impl<P: Copy, S> Copy for PtrCast<P, S> {}
 
-impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
+unsafe impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
     type Out = S;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         // A cast is a no-op on the address value; only the static type changes.
@@ -585,7 +585,7 @@ impl<P: Clone> Clone for PtrIsNull<P> {
 }
 impl<P: Copy> Copy for PtrIsNull<P> {}
 
-impl<P: Staged> Staged for PtrIsNull<P> {
+unsafe impl<P: Staged> Staged for PtrIsNull<P> {
     type Out = bool;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let p = self.ptr.codegen(ctx);

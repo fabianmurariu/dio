@@ -211,7 +211,7 @@ macro_rules! impl_fun_n {
             _phantom: PhantomData<OUT>,
         }
 
-        impl<OUT: StagedType> StagedType for $FunType<OUT> {
+        unsafe impl<OUT: StagedType> StagedType for $FunType<OUT> {
             type RuntimeValue = extern "C" fn() -> OUT::RuntimeValue;
 
             fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -245,7 +245,7 @@ macro_rules! impl_fun_n {
             }
         }
 
-        impl<OUT: StagedType> Staged for $FunRef<OUT> {
+        unsafe impl<OUT: StagedType> Staged for $FunRef<OUT> {
             type Out = $FunType<OUT>;
 
             fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -259,7 +259,7 @@ macro_rules! impl_fun_n {
             func: $FunRef<OUT>,
         }
 
-        impl<OUT: StagedType> Staged for $Call<OUT> {
+        unsafe impl<OUT: StagedType> Staged for $Call<OUT> {
             type Out = OUT;
 
             fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -284,7 +284,7 @@ macro_rules! impl_fun_n {
             _phantom: PhantomData<($($T,)+ OUT)>,
         }
 
-        impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
+        unsafe impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
             type RuntimeValue = extern "C" fn($($T::RuntimeValue,)+) -> OUT::RuntimeValue;
 
             fn cranelift_type() -> cranelift_codegen::ir::Type {
@@ -318,7 +318,7 @@ macro_rules! impl_fun_n {
             }
         }
 
-        impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
+        unsafe impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
             type Out = $FunType<$($T,)+ OUT>;
 
             fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -333,7 +333,7 @@ macro_rules! impl_fun_n {
             $($arg: $Arg,)+
         }
 
-        impl<$($T: StagedType,)+ OUT: StagedType, $($Arg),+> Staged for $Call<$($T,)+ OUT, $($Arg),+>
+        unsafe impl<$($T: StagedType,)+ OUT: StagedType, $($Arg),+> Staged for $Call<$($T,)+ OUT, $($Arg),+>
         where
             $($Arg: Staged<Out = $T>,)+
         {

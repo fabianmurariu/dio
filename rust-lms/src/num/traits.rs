@@ -21,8 +21,15 @@ use crate::types::{ConstantType, CopyType, StagedType};
 // Trait hierarchy
 // =============================================================================
 
+mod sealed {
+    pub trait Sealed {}
+}
+
 /// Numeric staged types — share arithmetic and comparison operations.
-pub trait Num: StagedType + ConstantType + CopyType + 'static {
+///
+/// This trait is sealed because its methods return raw IR values whose type is
+/// trusted by every arithmetic expression.
+pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
     fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
     fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
     fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
@@ -53,6 +60,7 @@ pub trait FloatNum: Num {}
 
 macro_rules! impl_int_num {
     ($ty:ty, signed) => {
+        impl sealed::Sealed for $ty {}
         impl Num for $ty {
             fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
                 b.ins().iadd(l, r)
@@ -100,6 +108,7 @@ macro_rules! impl_int_num {
         }
     };
     ($ty:ty, unsigned) => {
+        impl sealed::Sealed for $ty {}
         impl Num for $ty {
             fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
                 b.ins().iadd(l, r)
@@ -161,6 +170,7 @@ impl_int_num!(u32, unsigned);
 // Floating point
 // =============================================================================
 
+impl sealed::Sealed for f64 {}
 impl Num for f64 {
     fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
         b.ins().fadd(l, r)
@@ -187,6 +197,7 @@ impl Num for f64 {
 
 impl FloatNum for f64 {}
 
+impl sealed::Sealed for f32 {}
 impl Num for f32 {
     fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
         b.ins().fadd(l, r)

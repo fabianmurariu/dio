@@ -132,7 +132,7 @@ impl<P: Clone, T> Clone for AsSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsSlice<P, T> {}
 
-impl<'a, P, R, T> Staged for AsSlice<P, T>
+unsafe impl<'a, P, R, T> Staged for AsSlice<P, T>
 where
     P: Staged<Out = SRef<'a, R>>,
     R: SliceRepr<T> + 'a,
@@ -239,7 +239,7 @@ impl<P: Clone, T> Clone for AsMutSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
 
-impl<'a, P, R, T> Staged for AsMutSlice<P, T>
+unsafe impl<'a, P, R, T> Staged for AsMutSlice<P, T>
 where
     P: Staged<Out = SRefMut<'a, R>>,
     R: MutSliceRepr<T> + 'a,
@@ -256,7 +256,7 @@ where
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================
 
-impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
+unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     /// Runtime type is `&[T::RuntimeValue]`
     type RuntimeValue = &'a [T::RuntimeValue];
 
@@ -294,7 +294,7 @@ impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
 
-impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
+unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     /// Runtime type is `&mut [T::RuntimeValue]`
     type RuntimeValue = &'a mut [T::RuntimeValue];
 
@@ -331,6 +331,11 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
 // SliceType: unify immutable and mutable slice fat pointers
 // =============================================================================
 
+mod slice_type_sealed {
+    pub trait Sealed {}
+    pub trait MutableSealed: Sealed {}
+}
+
 /// A staged slice fat-pointer type. Implemented by both `SRef<Slice<T>>`
 /// (`&[T]`) and `SRefMut<Slice<T>>` (`&mut [T]`), so a *single* op impl can
 /// serve both — the mutability lives entirely in the associated `ElemRef`.
@@ -340,7 +345,26 @@ impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
 /// `Out = S::Out`, so the result of `slice_unchecked` is itself a slice that
 /// supports `len`/`get`/`slice_unchecked`/… all over again — and a sub-slice
 /// of a `&mut [T]` stays mutable.
-pub trait SliceType: StagedType {
+///
+/// The trait is sealed; only the slice representations supplied by this crate
+/// may participate in slice lowering.
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct FabricatedSlice {
+///     ptr: u64,
+///     len: u64,
+/// }
+///
+/// impl SliceType for FabricatedSlice {
+///     type Elem = u8;
+///     type ElemRef = SPtr<u8>;
+/// }
+/// ```
+pub trait SliceType: StagedType + slice_type_sealed::Sealed {
     /// Element type (`T`).
     type Elem: StagedType;
     /// Reference-to-element produced by `as_ptr`/`get_ref_unchecked`:
@@ -353,16 +377,21 @@ impl<'a, T: StagedType> SliceType for SRef<'a, Slice<T>> {
     type ElemRef = SRef<'a, T>;
 }
 
+impl<'a, T: StagedType> slice_type_sealed::Sealed for SRef<'a, Slice<T>> {}
+
 impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
     type Elem = T;
     type ElemRef = SRefMut<'a, T>;
 }
 
+impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
+
 /// Marker for *mutable* slices (`SRefMut<Slice<T>>`). Gates the writing ops
 /// (`set_unchecked`) so they cannot be called on an immutable slice.
-pub trait MutSliceType: SliceType {}
+pub trait MutSliceType: SliceType + slice_type_sealed::MutableSealed {}
 
 impl<'a, T: StagedType> MutSliceType for SRefMut<'a, Slice<T>> {}
+impl<'a, T: StagedType> slice_type_sealed::MutableSealed for SRefMut<'a, Slice<T>> {}
 
 /// Convenience accessor for `S`'s element type inside generic op impls.
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
@@ -389,7 +418,7 @@ pub struct SliceLen<S> {
     slice: S,
 }
 
-impl<S> Staged for SliceLen<S>
+unsafe impl<S> Staged for SliceLen<S>
 where
     S: Staged,
     S::Out: SliceType,
@@ -412,7 +441,7 @@ pub struct SliceAsPtr<S> {
     slice: S,
 }
 
-impl<S> Staged for SliceAsPtr<S>
+unsafe impl<S> Staged for SliceAsPtr<S>
 where
     S: Staged,
     S::Out: SliceType,
@@ -436,7 +465,7 @@ pub struct SliceGetRefUnchecked<S, I> {
     index: I,
 }
 
-impl<S, I> Staged for SliceGetRefUnchecked<S, I>
+unsafe impl<S, I> Staged for SliceGetRefUnchecked<S, I>
 where
     S: Staged,
     S::Out: SliceType,
@@ -462,7 +491,7 @@ pub struct SliceGetUnchecked<S, I> {
     index: I,
 }
 
-impl<S, I> Staged for SliceGetUnchecked<S, I>
+unsafe impl<S, I> Staged for SliceGetUnchecked<S, I>
 where
     S: Staged,
     S::Out: SliceType,
@@ -497,7 +526,7 @@ pub struct SliceSetUnchecked<S, I, V> {
     value: V,
 }
 
-impl<S, I, V> Staged for SliceSetUnchecked<S, I, V>
+unsafe impl<S, I, V> Staged for SliceSetUnchecked<S, I, V>
 where
     S: Staged,
     S::Out: MutSliceType,
@@ -531,7 +560,7 @@ pub struct SliceSwapUnchecked<S, I, J> {
     j: J,
 }
 
-impl<S, I, J> Staged for SliceSwapUnchecked<S, I, J>
+unsafe impl<S, I, J> Staged for SliceSwapUnchecked<S, I, J>
 where
     S: Staged,
     S::Out: MutSliceType,
@@ -574,7 +603,7 @@ pub struct SliceSliceUnchecked<S, START, END> {
     end: END,
 }
 
-impl<S, START, END> Staged for SliceSliceUnchecked<S, START, END>
+unsafe impl<S, START, END> Staged for SliceSliceUnchecked<S, START, END>
 where
     S: Staged,
     S::Out: SliceType,
