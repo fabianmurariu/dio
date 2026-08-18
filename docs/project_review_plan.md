@@ -30,8 +30,8 @@ larger ownership and ABI redesigns.
    signature. Add compile-fail tests for wrong arity and same-ABI/wrong-Rust-type
    calls. Covers PR-04. **Status: complete.**
 3. **Restrict representation-to-slice conversions.** Replace blanket safe
-   reinterpretation with sealed/unsafe representation witnesses and prove that
-   ordinary `SRef<T>` cannot become a slice. Covers PR-06.
+   reinterpretation with unsafe representation witnesses and prove that
+   ordinary `SRef<T>` cannot become a slice. Covers PR-06. **Status: complete.**
 4. **Mark the trusted trait boundary.** Seal internal layout/codegen traits and
    make supported external implementations unsafe with documented invariants.
    Reduce `CompilationContext` visibility. Covers PR-02.

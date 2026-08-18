@@ -85,6 +85,30 @@ pub struct Slice<T: StagedType> {
 // AsSlice: view any repr-compatible `(ptr, len)` value as a staged slice
 // =============================================================================
 
+/// Unsafe layout witness for staged types that can be decoded as a slice
+/// descriptor for `T`.
+///
+/// This trait witnesses only the representation layout. A particular
+/// descriptor's pointer validity, alignment, element count, and lifetime are
+/// checked by the caller of [`ReprSliceOps::as_slice`].
+///
+/// # Safety
+///
+/// The staged representation of `Self` must store a pointer at byte offset 0
+/// and a `u64` element count at byte offset 8. The pointer must have the same
+/// representation as a pointer to `T`.
+pub unsafe trait SliceRepr<T: StagedType>: StagedType {}
+
+/// Unsafe layout witness for staged types that can also be decoded as a
+/// mutable slice descriptor for `T`.
+///
+/// # Safety
+///
+/// In addition to the requirements of [`SliceRepr`], the pointer field must
+/// have a representation that permits writes. Whether a particular descriptor
+/// is exclusively writable remains the caller's responsibility.
+pub unsafe trait MutSliceRepr<T: StagedType>: SliceRepr<T> {}
+
 /// Re-types a reference to a repr-compatible `(ptr, len)` value as a staged
 /// `Slice<T>`.
 ///
@@ -111,7 +135,7 @@ impl<P: Copy, T> Copy for AsSlice<P, T> {}
 impl<'a, P, R, T> Staged for AsSlice<P, T>
 where
     P: Staged<Out = SRef<'a, R>>,
-    R: StagedType + 'a,
+    R: SliceRepr<T> + 'a,
     T: StagedType + 'a,
 {
     type Out = SRef<'a, Slice<T>>;
@@ -121,15 +145,32 @@ where
     }
 }
 
-/// Extension trait for values that point at a repr-compatible `(ptr, len)`.
+/// Extension trait for values that point at a witnessed `(ptr, len)`
+/// representation.
+///
+/// Ordinary staged references cannot be reinterpreted as slices:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<'static, i64>>) {
+///     let _ = unsafe { value.as_slice::<u8>() };
+/// }
+/// ```
 pub trait ReprSliceOps<'a, R>: Staged<Out = SRef<'a, R>> + Sized
 where
     R: StagedType + 'a,
 {
     /// Reinterpret the pointed-to representation as a staged slice of `T`.
-    fn as_slice<T>(self) -> AsSlice<Self, T>
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live and aligned for
+    /// reads of `len` values of `T` for the duration of generated execution.
+    unsafe fn as_slice<T>(self) -> AsSlice<Self, T>
     where
         T: StagedType + 'a,
+        R: SliceRepr<T>,
     {
         AsSlice {
             repr: self,
@@ -154,9 +195,16 @@ where
     R: StagedType + 'a,
 {
     /// Reinterpret the pointed-to representation as a staged *mutable* slice.
-    fn as_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live, aligned, and
+    /// exclusively writable for `len` values of `T` for the duration of
+    /// generated execution.
+    unsafe fn as_mut_slice<T>(self) -> AsMutSlice<Self, T>
     where
         T: StagedType + 'a,
+        R: MutSliceRepr<T>,
     {
         AsMutSlice {
             repr: self,
@@ -194,7 +242,7 @@ impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
 impl<'a, P, R, T> Staged for AsMutSlice<P, T>
 where
     P: Staged<Out = SRefMut<'a, R>>,
-    R: StagedType + 'a,
+    R: MutSliceRepr<T> + 'a,
     T: StagedType + 'a,
 {
     type Out = SRefMut<'a, Slice<T>>;

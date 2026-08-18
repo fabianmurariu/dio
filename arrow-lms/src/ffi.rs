@@ -37,6 +37,23 @@ pub struct FfiBuffer {
     pub len: usize,
 }
 
+const _: () = {
+    assert!(std::mem::size_of::<*mut u8>() == 8);
+    assert!(std::mem::size_of::<usize>() == 8);
+    assert!(std::mem::offset_of!(FfiBuffer, ptr) == 0);
+    assert!(std::mem::offset_of!(FfiBuffer, len) == 8);
+};
+
+// SAFETY: FfiBuffer is repr(C), and the assertions above keep its pointer and
+// u64-sized element count at the offsets consumed by rust-lms slice codegen.
+// Individual buffer validity remains the unsafe conversion caller's contract.
+unsafe impl<T: StagedType> SliceRepr<T> for FfiBuffer {}
+
+// SAFETY: FfiBuffer stores a mutable pointer at offset 0. Individual instances
+// must still be exclusively writable before they are converted to mutable
+// slices.
+unsafe impl<T: StagedType> MutSliceRepr<T> for FfiBuffer {}
+
 impl FfiBuffer {
     pub const fn empty() -> Self {
         Self {
@@ -316,6 +333,18 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+
+    fn assert_slice_representations<T: StagedType>()
+    where
+        FfiBuffer: SliceRepr<T> + MutSliceRepr<T>,
+    {
+    }
+
+    #[test]
+    fn buffer_is_an_explicit_slice_representation() {
+        assert_slice_representations::<u8>();
+        assert_slice_representations::<i64>();
+    }
 
     #[test]
     fn descriptor_matches_arrow() {

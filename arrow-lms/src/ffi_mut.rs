@@ -21,8 +21,11 @@ where
 {
     /// Mark row `i` null (clear its validity bit): `byte &= ~mask`.
     pub fn set_null(&self, ctx: &mut Ctx, i: Var<u64>) {
-        let bytes =
-            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
+        // SAFETY: the mutable validity view must own exclusive access to its
+        // live bitmap buffer for the duration of generated execution.
+        let bytes = unsafe {
+            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>()
+        };
         let (byte_index, mask) = bit_location(self.validity.clone(), i);
         let byte_index = ctx.bind(byte_index);
         let old = int_cast::<u64, u8, _>(bytes.clone().get_unchecked(byte_index));
@@ -33,8 +36,11 @@ where
 
     /// Mark row `i` valid (set its validity bit): `byte |= mask`.
     pub fn set_valid(&self, ctx: &mut Ctx, i: Var<u64>) {
-        let bytes =
-            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>();
+        // SAFETY: the mutable validity view must own exclusive access to its
+        // live bitmap buffer for the duration of generated execution.
+        let bytes = unsafe {
+            field_addr(self.validity.clone(), FfiValidityType::bytes()).as_mut_slice::<u8>()
+        };
         let (byte_index, mask) = bit_location(self.validity.clone(), i);
         let byte_index = ctx.bind(byte_index);
         let old = int_cast::<u64, u8, _>(bytes.clone().get_unchecked(byte_index));

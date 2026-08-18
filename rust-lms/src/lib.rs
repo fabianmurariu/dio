@@ -179,8 +179,8 @@ pub mod prelude {
         PtrIsNull, PtrOffset, PtrOffsetMut, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
-        AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,
-        SliceRefOps, SliceType,
+        AsMutSlice, AsSlice, MutSliceRepr, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen,
+        SliceMutOps, SliceRefOps, SliceRepr, SliceType,
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,

@@ -82,7 +82,9 @@ impl<P, M> PrimitiveArrayView<P, M> {
         P: ArraySource<'r>,
         M: StagedType + 'r,
     {
-        field_addr(self.array.clone(), FfiArrayType::values()).as_slice::<M>()
+        // SAFETY: PrimitiveArrayView's element type must match the descriptor
+        // created for FfiArray::values, and that storage must outlive execution.
+        unsafe { field_addr(self.array.clone(), FfiArrayType::values()).as_slice::<M>() }
     }
 
     pub fn len<'r>(&self) -> impl Staged<Out = u64> + Clone + 'r + use<'r, P, M>
@@ -173,7 +175,9 @@ impl<V> ValidityView<V> {
     where
         V: ValiditySource<'r>,
     {
-        field_addr(self.validity.clone(), FfiValidityType::bytes()).as_slice::<u8>()
+        // SAFETY: FfiValidity::bytes describes the live byte buffer backing the
+        // bitmap for the duration of generated execution.
+        unsafe { field_addr(self.validity.clone(), FfiValidityType::bytes()).as_slice::<u8>() }
     }
 
     pub fn len<'r>(&self) -> LoadField<V, FfiValidityType::__field_bit_len>
