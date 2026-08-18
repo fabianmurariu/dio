@@ -620,7 +620,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let mut value = 0i64;
-        let result = f(&mut value);
+        let result = f.call(&mut value);
 
         assert_eq!(value, 42);
         assert_eq!(result, 42);
@@ -636,7 +636,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let value = 3.15159;
-        let result = f(&value);
+        let result = f.call(&value);
 
         assert_eq!(result, 3.15159);
     }
@@ -654,7 +654,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let mut value = 0i64;
-        let result = f(&mut value);
+        let result = f.call(&mut value);
 
         assert_eq!(value, 99);
         assert_eq!(result, 99);
@@ -672,7 +672,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let array = [10i64, 20, 30, 40, 50];
-        let result = f(array.as_ptr());
+        let result = f.call(array.as_ptr());
 
         assert_eq!(result, 30);
     }
@@ -689,7 +689,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let array = [100i64, 200, 300, 400, 500];
-        let result = f(array.as_ptr());
+        let result = f.call(array.as_ptr());
 
         assert_eq!(result, 400);
     }

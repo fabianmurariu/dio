@@ -29,9 +29,9 @@ fn p99_01_last_element() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(&[1, 2, 3, 4][..]), 4);
-    assert_eq!(g(&[42][..]), 42);
-    assert_eq!(g(&[][..]), 0);
+    assert_eq!(g.call(&[1, 2, 3, 4][..]), 4);
+    assert_eq!(g.call(&[42][..]), 42);
+    assert_eq!(g.call(&[][..]), 0);
 }
 
 // =============================================================================
@@ -62,22 +62,22 @@ fn p99_05_reverse_in_place() {
 
     let compiled = compiler.compile(f).expect("compile");
     // Note: `as_fn()` returns a fn pointer whose `&mut [i64]` parameter is
-    // bound to a single lifetime, not HRTB. Calling `compiled.as_fn()(...)`
+    // bound to a single lifetime, not HRTB. Calling `compiled.call(...)`
     // inline gives each call a fresh borrow.
     let mut data = vec![1i64, 2, 3, 4, 5];
-    compiled.as_fn()(&mut data[..]);
+    compiled.call(&mut data[..]);
     assert_eq!(data, vec![5, 4, 3, 2, 1]);
 
     let mut even = vec![10i64, 20, 30, 40];
-    compiled.as_fn()(&mut even[..]);
+    compiled.call(&mut even[..]);
     assert_eq!(even, vec![40, 30, 20, 10]);
 
     let mut single = vec![7i64];
-    compiled.as_fn()(&mut single[..]);
+    compiled.call(&mut single[..]);
     assert_eq!(single, vec![7]);
 
     let mut empty: Vec<i64> = vec![];
-    compiled.as_fn()(&mut empty[..]);
+    compiled.call(&mut empty[..]);
     assert_eq!(empty, Vec::<i64>::new());
 }
 
@@ -115,7 +115,7 @@ fn p99_31_is_prime() {
         (100, false),
         (1_000_003, true),
     ] {
-        assert_eq!(g(n), expected, "isPrime({n}) was wrong");
+        assert_eq!(g.call(n), expected, "isPrime({n}) was wrong");
     }
 }
 
@@ -144,11 +144,11 @@ fn p99_32_gcd() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(36, 63), 9);
-    assert_eq!(g(123456, 7890), 6);
-    assert_eq!(g(100, 0), 100);
-    assert_eq!(g(0, 25), 25);
-    assert_eq!(g(17, 13), 1);
+    assert_eq!(g.call(36, 63), 9);
+    assert_eq!(g.call(123456, 7890), 6);
+    assert_eq!(g.call(100, 0), 100);
+    assert_eq!(g.call(0, 25), 25);
+    assert_eq!(g.call(17, 13), 1);
 }
 
 // =============================================================================
@@ -193,9 +193,9 @@ fn p99_34_totient() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(1), 1);
-    assert_eq!(g(10), 4); // 1, 3, 7, 9
-    assert_eq!(g(9), 6);
-    assert_eq!(g(13), 12); // prime
-    assert_eq!(g(100), 40);
+    assert_eq!(g.call(1), 1);
+    assert_eq!(g.call(10), 4); // 1, 3, 7, 9
+    assert_eq!(g.call(9), 6);
+    assert_eq!(g.call(13), 12); // prime
+    assert_eq!(g.call(100), 40);
 }

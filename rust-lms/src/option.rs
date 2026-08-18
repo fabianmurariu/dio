@@ -1100,12 +1100,12 @@ mod tests {
         let f = compiled.as_fn();
 
         // Test with Some
-        assert_eq!(f(COption::Some(42)), 42);
-        assert_eq!(f(COption::Some(0)), 0);
-        assert_eq!(f(COption::Some(-100)), -100);
+        assert_eq!(f.call(COption::Some(42)), 42);
+        assert_eq!(f.call(COption::Some(0)), 0);
+        assert_eq!(f.call(COption::Some(-100)), -100);
 
         // Test with None
-        assert_eq!(f(COption::None), -1);
+        assert_eq!(f.call(COption::None), -1);
     }
 
     #[test]
@@ -1129,10 +1129,10 @@ mod tests {
         let compiled = compiler.compile(maybe_double).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(5), COption::Some(10));
-        assert_eq!(f(1), COption::Some(2));
-        assert_eq!(f(0), COption::None);
-        assert_eq!(f(-5), COption::None);
+        assert_eq!(f.call(5), COption::Some(10));
+        assert_eq!(f.call(1), COption::Some(2));
+        assert_eq!(f.call(0), COption::None);
+        assert_eq!(f.call(-5), COption::None);
     }
 
     #[test]
@@ -1152,9 +1152,9 @@ mod tests {
         let compiled = compiler.compile(add_one).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(10)), COption::Some(11));
-        assert_eq!(f(COption::Some(-1)), COption::Some(0));
-        assert_eq!(f(COption::None), COption::None);
+        assert_eq!(f.call(COption::Some(10)), COption::Some(11));
+        assert_eq!(f.call(COption::Some(-1)), COption::Some(0));
+        assert_eq!(f.call(COption::None), COption::None);
     }
 
     // =========================================================================
@@ -1191,9 +1191,9 @@ mod tests {
         let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(3.15)), 3.15);
-        assert_eq!(f(COption::Some(-2.5)), -2.5);
-        assert_eq!(f(COption::None), 0.0);
+        assert_eq!(f.call(COption::Some(3.15)), 3.15);
+        assert_eq!(f.call(COption::Some(-2.5)), -2.5);
+        assert_eq!(f.call(COption::None), 0.0);
     }
 
     #[test]
@@ -1207,9 +1207,9 @@ mod tests {
         let compiled = compiler.compile(wrap).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(3.15), COption::Some(3.15));
-        assert_eq!(f(0.0), COption::Some(0.0));
-        assert_eq!(f(-1.5), COption::Some(-1.5));
+        assert_eq!(f.call(3.15), COption::Some(3.15));
+        assert_eq!(f.call(0.0), COption::Some(0.0));
+        assert_eq!(f.call(-1.5), COption::Some(-1.5));
     }
 
     // =========================================================================
@@ -1231,12 +1231,12 @@ mod tests {
         let f = compiled.as_fn();
 
         let val = 42i64;
-        assert_eq!(f(Some(&val)), 42);
+        assert_eq!(f.call(Some(&val)), 42);
 
         let val2 = -100i64;
-        assert_eq!(f(Some(&val2)), -100);
+        assert_eq!(f.call(Some(&val2)), -100);
 
-        assert_eq!(f(None), -1);
+        assert_eq!(f.call(None), -1);
     }
 
     #[test]
@@ -1253,7 +1253,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let val = 99i64;
-        let result = f(&val);
+        let result = f.call(&val);
         assert_eq!(result, Some(&99i64));
     }
 
@@ -1277,13 +1277,13 @@ mod tests {
         let f = compiled.as_fn();
 
         let pos = 42i64;
-        assert_eq!(f(&pos), Some(&42i64));
+        assert_eq!(f.call(&pos), Some(&42i64));
 
         let zero = 0i64;
-        assert_eq!(f(&zero), None);
+        assert_eq!(f.call(&zero), None);
 
         let neg = -10i64;
-        assert_eq!(f(&neg), None);
+        assert_eq!(f.call(&neg), None);
     }
 
     // =========================================================================
@@ -1311,13 +1311,13 @@ mod tests {
 
         // Test with Some - just reading, not mutating
         let mut val = 21i64;
-        assert_eq!(f(Some(&mut val)), 42);
+        assert_eq!(f.call(Some(&mut val)), 42);
 
         let mut val2 = 5i64;
-        assert_eq!(f(Some(&mut val2)), 10);
+        assert_eq!(f.call(Some(&mut val2)), 10);
 
         // None case
-        assert_eq!(f(None), -1);
+        assert_eq!(f.call(None), -1);
     }
 
     #[test]
@@ -1354,13 +1354,13 @@ mod tests {
 
         // Test mutation
         let mut val = 41i64;
-        let returned = f(Some(&mut val));
+        let returned = f.call(Some(&mut val));
         assert_eq!(returned, 42);
         // Note: we can't easily check val was mutated due to Rust's borrow checker
         // but the function does mutate it
 
         // None case
-        assert_eq!(f(None), -1);
+        assert_eq!(f.call(None), -1);
     }
 
     #[test]
@@ -1376,7 +1376,7 @@ mod tests {
         let f = compiled.as_fn();
 
         let mut val = 99i64;
-        let result = f(&mut val);
+        let result = f.call(&mut val);
         assert!(result.is_some());
         if let Some(r) = result {
             assert_eq!(*r, 99);
@@ -1407,9 +1407,9 @@ mod tests {
         let compiled = compiler.compile(square_fn).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(3.0)), COption::Some(9.0));
-        assert_eq!(f(COption::Some(-2.0)), COption::Some(4.0));
-        assert_eq!(f(COption::None), COption::None);
+        assert_eq!(f.call(COption::Some(3.0)), COption::Some(9.0));
+        assert_eq!(f.call(COption::Some(-2.0)), COption::Some(4.0));
+        assert_eq!(f.call(COption::None), COption::None);
     }
 
     // =========================================================================
@@ -1444,10 +1444,13 @@ mod tests {
         let compiled = compiler.compile(add_opts).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(10), COption::Some(20)), COption::Some(30));
-        assert_eq!(f(COption::Some(5), COption::None), COption::None);
-        assert_eq!(f(COption::None, COption::Some(5)), COption::None);
-        assert_eq!(f(COption::None, COption::None), COption::None);
+        assert_eq!(
+            f.call(COption::Some(10), COption::Some(20)),
+            COption::Some(30)
+        );
+        assert_eq!(f.call(COption::Some(5), COption::None), COption::None);
+        assert_eq!(f.call(COption::None, COption::Some(5)), COption::None);
+        assert_eq!(f.call(COption::None, COption::None), COption::None);
     }
 
     #[test]
@@ -1463,8 +1466,8 @@ mod tests {
         let compiled = compiler.compile(unwrap_add).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f(COption::Some(42), 0), 42);
-        assert_eq!(f(COption::None, 99), 99);
-        assert_eq!(f(COption::Some(10), 99), 10);
+        assert_eq!(f.call(COption::Some(42), 0), 42);
+        assert_eq!(f.call(COption::None, 99), 99);
+        assert_eq!(f.call(COption::Some(10), 99), 10);
     }
 }

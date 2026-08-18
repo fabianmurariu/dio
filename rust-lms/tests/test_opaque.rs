@@ -34,12 +34,13 @@ fn opaque_ref_param_round_trips() {
     let f = compiler.fun1("count_nodes", move |_ctx, g: Var<SRef<Opaque<Graph>>>| {
         call_extern1(node_count, g)
     });
-    let kernel = compiler.compile(f).expect("compile").as_fn();
+    let compiled = compiler.compile(f).expect("compile");
+    let kernel = compiled.as_fn();
 
     let g = Graph {
         nodes: vec![10, 20, 30, 40],
     };
-    assert_eq!(kernel(&g), 4); // &g passed straight through
+    assert_eq!(kernel.call(&g), 4); // &g passed straight through
 }
 
 #[test]
@@ -56,9 +57,10 @@ fn opaque_mut_ref_param() {
             call_extern1(node_count, ref_as_const(g))
         },
     );
-    let kernel = compiler.compile(f).expect("compile").as_fn();
+    let compiled = compiler.compile(f).expect("compile");
+    let kernel = compiled.as_fn();
 
     let mut g = Graph { nodes: vec![1, 2] };
-    assert_eq!(kernel(&mut g), 3);
+    assert_eq!(kernel.call(&mut g), 3);
     assert_eq!(g.nodes, vec![1, 2, 99]);
 }

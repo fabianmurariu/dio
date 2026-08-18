@@ -78,11 +78,12 @@ fn plain_count_via_next_drop() {
         let handle = call_extern1(producer, g);
         nodes.iter(handle).count(ctx)
     });
-    let kernel = compiler.compile(f).expect("compile").as_fn();
+    let compiled = compiler.compile(f).expect("compile");
+    let kernel = compiled.as_fn();
 
     let g = graph(vec![10, 20, 30, 40, 50]);
-    assert_eq!(kernel(&g), 5);
-    assert_eq!(kernel(&graph(vec![])), 0);
+    assert_eq!(kernel.call(&g), 5);
+    assert_eq!(kernel.call(&graph(vec![])), 0);
 }
 
 #[test]
@@ -96,10 +97,11 @@ fn plain_sum_and_filter() {
         let handle = call_extern1(producer, g);
         nodes.iter(handle).filter(|x| lt(2u64, x)).sum(ctx)
     });
-    let kernel = compiler.compile(f).expect("compile").as_fn();
+    let compiled = compiler.compile(f).expect("compile");
+    let kernel = compiled.as_fn();
 
     let g = graph(vec![1, 2, 3, 4, 5]);
-    assert_eq!(kernel(&g), 3 + 4 + 5);
+    assert_eq!(kernel.call(&g), 3 + 4 + 5);
 }
 
 #[test]
@@ -113,8 +115,9 @@ fn exact_size_count_is_o1_and_sum_works() {
         let handle = call_extern1(producer, g);
         nodes.iter(handle).count(ctx)
     });
-    let count = compiler.compile(count_fn).expect("compile").as_fn();
-    assert_eq!(count(&graph(vec![7, 8, 9])), 3);
+    let compiled = compiler.compile(count_fn).expect("compile");
+    let count = compiled.as_fn();
+    assert_eq!(count.call(&graph(vec![7, 8, 9])), 3);
 
     // sum() over the counted loop (len + next_value).
     let mut compiler = Compiler::new();
@@ -124,6 +127,7 @@ fn exact_size_count_is_o1_and_sum_works() {
         let handle = call_extern1(producer, g);
         nodes.iter(handle).sum(ctx)
     });
-    let sum = compiler.compile(sum_fn).expect("compile").as_fn();
-    assert_eq!(sum(&graph(vec![10, 20, 30, 40])), 100);
+    let compiled = compiler.compile(sum_fn).expect("compile");
+    let sum = compiled.as_fn();
+    assert_eq!(sum.call(&graph(vec![10, 20, 30, 40])), 100);
 }

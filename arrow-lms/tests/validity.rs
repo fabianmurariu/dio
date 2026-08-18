@@ -29,8 +29,9 @@ fn set_null_clears_bits_standalone() {
         }
         Const::<()>::new(())
     });
-    let clear = compiler.compile(f).unwrap().as_fn();
-    clear(&mut validity);
+    let compiled = compiler.compile(f).unwrap();
+    let clear = compiled.as_fn();
+    clear.call(&mut validity);
 
     // bits 1, 3, 6 cleared
     assert_eq!(bitmap[0], 0b1011_0101);
@@ -50,8 +51,9 @@ fn set_valid_sets_bits_standalone() {
         }
         Const::<()>::new(())
     });
-    let mark = compiler.compile(f).unwrap().as_fn();
-    mark(&mut validity);
+    let compiled = compiler.compile(f).unwrap();
+    let mark = compiled.as_fn();
+    mark.call(&mut validity);
 
     // bits 0, 2, 5 set
     assert_eq!(bitmap[0], 0b0010_0101);

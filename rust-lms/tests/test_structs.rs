@@ -31,7 +31,7 @@ fn test_simple_struct_field_access() {
 
     // Create a test point - passed by VALUE
     let point = Point { x: 42, y: 3.15 };
-    let result = f(point); // Pass by value, not &point
+    let result = f.call(point); // Pass by value, not &point
 
     assert_eq!(result, 42);
 }
@@ -53,7 +53,7 @@ fn test_struct_multiple_fields() {
     let f = compiled.as_fn();
 
     let point = Point { x: 10, y: 3.15 };
-    let result = f(point); // Pass by value
+    let result = f.call(point); // Pass by value
 
     assert_eq!(result, 13); // 10 + 3
 }
@@ -70,7 +70,7 @@ fn test_struct_pass_by_value_semantics() {
     let f = compiled.as_fn();
 
     let point = Point { x: 99, y: 2.71 };
-    let result = f(point); // Pass by value
+    let result = f.call(point); // Pass by value
 
     assert_eq!(result, 99);
 }
@@ -114,7 +114,7 @@ fn test_nested_struct_access() {
         extra: 123,
     };
 
-    let result = f(test_struct); // Pass by value
+    let result = f.call(test_struct); // Pass by value
 
     assert_eq!(result, 777);
 }
@@ -142,7 +142,7 @@ fn test_nested_struct_by_ref_access() {
         inner: Inner { value: 555 },
         extra: 321,
     };
-    let result = f(&test_struct); // Pass by reference
+    let result = f.call(&test_struct); // Pass by reference
 
     assert_eq!(result, 555);
 }
@@ -169,7 +169,7 @@ fn test_nested_struct_multiple_access() {
         inner: Inner { value: 100 },
         extra: 50,
     };
-    let result = f(test_struct); // Pass by value
+    let result = f.call(test_struct); // Pass by value
 
     assert_eq!(result, 150); // 100 + 50
 }
@@ -193,7 +193,7 @@ fn test_nested_struct_multiple_access_ref() {
         inner: Inner { value: 100 },
         extra: 50,
     };
-    let result = f(&test_struct); // Pass by value
+    let result = f.call(&test_struct); // Pass by value
 
     assert_eq!(result, 150); // 100 + 50
 }
@@ -213,7 +213,7 @@ fn test_struct_copy_semantics() {
     let f = compiled.as_fn();
 
     let point = Point { x: 21, y: 1.0 };
-    let result = f(point); // Pass by value
+    let result = f.call(point); // Pass by value
 
     assert_eq!(result, 42);
 }
@@ -235,7 +235,7 @@ fn test_outer_extra_field() {
         inner: Inner { value: 777 },
         extra: 999,
     };
-    let result = f(test_struct);
+    let result = f.call(test_struct);
 
     assert_eq!(result, 999);
 }
@@ -255,7 +255,7 @@ fn test_mixed_struct_read_f64_field() {
     let f = compiled.as_fn();
 
     let point = Point { x: 42, y: 3.15 };
-    let result = f(point);
+    let result = f.call(point);
 
     assert!(
         (result - 3.15).abs() < 1e-10,
@@ -279,7 +279,7 @@ fn test_mixed_struct_read_i64_after_f64_access() {
     let f = compiled.as_fn();
 
     let point = Point { x: 100, y: 3.15 };
-    let result = f(point);
+    let result = f.call(point);
 
     assert_eq!(result, 100);
 }
@@ -323,7 +323,7 @@ fn test_float_first_struct() {
         b: 42,
         c: 1.41,
     };
-    let result = f(s);
+    let result = f.call(s);
 
     assert!(
         (result - 2.71).abs() < 1e-10,
@@ -348,7 +348,7 @@ fn test_float_first_struct_read_int() {
         b: 42,
         c: 1.41,
     };
-    let result = f(s);
+    let result = f.call(s);
 
     assert_eq!(result, 42);
 }
@@ -366,7 +366,7 @@ fn test_16byte_float_first_struct() {
     let f = compiled.as_fn();
 
     let s = FloatFirst { x: 2.71, y: 42 };
-    let result = f(s);
+    let result = f.call(s);
 
     assert!(
         (result - 2.71).abs() < 1e-10,
@@ -387,7 +387,7 @@ fn test_16byte_float_first_struct_read_int() {
     let f = compiled.as_fn();
 
     let s = FloatFirst { x: 2.71, y: 42 };
-    let result = f(s);
+    let result = f.call(s);
 
     assert_eq!(result, 42);
 }
@@ -415,12 +415,10 @@ fn test_generic_struct_by_value() {
         p.get(PairType::second())
     });
 
-    let f = compiler
-        .compile(get_second)
-        .expect("compilation failed")
-        .as_fn();
+    let compiled = compiler.compile(get_second).expect("compilation failed");
+    let f = compiled.as_fn();
     assert_eq!(
-        f(Pair {
+        f.call(Pair {
             first: 10i64,
             second: 20i64
         }),
@@ -438,12 +436,10 @@ fn test_generic_struct_distinct_monomorphizations() {
         p.get(PairType::first())
     });
 
-    let f = compiler
-        .compile(get_first)
-        .expect("compilation failed")
-        .as_fn();
+    let compiled = compiler.compile(get_first).expect("compilation failed");
+    let f = compiled.as_fn();
     assert_eq!(
-        f(Pair {
+        f.call(Pair {
             first: 7i32,
             second: 99i64
         }),
@@ -460,12 +456,10 @@ fn test_generic_struct_by_ref() {
         load_ref(p.get_ref(PairType::second()))
     });
 
-    let f = compiler
-        .compile(read_second)
-        .expect("compilation failed")
-        .as_fn();
+    let compiled = compiler.compile(read_second).expect("compilation failed");
+    let f = compiled.as_fn();
     assert_eq!(
-        f(&Pair {
+        f.call(&Pair {
             first: 1i64,
             second: 42i64
         }),
@@ -487,6 +481,6 @@ fn test_return_mixed_struct() {
     let compiled = compiler.compile(make_point).expect("compilation failed");
     let f = compiled.as_fn();
 
-    let result = f(42, 3.15);
+    let result = f.call(42, 3.15);
     assert_eq!(result, 42);
 }

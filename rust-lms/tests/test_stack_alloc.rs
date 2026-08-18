@@ -18,5 +18,5 @@ fn stack_alloc_write_read_roundtrip() {
         add(ra, rb)
     });
     let compiled = compiler.compile(f).expect("compile");
-    assert_eq!(compiled.as_fn()(7, 35), 42);
+    assert_eq!(compiled.call(7, 35), 42);
 }

@@ -114,7 +114,7 @@ fn test_unsafe_extern_requires_explicit_constructor() {
     let compiled = compiler.compile(test_fn).expect("compilation failed");
     let function = compiled.as_fn();
     let value = 42i64;
-    assert_eq!(function(&value), 42);
+    assert_eq!(function.call(&value), 42);
 }
 
 #[test]
@@ -132,9 +132,9 @@ fn test_extern_fn_simple_add() {
     let compiled = compiler.compile(test_fn).expect("compilation failed");
     let f = compiled.as_fn();
 
-    assert_eq!(f(10, 32), 42);
-    assert_eq!(f(-5, 5), 0);
-    assert_eq!(f(100, 200), 300);
+    assert_eq!(f.call(10, 32), 42);
+    assert_eq!(f.call(-5, 5), 0);
+    assert_eq!(f.call(100, 200), 300);
 }
 
 #[test]
@@ -148,9 +148,9 @@ fn test_extern_fn_simple_square() {
     let compiled = compiler.compile(test_fn).expect("compilation failed");
     let f = compiled.as_fn();
 
-    assert_eq!(f(5), 25);
-    assert_eq!(f(7), 49);
-    assert_eq!(f(-3), 9);
+    assert_eq!(f.call(5), 25);
+    assert_eq!(f.call(7), 49);
+    assert_eq!(f.call(-3), 9);
 }
 
 #[test]
@@ -170,9 +170,9 @@ fn test_extern_fn_chained() {
     let f = compiled.as_fn();
 
     // (3 + 4)^2 = 49
-    assert_eq!(f(3, 4), 49);
+    assert_eq!(f.call(3, 4), 49);
     // (10 + 0)^2 = 100
-    assert_eq!(f(10, 0), 100);
+    assert_eq!(f.call(10, 0), 100);
 }
 
 #[test]
@@ -194,7 +194,7 @@ fn test_extern_fn_with_internal() {
     let f = compiled.as_fn();
 
     // (10 + 32) * 2 = 84
-    assert_eq!(f(10, 32), 84);
+    assert_eq!(f.call(10, 32), 84);
 }
 
 #[test]
@@ -213,11 +213,11 @@ fn test_extern_fn_sum_slice() {
 
     let data = [1i64, 2, 3, 4, 5];
     let fat_slice = FatSlice::from_slice(&data);
-    assert_eq!(f(fat_slice), 15); // 1+2+3+4+5 = 15
+    assert_eq!(f.call(fat_slice), 15); // 1+2+3+4+5 = 15
 
     let data2 = [10i64, 20, 30];
     let fat_slice2 = FatSlice::from_slice(&data2);
-    assert_eq!(f(fat_slice2), 60); // 10+20+30 = 60
+    assert_eq!(f.call(fat_slice2), 60); // 10+20+30 = 60
 }
 
 #[test]
@@ -235,9 +235,9 @@ fn test_extern_fn_slice_len() {
 
     let data = [1i64, 2, 3, 4, 5];
     let fat_slice = FatSlice::from_slice(&data);
-    assert_eq!(f(fat_slice), 5);
+    assert_eq!(f.call(fat_slice), 5);
 
     let empty: [i64; 0] = [];
     let fat_empty = FatSlice::from_slice(&empty);
-    assert_eq!(f(fat_empty), 0);
+    assert_eq!(f.call(fat_empty), 0);
 }

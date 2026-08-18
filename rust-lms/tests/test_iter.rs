@@ -19,7 +19,7 @@ fn test_iter_sum_i64() {
     let sum = compiled.as_fn();
 
     let data: [i64; 5] = [10, 20, 30, 40, 50];
-    assert_eq!(sum(&data[..]), 150);
+    assert_eq!(sum.call(&data[..]), 150);
 }
 
 #[test]
@@ -34,7 +34,7 @@ fn test_iter_sum_f64() {
     let sum = compiled.as_fn();
 
     let data: [f64; 4] = [1.5, 2.5, 3.0, 4.0];
-    assert!((sum(&data[..]) - 11.0).abs() < 1e-9);
+    assert!((sum.call(&data[..]) - 11.0).abs() < 1e-9);
 }
 
 #[test]
@@ -49,7 +49,7 @@ fn test_iter_sum_with_map() {
     let f = compiled.as_fn();
 
     let data: [i64; 4] = [1, 2, 3, 4]; // 2+4+6+8 = 20
-    assert_eq!(f(&data[..]), 20);
+    assert_eq!(f.call(&data[..]), 20);
 }
 
 #[test]
@@ -64,7 +64,7 @@ fn test_iter_sum_with_filter() {
     let f = compiled.as_fn();
 
     let data: [i64; 6] = [-3, 5, -1, 8, 0, 2];
-    assert_eq!(f(&data[..]), 15); // 5+8+2
+    assert_eq!(f.call(&data[..]), 15); // 5+8+2
 }
 
 // =============================================================================
@@ -83,7 +83,7 @@ fn test_iter_count_all() {
     let f = compiled.as_fn();
 
     let data: [i64; 7] = [1, 2, 3, 4, 5, 6, 7];
-    assert_eq!(f(&data[..]), 7u64);
+    assert_eq!(f.call(&data[..]), 7u64);
 }
 
 #[test]
@@ -98,7 +98,7 @@ fn test_iter_count_filtered() {
     let f = compiled.as_fn();
 
     let data: [i64; 5] = [1, 4, 5, 2, 6];
-    assert_eq!(f(&data[..]), 3u64); // 4, 5, 6
+    assert_eq!(f.call(&data[..]), 3u64); // 4, 5, 6
 }
 
 // =============================================================================
@@ -117,7 +117,7 @@ fn test_iter_min_i64() {
     let f = compiled.as_fn();
 
     let data: [i64; 5] = [30, 10, 50, 20, 40];
-    assert_eq!(f(&data[..]), 10);
+    assert_eq!(f.call(&data[..]), 10);
 }
 
 #[test]
@@ -132,7 +132,7 @@ fn test_iter_max_f64() {
     let f = compiled.as_fn();
 
     let data: [f64; 5] = [1.5, 9.9, 3.3, 7.7, 2.2];
-    assert!((f(&data[..]) - 9.9).abs() < 1e-9);
+    assert!((f.call(&data[..]) - 9.9).abs() < 1e-9);
 }
 
 #[test]
@@ -147,7 +147,7 @@ fn test_iter_min_max_filtered() {
     let f = compiled.as_fn();
 
     let data: [i64; 6] = [-5, 3, -1, 7, 2, 9];
-    assert_eq!(f(&data[..]), 2); // min of {3, 7, 2, 9}
+    assert_eq!(f.call(&data[..]), 2); // min of {3, 7, 2, 9}
 }
 
 // =============================================================================
@@ -177,7 +177,7 @@ fn test_iter_fold_count_and_sum() {
     let f = compiled.as_fn();
 
     let data: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
-    assert_eq!(f(&data[..]), 4u64);
+    assert_eq!(f.call(&data[..]), 4u64);
 }
 
 // =============================================================================
@@ -208,7 +208,7 @@ fn test_iter_zip_dot_product() {
     let a: [f64; 4] = [1.0, 2.0, 3.0, 4.0];
     let b: [f64; 4] = [4.0, 3.0, 2.0, 1.0];
     // dot = 1*4 + 2*3 + 3*2 + 4*1 = 20
-    assert!((dot(&a[..], &b[..]) - 20.0).abs() < 1e-9);
+    assert!((dot.call(&a[..], &b[..]) - 20.0).abs() < 1e-9);
 }
 
 #[test]
@@ -235,7 +235,7 @@ fn test_iter_zip_element_wise_sum() {
     let a: [i64; 4] = [1, 2, 3, 4];
     let b: [i64; 4] = [10, 20, 30, 40];
     // (1+10)+(2+20)+(3+30)+(4+40) = 11+22+33+44 = 110
-    assert_eq!(f(&a[..], &b[..]), 110);
+    assert_eq!(f.call(&a[..], &b[..]), 110);
 }
 
 #[test]
@@ -257,7 +257,7 @@ fn test_iter_zip_composes_with_map_and_sum() {
 
     let a: [i64; 4] = [1, 2, 3, 4];
     let b: [i64; 4] = [10, 20, 30, 40];
-    assert_eq!(f(&a[..], &b[..]), 300);
+    assert_eq!(f.call(&a[..], &b[..]), 300);
 }
 
 #[test]
@@ -282,7 +282,7 @@ fn test_iter_zip_for_each_yields_pair_item() {
 
     let a: [i64; 3] = [1, 2, 3];
     let b: [i64; 3] = [10, 20, 30];
-    assert_eq!(f(&a[..], &b[..]), 66);
+    assert_eq!(f.call(&a[..], &b[..]), 66);
 }
 
 #[test]
@@ -313,7 +313,7 @@ fn test_iter_zip_is_indexed_source_for_nested_zip() {
     let a: [i64; 3] = [1, 2, 3];
     let b: [i64; 3] = [10, 20, 30];
     let c: [i64; 3] = [100, 200, 300];
-    assert_eq!(f(&a[..], &b[..], &c[..]), 666);
+    assert_eq!(f.call(&a[..], &b[..], &c[..]), 666);
 }
 
 // =============================================================================
@@ -330,8 +330,8 @@ fn test_range_sum() {
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
 
-    assert_eq!(f(10u64), 45u64); // 0+1+...+9 = 45
-    assert_eq!(f(5u64), 10u64); // 0+1+2+3+4 = 10
+    assert_eq!(f.call(10u64), 45u64); // 0+1+...+9 = 45
+    assert_eq!(f.call(5u64), 10u64); // 0+1+2+3+4 = 10
 }
 
 #[test]
@@ -343,8 +343,8 @@ fn test_range_step_sum() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(10u64), 20u64); // 0+2+4+6+8
-    assert_eq!(f(9u64), 20u64); // 0+2+4+6+8
+    assert_eq!(f.call(10u64), 20u64); // 0+2+4+6+8
+    assert_eq!(f.call(9u64), 20u64); // 0+2+4+6+8
 }
 
 #[test]
@@ -354,7 +354,7 @@ fn test_range_i64_sum() {
     let f = compiler.fun1("range_i64_sum", |ctx, n: Var<i64>| range(0i64, n).sum(ctx));
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(5i64), 10i64); // 0+1+2+3+4
+    assert_eq!(f.call(5i64), 10i64); // 0+1+2+3+4
 }
 
 #[test]
@@ -365,7 +365,7 @@ fn test_range_into_staged_iter() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(4u64), 18u64); // 3*(0+1+2+3)
+    assert_eq!(f.call(4u64), 18u64); // 3*(0+1+2+3)
 }
 
 #[test]
@@ -379,8 +379,8 @@ fn test_iter_filter_map() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[1i64, 2, 3, 4][..]), 60);
-    assert_eq!(f(&[1i64, 3, 5][..]), 0); // no evens
+    assert_eq!(f.call(&[1i64, 2, 3, 4][..]), 60);
+    assert_eq!(f.call(&[1i64, 3, 5][..]), 0); // no evens
 }
 
 #[test]
@@ -395,8 +395,8 @@ fn test_iter_find_map() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[1i64, 2, 5, 4][..]), 50); // first > 3 is 5 -> 50
-    assert_eq!(f(&[1i64, 2, 3][..]), -1); // none > 3
+    assert_eq!(f.call(&[1i64, 2, 5, 4][..]), 50); // first > 3 is 5 -> 50
+    assert_eq!(f.call(&[1i64, 2, 3][..]), -1); // none > 3
 }
 
 #[test]
@@ -407,8 +407,8 @@ fn test_iter_count_if() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[1i64, 4, 5, 2, 6][..]), 3u64); // 4,5,6
-    assert_eq!(f(&[][..]), 0u64);
+    assert_eq!(f.call(&[1i64, 4, 5, 2, 6][..]), 3u64); // 4,5,6
+    assert_eq!(f.call(&[][..]), 0u64);
 }
 
 #[test]
@@ -419,7 +419,7 @@ fn test_iter_sum_if() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[1i64, 2, 3, 4, 5, 6][..]), 12); // 2+4+6
+    assert_eq!(f.call(&[1i64, 2, 3, 4, 5, 6][..]), 12); // 2+4+6
 }
 
 #[test]
@@ -430,9 +430,9 @@ fn test_iter_any() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert!(f(&[1i64, 2, 3, 5][..])); // 5 > 4
-    assert!(!f(&[1i64, 2, 3, 4][..])); // none > 4
-    assert!(!f(&[][..]));
+    assert!(f.call(&[1i64, 2, 3, 5][..])); // 5 > 4
+    assert!(!f.call(&[1i64, 2, 3, 4][..])); // none > 4
+    assert!(!f.call(&[][..]));
 }
 
 #[test]
@@ -443,9 +443,9 @@ fn test_iter_all() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert!(f(&[1i64, 2, 3][..]));
-    assert!(!f(&[1i64, -2, 3][..]));
-    assert!(f(&[][..])); // vacuously true
+    assert!(f.call(&[1i64, 2, 3][..]));
+    assert!(!f.call(&[1i64, -2, 3][..]));
+    assert!(f.call(&[][..])); // vacuously true
 }
 
 #[test]
@@ -456,8 +456,8 @@ fn test_iter_position() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[10i64, 20, 3, 40][..]), 2); // index 2
-    assert_eq!(f(&[10i64, 20][..]), 2); // not found -> len (2)
+    assert_eq!(f.call(&[10i64, 20, 3, 40][..]), 2); // index 2
+    assert_eq!(f.call(&[10i64, 20][..]), 2); // not found -> len (2)
 }
 
 #[test]
@@ -471,8 +471,8 @@ fn test_iter_any_after_filter() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert!(f(&[1i64, 3, 6][..])); // 6 is even and > 4
-    assert!(!f(&[1i64, 3, 4, 5][..])); // only even is 4, not > 4
+    assert!(f.call(&[1i64, 3, 6][..])); // 6 is even and > 4
+    assert!(!f.call(&[1i64, 3, 4, 5][..])); // only even is 4, not > 4
 }
 
 #[test]
@@ -485,7 +485,7 @@ fn test_iter_position_after_map() {
     });
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[1i64, 2, 3, 4][..]), 2); // 3*2 == 6 at index 2
+    assert_eq!(f.call(&[1i64, 2, 3, 4][..]), 2); // 3*2 == 6 at index 2
 }
 
 #[test]
@@ -501,7 +501,7 @@ fn test_iter_scan_prefix_sum() {
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
     // prefix sums of [1,2,3,4] = [1,3,6,10]; their sum = 20
-    assert_eq!(f(&[1i64, 2, 3, 4][..]), 20);
+    assert_eq!(f.call(&[1i64, 2, 3, 4][..]), 20);
 }
 
 #[test]
@@ -513,7 +513,7 @@ fn test_iter_take_while() {
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
     // takes 1,2,3 then stops at 5; sum = 6 (the 4 after 5 is not reached)
-    assert_eq!(f(&[1i64, 2, 3, 5, 4][..]), 6);
+    assert_eq!(f.call(&[1i64, 2, 3, 5, 4][..]), 6);
 }
 
 #[test]
@@ -538,7 +538,7 @@ fn test_iter_nested_break() {
     let f = compiled.as_fn();
     let a: [i64; 4] = [1, 2, 3, 7];
     let b: [i64; 3] = [2, 3, 4];
-    assert_eq!(f(&a[..], &b[..]), 2); // 2 and 3 are in both
+    assert_eq!(f.call(&a[..], &b[..]), 2); // 2 and 3 are in both
 }
 
 #[test]
@@ -550,5 +550,5 @@ fn test_iter_skip_while() {
     let compiled = compiler.compile(f).expect("compile failed");
     let f = compiled.as_fn();
     // skips 1,2,3; yields 5,4,6 from the first >=5; sum = 15
-    assert_eq!(f(&[1i64, 2, 3, 5, 4, 6][..]), 15);
+    assert_eq!(f.call(&[1i64, 2, 3, 5, 4, 6][..]), 15);
 }

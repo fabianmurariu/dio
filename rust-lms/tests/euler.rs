@@ -42,8 +42,8 @@ fn euler_01_multiples_of_3_or_5() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(10), 23);
-    assert_eq!(g(1000), 233168); // official answer
+    assert_eq!(g.call(10), 23);
+    assert_eq!(g.call(1000), 233168); // official answer
 }
 
 // =============================================================================
@@ -73,7 +73,7 @@ fn euler_02_even_fibonacci() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(4_000_000), 4613732); // official answer
+    assert_eq!(g.call(4_000_000), 4613732); // official answer
 }
 
 // =============================================================================
@@ -105,8 +105,8 @@ fn euler_03_largest_prime_factor() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(13195), 29);
-    assert_eq!(g(600_851_475_143), 6857); // official answer
+    assert_eq!(g.call(13195), 29);
+    assert_eq!(g.call(600_851_475_143), 6857); // official answer
 }
 
 // =============================================================================
@@ -179,8 +179,8 @@ fn euler_05_smallest_multiple() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(10), 2520);
-    assert_eq!(g(20), 232792560); // official answer
+    assert_eq!(g.call(10), 2520);
+    assert_eq!(g.call(20), 232792560); // official answer
 }
 
 // =============================================================================
@@ -200,8 +200,8 @@ fn euler_06_sum_square_difference() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(10), 2640);
-    assert_eq!(g(100), 25164150); // official answer
+    assert_eq!(g.call(10), 2640);
+    assert_eq!(g.call(100), 25164150); // official answer
 }
 
 // =============================================================================
@@ -237,8 +237,8 @@ fn euler_07_nth_prime() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(6), 13);
-    assert_eq!(g(10001), 104743); // official answer
+    assert_eq!(g.call(6), 13);
+    assert_eq!(g.call(10001), 104743); // official answer
 }
 
 // =============================================================================
@@ -279,8 +279,8 @@ fn euler_08_largest_product_of_k_adjacent() {
         .collect();
     assert_eq!(digits.len(), 1000, "input file should hold 1000 digits");
 
-    assert_eq!(g(&digits[..], 13u64), 23514624000); // official answer
-    assert_eq!(g(&digits[..], 4u64), 5832); // published smaller case
+    assert_eq!(g.call(&digits[..], 13u64), 23514624000); // official answer
+    assert_eq!(g.call(&digits[..], 4u64), 5832); // published smaller case
 }
 
 // =============================================================================
@@ -315,7 +315,7 @@ fn euler_09_pythagorean_triplet() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(1000), 31875000); // official answer
+    assert_eq!(g.call(1000), 31875000); // official answer
 }
 
 // =============================================================================
@@ -349,8 +349,8 @@ fn euler_10_sum_of_primes_below() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(10), 17);
-    assert_eq!(g(2_000_000), 142913828922); // official answer
+    assert_eq!(g.call(10), 17);
+    assert_eq!(g.call(2_000_000), 142913828922); // official answer
 }
 
 // =============================================================================
@@ -389,8 +389,8 @@ fn euler_12_highly_divisible_triangle() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(5), 28);
-    assert_eq!(g(500), 76576500); // official answer
+    assert_eq!(g.call(5), 28);
+    assert_eq!(g.call(500), 76576500); // official answer
 }
 
 // =============================================================================
@@ -428,7 +428,7 @@ fn euler_14_longest_collatz() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(1_000_000), 837799); // official answer
+    assert_eq!(g.call(1_000_000), 837799); // official answer
 }
 
 // =============================================================================
@@ -452,8 +452,8 @@ fn euler_15_lattice_paths() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(2), 6);
-    assert_eq!(g(20), 137846528820); // official answer
+    assert_eq!(g.call(2), 6);
+    assert_eq!(g.call(20), 137846528820); // official answer
 }
 
 // =============================================================================
@@ -523,8 +523,8 @@ fn euler_21_amicable_sum() {
 
     let n: usize = 10_000;
     let mut sigma = vec![0u64; n];
-    fill_fn(&mut sigma[..]);
-    assert_eq!(sum_fn(&sigma[..]), 31626); // official answer
+    fill_fn.call(&mut sigma[..]);
+    assert_eq!(sum_fn.call(&sigma[..]), 31626); // official answer
 }
 
 // =============================================================================
@@ -560,8 +560,8 @@ fn euler_28_spiral_diagonals() {
     let compiled = compiler.compile(f).expect("compile");
     let g = compiled.as_fn();
 
-    assert_eq!(g(5), 101);
-    assert_eq!(g(1001), 669171001); // official answer
+    assert_eq!(g.call(5), 101);
+    assert_eq!(g.call(1001), 669171001); // official answer
 }
 
 // =============================================================================
@@ -597,7 +597,7 @@ fn euler_30_digit_fifth_powers() {
     let g = compiled.as_fn();
 
     // 6 * 9^5 = 354294 is a safe upper bound.
-    assert_eq!(g(354295), 443839); // official answer
+    assert_eq!(g.call(354295), 443839); // official answer
 }
 
 // =============================================================================
@@ -638,7 +638,7 @@ fn euler_34_digit_factorials() {
 
     let fact: [u64; 10] = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880];
     // Safe upper bound: 7 * 9! = 2540160.
-    assert_eq!(g(2540160u64, &fact[..]), 40730); // official answer
+    assert_eq!(g.call(2540160u64, &fact[..]), 40730); // official answer
 }
 
 // =============================================================================
@@ -718,7 +718,7 @@ fn euler_67_max_path_sum_triangle() {
     //   8  5  9  3
     let small: [i64; 10] = [3, 7, 4, 2, 4, 6, 8, 5, 9, 3];
     let mut ws = vec![0i64; 4];
-    assert_eq!(g(&small[..], &mut ws[..], 4u64), 23);
+    assert_eq!(g.call(&small[..], &mut ws[..], 4u64), 23);
 
     // Official Euler-18 15-row triangle (answer = 1074).
     let e18_rows: [&[i64]; 15] = [
@@ -740,5 +740,5 @@ fn euler_67_max_path_sum_triangle() {
     ];
     let flat: Vec<i64> = e18_rows.iter().flat_map(|r| r.iter().copied()).collect();
     let mut ws = vec![0i64; 15];
-    assert_eq!(g(&flat[..], &mut ws[..], 15u64), 1074);
+    assert_eq!(g.call(&flat[..], &mut ws[..], 15u64), 1074);
 }

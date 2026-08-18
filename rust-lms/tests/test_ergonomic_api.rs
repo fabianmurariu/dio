@@ -53,8 +53,8 @@ fn test_ergonomic_comparison() {
     let compiled = compiler.compile(f).expect("compilation failed");
     let clamp = compiled.as_fn();
 
-    assert_eq!(clamp(50), 50); // Below max
-    assert_eq!(clamp(150), 100); // Above max, clamped
+    assert_eq!(clamp.call(50), 50); // Below max
+    assert_eq!(clamp.call(150), 100); // Above max, clamped
 }
 
 #[test]
@@ -74,9 +74,9 @@ fn test_ergonomic_while_loop() {
     let compiled = compiler.compile(count_to_n).expect("compilation failed");
     let f = compiled.as_fn();
 
-    assert_eq!(f(5), 0 + 1 + 2 + 3 + 4); // Sum of 0..5
-    assert_eq!(f(3), 0 + 1 + 2); // Sum of 0..3
-    assert_eq!(f(55), (54 * 55) / 2); // Sum of 0..55
+    assert_eq!(f.call(5), 0 + 1 + 2 + 3 + 4); // Sum of 0..5
+    assert_eq!(f.call(3), 0 + 1 + 2); // Sum of 0..3
+    assert_eq!(f.call(55), (54 * 55) / 2); // Sum of 0..55
 }
 
 #[test]
@@ -94,7 +94,7 @@ fn test_ergonomic_slice_operations() {
     let data: [i64; 5] = [10, 20, 30, 40, 50];
     let slice: &[i64] = &data;
 
-    let result = f(slice);
+    let result = f.call(slice);
     assert_eq!(result, 20);
 }
 
@@ -113,7 +113,7 @@ fn test_ergonomic_slice_set() {
     let mut data: [i64; 3] = [10, 20, 30];
     let slice: &mut [i64] = &mut data;
 
-    f(slice);
+    f.call(slice);
     assert_eq!(data[0], 999);
 }
 
@@ -139,7 +139,7 @@ fn test_ergonomic_slice_subslice() {
     let slice: &[i64] = &data;
 
     // arr[1..4] = [10, 20, 30], sum = 60
-    let result = f(slice);
+    let result = f.call(slice);
     assert_eq!(result, 60);
 }
 
@@ -166,7 +166,7 @@ fn test_ergonomic_f64_operations() {
     let compiled = compiler.compile(f).expect("compilation failed");
     let compute = compiled.as_fn();
 
-    assert!((compute(2.0) - 8.5).abs() < 0.0001); // 2.0 * 2.5 + 3.5 = 8.5
+    assert!((compute.call(2.0) - 8.5).abs() < 0.0001); // 2.0 * 2.5 + 3.5 = 8.5
 }
 
 // =============================================================================
@@ -205,8 +205,8 @@ fn test_imperative_while_loop() {
     let compiled = compiler.compile(count_to_n).expect("compilation failed");
     let f = compiled.as_fn();
 
-    assert_eq!(f(5), 0 + 1 + 2 + 3 + 4);
-    assert_eq!(f(10), 45);
+    assert_eq!(f.call(5), 0 + 1 + 2 + 3 + 4);
+    assert_eq!(f.call(10), 45);
 }
 
 #[test]
@@ -221,8 +221,8 @@ fn test_imperative_bind() {
 
     let compiled = compiler.compile(f).expect("compilation failed");
     let f = compiled.as_fn();
-    assert_eq!(f(5), 20); // (5+5) + (5+5)
-    assert_eq!(f(3), 12);
+    assert_eq!(f.call(5), 20); // (5+5) + (5+5)
+    assert_eq!(f.call(3), 12);
 }
 
 #[test]
@@ -248,8 +248,8 @@ fn test_imperative_fibonacci() {
     let compiled = compiler.compile(fib_iter).expect("compilation failed");
     let fib = compiled.as_fn();
 
-    assert_eq!(fib(0), 0);
-    assert_eq!(fib(1), 1);
-    assert_eq!(fib(5), 5);
-    assert_eq!(fib(10), 55);
+    assert_eq!(fib.call(0), 0);
+    assert_eq!(fib.call(1), 1);
+    assert_eq!(fib.call(5), 5);
+    assert_eq!(fib.call(10), 55);
 }

@@ -55,7 +55,7 @@ fn jit_writes_typed_fields_into_packed_records() {
         i
     });
     let compiled = compiler.compile(fill).expect("compile");
-    compiled.as_fn()(N as u64);
+    compiled.call(N as u64);
 
     for i in 0..N {
         let rec = unsafe { (base as *const u8).add(i * stride) };

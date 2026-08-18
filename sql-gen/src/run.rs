@@ -186,7 +186,7 @@ fn build_join_index(js: &mut JoinState, rel_schema: &SchemaRef, key_col: usize) 
         unit()
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
-    compiled.as_fn()();
+    compiled.call();
     Ok(())
 }
 
@@ -237,7 +237,7 @@ fn build_join_materialized(
         },
     );
     let compiled = compiler.compile(f).map_err(exec_err)?;
-    let n = compiled.as_fn()(inputs);
+    let n = compiled.call(inputs);
     inputs.take_error()?;
     // Install the materialized batch: the locators inserted during the run reference
     // row indices into it.
@@ -327,7 +327,7 @@ fn run_kernel(
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
-    let n = compiled.as_fn()(inputs);
+    let n = compiled.call(inputs);
     inputs.take_error()?;
     let result = out.into_record_batch(n as usize);
     // Keep the interned-literal bytes and group state alive across the run (the

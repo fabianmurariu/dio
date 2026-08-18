@@ -9,7 +9,7 @@ fn test_slice_len() {
     let compiled = compiler.compile(get_len).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 5] = [10, 20, 30, 40, 50];
-    assert_eq!(f(&data[..]), 5);
+    assert_eq!(f.call(&data[..]), 5);
 }
 
 #[test]
@@ -18,7 +18,7 @@ fn test_slice_len_empty() {
     let get_len = compiler.fun1("get_len", |_ctx, arr: Var<SRef<Slice<i64>>>| arr.len());
     let compiled = compiler.compile(get_len).expect("compilation failed");
     let f = compiled.as_fn();
-    assert_eq!(f(&[][..]), 0);
+    assert_eq!(f.call(&[][..]), 0);
 }
 
 #[test]
@@ -30,7 +30,7 @@ fn test_slice_get_unchecked() {
     let compiled = compiler.compile(get_second).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 5] = [10, 20, 30, 40, 50];
-    assert_eq!(f(&data[..]), 20);
+    assert_eq!(f.call(&data[..]), 20);
 }
 
 #[test]
@@ -48,7 +48,7 @@ fn test_slice_sum() {
     let compiled = compiler.compile(sum).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 5] = [10, 20, 30, 40, 50];
-    assert_eq!(f(&data[..]), 150);
+    assert_eq!(f.call(&data[..]), 150);
 }
 
 #[test]
@@ -60,7 +60,7 @@ fn test_slice_mutable_set() {
     let compiled = compiler.compile(set_first).expect("compilation failed");
     let f = compiled.as_fn();
     let mut data: [i64; 3] = [10, 20, 30];
-    f(&mut data[..]);
+    f.call(&mut data[..]);
     assert_eq!(data[0], 999);
     assert_eq!(data[1], 20);
 }
@@ -79,7 +79,7 @@ fn test_slice_mutable_fill() {
     let compiled = compiler.compile(fill).expect("compilation failed");
     let f = compiled.as_fn();
     let mut data: [i64; 4] = [0, 0, 0, 0];
-    f(&mut data[..]);
+    f.call(&mut data[..]);
     assert_eq!(data, [42, 42, 42, 42]);
 }
 
@@ -99,7 +99,7 @@ fn test_slice_subslice() {
     let compiled = compiler.compile(sum_middle).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 6] = [100, 10, 20, 30, 200, 300];
-    assert_eq!(f(&data[..]), 60); // arr[1..4] = [10,20,30]
+    assert_eq!(f.call(&data[..]), 60); // arr[1..4] = [10,20,30]
 }
 
 #[test]
@@ -113,7 +113,7 @@ fn test_slice_swap() {
     let compiled = compiler.compile(swap).expect("compilation failed");
     let f = compiled.as_fn();
     let mut data: [i64; 4] = [1, 2, 3, 4];
-    f(&mut data[..]);
+    f.call(&mut data[..]);
     assert_eq!(data, [4, 2, 3, 1]);
 }
 
@@ -135,7 +135,7 @@ fn test_slice_of_slice() {
     let compiled = compiler.compile(sum).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 6] = [0, 1, 2, 3, 4, 5];
-    assert_eq!(f(&data[..]), 5); // arr[2..4] = [2, 3]
+    assert_eq!(f.call(&data[..]), 5); // arr[2..4] = [2, 3]
 }
 
 #[test]
@@ -150,7 +150,7 @@ fn test_mut_subslice_stays_mutable() {
     let compiled = compiler.compile(set).expect("compilation failed");
     let f = compiled.as_fn();
     let mut data: [i64; 4] = [10, 20, 30, 40];
-    f(&mut data[..]);
+    f.call(&mut data[..]);
     assert_eq!(data, [10, 20, 777, 40]);
 }
 
@@ -172,7 +172,7 @@ fn test_subslice_bind_reuse() {
     let compiled = compiler.compile(sum).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 6] = [100, 10, 20, 30, 200, 300];
-    assert_eq!(f(&data[..]), 60); // arr[1..4] = [10, 20, 30]
+    assert_eq!(f.call(&data[..]), 60); // arr[1..4] = [10, 20, 30]
 }
 
 #[test]
@@ -195,7 +195,7 @@ fn test_slice_count_all_larger_than_3() {
         .expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 5] = [1, 4, 5, 2, 6];
-    assert_eq!(f(&data[..]), 3u64); // 4, 5, 6 > 3
+    assert_eq!(f.call(&data[..]), 3u64); // 4, 5, 6 > 3
 }
 
 #[test]
@@ -213,7 +213,7 @@ fn test_slice_f64() {
     let compiled = compiler.compile(sum_f64).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [f64; 4] = [1.5, 2.5, 3.0, 4.0];
-    assert!((f(&data[..]) - 11.0).abs() < 0.0001);
+    assert!((f.call(&data[..]) - 11.0).abs() < 0.0001);
 }
 
 #[test]
@@ -227,5 +227,5 @@ fn test_slice_return_subslice_len() {
     let compiled = compiler.compile(get_half_len).expect("compilation failed");
     let f = compiled.as_fn();
     let data: [i64; 10] = [0; 10];
-    assert_eq!(f(&data[..]), 5);
+    assert_eq!(f.call(&data[..]), 5);
 }

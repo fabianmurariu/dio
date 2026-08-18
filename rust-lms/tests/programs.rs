@@ -60,7 +60,7 @@ fn test_compute_stats() {
     let mut max = 0.0;
     let mut sum = 0.0;
 
-    func(
+    func.call(
         &data[..],
         threshold,
         &mut count,
@@ -88,6 +88,6 @@ fn test_simple_store_load() {
     let func = compiled.as_fn();
 
     let mut value = 41u64;
-    func(&mut value);
+    func.call(&mut value);
     assert_eq!(value, 42);
 }

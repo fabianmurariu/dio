@@ -37,11 +37,19 @@ larger ownership and ABI redesigns.
    Reduce `CompilationContext` visibility. Covers PR-02. **Status: complete.**
 5. **Tie compiled entry points to ownership.** Add borrowing `call` wrappers,
    make detached function-pointer extraction an unsafe escape hatch, and define
-   an executable-memory reclamation policy. Covers PR-01.
+   an executable-memory reclamation policy. Covers PR-01. **Status: complete.**
 
 Exit criteria: invalid external signatures and arbitrary slice reinterpretation
 fail at compile time; streamed schema changes return an error; unsafe extension
 points and detached entry points are explicit.
+
+**Phase 1 verification (2026-08-18):** `cargo test --workspace --all-targets`
+and `cargo test --workspace --doc` pass. Workspace Clippy with warnings denied
+reports 17 findings outside the PR-01 diff and no new PR-01 findings: three
+`type_complexity`, two generated `too_many_arguments`, three
+`len_without_is_empty`, four `wrong_self_convention`, two `expect_fun_call`,
+one `clone_on_copy`, and two `bool_assert_comparison` diagnostics. These remain
+tracked for the API-consolidation phase.
 
 ## Phase 2: Pointer and ownership model
 

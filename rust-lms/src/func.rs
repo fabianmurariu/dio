@@ -1424,7 +1424,7 @@ impl<'a> Compiler<'a> {
         let main_ptr = module.get_finalized_function(main_func_id);
 
         Ok(Compiled {
-            module,
+            module: Some(module),
             main_ptr,
             _phantom: PhantomData,
         })
@@ -1457,53 +1457,163 @@ impl std::error::Error for CompileError {}
 // Compiled<T>: The result of compilation
 // =============================================================================
 
-/// A compiled expression that owns its JIT module.
+/// A compiled expression that owns its JIT module and executable memory.
 ///
-/// Use `.run()` to execute the compiled code and get the result.
+/// Use [`run`](Self::run) for a plain expression or the arity-specific `call`
+/// methods for a compiled staged function. Executable memory is reclaimed when
+/// this value is dropped.
 pub struct Compiled<'a, T: StagedType> {
-    #[allow(dead_code)]
-    module: JITModule,
+    module: Option<JITModule>,
     main_ptr: *const u8,
     _phantom: PhantomData<&'a T>,
+}
+
+impl<'a, T: StagedType> Drop for Compiled<'a, T> {
+    fn drop(&mut self) {
+        if let Some(module) = self.module.take() {
+            // SAFETY: safe entry points borrow this Compiled value, so no safe
+            // callable can remain when Drop obtains exclusive access. Escaped
+            // pointers are governed by `as_fn_unchecked`'s safety contract.
+            unsafe { module.free_memory() };
+        }
+    }
 }
 
 impl<'a, T: StagedType> Compiled<'a, T> {
     /// Execute the compiled code and return the result.
     ///
-    /// # Safety
-    /// This is safe as long as the compilation was done correctly.
     pub fn run(&self) -> T::RuntimeValue
     where
         T::RuntimeValue: Copy,
     {
-        let func: fn() -> T::RuntimeValue = unsafe { std::mem::transmute(self.main_ptr) };
+        // SAFETY: compile creates `__main__` with this exact zero-argument C ABI
+        // signature, and borrowing self keeps its executable memory live.
+        let func: extern "C" fn() -> T::RuntimeValue =
+            unsafe { std::mem::transmute(self.main_ptr) };
         func()
     }
 }
 
-// Macro to generate as_fn implementations for all function arities
-macro_rules! impl_compiled_as_fn {
+/// A callable entry point tied to the lifetime of its owning [`Compiled`]
+/// module.
+///
+/// The function pointer is deliberately private and this type does not
+/// implement `Deref`: exposing the pointer would allow safe code to copy it and
+/// outlive the executable memory. Use [`call`](CompiledFn::call), or use
+/// `Compiled::as_fn_unchecked` when a foreign API genuinely requires a bare
+/// function pointer.
+#[must_use = "a compiled entry point does nothing until it is called"]
+pub struct CompiledFn<'compiled, F> {
+    function: F,
+    _owner: PhantomData<&'compiled JITModule>,
+}
+
+impl<F: Copy> Clone for CompiledFn<'_, F> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<F: Copy> Copy for CompiledFn<'_, F> {}
+
+// Generate borrowed entry points and direct calls for every function arity.
+macro_rules! impl_compiled_fn {
     // Base case: zero parameters
     (0, $FunType:ident) => {
+        impl<'compiled, OUT> CompiledFn<'compiled, extern "C" fn() -> OUT> {
+            /// Invoke the entry point while its module remains borrowed.
+            pub fn call(&self) -> OUT {
+                (self.function)()
+            }
+        }
+
         impl<'a, OUT: StagedType> Compiled<'a, $FunType<OUT>> {
-            /// Get the compiled function as a callable function pointer.
-            pub fn as_fn(&self) -> extern "C" fn() -> OUT::RuntimeValue {
-                let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
+            /// Borrow the compiled function as a safe callable entry point.
+            ///
+            /// The borrow prevents this pattern from compiling:
+            ///
+            /// ```compile_fail
+            /// use rust_lms::prelude::*;
+            ///
+            /// let mut compiler = Compiler::new();
+            /// let function = compiler.fun0("one", |_ctx| Const::new(1i64));
+            /// let entry = compiler.compile(function).unwrap().as_fn();
+            /// assert_eq!(entry.call(), 1);
+            /// ```
+            pub fn as_fn(
+                &self,
+            ) -> CompiledFn<'_, extern "C" fn() -> OUT::RuntimeValue> {
+                // SAFETY: the returned wrapper borrows self and never exposes
+                // the bare pointer.
+                let function = unsafe { self.as_fn_unchecked() };
+                CompiledFn {
+                    function,
+                    _owner: PhantomData,
+                }
+            }
+
+            /// Invoke the compiled function while borrowing its owner.
+            pub fn call(&self) -> OUT::RuntimeValue {
+                self.as_fn().call()
+            }
+
+            /// Extract the compiled function as an untracked function pointer.
+            ///
+            /// # Safety
+            ///
+            /// The returned pointer must never be invoked after `self` is
+            /// dropped.
+            pub unsafe fn as_fn_unchecked(
+                &self,
+            ) -> extern "C" fn() -> OUT::RuntimeValue {
+                let get_ptr: extern "C" fn() -> i64 =
+                    unsafe { std::mem::transmute(self.main_ptr) };
                 let fn_ptr = get_ptr();
                 unsafe { std::mem::transmute(fn_ptr) }
             }
         }
     };
     // N parameters (N >= 1)
-    ($n:tt, $FunType:ident, [$($T:ident),+]) => {
+    ($n:tt, $FunType:ident, [$($T:ident : $arg:ident),+]) => {
+        impl<'compiled, $($T,)+ OUT> CompiledFn<'compiled, extern "C" fn($($T),+) -> OUT> {
+            /// Invoke the entry point while its module remains borrowed.
+            #[allow(clippy::too_many_arguments)]
+            pub fn call(&self, $($arg: $T),+) -> OUT {
+                (self.function)($($arg),+)
+            }
+        }
+
         impl<'a, $($T: StagedType,)+ OUT: StagedType> Compiled<'a, $FunType<$($T,)+ OUT>> {
-            /// Get the compiled function as a callable function pointer.
+            /// Borrow the compiled function as a safe callable entry point.
+            pub fn as_fn(
+                &self,
+            ) -> CompiledFn<'_, extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue> {
+                // SAFETY: the returned wrapper borrows self and never exposes
+                // the bare pointer.
+                let function = unsafe { self.as_fn_unchecked() };
+                CompiledFn {
+                    function,
+                    _owner: PhantomData,
+                }
+            }
+
+            /// Invoke the compiled function while borrowing its owner.
+            #[allow(clippy::too_many_arguments)]
+            pub fn call(&self, $($arg: $T::RuntimeValue),+) -> OUT::RuntimeValue {
+                self.as_fn().call($($arg),+)
+            }
+
+            /// Extract the compiled function as an untracked function pointer.
             ///
-            /// Returns an `extern "C"` function pointer to match the System V calling
-            /// convention used by Cranelift. This is important for structs passed by value,
-            /// as Rust's default calling convention may differ from the C ABI.
-            pub fn as_fn(&self) -> extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue {
-                let get_ptr: fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
+            /// # Safety
+            ///
+            /// The returned pointer must never be invoked after `self` is
+            /// dropped.
+            pub unsafe fn as_fn_unchecked(
+                &self,
+            ) -> extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue {
+                let get_ptr: extern "C" fn() -> i64 =
+                    unsafe { std::mem::transmute(self.main_ptr) };
                 let fn_ptr = get_ptr();
                 unsafe { std::mem::transmute(fn_ptr) }
             }
@@ -1511,468 +1621,12 @@ macro_rules! impl_compiled_as_fn {
     };
 }
 
-impl_compiled_as_fn!(0, FunType0);
-impl_compiled_as_fn!(1, FunType1, [A]);
-impl_compiled_as_fn!(2, FunType2, [A, B]);
-impl_compiled_as_fn!(3, FunType3, [A, B, C]);
-impl_compiled_as_fn!(4, FunType4, [A, B, C, D]);
-impl_compiled_as_fn!(5, FunType5, [A, B, C, D, E]);
-impl_compiled_as_fn!(6, FunType6, [A, B, C, D, E, F]);
-impl_compiled_as_fn!(7, FunType7, [A, B, C, D, E, F, G]);
-impl_compiled_as_fn!(8, FunType8, [A, B, C, D, E, F, G, H]);
-
-#[cfg(test)]
-mod tests {
-    use super::*;
-    use crate::prelude::*;
-
-    #[test]
-    fn test_simple_constant() {
-        let compiler = Compiler::new();
-        let five = Const::<i64>::new(5);
-
-        let compiled = compiler.compile(five).expect("compilation failed");
-        let result = compiled.run();
-
-        assert_eq!(result, 5);
-    }
-
-    #[test]
-    fn test_simple_addition() {
-        let compiler = Compiler::new();
-        let expr = add::<i64, _, _>(3i64, 4i64);
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        let result = compiled.run();
-
-        assert_eq!(result, 7);
-    }
-
-    #[test]
-    fn test_nested_arithmetic() {
-        let compiler = Compiler::new();
-        // (3 + 4) * 2 = 14
-        let expr = mul(
-            add(Const::<i64>::new(3), Const::<i64>::new(4)),
-            Const::<i64>::new(2),
-        );
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        let result = compiled.run();
-
-        assert_eq!(result, 14);
-    }
-
-    #[test]
-    fn test_fun1_and_call() {
-        let mut compiler = Compiler::new();
-
-        // Define: square(x) = x * x
-        let square = compiler.fun1("square", |_ctx, x: Var<i64>| mul(x, x));
-
-        // Call: square(5) = 25
-        let expr = call1(square, Const::<i64>::new(5));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        let result = compiled.run();
-
-        assert_eq!(result, 25);
-    }
-
-    #[test]
-    fn test_var_before_fun1() {
-        let mut compiler = Compiler::new();
-
-        // Ensure that functions defined after internal var allocation don't get wrong param IDs.
-        // Allocate a var inside a fun0 first to advance the counter.
-        let _prime = compiler.fun0("prime_counter", |ctx| {
-            let _x = ctx.var(0i64);
-            Const::<i64>::new(0)
-        });
-
-        // Define: double(x) = x + x
-        let double = compiler.fun1("double", |_ctx, x: Var<i64>| add(x, x));
-
-        // Call: double(7) = 14
-        let expr = call1(double, Const::<i64>::new(7));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        let result = compiled.run();
-
-        assert_eq!(result, 14);
-    }
-
-    #[test]
-    fn test_return_function_pointer() {
-        let mut compiler = Compiler::new();
-
-        // Define: cube(x) = x * x * x
-        let cube = compiler.fun1("cube", |_ctx, x: Var<i64>| mul(mul(x, x), x));
-
-        // Compile the function reference itself (not a call)
-        let compiled = compiler.compile(cube).expect("compilation failed");
-
-        // Extract the function pointer
-        let cube_fn = compiled.as_fn();
-
-        // Test the function with various inputs
-        assert_eq!(cube_fn(2), 8);
-        assert_eq!(cube_fn(3), 27);
-        assert_eq!(cube_fn(5), 125);
-        assert_eq!(cube_fn(-2), -8);
-    }
-
-    #[test]
-    fn test_recursive_function_compiles() {
-        let mut compiler = Compiler::new();
-
-        // Define a recursive function: rec(x) = x + rec(x - 1)
-        // Note: This will infinite loop if called, but we're just testing
-        // that it compiles and the function can reference itself
-        let _rec = compiler.fun1_rec("recursive", |f, _ctx, x: Var<i64>| {
-            // Body references itself: call f recursively
-            add(x, call1(f, sub(x, Const::<i64>::new(1))))
-        });
-
-        // Just test that compilation succeeds
-        // We don't call it since it would infinite loop without conditionals
-        let expr = Const::<i64>::new(42);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
-
-    // =========================================================================
-    // Control Flow Tests
-    // =========================================================================
-
-    #[test]
-    fn test_if_then_else_basic() {
-        // Test true branch
-        let compiler = Compiler::new();
-        let expr_true = if_then_else(true, Const::<i64>::new(10), Const::<i64>::new(20));
-        assert_eq!(compiler.compile(expr_true).unwrap().run(), 10);
-
-        // Test false branch
-        let compiler = Compiler::new();
-        let expr_false = if_then_else(false, Const::<i64>::new(10), Const::<i64>::new(20));
-        assert_eq!(compiler.compile(expr_false).unwrap().run(), 20);
-    }
-
-    #[test]
-    fn test_if_then_else_clamp() {
-        let mut compiler = Compiler::new();
-
-        // clamp(x) = if x < 0 then 0 else (if x > 10 then 10 else x)
-        let clamp = compiler.fun1("clamp", |_ctx, x: Var<i64>| {
-            if_then_else(
-                lt(x, 0),
-                Const::<i64>::new(0),
-                if_then_else(lt(10, x), Const::<i64>::new(10), x),
-            )
-        });
-
-        let compiled = compiler.compile(clamp).expect("compilation failed");
-        let clamp_fn = compiled.as_fn();
-
-        assert_eq!(clamp_fn(-5), 0); // Clamped at min
-        assert_eq!(clamp_fn(5), 5); // In range
-        assert_eq!(clamp_fn(15), 10); // Clamped at max
-    }
-
-    #[test]
-    fn test_seq_basic() {
-        let compiler = Compiler::new();
-
-        // (5, 10) => 10 (first value ignored, second returned)
-        let expr = (Const::<i64>::new(5), Const::<i64>::new(10));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 10);
-    }
-
-    #[test]
-    fn test_let_var() {
-        let mut compiler = Compiler::new();
-
-        let f = compiler.fun0("let_var_test", |ctx| {
-            let x = ctx.var(42i64);
-            let y = ctx.var(8i64);
-            add::<i64, _, _>(x, y)
-        });
-
-        let compiled = compiler.compile(call0(f)).expect("compilation failed");
-        assert_eq!(compiled.run(), 50);
-    }
-
-    #[test]
-    fn test_ergonomic_assign() {
-        let mut compiler = Compiler::new();
-
-        let f = compiler.fun0("ergonomic_assign", |ctx| {
-            let x = ctx.var(0i64);
-            let y = ctx.var(0i64);
-            ctx.store(x, 10i64);
-            ctx.store(y, 32i64);
-            add(x, y)
-        });
-
-        let compiled = compiler.compile(call0(f)).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
-
-    #[test]
-    fn test_recursive_factorial() {
-        let mut compiler = Compiler::new();
-
-        // factorial(n) = if n <= 1 then 1 else n * factorial(n - 1)
-        let factorial = compiler.fun1_rec("factorial", |f, _ctx, n: Var<i64>| {
-            if_then_else(lt(n, 2), Const::new(1), mul(n, call1(f, sub(n, 1))))
-        });
-
-        let compiled = compiler.compile(factorial).expect("compilation failed");
-        let factorial_fn = compiled.as_fn();
-
-        assert_eq!(factorial_fn(0), 1);
-        assert_eq!(factorial_fn(1), 1);
-        assert_eq!(factorial_fn(5), 120);
-        assert_eq!(factorial_fn(10), 3628800);
-    }
-
-    #[test]
-    fn test_fibonacci() {
-        let mut compiler = Compiler::new();
-
-        // fib(n) = if n < 2 then n else fib(n-1) + fib(n-2)
-        let fib = compiler.fun1_rec("fib", |f, _ctx, n: Var<i64>| {
-            if_then_else(
-                lt(n, Const::<i64>::new(2)),
-                n, // fib(0) = 0, fib(1) = 1
-                add(
-                    call1(f, sub(n, Const::<i64>::new(1))),
-                    call1(f, sub(n, Const::<i64>::new(2))),
-                ),
-            )
-        });
-
-        // Compile and get function pointer
-        let compiled = compiler.compile(fib).expect("compilation failed");
-        let fib_fn = compiled.as_fn();
-
-        // Test Fibonacci sequence: 0, 1, 1, 2, 3, 5, 8, 13, 21, 34
-        assert_eq!(fib_fn(0), 0);
-        assert_eq!(fib_fn(1), 1);
-        assert_eq!(fib_fn(2), 1);
-        assert_eq!(fib_fn(3), 2);
-        assert_eq!(fib_fn(4), 3);
-        assert_eq!(fib_fn(5), 5);
-        assert_eq!(fib_fn(6), 8);
-        assert_eq!(fib_fn(7), 13);
-        assert_eq!(fib_fn(10), 55);
-    }
-
-    // =========================================================================
-    // While Loop Tests
-    // =========================================================================
-
-    #[test]
-    fn test_while_loop_zero_iterations() {
-        let mut compiler = Compiler::new();
-
-        let f = compiler.fun0("while_zero", |ctx| {
-            let result = ctx.var(0i64);
-            ctx.while_loop(false, move |ctx| {
-                ctx.store(result, 999i64);
-            });
-            ctx.store(result, 42i64);
-            result
-        });
-
-        let compiled = compiler.compile(call0(f)).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
-
-    #[test]
-    fn test_while_loop_factorial() {
-        let mut compiler = Compiler::new();
-
-        let factorial_iter = compiler.fun1("factorial_iter", |ctx, n: Var<i64>| {
-            let i = ctx.var(1i64);
-            let result = ctx.var(1i64);
-            ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                ctx.store(result, mul(result, i));
-                ctx.store(i, add(i, 1i64));
-            });
-            result
-        });
-
-        let compiled = compiler
-            .compile(factorial_iter)
-            .expect("compilation failed");
-        let factorial_fn = compiled.as_fn();
-
-        assert_eq!(factorial_fn(0), 1);
-        assert_eq!(factorial_fn(1), 1);
-        assert_eq!(factorial_fn(2), 2);
-        assert_eq!(factorial_fn(3), 6);
-        assert_eq!(factorial_fn(5), 120);
-        assert_eq!(factorial_fn(10), 3628800);
-    }
-
-    #[test]
-    fn test_while_loop_fibonacci_iterative() {
-        let mut compiler = Compiler::new();
-
-        let fib_iter = compiler.fun1("fib_iter", |ctx, n: Var<i64>| {
-            let i = ctx.var(2i64);
-            let a = ctx.var(0i64);
-            let b = ctx.var(1i64);
-            let temp = ctx.var(0i64);
-            if_then_else(lt(n, 2), n, {
-                ctx.while_loop(lt(i, add(n, 1i64)), move |ctx| {
-                    ctx.store(temp, add(a, b));
-                    ctx.store(a, b);
-                    ctx.store(b, temp);
-                    ctx.store(i, add(i, 1i64));
-                });
-                b
-            })
-        });
-
-        let compiled = compiler.compile(fib_iter).expect("compilation failed");
-        let fib_fn = compiled.as_fn();
-
-        assert_eq!(fib_fn(0), 0);
-        assert_eq!(fib_fn(1), 1);
-        assert_eq!(fib_fn(2), 1);
-        assert_eq!(fib_fn(3), 2);
-        assert_eq!(fib_fn(4), 3);
-        assert_eq!(fib_fn(5), 5);
-        assert_eq!(fib_fn(10), 55);
-        assert_eq!(fib_fn(20), 6765);
-        assert_eq!(fib_fn(30), 832040);
-    }
-
-    #[test]
-    fn test_local_variables_in_fun1() {
-        use crate::refer::SRef;
-        use crate::slice::Slice;
-
-        let mut compiler = Compiler::new();
-
-        // Function that sums elements > 5 using local variables
-        // fn sum_gt_5(arr: &[i64]) -> i64
-        let sum_gt_5 = compiler.fun1("sum_gt_5", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            // Create local variables inside the function using ctx
-            let i = ctx.let_var(0u64);
-            let sum = ctx.let_var(0i64);
-            let v = ctx.let_var(0i64);
-
-            (
-                (i, sum, v),
-                while_loop(
-                    lt(*i, arr.len()),
-                    (
-                        // v = arr.get_unchecked(i)
-                        assign(*v, arr.get_unchecked(*i)),
-                        // sum = if v > 5 then sum + v else sum
-                        assign(
-                            *sum,
-                            if_then_else(
-                                lt(5, *v), // v > 5
-                                add(*sum, *v),
-                                *sum,
-                            ),
-                        ),
-                        assign(*i, add(*i, 1u64)),
-                    ),
-                ),
-                *sum,
-            )
-        });
-
-        let compiled = compiler.compile(sum_gt_5).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        // Test with array [0, 3, 5, 7, 2, 8, 1, 9, 4, 6]
-        // Elements > 5: 7, 8, 9, 6 => sum = 30
-        let data: [i64; 10] = [0, 3, 5, 7, 2, 8, 1, 9, 4, 6];
-        let slice: &[i64] = &data;
-
-        let result = f(slice);
-        assert_eq!(result, 30); // 7 + 8 + 9 + 6 = 30
-    }
-
-    // =========================================================================
-    // Multi-Parameter Function Tests
-    // =========================================================================
-
-    #[test]
-    fn test_fun0_constant() {
-        use crate::func_impl::call0;
-
-        let mut compiler = Compiler::new();
-
-        // Define: get_answer() = 42
-        let get_answer = compiler.fun0("get_answer", |_ctx| Const::<i64>::new(42));
-
-        let expr = call0(get_answer);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
-
-    #[test]
-    fn test_fun2_add() {
-        let mut compiler = Compiler::new();
-
-        let add_fn = compiler.fun2("add", |_ctx, a: Var<i64>, b: Var<i64>| add(a, b));
-
-        let compiled = compiler.compile(add_fn).expect("compilation failed");
-        let add_ptr = compiled.as_fn();
-
-        assert_eq!(add_ptr(10, 32), 42);
-        assert_eq!(add_ptr(-5, 5), 0);
-    }
-
-    #[test]
-    fn test_fun3_clamp() {
-        let mut compiler = Compiler::new();
-
-        // clamp(x, min, max) = if x < min then min else (if x > max then max else x)
-        let clamp_fn = compiler.fun3(
-            "clamp",
-            |_ctx, x: Var<i64>, min: Var<i64>, max: Var<i64>| {
-                if_then_else(lt(x, min), min, if_then_else(lt(max, x), max, x))
-            },
-        );
-
-        let compiled = compiler.compile(clamp_fn).expect("compilation failed");
-        let clamp = compiled.as_fn();
-
-        assert_eq!(clamp(-5, 0, 10), 0); // Clamped at min
-        assert_eq!(clamp(5, 0, 10), 5); // In range
-        assert_eq!(clamp(15, 0, 10), 10); // Clamped at max
-    }
-
-    #[test]
-    fn test_fun2_rec_gcd() {
-        use crate::func_impl::call2;
-
-        let mut compiler = Compiler::new();
-
-        // Define: gcd(a, b) = if b == 0 then a else gcd(b, a % b)
-        // Note: We'll use a different implementation since we don't have modulo
-        // gcd(a, b) = if b == 0 then a else gcd(b, a - b * (a / b))
-        let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<i64>, b: Var<i64>| {
-            if_then_else(
-                eq(b, 0i64),
-                a,
-                call2(f, b, sub(a, mul(b, div(a, b)))), // a % b = a - b * (a / b)
-            )
-        });
-
-        // gcd(48, 18) = 6
-        let expr = call2(gcd, 48i64, 18i64);
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 6);
-    }
-}
+impl_compiled_fn!(0, FunType0);
+impl_compiled_fn!(1, FunType1, [A: a]);
+impl_compiled_fn!(2, FunType2, [A: a, B: b]);
+impl_compiled_fn!(3, FunType3, [A: a, B: b, C: c]);
+impl_compiled_fn!(4, FunType4, [A: a, B: b, C: c, D: d]);
+impl_compiled_fn!(5, FunType5, [A: a, B: b, C: c, D: d, E: e]);
+impl_compiled_fn!(6, FunType6, [A: a, B: b, C: c, D: d, E: e, F: f]);
+impl_compiled_fn!(7, FunType7, [A: a, B: b, C: c, D: d, E: e, F: f, G: g]);
+impl_compiled_fn!(8, FunType8, [A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h]);

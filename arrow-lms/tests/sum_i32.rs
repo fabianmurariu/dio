@@ -41,12 +41,13 @@ fn sum_i32_column() {
         });
         acc
     });
-    let sum = compiler.compile(f).unwrap().as_fn();
+    let compiled = compiler.compile(f).unwrap();
+    let sum = compiled.as_fn();
 
     let arrow_sum =
         arrow::compute::sum(rb.column(0).as_any().downcast_ref::<Int32Array>().unwrap()).unwrap();
-    assert_eq!(sum(prepared.arrays()), 15);
-    assert_eq!(sum(prepared.arrays()), arrow_sum);
+    assert_eq!(sum.call(prepared.arrays()), 15);
+    assert_eq!(sum.call(prepared.arrays()), arrow_sum);
 }
 
 #[test]
@@ -66,9 +67,10 @@ fn empty_column_sums_to_zero() {
         });
         acc
     });
-    let sum = compiler.compile(f).unwrap().as_fn();
+    let compiled = compiler.compile(f).unwrap();
+    let sum = compiled.as_fn();
 
-    assert_eq!(sum(prepared.arrays()), 0);
+    assert_eq!(sum.call(prepared.arrays()), 0);
 }
 
 #[test]
@@ -91,9 +93,10 @@ fn sum_skips_nulls_via_is_valid() {
         });
         acc
     });
-    let sum = compiler.compile(f).unwrap().as_fn();
+    let compiled = compiler.compile(f).unwrap();
+    let sum = compiled.as_fn();
 
-    assert_eq!(sum(prepared.arrays()), 40);
+    assert_eq!(sum.call(prepared.arrays()), 40);
 }
 
 #[test]
@@ -120,9 +123,10 @@ fn is_valid_respects_sliced_bitmap_offset() {
         });
         acc
     });
-    let count_valid = compiler.compile(f).unwrap().as_fn();
+    let compiled = compiler.compile(f).unwrap();
+    let count_valid = compiled.as_fn();
 
-    assert_eq!(count_valid(prepared.arrays()), 1);
+    assert_eq!(count_valid.call(prepared.arrays()), 1);
 }
 
 #[test]
@@ -143,7 +147,8 @@ fn read_i16_from_erased_dyn_arrays() {
         });
         int_cast::<i64, i16, _>(acc)
     });
-    let sum = compiler.compile(f).unwrap().as_fn();
+    let compiled = compiler.compile(f).unwrap();
+    let sum = compiled.as_fn();
 
-    assert_eq!(sum(prepared.arrays()), 10);
+    assert_eq!(sum.call(prepared.arrays()), 10);
 }

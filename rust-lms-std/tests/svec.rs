@@ -27,7 +27,7 @@ fn push_grows_and_reads_back() {
     });
     let compiled = compiler.compile(fill).expect("compile");
 
-    let len = compiled.as_fn()(10);
+    let len = compiled.call(10);
     assert_eq!(len, 10);
     assert_eq!(host.len(), 10);
     assert_eq!(host.as_slice(), &[0, 10, 20, 30, 40, 50, 60, 70, 80, 90]);
@@ -66,7 +66,7 @@ fn get_after_grow() {
     let compiled = compiler.compile(sum_fn).expect("compile");
 
     // 0+1+…+99 = 4950
-    let sum = compiled.as_fn()(100);
+    let sum = compiled.call(100);
     assert_eq!(sum, 4950);
     assert_eq!(host.len(), 100);
 }
@@ -98,7 +98,7 @@ fn set_overwrites() {
     });
     let compiled = compiler.compile(build).expect("compile");
 
-    let len = compiled.as_fn()();
+    let len = compiled.call();
     assert_eq!(len, 5);
     assert_eq!(host.as_slice(), &[0, 0, 42, 0, 7]);
 }

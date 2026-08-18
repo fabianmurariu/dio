@@ -142,8 +142,8 @@ pub mod prelude {
         SliceFromRawParts, SliceRefFromRawParts, StackAlloc, StackBytes,
     };
     pub use crate::func::{
-        call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,
-        FunType0, FunType1, FunType2, FunType3,
+        call0, call1, call2, call3, Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2,
+        FunRef3, FunType0, FunType1, FunType2, FunType3,
     };
     pub use crate::iter::{
         box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step, DynExactIter, DynIter,

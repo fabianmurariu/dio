@@ -29,7 +29,7 @@ fn kernel_appends_into_pool() {
     let compiled = compiler.compile(f).expect("compile");
 
     let mut pool = BytesPool::new();
-    let world_addr = compiled.as_fn()(&mut pool);
+    let world_addr = compiled.call(&mut pool);
 
     // Both appends landed contiguously in one chunk, recoverable by the host.
     assert_eq!(pool.chunks().len(), 1);

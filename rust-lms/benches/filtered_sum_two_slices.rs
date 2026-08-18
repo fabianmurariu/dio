@@ -80,7 +80,7 @@ fn build_filtered_sum_lms() -> impl Fn(&[i64], &[i64], i64) -> i64 {
     let compiled = compiler.compile(f).expect("rust-lms compile failed");
     move |x, y, z| {
         let func = compiled.as_fn();
-        func(x, y, z)
+        func.call(x, y, z)
     }
 }
 

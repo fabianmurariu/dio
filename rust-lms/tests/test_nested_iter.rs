@@ -78,7 +78,8 @@ fn nested_traversal_sums_neighbours_with_zero_allocation() {
         });
         total
     });
-    let kernel = compiler.compile(f).expect("compile").as_fn();
+    let compiled = compiler.compile(f).expect("compile");
+    let kernel = compiled.as_fn();
 
     let g = Nums {
         adj: vec![vec![1, 2, 3], vec![4], vec![5, 6], vec![]],
@@ -87,7 +88,7 @@ fn nested_traversal_sums_neighbours_with_zero_allocation() {
 
     // Measure allocations *during* the JIT'd nested traversal only.
     let before = ALLOCS.load(Ordering::Relaxed);
-    let got = kernel(&g);
+    let got = kernel.call(&g);
     let allocs = ALLOCS.load(Ordering::Relaxed) - before;
 
     assert_eq!(got, expected, "nested traversal produced the wrong sum");
