@@ -53,7 +53,7 @@ fn opaque_mut_ref_param() {
         "push_and_count",
         move |ctx, g: Var<SRefMut<Opaque<Graph>>>| {
             ctx.emit(call_extern2(push, g, Const::<u64>::new(99)));
-            call_extern1(node_count, g)
+            call_extern1(node_count, ref_as_const(g))
         },
     );
     let kernel = compiler.compile(f).expect("compile").as_fn();

@@ -134,10 +134,12 @@ pub mod prelude {
         if_then, if_then_else, not, while_loop, IfThen, IfThenElse, Not, While,
     };
     pub use crate::ffi::{
-        call_extern0, call_extern1, call_extern2, call_extern3, call_extern4, slice_from_raw_parts,
-        slice_ref_from_raw_parts, stack_alloc, stack_bytes, ExternFn, ExternRef, FatSlice,
-        FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice, FfiSliceMut, FfiSliceMutType,
-        FfiSliceType, SliceFromRawParts, SliceRefFromRawParts, StackAlloc, StackBytes,
+        call_extern0, call_extern0_unchecked, call_extern1, call_extern1_unchecked, call_extern2,
+        call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
+        call_extern4_unchecked, slice_from_raw_parts, slice_ref_from_raw_parts, stack_alloc,
+        stack_bytes, ExternArgs, ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType,
+        FatSliceType, FfiSlice, FfiSliceMut, FfiSliceMutType, FfiSliceType, SafeExternFn,
+        SliceFromRawParts, SliceRefFromRawParts, StackAlloc, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3,
@@ -172,9 +174,9 @@ pub mod prelude {
     };
     pub use crate::refer::{
         array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
-        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut, store,
-        store_ref, ArrayIndex, ConstPtr, LoadMutRef, LoadRef, PtrCast, PtrIsNull, PtrOffset,
-        PtrOffsetMut, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
+        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
+        ref_as_const, store, store_ref, ArrayIndex, ConstPtr, LoadMutRef, LoadRef, PtrCast,
+        PtrIsNull, PtrOffset, PtrOffsetMut, RustPtr, RustRef, SMutPtr, SPtr, SRef, SRefMut, Store,
     };
     pub use crate::slice::{
         AsMutSlice, AsSlice, ReprSliceMutOps, ReprSliceOps, Slice, SliceLen, SliceMutOps,

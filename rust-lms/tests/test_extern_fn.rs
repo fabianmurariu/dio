@@ -35,6 +35,14 @@ pub extern "C" fn ext_noop() {
     // Do nothing
 }
 
+/// An unsafe callback must use `call_extern1_unchecked`.
+#[extern_fn]
+#[no_mangle]
+pub unsafe extern "C" fn ext_read_i64(ptr: *const i64) -> i64 {
+    // SAFETY: required by this function's contract.
+    unsafe { *ptr }
+}
+
 // =============================================================================
 // FatSlice external functions
 // =============================================================================
@@ -67,6 +75,47 @@ pub extern "C" fn ext_double_slice(mut data: FatSliceMut<i64>) {
 // =============================================================================
 // Tests
 // =============================================================================
+
+#[test]
+fn test_extern_marker_carries_the_complete_signature() {
+    fn assert_add_signature<S>()
+    where
+        S: ExternFn<Args = (i64, i64), Ret = i64> + SafeExternFn,
+    {
+    }
+
+    fn assert_noop_signature<S>()
+    where
+        S: ExternFn<Args = (), Ret = ()> + SafeExternFn,
+    {
+    }
+
+    fn assert_slice_signature<S>()
+    where
+        S: ExternFn<Args = (FatSliceType<i64>,), Ret = i64> + SafeExternFn,
+    {
+    }
+
+    assert_add_signature::<ExtAddExtern>();
+    assert_noop_signature::<ExtNoopExtern>();
+    assert_slice_signature::<ExtSumSliceExtern>();
+}
+
+#[test]
+fn test_unsafe_extern_requires_explicit_constructor() {
+    let mut compiler = Compiler::new();
+    let read = compiler.extern_fn::<ExtReadI64Extern>();
+    let test_fn = compiler.fun1("test", |_ctx, ptr: Var<SPtr<i64>>| {
+        // SAFETY: the generated function forwards its caller-provided pointer;
+        // this test supplies a live, aligned `i64` below.
+        unsafe { call_extern1_unchecked(read, ptr) }
+    });
+
+    let compiled = compiler.compile(test_fn).expect("compilation failed");
+    let function = compiled.as_fn();
+    let value = 42i64;
+    assert_eq!(function(&value), 42);
+}
 
 #[test]
 fn test_extern_fn_simple_add() {

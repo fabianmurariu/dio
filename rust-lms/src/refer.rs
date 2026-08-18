@@ -552,6 +552,23 @@ where
     }
 }
 
+/// Demote a staged `&mut T` to `&T` at the same address (no code emitted).
+///
+/// This is the staged equivalent of reborrowing a mutable Rust reference as an
+/// immutable reference, primarily for passing an `SRefMut` to an external
+/// function whose typed signature expects `SRef`.
+pub fn ref_as_const<'a, T, Tag, P>(reference: P) -> PtrCast<P, SRef<'a, T, Tag>>
+where
+    T: StagedType + 'a,
+    Tag: 'a,
+    P: Staged<Out = SRefMut<'a, T, Tag>>,
+{
+    PtrCast {
+        ptr: reference,
+        _s: PhantomData,
+    }
+}
+
 /// True iff the pointer is null (`ptr == 0`) — the staged twin of `p.is_null()`.
 /// The sentinel test for an extern returning a nullable `*const T` / `*mut T`
 /// (e.g. a scan stream's "no more batches"). Emits a single `icmp eq ptr, 0`.

@@ -559,12 +559,16 @@ fn build_bytes_key(
                 const_opaque_mut::<GroupState>(state),
                 v,
             )),
-            Pushable::Bytes(ptr, len) => ctx.emit(call_extern3(
-                cx.rt.group_key_push_bytes,
-                const_opaque_mut::<GroupState>(state),
-                ptr,
-                len,
-            )),
+            // SAFETY: `ptr` and `len` come from a resolved Arrow string that
+            // remains live for the duration of this generated call.
+            Pushable::Bytes(ptr, len) => ctx.emit(unsafe {
+                call_extern3_unchecked(
+                    cx.rt.group_key_push_bytes,
+                    const_opaque_mut::<GroupState>(state),
+                    ptr,
+                    len,
+                )
+            }),
         }
     }
     ctx.bind(call_extern1(

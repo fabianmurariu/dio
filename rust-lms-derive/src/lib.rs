@@ -425,7 +425,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 ///
 /// // Usage:
 /// // let sum_fn = compiler.extern_fn::<SumArrayExtern>();
-/// // let result = call_extern1::<_, _, FatSliceType<i64>, i64>(sum_fn, slice_arg);
+/// // let result = call_extern1(sum_fn, slice_arg);
 /// ```
 #[proc_macro_attribute]
 pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
@@ -516,17 +516,18 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         });
     }
 
-    let num_params = param_staged_types.len();
-
-    // Generate param_abi_types() implementation
-    let param_abi_types_impl = if param_staged_types.is_empty() {
-        quote! { Vec::new() }
+    let args_staged_type = if param_staged_types.is_empty() {
+        quote! { () }
     } else {
+        quote! { (#(#param_staged_types,)*) }
+    };
+
+    let safe_extern_impl = if input.sig.unsafety.is_none() {
         quote! {
-            vec![
-                #(<#param_staged_types as ::rust_lms::types::StagedType>::abi_types()),*
-            ]
+            unsafe impl ::rust_lms::ffi::SafeExternFn for #type_name {}
         }
+    } else {
+        quote! {}
     };
 
     // Generate the output
@@ -540,20 +541,18 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         pub struct #type_name;
 
         unsafe impl ::rust_lms::ffi::ExternFn for #type_name {
+            type Args = #args_staged_type;
             type Ret = #return_staged_type;
 
             const NAME: &'static str = #fn_name_str;
-            const NUM_PARAMS: usize = #num_params;
             const FN_PTR: *const u8 = #fn_name as *const u8;
-
-            fn param_abi_types() -> Vec<Vec<::cranelift_codegen::ir::Type>> {
-                #param_abi_types_impl
-            }
 
             fn return_abi_types() -> Vec<::cranelift_codegen::ir::Type> {
                 <#return_staged_type as ::rust_lms::types::StagedType>::abi_types()
             }
         }
+
+        #safe_extern_impl
     };
 
     TokenStream::from(expanded)

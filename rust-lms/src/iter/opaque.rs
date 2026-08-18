@@ -20,7 +20,7 @@
 
 use std::marker::PhantomData;
 
-use crate::ffi::{call_extern1, ExternFn, ExternRef};
+use crate::ffi::{call_extern1_unchecked, ExternFn, ExternRef};
 use crate::func::{Compiler, Ctx};
 use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
@@ -48,9 +48,9 @@ pub trait OpaqueIterKind: 'static {
     /// The element type (an integer ≤ 64 bits for the `next` register path).
     type Item: StagedType + 'static;
     /// `next(it) -> COption<Item>`.
-    type Next: ExternFn;
+    type Next: ExternFn<Args = (OpaqueHandle,), Ret = COptionType<Self::Item>>;
     /// `drop(it)`.
-    type Drop: ExternFn<Ret = ()>;
+    type Drop: ExternFn<Args = (OpaqueHandle,), Ret = ()>;
 }
 
 /// An [`OpaqueIterKind`] that also knows its length, enabling a tighter counted
@@ -60,9 +60,9 @@ pub trait OpaqueIterKind: 'static {
 /// - `NextValue`: `extern "C" fn(*mut ()) -> Item` (valid for `len` calls)
 pub trait ExactSizeOpaqueIterKind: OpaqueIterKind {
     /// `len(it) -> u64`.
-    type Len: ExternFn<Ret = u64>;
+    type Len: ExternFn<Args = (OpaqueHandle,), Ret = u64>;
     /// `next_value(it) -> Item`, called exactly `len` times (no `Option`).
-    type NextValue: ExternFn<Ret = Self::Item>;
+    type NextValue: ExternFn<Args = (OpaqueHandle,), Ret = Self::Item>;
 }
 
 // =============================================================================
@@ -206,8 +206,12 @@ where
     /// O(1) element count: `len(it)`, then `drop(it)` — no iteration.
     pub fn count(self, ctx: &mut Ctx) -> Var<u64> {
         let handle = ctx.bind(self.handle);
-        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle>(self.len, handle));
-        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle>(self.drop, handle));
+        // SAFETY: `handle` came from this iterator kind's producer and remains
+        // live until the matching drop call below.
+        let n = ctx
+            .bind(unsafe { call_extern1_unchecked::<K::Len, _, OpaqueHandle>(self.len, handle) });
+        // SAFETY: this is the matching drop for the same live handle.
+        ctx.emit(unsafe { call_extern1_unchecked::<K::Drop, _, OpaqueHandle>(self.drop, handle) });
         n
     }
 }
@@ -224,17 +228,22 @@ where
         F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
     {
         let handle = ctx.bind(self.handle);
-        let n = ctx.bind(call_extern1::<K::Len, _, OpaqueHandle>(self.len, handle));
+        // SAFETY: all calls use the live handle produced for this iterator kind.
+        let n = ctx
+            .bind(unsafe { call_extern1_unchecked::<K::Len, _, OpaqueHandle>(self.len, handle) });
         let i = ctx.var(0u64);
         let next_value = self.next_value;
         ctx.while_loop(lt(i, n), move |ctx| {
-            let v = ctx.bind(call_extern1::<K::NextValue, _, OpaqueHandle>(
-                next_value, handle,
-            ));
+            // SAFETY: the loop executes exactly the length reported for this
+            // handle, so `next_value` is never called past the end.
+            let v = ctx.bind(unsafe {
+                call_extern1_unchecked::<K::NextValue, _, OpaqueHandle>(next_value, handle)
+            });
             consumer(ctx, v);
             ctx.store(i, add(i, 1u64));
         });
-        ctx.emit(call_extern1::<K::Drop, _, OpaqueHandle>(self.drop, handle));
+        // SAFETY: this is the matching drop after the final use of the handle.
+        ctx.emit(unsafe { call_extern1_unchecked::<K::Drop, _, OpaqueHandle>(self.drop, handle) });
     }
 }
 
@@ -322,13 +331,10 @@ macro_rules! dyn_extern {
             T: StagedType + Copy + 'static,
             T::RuntimeValue: Copy,
         {
+            type Args = (OpaqueHandle,);
             type Ret = $ret_ty;
             const NAME: &'static str = stringify!($func);
-            const NUM_PARAMS: usize = 1;
             const FN_PTR: *const u8 = $func::<T::RuntimeValue> as *const u8;
-            fn param_abi_types() -> Vec<Vec<cranelift_codegen::ir::Type>> {
-                vec![vec![cranelift_codegen::ir::types::I64]]
-            }
             fn return_abi_types() -> Vec<cranelift_codegen::ir::Type> {
                 $ret_abi
             }
@@ -468,7 +474,7 @@ pub trait ReusedOpaqueIterKind: 'static {
     /// Element type (scalar; `T == T::RuntimeValue`).
     type Item: StagedType + Copy + 'static;
     /// `init(args.., slot: *mut ())` — calls [`emplace_iter`].
-    type Init: ExternFn;
+    type Init: ExternFn<Ret = ()>;
 }
 
 /// The resolved `init` ref for a kind, via [`Compiler::reused_opaque_iter_fns`].
@@ -485,9 +491,11 @@ impl<K: ReusedOpaqueIterKind> Copy for ReusedOpaqueIterFns<K> {}
 
 impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     /// One-argument producer, e.g. `nodes(g)`.
-    pub fn iter1<A>(self, a: A) -> ReusedOpaqueIter<K>
+    pub fn iter1<A, AType>(self, a: A) -> ReusedOpaqueIter<K>
     where
-        A: Staged + 'static,
+        A: Staged<Out = AType> + 'static,
+        AType: StagedType,
+        K::Init: ExternFn<Args = (AType, OpaqueHandle), Ret = ()>,
     {
         ReusedOpaqueIter {
             init: self.init,
@@ -496,10 +504,13 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     }
 
     /// Two-argument producer, e.g. `neighbours(g, n)`.
-    pub fn iter2<A, B>(self, a: A, b: B) -> ReusedOpaqueIter<K>
+    pub fn iter2<A, B, AType, BType>(self, a: A, b: B) -> ReusedOpaqueIter<K>
     where
-        A: Staged + 'static,
-        B: Staged + 'static,
+        A: Staged<Out = AType> + 'static,
+        B: Staged<Out = BType> + 'static,
+        AType: StagedType,
+        BType: StagedType,
+        K::Init: ExternFn<Args = (AType, BType, OpaqueHandle), Ret = ()>,
     {
         ReusedOpaqueIter {
             init: self.init,

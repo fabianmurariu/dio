@@ -65,6 +65,27 @@ fn passthrough_across_three_batches() {
 }
 
 #[test]
+fn rejects_a_batch_with_a_different_schema() {
+    let short_schema = Arc::new(Schema::new(vec![Field::new("key", DataType::Int64, false)]));
+    let short_batch =
+        RecordBatch::try_new(short_schema, vec![Arc::new(Int64Array::from(vec![3]))]).unwrap();
+
+    let error = exec_jit_stream(
+        "SELECT key, value FROM t",
+        "t",
+        schema_kv(),
+        vec![kv_batch(vec![1, 2], vec![10, 20]), short_batch],
+    )
+    .unwrap_err();
+
+    assert!(
+        error
+            .to_string()
+            .contains("input batch schema does not match declared stream schema")
+    );
+}
+
+#[test]
 fn filter_across_batches() {
     let batches = vec![
         kv_batch(vec![1, 2, 3], vec![5, 15, 25]),

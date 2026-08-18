@@ -69,8 +69,8 @@ where
     I: IntoIterator<Item = RecordBatch>,
     I::IntoIter: 'static,
 {
-    let op = sql_to_operator(sql, table, schema)?;
-    let inputs = Inputs::new(vec![ScanStream::new(Box::new(batches.into_iter()))]);
+    let op = sql_to_operator(sql, table, schema.clone())?;
+    let inputs = Inputs::new(vec![ScanStream::new(schema, Box::new(batches.into_iter()))]);
     run_operator(op, inputs)
 }
 
@@ -110,7 +110,7 @@ pub fn exec_jit_multi(sql: &str, tables: Vec<StreamTable>) -> Result<RecordBatch
     };
     let streams = tables
         .into_iter()
-        .map(|t| ScanStream::new(t.batches))
+        .map(|t| ScanStream::new(t.schema, t.batches))
         .collect();
     run_operator(op, Inputs::new(streams))
 }
@@ -140,7 +140,7 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
         // bare scan → JIT index over the clone; else → ONE fused kernel that
         // materializes the surviving rows AND indexes them in a single pass.
         let mut join_state = match left.as_ref() {
-            Operator::Scan { table, .. } => JoinState::from_clone(inputs.drain_table(*table)),
+            Operator::Scan { table, .. } => JoinState::from_clone(inputs.drain_table(*table)?),
             _ => JoinState::empty_relation(),
         };
         match left.as_ref() {
@@ -238,6 +238,7 @@ fn build_join_materialized(
     );
     let compiled = compiler.compile(f).map_err(exec_err)?;
     let n = compiled.as_fn()(inputs);
+    inputs.take_error()?;
     // Install the materialized batch: the locators inserted during the run reference
     // row indices into it.
     js.push_batch(out.into_record_batch(n as usize));
@@ -327,6 +328,7 @@ fn run_kernel(
     let compiled = compiler.compile(f).map_err(exec_err)?;
 
     let n = compiled.as_fn()(inputs);
+    inputs.take_error()?;
     let result = out.into_record_batch(n as usize);
     // Keep the interned-literal bytes and group state alive across the run (the
     // kernel holds pointers into them).
