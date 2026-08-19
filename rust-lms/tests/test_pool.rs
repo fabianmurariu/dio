@@ -22,15 +22,11 @@ fn kernel_appends_into_pool() {
 
     // fn(&mut BytesPool) -> u64 : append "hi" then "world", return the 2nd ptr.
     // The return type is derived from `pool_append`'s own signature — no turbofish.
-    let f = compiler.fun1("append_two", move |ctx, pool: Var<PoolRef<'_>>| {
-        let pool_ptr = ctx.bind(ref_mut_as_ptr(pool));
+    let f = compiler.fun1("append_two", move |ctx, mut pool: Var<PoolRef<'_>>| {
         let hi = lit(ctx, b"hi");
-        // SAFETY: the kernel receives exclusive access to `pool`; calls are
-        // sequenced and each `FatSlice` points into the live kernel frame.
-        let _a = ctx.bind(unsafe { call_extern2_unchecked(append, pool_ptr, hi) });
+        let _a = ctx.bind(call_extern2(append, &mut pool, hi));
         let world = lit(ctx, b"world");
-        // SAFETY: same exclusive pool borrow; `world` remains live for this call.
-        ctx.bind(unsafe { call_extern2_unchecked(append, pool_ptr, world) })
+        ctx.bind(call_extern2(append, &mut pool, world))
     });
     let compiled = compiler.compile(f).expect("compile");
 

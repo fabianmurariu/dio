@@ -1,14 +1,12 @@
 //! Opaque external pointees.
 //!
 //! [`Opaque<T>`] marks a Rust value that generated code never inspects. It is
-//! used behind [`SPtr`](crate::refer::SPtr) or
-//! [`SMutPtr`](crate::refer::SMutPtr) and passed back to external functions.
+//! used behind staged references or raw pointers and passed back to external functions.
 //! `T` therefore need not implement [`StagedType`].
 //!
-//! `#[extern_fn]` maps `&T` to `SPtr<Opaque<T>>` and `&mut T` to
-//! `SMutPtr<Opaque<T>>`. Calls with those arguments require an unsafe extern
-//! constructor because raw staged pointers cannot prove Rust reference
-//! validity, lifetime, or exclusivity.
+//! `#[extern_fn]` maps `&T` to `SRef<Opaque<T>>` and `&mut T` to
+//! `SRefMut<Opaque<T>>`. Safe extern calls require those reference markers;
+//! passing a raw staged pointer instead remains an explicit unchecked call.
 
 use std::marker::PhantomData;
 

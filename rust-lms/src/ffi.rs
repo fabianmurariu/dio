@@ -24,8 +24,9 @@
 use std::marker::PhantomData;
 use std::slice;
 
-use crate::refer::{SMutPtr, SPtr};
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
+use crate::slice::Slice;
+use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 
@@ -520,9 +521,8 @@ impl_extern_args!(8; A, B, C, D, E, F, G, H);
 /// # Safety
 ///
 /// Implementations must ensure that:
-/// - `Args` and `Ret` exactly match the function's ABI. Rust references are
-///   represented by raw `SPtr<Opaque<T>>` / `SMutPtr<Opaque<T>>` markers rather
-///   than fabricated staged references.
+/// - `Args` and `Ret` exactly match the function's ABI, including preserving
+///   Rust shared and mutable references as `SRef` and `SRefMut` markers.
 /// - `FN_PTR` points to a valid `extern "C"` function with the declared signature
 pub unsafe trait ExternFn {
     /// The complete staged parameter signature.
@@ -610,6 +610,135 @@ impl<S: ExternFn> ExternRef<S> {
 // CallExtern - Expression for calling external functions
 // =============================================================================
 
+/// A no-code representation cast used after an extern-argument conversion has
+/// established that two staged markers have the same ABI.
+#[doc(hidden)]
+pub struct ExternArgCast<A, T> {
+    arg: A,
+    _expected: PhantomData<T>,
+}
+
+unsafe impl<A, T> Staged for ExternArgCast<A, T>
+where
+    A: Staged,
+    T: StagedType,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.arg.codegen(ctx)
+    }
+
+    fn var_id(&self) -> Option<usize> {
+        self.arg.var_id()
+    }
+}
+
+/// Convert a value into the exact staged marker required by a safe extern
+/// parameter.
+///
+/// Ordinary staged expressions pass through unchanged. Borrowing a mutable
+/// reference variable creates a single-use occurrence for this call, so the
+/// original unique handle can be reborrowed by a later, sequenced call.
+pub trait IntoExternArg<T: StagedType> {
+    type Staged: Staged<Out = T>;
+
+    fn into_extern_arg(self) -> Self::Staged;
+}
+
+impl<A, T> IntoExternArg<T> for A
+where
+    A: Staged<Out = T>,
+    T: StagedType,
+{
+    type Staged = A;
+
+    fn into_extern_arg(self) -> Self::Staged {
+        self
+    }
+}
+
+impl<'stage, T> IntoExternArg<SRefMut<'stage, T>> for &mut Var<SRefMut<'stage, T>>
+where
+    T: StagedType + 'stage,
+{
+    type Staged = VarUse<SRefMut<'stage, T>>;
+
+    fn into_extern_arg(self) -> Self::Staged {
+        self.use_once()
+    }
+}
+
+impl<'stage, T> IntoExternArg<SRef<'stage, T>> for &mut Var<SRefMut<'stage, T>>
+where
+    T: StagedType + 'stage,
+{
+    type Staged = ExternArgCast<VarUse<SRefMut<'stage, T>>, SRef<'stage, T>>;
+
+    fn into_extern_arg(self) -> Self::Staged {
+        ExternArgCast {
+            arg: self.use_once(),
+            _expected: PhantomData,
+        }
+    }
+}
+
+impl<'stage, T> IntoExternArg<SRefMut<'stage, Slice<T>>> for &mut Var<SRefMut<'stage, Slice<T>>>
+where
+    T: StagedType + 'stage,
+{
+    type Staged = VarUse<SRefMut<'stage, Slice<T>>>;
+
+    fn into_extern_arg(self) -> Self::Staged {
+        self.use_once()
+    }
+}
+
+impl<'stage, T> IntoExternArg<SRef<'stage, Slice<T>>> for &mut Var<SRefMut<'stage, Slice<T>>>
+where
+    T: StagedType + 'stage,
+{
+    type Staged = ExternArgCast<VarUse<SRefMut<'stage, Slice<T>>>, SRef<'stage, Slice<T>>>;
+
+    fn into_extern_arg(self) -> Self::Staged {
+        ExternArgCast {
+            arg: self.use_once(),
+            _expected: PhantomData,
+        }
+    }
+}
+
+/// ABI compatibility accepted only by `call_externN_unchecked`.
+///
+/// # Safety
+///
+/// `Self` and `Expected` must lower to identical argument ABI values. This
+/// witnesses representation only; the unchecked call's caller must still
+/// establish pointer validity, lifetime, and aliasing for any reference target.
+#[doc(hidden)]
+pub unsafe trait UncheckedExternArg<Expected: StagedType>: StagedType {}
+
+unsafe impl<T: StagedType> UncheckedExternArg<T> for T {}
+
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SPtr<T> {}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SMutPtr<T> {}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRefMut<'stage, T>> for SMutPtr<T> {}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SRefMut<'stage, T> {}
+
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>> for FatSliceType<T> {}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>>
+    for FatSliceMutType<T>
+{
+}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRefMut<'stage, Slice<T>>>
+    for FatSliceMutType<T>
+{
+}
+unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>>
+    for SRefMut<'stage, Slice<T>>
+{
+}
+
 /// Call an external function with 0 arguments. `Out` is the function's own
 /// return type (`S::Ret`), so callers never restate it.
 pub struct CallExtern0<S: ExternFn> {
@@ -653,17 +782,17 @@ pub struct CallExtern1<S: ExternFn, A> {
 unsafe impl<S, A, AType> Staged for CallExtern1<S, A>
 where
     S: ExternFn<Args = (AType,)>,
-    A: Staged<Out = AType>,
+    A: Staged,
+    A::Out: UncheckedExternArg<AType>,
     AType: StagedType,
 {
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
-        let arg_val = self.arg.codegen(ctx);
 
         let mut args = Vec::new();
-        push_extern_arg::<AType>(ctx, &mut args, arg_val);
+        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
 
         let call = ctx.builder.ins().call(func_ref, &args);
         finish_extern_call::<S::Ret>(ctx, call)
@@ -718,8 +847,7 @@ where
 /// }
 /// ```
 ///
-/// Safe Rust functions with reference parameters also require the unchecked
-/// constructor, because a staged raw pointer cannot prove a Rust borrow:
+/// A raw pointer cannot satisfy a safe reference parameter:
 ///
 /// ```compile_fail
 /// use rust_lms::prelude::*;
@@ -730,18 +858,37 @@ where
 /// fn main() {
 ///     let mut compiler = Compiler::new();
 ///     let function = compiler.extern_fn::<ReadBorrowExtern>();
-///     let value = 1i64;
-///     let pointer = const_ptr::<Opaque<i64>>(&value);
+///     let pointer = const_ptr::<Opaque<i64>>(std::ptr::null());
 ///     let _ = call_extern1(function, pointer);
 /// }
 /// ```
-pub fn call_extern1<S, A, AType>(func: ExternRef<S>, arg: A) -> CallExtern1<S, A>
+///
+/// Rust slice references retain their reference metadata, but are excluded
+/// from the safe extern path because their C ABI is not stable:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[allow(improper_ctypes_definitions)]
+/// #[extern_fn]
+/// extern "C" fn slice_len(value: &[i64]) -> usize { value.len() }
+///
+/// fn require_safe<S: SafeExternFn>() {}
+///
+/// fn main() {
+///     require_safe::<SliceLenExtern>();
+/// }
+/// ```
+pub fn call_extern1<S, A, AType>(func: ExternRef<S>, arg: A) -> CallExtern1<S, A::Staged>
 where
     S: SafeExternFn<Args = (AType,)>,
-    A: Staged<Out = AType>,
+    A: IntoExternArg<AType>,
     AType: StagedType,
 {
-    CallExtern1 { func, arg }
+    CallExtern1 {
+        func,
+        arg: arg.into_extern_arg(),
+    }
 }
 
 /// Stage a call to an unsafe one-argument external function.
@@ -749,11 +896,14 @@ where
 /// # Safety
 ///
 /// The caller must uphold the target function's safety contract when the
-/// generated call executes.
+/// generated call executes. When the staged argument marker differs from the
+/// declared extern marker, the caller must additionally establish the pointer
+/// validity, lifetime, and aliasing required by the declared marker.
 pub unsafe fn call_extern1_unchecked<S, A, AType>(func: ExternRef<S>, arg: A) -> CallExtern1<S, A>
 where
     S: ExternFn<Args = (AType,)>,
-    A: Staged<Out = AType>,
+    A: Staged,
+    A::Out: UncheckedExternArg<AType>,
     AType: StagedType,
 {
     CallExtern1 { func, arg }
@@ -769,8 +919,10 @@ pub struct CallExtern2<S: ExternFn, A, B> {
 unsafe impl<S, A, B, AType, BType> Staged for CallExtern2<S, A, B>
 where
     S: ExternFn<Args = (AType, BType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
+    A: Staged,
+    B: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
     AType: StagedType,
     BType: StagedType,
 {
@@ -778,32 +930,53 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
-        let arg0_val = self.arg0.codegen(ctx);
-        let arg1_val = self.arg1.codegen(ctx);
 
         let mut args = Vec::new();
-        push_extern_arg::<AType>(ctx, &mut args, arg0_val);
-        push_extern_arg::<BType>(ctx, &mut args, arg1_val);
+        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
+        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
 
         let call = ctx.builder.ins().call(func_ref, &args);
         finish_extern_call::<S::Ret>(ctx, call)
     }
 }
 
-/// Create a call to an external function with 2 arguments
+/// Create a call to an external function with 2 arguments.
+///
+/// A staged mutable reference is reborrowed for the call. Rust therefore
+/// rejects using the same unique handle for two mutable parameters:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[extern_fn]
+/// extern "C" fn two_mut(_: &mut i64, _: &mut i64) {}
+///
+/// let mut compiler = Compiler::new();
+/// let function = compiler.extern_fn::<TwoMutExtern>();
+/// let _kernel = compiler.fun1(
+///     "aliased",
+///     |_ctx, mut value: Var<SRefMut<Opaque<i64>>>| {
+///         call_extern2(function, &mut value, &mut value)
+///     },
+/// );
+/// ```
 pub fn call_extern2<S, A, B, AType, BType>(
     func: ExternRef<S>,
     arg0: A,
     arg1: B,
-) -> CallExtern2<S, A, B>
+) -> CallExtern2<S, A::Staged, B::Staged>
 where
     S: SafeExternFn<Args = (AType, BType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
+    A: IntoExternArg<AType>,
+    B: IntoExternArg<BType>,
     AType: StagedType,
     BType: StagedType,
 {
-    CallExtern2 { func, arg0, arg1 }
+    CallExtern2 {
+        func,
+        arg0: arg0.into_extern_arg(),
+        arg1: arg1.into_extern_arg(),
+    }
 }
 
 /// Stage a call to an unsafe two-argument external function.
@@ -811,7 +984,9 @@ where
 /// # Safety
 ///
 /// The caller must uphold the target function's safety contract when the
-/// generated call executes.
+/// generated call executes. When a staged argument marker differs from its
+/// declared extern marker, the caller must additionally establish the pointer
+/// validity, lifetime, and aliasing required by the declared marker.
 pub unsafe fn call_extern2_unchecked<S, A, B, AType, BType>(
     func: ExternRef<S>,
     arg0: A,
@@ -819,35 +994,57 @@ pub unsafe fn call_extern2_unchecked<S, A, B, AType, BType>(
 ) -> CallExtern2<S, A, B>
 where
     S: ExternFn<Args = (AType, BType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
+    A: Staged,
+    B: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
     AType: StagedType,
     BType: StagedType,
 {
     CallExtern2 { func, arg0, arg1 }
 }
 
-/// Append `arg`'s ABI value(s) to `args` (flattening a copy-struct passed by
-/// pointer into its register-sized parts), mirroring the per-arg handling in
-/// `CallExtern1`/`CallExtern2`.
-fn push_extern_arg<AType: StagedType>(
-    ctx: &mut CompilationContext,
-    args: &mut Vec<Value>,
-    arg_val: Value,
-) {
-    if AType::is_copy_struct() && AType::num_abi_values() > 1 {
+/// Append `arg`'s ABI value(s) to `args`.
+///
+/// Slice references may be represented by two compiler variables instead of a
+/// pointer to a descriptor. Other multi-value arguments are flattened from
+/// their in-memory copy-struct representation.
+fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<Value>, arg: &A)
+where
+    A: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    AType: StagedType,
+{
+    if AType::is_fat_pointer() {
+        if let Some(slice_vars) = arg
+            .var_id()
+            .and_then(|var_id| ctx.slice_vars.get(&var_id).copied())
+        {
+            args.push(ctx.builder.use_var(slice_vars.ptr_var));
+            args.push(ctx.builder.use_var(slice_vars.len_var));
+            return;
+        }
+
+        let descriptor = arg.codegen(ctx);
+        for offset in [0, 8] {
+            args.push(
+                ctx.builder
+                    .ins()
+                    .load(types::I64, MemFlags::trusted(), descriptor, offset),
+            );
+        }
+    } else if AType::is_copy_struct() && AType::num_abi_values() > 1 {
+        let arg_val = arg.codegen(ctx);
         for i in 0..AType::num_abi_values() {
             let offset = (i * 8) as i32;
-            let val = ctx.builder.ins().load(
-                types::I64,
-                cranelift_codegen::ir::MemFlags::trusted(),
-                arg_val,
-                offset,
-            );
+            let val = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), arg_val, offset);
             args.push(val);
         }
     } else {
-        args.push(arg_val);
+        args.push(arg.codegen(ctx));
     }
 }
 
@@ -889,9 +1086,12 @@ pub struct CallExtern3<S: ExternFn, A, B, C> {
 unsafe impl<S, A, B, C, AType, BType, CType> Staged for CallExtern3<S, A, B, C>
 where
     S: ExternFn<Args = (AType, BType, CType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
+    A: Staged,
+    B: Staged,
+    C: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
+    C::Out: UncheckedExternArg<CType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
@@ -900,14 +1100,11 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
-        let arg0_val = self.arg0.codegen(ctx);
-        let arg1_val = self.arg1.codegen(ctx);
-        let arg2_val = self.arg2.codegen(ctx);
 
         let mut args = Vec::new();
-        push_extern_arg::<AType>(ctx, &mut args, arg0_val);
-        push_extern_arg::<BType>(ctx, &mut args, arg1_val);
-        push_extern_arg::<CType>(ctx, &mut args, arg2_val);
+        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
+        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
+        push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
 
         let call = ctx.builder.ins().call(func_ref, &args);
         finish_extern_call::<S::Ret>(ctx, call)
@@ -920,21 +1117,21 @@ pub fn call_extern3<S, A, B, C, AType, BType, CType>(
     arg0: A,
     arg1: B,
     arg2: C,
-) -> CallExtern3<S, A, B, C>
+) -> CallExtern3<S, A::Staged, B::Staged, C::Staged>
 where
     S: SafeExternFn<Args = (AType, BType, CType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
+    A: IntoExternArg<AType>,
+    B: IntoExternArg<BType>,
+    C: IntoExternArg<CType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
 {
     CallExtern3 {
         func,
-        arg0,
-        arg1,
-        arg2,
+        arg0: arg0.into_extern_arg(),
+        arg1: arg1.into_extern_arg(),
+        arg2: arg2.into_extern_arg(),
     }
 }
 
@@ -943,7 +1140,9 @@ where
 /// # Safety
 ///
 /// The caller must uphold the target function's safety contract when the
-/// generated call executes.
+/// generated call executes. When a staged argument marker differs from its
+/// declared extern marker, the caller must additionally establish the pointer
+/// validity, lifetime, and aliasing required by the declared marker.
 pub unsafe fn call_extern3_unchecked<S, A, B, C, AType, BType, CType>(
     func: ExternRef<S>,
     arg0: A,
@@ -952,9 +1151,12 @@ pub unsafe fn call_extern3_unchecked<S, A, B, C, AType, BType, CType>(
 ) -> CallExtern3<S, A, B, C>
 where
     S: ExternFn<Args = (AType, BType, CType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
+    A: Staged,
+    B: Staged,
+    C: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
+    C::Out: UncheckedExternArg<CType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
@@ -979,10 +1181,14 @@ pub struct CallExtern4<S: ExternFn, A, B, C, D> {
 unsafe impl<S, A, B, C, D, AType, BType, CType, DType> Staged for CallExtern4<S, A, B, C, D>
 where
     S: ExternFn<Args = (AType, BType, CType, DType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
-    D: Staged<Out = DType>,
+    A: Staged,
+    B: Staged,
+    C: Staged,
+    D: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
+    C::Out: UncheckedExternArg<CType>,
+    D::Out: UncheckedExternArg<DType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
@@ -992,16 +1198,12 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
-        let arg0_val = self.arg0.codegen(ctx);
-        let arg1_val = self.arg1.codegen(ctx);
-        let arg2_val = self.arg2.codegen(ctx);
-        let arg3_val = self.arg3.codegen(ctx);
 
         let mut args = Vec::new();
-        push_extern_arg::<AType>(ctx, &mut args, arg0_val);
-        push_extern_arg::<BType>(ctx, &mut args, arg1_val);
-        push_extern_arg::<CType>(ctx, &mut args, arg2_val);
-        push_extern_arg::<DType>(ctx, &mut args, arg3_val);
+        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
+        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
+        push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
+        push_extern_arg::<_, DType>(ctx, &mut args, &self.arg3);
 
         let call = ctx.builder.ins().call(func_ref, &args);
         finish_extern_call::<S::Ret>(ctx, call)
@@ -1016,13 +1218,13 @@ pub fn call_extern4<S, A, B, C, D, AType, BType, CType, DType>(
     arg1: B,
     arg2: C,
     arg3: D,
-) -> CallExtern4<S, A, B, C, D>
+) -> CallExtern4<S, A::Staged, B::Staged, C::Staged, D::Staged>
 where
     S: SafeExternFn<Args = (AType, BType, CType, DType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
-    D: Staged<Out = DType>,
+    A: IntoExternArg<AType>,
+    B: IntoExternArg<BType>,
+    C: IntoExternArg<CType>,
+    D: IntoExternArg<DType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,
@@ -1030,10 +1232,10 @@ where
 {
     CallExtern4 {
         func,
-        arg0,
-        arg1,
-        arg2,
-        arg3,
+        arg0: arg0.into_extern_arg(),
+        arg1: arg1.into_extern_arg(),
+        arg2: arg2.into_extern_arg(),
+        arg3: arg3.into_extern_arg(),
     }
 }
 
@@ -1042,7 +1244,9 @@ where
 /// # Safety
 ///
 /// The caller must uphold the target function's safety contract when the
-/// generated call executes.
+/// generated call executes. When a staged argument marker differs from its
+/// declared extern marker, the caller must additionally establish the pointer
+/// validity, lifetime, and aliasing required by the declared marker.
 #[allow(clippy::too_many_arguments)]
 pub unsafe fn call_extern4_unchecked<S, A, B, C, D, AType, BType, CType, DType>(
     func: ExternRef<S>,
@@ -1053,10 +1257,14 @@ pub unsafe fn call_extern4_unchecked<S, A, B, C, D, AType, BType, CType, DType>(
 ) -> CallExtern4<S, A, B, C, D>
 where
     S: ExternFn<Args = (AType, BType, CType, DType)>,
-    A: Staged<Out = AType>,
-    B: Staged<Out = BType>,
-    C: Staged<Out = CType>,
-    D: Staged<Out = DType>,
+    A: Staged,
+    B: Staged,
+    C: Staged,
+    D: Staged,
+    A::Out: UncheckedExternArg<AType>,
+    B::Out: UncheckedExternArg<BType>,
+    C::Out: UncheckedExternArg<CType>,
+    D::Out: UncheckedExternArg<DType>,
     AType: StagedType,
     BType: StagedType,
     CType: StagedType,

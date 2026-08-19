@@ -43,6 +43,30 @@ pub unsafe extern "C" fn ext_read_i64(ptr: *const i64) -> i64 {
     unsafe { *ptr }
 }
 
+/// A safe shared-reference callback retains a staged `SRef` signature.
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ext_read_ref(value: &i64) -> i64 {
+    *value
+}
+
+/// A safe mutable-reference callback retains a staged `SRefMut` signature.
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ext_add_assign(value: &mut i64, delta: i64) -> i64 {
+    *value += delta;
+    *value
+}
+
+/// Slice references preserve their pointer-and-length signature, but are not
+/// considered safe extern calls because Rust does not define their C ABI.
+#[allow(improper_ctypes_definitions)]
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ext_ref_slice_len(data: &[i64]) -> usize {
+    data.len()
+}
+
 // =============================================================================
 // FatSlice external functions
 // =============================================================================
@@ -96,9 +120,76 @@ fn test_extern_marker_carries_the_complete_signature() {
     {
     }
 
+    fn assert_ref_signature<S>()
+    where
+        S: ExternFn<Args = (SRef<'static, Opaque<i64>>,), Ret = i64> + SafeExternFn,
+    {
+    }
+
+    fn assert_mut_ref_signature<S>()
+    where
+        S: ExternFn<Args = (SRefMut<'static, Opaque<i64>>, i64), Ret = i64> + SafeExternFn,
+    {
+    }
+
+    fn assert_ref_slice_signature<S>()
+    where
+        S: ExternFn<Args = (SRef<'static, Slice<i64>>,), Ret = u64>,
+    {
+    }
+
     assert_add_signature::<ExtAddExtern>();
     assert_noop_signature::<ExtNoopExtern>();
     assert_slice_signature::<ExtSumSliceExtern>();
+    assert_ref_signature::<ExtReadRefExtern>();
+    assert_mut_ref_signature::<ExtAddAssignExtern>();
+    assert_ref_slice_signature::<ExtRefSliceLenExtern>();
+}
+
+#[test]
+fn test_safe_extern_shared_reference() {
+    let mut compiler = Compiler::new();
+    let read = compiler.extern_fn::<ExtReadRefExtern>();
+    let test_fn = compiler.fun1("read_ref", |_ctx, value: Var<SRef<Opaque<i64>>>| {
+        call_extern1(read, value)
+    });
+
+    let compiled = compiler.compile(test_fn).expect("compilation failed");
+    let value = 42i64;
+    assert_eq!(compiled.call(&value), 42);
+}
+
+#[test]
+fn test_safe_extern_mut_reference_reborrows_sequentially() {
+    let mut compiler = Compiler::new();
+    let add_assign = compiler.extern_fn::<ExtAddAssignExtern>();
+    let test_fn = compiler.fun1(
+        "add_assign_twice",
+        |ctx, mut value: Var<SRefMut<Opaque<i64>>>| {
+            let _first = ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(1)));
+            ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(2)))
+        },
+    );
+
+    let compiled = compiler.compile(test_fn).expect("compilation failed");
+    let mut value = 10i64;
+    assert_eq!(compiled.call(&mut value), 13);
+    assert_eq!(value, 13);
+}
+
+#[test]
+fn test_extern_slice_reference_uses_split_parameter_values() {
+    let mut compiler = Compiler::new();
+    let len = compiler.extern_fn::<ExtRefSliceLenExtern>();
+    let test_fn = compiler.fun1("ref_slice_len", |_ctx, data: Var<SRef<Slice<i64>>>| {
+        // SAFETY: `data` is a valid shared slice reference. This call is
+        // unchecked only because Rust slice references have no stable C ABI.
+        unsafe { call_extern1_unchecked(len, data) }
+    });
+
+    let compiled = compiler.compile(test_fn).expect("compilation failed");
+    let data = [3i64, 5, 8, 13];
+    assert_eq!(compiled.call(&data), 4);
 }
 
 #[test]

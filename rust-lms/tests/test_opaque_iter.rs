@@ -75,8 +75,7 @@ fn plain_count_via_next_drop() {
 
     // fn(&Graph) -> u64 : drive the external iterator and count it.
     let f = compiler.fun1("count_nodes", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        // SAFETY: the entry point requires a live shared `&Graph` for the call.
-        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        let handle = call_extern1(producer, g);
         // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
         // `NodesKind` supplies that handle's matching operations.
         unsafe { nodes.iter(handle) }.count(ctx)
@@ -97,8 +96,7 @@ fn plain_sum_and_filter() {
 
     // Sum the node ids > 2, branchlessly.
     let f = compiler.fun1("sum_big", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        // SAFETY: the entry point requires a live shared `&Graph` for the call.
-        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        let handle = call_extern1(producer, g);
         // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
         // `NodesKind` supplies that handle's matching operations.
         unsafe { nodes.iter(handle) }
@@ -120,8 +118,7 @@ fn exact_size_count_is_o1_and_sum_works() {
 
     // count(): O(1), just len(it).
     let count_fn = compiler.fun1("count_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        // SAFETY: the entry point requires a live shared `&Graph` for the call.
-        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        let handle = call_extern1(producer, g);
         // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
         // `NodesKind` supplies that handle's matching exact-size operations.
         unsafe { nodes.iter(handle) }.count(ctx)
@@ -135,8 +132,7 @@ fn exact_size_count_is_o1_and_sum_works() {
     let producer = compiler.extern_fn::<GraphIterNodesExtern>();
     let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
     let sum_fn = compiler.fun1("sum_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        // SAFETY: the entry point requires a live shared `&Graph` for the call.
-        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        let handle = call_extern1(producer, g);
         // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
         // `NodesKind` supplies that handle's matching exact-size operations.
         unsafe { nodes.iter(handle) }.sum(ctx)

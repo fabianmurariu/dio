@@ -12,7 +12,7 @@ capability before reference-taking extern calls can be classified safely. The
 detailed implementation order and verification record are in
 `docs/project_review_plan.md`.
 
-Phase 2A steps 1 and 2 are complete. `Var<T>` is `Copy` only for `CopyType`
+Phase 2A steps 1 through 3 are complete. `Var<T>` is `Copy` only for `CopyType`
 values, `SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable
 loads, stores, and slice operations borrow the unique staged handle for one AST
 operation. Consuming `SRefMut` into `SMutPtr` makes the raw-pointer boundary
@@ -28,10 +28,19 @@ their arguments or the compiled module. The lifetime still visible on an
 `SRef`/`SRefMut` marker describes stored AST provenance; it no longer fixes the
 safe host-call lifetime.
 
+Derived extern metadata now preserves thin `&T` and `&mut T` parameters as
+`SRef<Opaque<T>>` and `SRefMut<Opaque<T>>`. Safe extern constructors accept
+controlled staged reborrows, so sequential calls can reuse one unique root but
+Rust rejects passing it to two mutable parameters in the same call. Raw staged
+pointers remain accepted only by the unchecked constructors under an explicit
+ABI-compatibility witness. Reference returns and Rust slice-reference C ABIs
+also remain unchecked; `FatSlice`/`FatSliceMut` are still the supported slice
+ABI wrappers, with descriptor hardening still tracked by PR-10. Pool and
+opaque-iterator examples now use the safe reference path, while SQL and `SVec`
+baked-pointer paths remain explicitly unchecked.
+
 Still pending in Phase 2A:
 
-- Preserve `SRef`/`SRefMut` in derived extern signatures and add call
-  constructors that use Rust reborrows instead of raw-pointer demotion.
 - Replace temporary unchecked mutable field/reference projections with scoped
   projection and disjoint-splitting APIs.
 - Audit mutable options, slices, structs, and SQL callbacks, then remove escape

@@ -418,32 +418,33 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
         Type::Reference(type_ref) => {
             let elem_ty = &*type_ref.elem;
 
-            // Check for slice types &[T] or &mut [T]
+            // Preserve slice references as staged slice references. Their ABI
+            // remains the same two-word `(ptr, len)` representation, but the
+            // marker now retains Rust's shared/unique distinction.
             if let Type::Slice(slice_ty) = elem_ty {
                 let inner_ty = &*slice_ty.elem;
                 let inner_staged = rust_type_to_staged_type(inner_ty)?;
 
                 if type_ref.mutability.is_some() {
-                    // &mut [T] -> FatSliceMutType<T>
-                    return Ok(quote! { ::rust_lms::ffi::FatSliceMutType<#inner_staged> });
+                    return Ok(quote! {
+                        ::rust_lms::refer::SRefMut<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                    });
                 } else {
-                    // &[T] -> FatSliceType<T>
-                    return Ok(quote! { ::rust_lms::ffi::FatSliceType<#inner_staged> });
+                    return Ok(quote! {
+                        ::rust_lms::refer::SRef<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                    });
                 }
             }
 
-            // A non-slice reference `&T` / `&mut T` is represented as a raw
-            // opaque pointer. Generated code cannot create a Rust reference or
-            // track its borrow lifetime, so staging the call remains unsafe.
+            // Generated code does not inspect an arbitrary referenced Rust
+            // value, so retain its reference kind over an opaque pointee.
             if type_ref.mutability.is_some() {
-                // &mut T -> SMutPtr<Opaque<T>>
                 Ok(quote! {
-                    ::rust_lms::refer::SMutPtr<::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRefMut<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             } else {
-                // &T -> SPtr<Opaque<T>>
                 Ok(quote! {
-                    ::rust_lms::refer::SPtr<::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRef<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             }
         }
@@ -477,9 +478,9 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 ///
 /// - Primitives: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bool`
 /// - Pointers: `*const T`, `*mut T`
-/// - References: `&T`, `&mut T` (mapped to raw opaque pointers; calls are unsafe
-///   to stage because generated code cannot prove the borrow)
-/// - Slices: `&[T]`, `&mut [T]` (converted to FatSlice/FatSliceMut)
+/// - References: `&T`, `&mut T` (preserved as staged shared/unique references)
+/// - Slices: `&[T]`, `&mut [T]` (preserved in metadata but not classified as
+///   safe C ABI; prefer `FatSlice<T>` / `FatSliceMut<T>`)
 /// - Option: `COption<T>`
 /// - Fat slices: `FatSlice<T>`, `FatSliceMut<T>`
 /// - Custom structs: Any `#[repr(C)]` struct with `derive(StagedType)`
@@ -599,18 +600,33 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { (#(#param_staged_types,)*) }
     };
 
-    let has_reference_param = input.sig.inputs.iter().any(|arg| match arg {
-        FnArg::Typed(pat_type) => matches!(&*pat_type.ty, Type::Reference(_)),
-        FnArg::Receiver(_) => false,
+    let has_reference_return = matches!(
+        &input.sig.output,
+        ReturnType::Type(_, ty) if matches!(&**ty, Type::Reference(_))
+    );
+    let has_slice_reference_param = input.sig.inputs.iter().any(|arg| {
+        matches!(
+            arg,
+            FnArg::Typed(pat_type)
+                if matches!(
+                    &*pat_type.ty,
+                    Type::Reference(reference) if matches!(&*reference.elem, Type::Slice(_))
+                )
+        )
     });
 
-    let safe_extern_impl = if input.sig.unsafety.is_none() && !has_reference_param {
-        quote! {
-            unsafe impl ::rust_lms::ffi::SafeExternFn for #type_name {}
-        }
-    } else {
-        quote! {}
-    };
+    // Reference parameters are safe once call_externN receives an SRef/SRefMut
+    // and performs a staged reborrow. Reference results remain unchecked until
+    // the staged result can carry provenance tied to the input call. Rust slice
+    // references are also excluded because they are not a stable C ABI.
+    let safe_extern_impl =
+        if input.sig.unsafety.is_none() && !has_reference_return && !has_slice_reference_param {
+            quote! {
+                unsafe impl ::rust_lms::ffi::SafeExternFn for #type_name {}
+            }
+        } else {
+            quote! {}
+        };
 
     // Generate the output
     let expanded = quote! {

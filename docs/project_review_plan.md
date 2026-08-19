@@ -111,8 +111,13 @@ back to raw pointers.
    reference and `&mut T` as a staged unique reference rather than as `SPtr` or
    `SMutPtr`. Add reference-aware call constructors that borrow unique
    arguments simultaneously, so Rust rejects passing the same mutable handle
-   twice. Raw-pointer and forgeable-descriptor callbacks remain unsafe.
-   **Status: pending.**
+   twice. Raw pointer arguments cannot substitute for reference parameters on
+   the safe path; forgeable descriptor hardening remains tracked by PR-10.
+   Thin references now map to `SRef<Opaque<T>>` / `SRefMut<Opaque<T>>`, and
+   `IntoExternArg` turns `&mut Var<SRefMut<_>>` into a controlled single-use
+   occurrence. Raw-pointer/reference ABI compatibility is available only to
+   the unchecked constructors. Reference returns and Rust slice-reference C
+   ABIs are deliberately not classified as safe. **Status: complete.**
 4. **Add scoped projections and splitting.** Make mutable field, element, and
    sub-slice projections borrow their parent capability. Provide explicit
    operations for statically disjoint fields and checked dynamic indices.
@@ -137,6 +142,15 @@ an explicit copyable raw-pointer variable.
 including the complete `sql-gen` integration and property suites. The
 regressions prove that one `CompiledFn` accepts fresh sequential mutable borrows
 and that a staged reference result cannot escape a shorter-lived input.
+
+**Phase 2A step 3 verification (2026-08-19):**
+`cargo test --workspace --all-targets` and `cargo test --workspace --doc` pass,
+including the complete `sql-gen` integration and property suites. Runtime tests
+cover shared and slice reference calls, sequential mutable reborrows, pool
+callbacks, and opaque iterators. Compile-fail regressions prove that one unique
+staged root cannot satisfy two mutable parameters in the same extern call and
+that Rust slice-reference C ABIs are excluded from safe extern calls. The
+rust-lms library Clippy count remains at its existing 13-warning baseline.
 
 ## Phase 3: ABI correctness
 

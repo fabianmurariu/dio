@@ -138,8 +138,8 @@ pub mod prelude {
         call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
         call_extern4_unchecked, slice_from_raw_parts, stack_alloc, stack_bytes, ExternArgs,
         ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice,
-        FfiSliceMut, FfiSliceMutType, FfiSliceType, SafeExternFn, SliceFromRawParts, StackAlloc,
-        StackBytes,
+        FfiSliceMut, FfiSliceMutType, FfiSliceType, IntoExternArg, SafeExternFn, SliceFromRawParts,
+        StackAlloc, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2,
