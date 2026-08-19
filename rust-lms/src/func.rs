@@ -19,7 +19,7 @@
 //! - Internally: pointer to stack slot for field access
 
 use crate::staged::{assign, CompilationContext, Staged, Var};
-use crate::types::StagedType;
+use crate::types::{RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
 };
@@ -1494,6 +1494,13 @@ impl<'a, T: StagedType> Compiled<'a, T> {
             unsafe { std::mem::transmute(self.main_ptr) };
         func()
     }
+
+    /// Read the generated function address returned by a function-valued
+    /// `__main__` trampoline.
+    unsafe fn function_entry_ptr(&self) -> *const u8 {
+        let get_ptr: extern "C" fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
+        get_ptr() as usize as *const u8
+    }
 }
 
 /// A callable entry point tied to the lifetime of its owning [`Compiled`]
@@ -1504,32 +1511,57 @@ impl<'a, T: StagedType> Compiled<'a, T> {
 /// outlive the executable memory. Use [`call`](CompiledFn::call), or use
 /// `Compiled::as_fn_unchecked` when a foreign API genuinely requires a bare
 /// function pointer.
+///
+/// Reference results are bounded by both the invocation arguments and the
+/// compiled module. They cannot escape a shorter-lived argument:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// let mut compiler = Compiler::new();
+/// let identity = compiler.fun1("identity", |_ctx, value: Var<SRef<i64>>| value);
+/// let compiled = compiler.compile(identity).unwrap();
+/// let escaped = {
+///     let value = 42i64;
+///     compiled.call(&value)
+/// };
+/// assert_eq!(*escaped, 42);
+/// ```
 #[must_use = "a compiled entry point does nothing until it is called"]
 pub struct CompiledFn<'compiled, F> {
-    function: F,
+    function: *const u8,
+    _signature: PhantomData<fn() -> F>,
     _owner: PhantomData<&'compiled JITModule>,
 }
 
-impl<F: Copy> Clone for CompiledFn<'_, F> {
+impl<F> Clone for CompiledFn<'_, F> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<F: Copy> Copy for CompiledFn<'_, F> {}
+impl<F> Copy for CompiledFn<'_, F> {}
 
 // Generate borrowed entry points and direct calls for every function arity.
 macro_rules! impl_compiled_fn {
     // Base case: zero parameters
     (0, $FunType:ident) => {
-        impl<'compiled, OUT> CompiledFn<'compiled, extern "C" fn() -> OUT> {
-            /// Invoke the entry point while its module remains borrowed.
-            pub fn call(&self) -> OUT {
-                (self.function)()
+        impl<'compiled, OUT: RuntimeResult> CompiledFn<'compiled, $FunType<OUT>> {
+            /// Invoke the entry point with a result lifetime bounded by its
+            /// owning module.
+            pub fn call<'call>(&self) -> OUT::Output<'call>
+            where
+                'compiled: 'call,
+            {
+                // SAFETY: RuntimeResult witnesses the entry point's result ABI,
+                // and the wrapper keeps the generated code live for 'call.
+                let function: extern "C" fn() -> OUT::Output<'call> =
+                    unsafe { std::mem::transmute(self.function) };
+                function()
             }
         }
 
-        impl<'a, OUT: StagedType> Compiled<'a, $FunType<OUT>> {
+        impl<'a, OUT: RuntimeResult> Compiled<'a, $FunType<OUT>> {
             /// Borrow the compiled function as a safe callable entry point.
             ///
             /// The borrow prevents this pattern from compiling:
@@ -1542,20 +1574,18 @@ macro_rules! impl_compiled_fn {
             /// let entry = compiler.compile(function).unwrap().as_fn();
             /// assert_eq!(entry.call(), 1);
             /// ```
-            pub fn as_fn(
-                &self,
-            ) -> CompiledFn<'_, extern "C" fn() -> OUT::RuntimeValue> {
-                // SAFETY: the returned wrapper borrows self and never exposes
-                // the bare pointer.
-                let function = unsafe { self.as_fn_unchecked() };
+            pub fn as_fn(&self) -> CompiledFn<'_, $FunType<OUT>> {
                 CompiledFn {
-                    function,
+                    // SAFETY: the returned wrapper borrows self and never
+                    // exposes the bare pointer.
+                    function: unsafe { self.function_entry_ptr() },
+                    _signature: PhantomData,
                     _owner: PhantomData,
                 }
             }
 
             /// Invoke the compiled function while borrowing its owner.
-            pub fn call(&self) -> OUT::RuntimeValue {
+            pub fn call<'call>(&'call self) -> OUT::Output<'call> {
                 self.as_fn().call()
             }
 
@@ -1568,40 +1598,48 @@ macro_rules! impl_compiled_fn {
             pub unsafe fn as_fn_unchecked(
                 &self,
             ) -> extern "C" fn() -> OUT::RuntimeValue {
-                let get_ptr: extern "C" fn() -> i64 =
-                    unsafe { std::mem::transmute(self.main_ptr) };
-                let fn_ptr = get_ptr();
-                unsafe { std::mem::transmute(fn_ptr) }
+                unsafe { std::mem::transmute(self.function_entry_ptr()) }
             }
         }
     };
     // N parameters (N >= 1)
     ($n:tt, $FunType:ident, [$($T:ident : $arg:ident),+]) => {
-        impl<'compiled, $($T,)+ OUT> CompiledFn<'compiled, extern "C" fn($($T),+) -> OUT> {
-            /// Invoke the entry point while its module remains borrowed.
+        impl<'compiled, $($T: RuntimeParam,)+ OUT: RuntimeResult>
+            CompiledFn<'compiled, $FunType<$($T,)+ OUT>>
+        {
+            /// Invoke the entry point with one fresh lifetime shared by its
+            /// reference arguments and result.
             #[allow(clippy::too_many_arguments)]
-            pub fn call(&self, $($arg: $T),+) -> OUT {
-                (self.function)($($arg),+)
+            pub fn call<'call>(&self, $($arg: $T::Arg<'call>),+) -> OUT::Output<'call>
+            where
+                'compiled: 'call,
+            {
+                // SAFETY: RuntimeParam and RuntimeResult witness the generated
+                // entry point's ABI. The shared 'call lifetime enforces the
+                // staged reference contract at each invocation.
+                let function: extern "C" fn($($T::Arg<'call>),+) -> OUT::Output<'call> =
+                    unsafe { std::mem::transmute(self.function) };
+                function($($arg),+)
             }
         }
 
-        impl<'a, $($T: StagedType,)+ OUT: StagedType> Compiled<'a, $FunType<$($T,)+ OUT>> {
+        impl<'a, $($T: RuntimeParam,)+ OUT: RuntimeResult>
+            Compiled<'a, $FunType<$($T,)+ OUT>>
+        {
             /// Borrow the compiled function as a safe callable entry point.
-            pub fn as_fn(
-                &self,
-            ) -> CompiledFn<'_, extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue> {
-                // SAFETY: the returned wrapper borrows self and never exposes
-                // the bare pointer.
-                let function = unsafe { self.as_fn_unchecked() };
+            pub fn as_fn(&self) -> CompiledFn<'_, $FunType<$($T,)+ OUT>> {
                 CompiledFn {
-                    function,
+                    // SAFETY: the returned wrapper borrows self and never
+                    // exposes the bare pointer.
+                    function: unsafe { self.function_entry_ptr() },
+                    _signature: PhantomData,
                     _owner: PhantomData,
                 }
             }
 
             /// Invoke the compiled function while borrowing its owner.
             #[allow(clippy::too_many_arguments)]
-            pub fn call(&self, $($arg: $T::RuntimeValue),+) -> OUT::RuntimeValue {
+            pub fn call<'call>(&'call self, $($arg: $T::Arg<'call>),+) -> OUT::Output<'call> {
                 self.as_fn().call($($arg),+)
             }
 
@@ -1614,10 +1652,7 @@ macro_rules! impl_compiled_fn {
             pub unsafe fn as_fn_unchecked(
                 &self,
             ) -> extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue {
-                let get_ptr: extern "C" fn() -> i64 =
-                    unsafe { std::mem::transmute(self.main_ptr) };
-                let fn_ptr = get_ptr();
-                unsafe { std::mem::transmute(fn_ptr) }
+                unsafe { std::mem::transmute(self.function_entry_ptr()) }
             }
         }
     };

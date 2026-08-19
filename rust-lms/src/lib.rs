@@ -188,7 +188,7 @@ pub mod prelude {
         Var,
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
-    pub use crate::types::{ConstantType, CopyType, StagedType};
+    pub use crate::types::{ConstantType, CopyType, RuntimeParam, RuntimeResult, StagedType};
     // Re-export derive macro
     #[cfg(feature = "derive")]
     pub use rust_lms_derive::{extern_fn, StagedType};

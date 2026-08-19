@@ -5,7 +5,7 @@
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
-type PoolRef = SRefMut<'static, Opaque<BytesPool>>;
+type PoolRef<'stage> = SRefMut<'stage, Opaque<BytesPool>>;
 
 /// Build a `FatSlice<u8>` of literal bytes baked into the kernel frame.
 fn lit(ctx: &mut Ctx, bytes: &[u8]) -> impl Staged<Out = FatSliceType<u8>> {
@@ -22,7 +22,7 @@ fn kernel_appends_into_pool() {
 
     // fn(&mut BytesPool) -> u64 : append "hi" then "world", return the 2nd ptr.
     // The return type is derived from `pool_append`'s own signature — no turbofish.
-    let f = compiler.fun1("append_two", move |ctx, pool: Var<PoolRef>| {
+    let f = compiler.fun1("append_two", move |ctx, pool: Var<PoolRef<'_>>| {
         let pool_ptr = ctx.bind(ref_mut_as_ptr(pool));
         let hi = lit(ctx, b"hi");
         // SAFETY: the kernel receives exclusive access to `pool`; calls are

@@ -59,7 +59,7 @@
 use crate::ffi::FatSliceType;
 use crate::refer::{SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
@@ -215,7 +215,7 @@ where
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<'static, i64>>) {
+/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<'_, i64>>) {
 ///     let _ = unsafe { value.as_slice::<u8>() };
 /// }
 /// ```
@@ -354,6 +354,22 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
 
 unsafe impl<'a, T: StagedType> CopyType for SRef<'a, Slice<T>> {}
 
+unsafe impl<'stage, T> RuntimeParam for SRef<'stage, Slice<T>>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = &'call [T::RuntimeValue];
+}
+
+unsafe impl<'stage, T> RuntimeResult for SRef<'stage, Slice<T>>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = &'call [T::RuntimeValue];
+}
+
 // =============================================================================
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
@@ -389,6 +405,22 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     fn is_fat_pointer() -> bool {
         true // Mutable slice references are fat pointers
     }
+}
+
+unsafe impl<'stage, T> RuntimeParam for SRefMut<'stage, Slice<T>>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = &'call mut [T::RuntimeValue];
+}
+
+unsafe impl<'stage, T> RuntimeResult for SRefMut<'stage, Slice<T>>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = &'call mut [T::RuntimeValue];
 }
 
 // =============================================================================

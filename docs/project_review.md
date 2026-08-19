@@ -12,17 +12,24 @@ capability before reference-taking extern calls can be classified safely. The
 detailed implementation order and verification record are in
 `docs/project_review_plan.md`.
 
-Phase 2A step 1 is complete: `Var<T>` is `Copy` only for `CopyType` values,
-`SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable loads,
-stores, and slice operations now borrow the unique staged handle for one AST
+Phase 2A steps 1 and 2 are complete. `Var<T>` is `Copy` only for `CopyType`
+values, `SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable
+loads, stores, and slice operations borrow the unique staged handle for one AST
 operation. Consuming `SRefMut` into `SMutPtr` makes the raw-pointer boundary
 explicit, and repeated raw use requires binding the result to a copyable staged
 pointer variable. Mutable validity views no longer clone their root reference.
 
+Safe compiled calls now use `RuntimeParam::Arg<'call>` and
+`RuntimeResult::Output<'call>`. `CompiledFn` retains the staged `FunTypeN`
+signature and privately materializes a Rust function pointer with a fresh
+lifetime for each call. A retained entry point can therefore be called with
+sequential, distinct mutable borrows, while reference results cannot outlive
+their arguments or the compiled module. The lifetime still visible on an
+`SRef`/`SRefMut` marker describes stored AST provenance; it no longer fixes the
+safe host-call lifetime.
+
 Still pending in Phase 2A:
 
-- Replace the `'static` staged-parameter marker with an invocation-lifetime
-  abstraction such as `RuntimeParam::Arg<'call>`.
 - Preserve `SRef`/`SRefMut` in derived extern signatures and add call
   constructors that use Rust reborrows instead of raw-pointer demotion.
 - Replace temporary unchecked mutable field/reference projections with scoped

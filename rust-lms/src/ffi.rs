@@ -26,7 +26,7 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 
 // =============================================================================
@@ -223,6 +223,14 @@ unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
 
 unsafe impl<T: StagedType> CopyType for FatSliceType<T> {}
 
+unsafe impl<T: StagedType> RuntimeParam for FatSliceType<T> {
+    type Arg<'call> = FatSlice<T::RuntimeValue>;
+}
+
+unsafe impl<T: StagedType> RuntimeResult for FatSliceType<T> {
+    type Output<'call> = FatSlice<T::RuntimeValue>;
+}
+
 /// Staged type marker for FatSliceMut<T>
 #[derive(Clone, Copy, Debug)]
 pub struct FatSliceMutType<T> {
@@ -261,6 +269,14 @@ unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
         vec![types::I64, types::I64]
     }
+}
+
+unsafe impl<T: StagedType> RuntimeParam for FatSliceMutType<T> {
+    type Arg<'call> = FatSliceMut<T::RuntimeValue>;
+}
+
+unsafe impl<T: StagedType> RuntimeResult for FatSliceMutType<T> {
+    type Output<'call> = FatSliceMut<T::RuntimeValue>;
 }
 
 // =============================================================================

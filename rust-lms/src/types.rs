@@ -145,6 +145,51 @@ pub unsafe trait ConstantType: StagedType {
 /// must have ordinary Rust copy semantics.
 pub unsafe trait CopyType: StagedType<RuntimeValue: Copy> + Copy {}
 
+/// Maps a staged function parameter to the Rust value accepted by one safe
+/// invocation of generated code.
+///
+/// Unlike [`StagedType::RuntimeValue`], this mapping is generic over the
+/// invocation lifetime. Reference markers can therefore expose `&'call T` or
+/// `&'call mut T` without baking the marker's staging-only lifetime into a
+/// compiled entry point.
+///
+/// # Safety
+///
+/// `Arg<'call>` must have the same calling-convention representation as
+/// [`StagedType::RuntimeValue`]. Every safe `Arg<'call>` value must satisfy the
+/// validity and aliasing requirements that generated code assumes for this
+/// staged type for the duration of the call.
+pub unsafe trait RuntimeParam: StagedType {
+    type Arg<'call>;
+}
+
+/// Maps a staged function result to the Rust value returned by one safe
+/// invocation of generated code.
+///
+/// # Safety
+///
+/// `Output<'call>` must have the same calling-convention representation as
+/// [`StagedType::RuntimeValue`]. Generated code must only produce values valid
+/// for `Output<'call>`; any borrow in the output must remain valid for the
+/// invocation lifetime selected by the safe entry point.
+pub unsafe trait RuntimeResult: StagedType {
+    type Output<'call>;
+}
+
+macro_rules! impl_by_value_runtime_type {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            unsafe impl RuntimeParam for $ty {
+                type Arg<'call> = $ty;
+            }
+
+            unsafe impl RuntimeResult for $ty {
+                type Output<'call> = $ty;
+            }
+        )+
+    };
+}
+
 // =============================================================================
 // Concrete Type Markers
 // =============================================================================
@@ -381,3 +426,5 @@ unsafe impl ConstantType for () {
 }
 
 unsafe impl CopyType for () {}
+
+impl_by_value_runtime_type!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool, ());

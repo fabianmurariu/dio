@@ -61,7 +61,8 @@ fn is_marker_runtime_value(field_ty: &Type, staged_ty: &Type) -> bool {
 ///
 /// This generates:
 /// - `PointType` module with field accessors (`PointType::x`, `PointType::y`)
-/// - `StagedType` impl with `RuntimeValue<'a> = Point` (owned, not reference)
+/// - `StagedType` impl with `RuntimeValue = Point` (owned, not reference)
+/// - By-value `RuntimeParam` and `RuntimeResult` impls
 /// - `CopyType` impl
 #[proc_macro_derive(StagedType, attributes(staged))]
 pub fn derive_staged_type(input: TokenStream) -> TokenStream {
@@ -293,6 +294,14 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 let n = ::std::mem::size_of::<#struct_name #ty_generics>().div_ceil(8);
                 vec![::cranelift_codegen::ir::types::I64; n]
             }
+        }
+
+        unsafe impl #trusted_impl_generics ::rust_lms::types::RuntimeParam for #struct_name #ty_generics #trusted_where_clause {
+            type Arg<'call> = #struct_name #ty_generics;
+        }
+
+        unsafe impl #trusted_impl_generics ::rust_lms::types::RuntimeResult for #struct_name #ty_generics #trusted_where_clause {
+            type Output<'call> = #struct_name #ty_generics;
         }
 
         unsafe impl #trusted_impl_generics ::rust_lms::types::CopyType for #struct_name #ty_generics #copy_where {}

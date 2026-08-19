@@ -11,7 +11,7 @@
 //! and aliasing guarantees; raw pointers do not.
 
 use crate::staged::{CompilationContext, Staged, Var, VarUse};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
 
@@ -48,6 +48,22 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
 
 unsafe impl<'a, T: StagedType> CopyType for SRef<'a, T> {}
 
+unsafe impl<'stage, T> RuntimeParam for SRef<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = &'call T::RuntimeValue;
+}
+
+unsafe impl<'stage, T> RuntimeResult for SRef<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = &'call T::RuntimeValue;
+}
+
 // =============================================================================
 // SRefMut<T> - Mutable reference type
 // =============================================================================
@@ -64,6 +80,22 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T> {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Pointer-sized
     }
+}
+
+unsafe impl<'stage, T> RuntimeParam for SRefMut<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = &'call mut T::RuntimeValue;
+}
+
+unsafe impl<'stage, T> RuntimeResult for SRefMut<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = &'call mut T::RuntimeValue;
 }
 
 // =============================================================================
@@ -112,6 +144,22 @@ unsafe impl<T: StagedType> StagedType for SMutPtr<T> {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64
     }
+}
+
+unsafe impl<T: StagedType> RuntimeParam for SPtr<T> {
+    type Arg<'call> = *const T::RuntimeValue;
+}
+
+unsafe impl<T: StagedType> RuntimeResult for SPtr<T> {
+    type Output<'call> = *const T::RuntimeValue;
+}
+
+unsafe impl<T: StagedType> RuntimeParam for SMutPtr<T> {
+    type Arg<'call> = *mut T::RuntimeValue;
+}
+
+unsafe impl<T: StagedType> RuntimeResult for SMutPtr<T> {
+    type Output<'call> = *mut T::RuntimeValue;
 }
 
 unsafe impl<T: StagedType> CopyType for SPtr<T> {}

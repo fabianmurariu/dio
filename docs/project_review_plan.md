@@ -102,7 +102,11 @@ back to raw pointers.
    abstraction whose runtime argument is generic over each call, for example
    `RuntimeParam::Arg<'call> = &'call mut T`. Keep `Compiled::call` safe and
    prevent reference parameters or results from escaping their invocation.
-   **Status: pending.**
+   `CompiledFn` now stores a private code address plus the staged `FunTypeN`
+   signature instead of a monomorphic Rust function pointer. `RuntimeParam`
+   and `RuntimeResult` select fresh argument/result lifetimes at every safe
+   call; the marker lifetime remains only as AST provenance. **Status:
+   complete.**
 3. **Preserve references in extern metadata.** Derive `&T` as a staged shared
    reference and `&mut T` as a staged unique reference rather than as `SPtr` or
    `SMutPtr`. Add reference-aware call constructors that borrow unique
@@ -127,6 +131,12 @@ The latter includes a compile-fail regression proving that
 `Var<SRef<'static, T>>` remains `Copy`. The complete `sql-gen` integration and
 property suite passes after binding its consumed `&mut Inputs` parameter into
 an explicit copyable raw-pointer variable.
+
+**Phase 2A step 2 verification (2026-08-19):**
+`cargo test --workspace --all-targets` and `cargo test --workspace --doc` pass,
+including the complete `sql-gen` integration and property suites. The
+regressions prove that one `CompiledFn` accepts fresh sequential mutable borrows
+and that a staged reference result cannot escape a shorter-lived input.
 
 ## Phase 3: ABI correctness
 

@@ -63,23 +63,23 @@ fn p99_05_reverse_in_place() {
     });
 
     let compiled = compiler.compile(f).expect("compile");
-    // Note: `as_fn()` returns a fn pointer whose `&mut [i64]` parameter is
-    // bound to a single lifetime, not HRTB. Calling `compiled.call(...)`
-    // inline gives each call a fresh borrow.
+    // A retained safe entry point chooses a fresh borrow lifetime for every
+    // call, so distinct mutable slices can be passed sequentially.
+    let g = compiled.as_fn();
     let mut data = vec![1i64, 2, 3, 4, 5];
-    compiled.call(&mut data[..]);
+    g.call(&mut data[..]);
     assert_eq!(data, vec![5, 4, 3, 2, 1]);
 
     let mut even = vec![10i64, 20, 30, 40];
-    compiled.call(&mut even[..]);
+    g.call(&mut even[..]);
     assert_eq!(even, vec![40, 30, 20, 10]);
 
     let mut single = vec![7i64];
-    compiled.call(&mut single[..]);
+    g.call(&mut single[..]);
     assert_eq!(single, vec![7]);
 
     let mut empty: Vec<i64> = vec![];
-    compiled.call(&mut empty[..]);
+    g.call(&mut empty[..]);
     assert_eq!(empty, Vec::<i64>::new());
 }
 

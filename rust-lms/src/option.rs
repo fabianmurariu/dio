@@ -24,7 +24,7 @@
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
-use crate::types::StagedType;
+use crate::types::{RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
@@ -141,6 +141,14 @@ unsafe impl<T: StagedType> StagedType for COptionType<T> {
     }
 }
 
+unsafe impl<T: StagedType> RuntimeParam for COptionType<T> {
+    type Arg<'call> = COption<T::RuntimeValue>;
+}
+
+unsafe impl<T: StagedType> RuntimeResult for COptionType<T> {
+    type Output<'call> = COption<T::RuntimeValue>;
+}
+
 // =============================================================================
 // OptRefType / OptMutRefType: Niche-optimized reference options
 // =============================================================================
@@ -161,6 +169,22 @@ unsafe impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
     }
 }
 
+unsafe impl<'stage, T> RuntimeParam for OptRefType<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = Option<&'call T::RuntimeValue>;
+}
+
+unsafe impl<'stage, T> RuntimeResult for OptRefType<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = Option<&'call T::RuntimeValue>;
+}
+
 /// Staged type for `Option<&mut T>` using niche optimization.
 ///
 /// Single i64 value: null = None, non-null = Some(&mut T)
@@ -175,6 +199,22 @@ unsafe impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I64 // Single pointer, null = None
     }
+}
+
+unsafe impl<'stage, T> RuntimeParam for OptMutRefType<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Arg<'call> = Option<&'call mut T::RuntimeValue>;
+}
+
+unsafe impl<'stage, T> RuntimeResult for OptMutRefType<'stage, T>
+where
+    T: StagedType,
+    T::RuntimeValue: 'static,
+{
+    type Output<'call> = Option<&'call mut T::RuntimeValue>;
 }
 
 // =============================================================================
