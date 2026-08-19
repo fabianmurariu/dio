@@ -1,12 +1,14 @@
 //! Zip combinator — pairs elements from two sources at the same index.
 
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{
+    condcodes::IntCC, types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+};
 
 use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
-use crate::r#struct::{load_field, Field, LoadField};
+use crate::r#struct::{load_field_unchecked, Field, LoadField};
 use crate::staged::{CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
 
@@ -58,11 +60,15 @@ where
     B: CopyType,
 {
     fn first(self) -> LoadField<Self, ZipItemType::__field_first<A, B>> {
-        load_field(self, ZipItemType::first::<A, B>())
+        // SAFETY: `Self::Out` is exactly the field descriptor's `ZipItem`
+        // parent, established by this trait's bound.
+        unsafe { load_field_unchecked(self, ZipItemType::first::<A, B>()) }
     }
 
     fn second(self) -> LoadField<Self, ZipItemType::__field_second<A, B>> {
-        load_field(self, ZipItemType::second::<A, B>())
+        // SAFETY: `Self::Out` is exactly the field descriptor's `ZipItem`
+        // parent, established by this trait's bound.
+        unsafe { load_field_unchecked(self, ZipItemType::second::<A, B>()) }
     }
 }
 
@@ -98,6 +104,44 @@ impl<I: Clone, S: Clone> Clone for Zip<I, S> {
 }
 
 impl<I: Copy, S: Copy> Copy for Zip<I, S> {}
+
+/// Length of a zip: the smaller of its two source lengths.
+pub struct ZipLen<L, R> {
+    left: L,
+    right: R,
+}
+
+impl<L, R> ZipLen<L, R> {
+    fn new(left: L, right: R) -> Self {
+        Self { left, right }
+    }
+}
+
+impl<L: Clone, R: Clone> Clone for ZipLen<L, R> {
+    fn clone(&self) -> Self {
+        Self {
+            left: self.left.clone(),
+            right: self.right.clone(),
+        }
+    }
+}
+
+impl<L: Copy, R: Copy> Copy for ZipLen<L, R> {}
+
+unsafe impl<L, R> Staged for ZipLen<L, R>
+where
+    L: Staged<Out = u64>,
+    R: Staged<Out = u64>,
+{
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let left = self.left.codegen(ctx);
+        let right = self.right.codegen(ctx);
+        let left_is_shorter = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, left, right);
+        ctx.builder.ins().select(left_is_shorter, left, right)
+    }
+}
 
 /// Random access expression for a zipped pair at `index`.
 pub struct ZipGetAt<I, S> {
@@ -136,8 +180,11 @@ where
     type Out = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let first = IndexedSource::get_at(self.iter.clone(), self.index).codegen(ctx);
-        let second = IndexedSource::get_at(self.other.clone(), self.index).codegen(ctx);
+        // SAFETY: `ZipGetAt` is only constructed by a bounded zip loop or by
+        // `IndexedSource::get_at`, whose caller supplies the same bound.
+        let first = unsafe { IndexedSource::get_at(self.iter.clone(), self.index) }.codegen(ctx);
+        // SAFETY: the zip length is the minimum of both source lengths.
+        let second = unsafe { IndexedSource::get_at(self.other.clone(), self.index) }.codegen(ctx);
 
         let align_shift = Self::Out::align_of().trailing_zeros() as u8;
         let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
@@ -205,11 +252,14 @@ where
         F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
     {
         let i = ctx.var(0u64);
-        let prim_len = IndexedSource::len(&self.iter);
+        let len = ctx.bind(ZipLen::new(
+            IndexedSource::len(&self.iter),
+            IndexedSource::len(&self.other),
+        ));
         let prim = self.iter;
         let sec = self.other;
 
-        ctx.while_loop(lt(i, prim_len), move |ctx| {
+        ctx.while_loop(lt(i, len), move |ctx| {
             let elem = ctx.bind(ZipGetAt::new(prim.clone(), sec.clone(), i));
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
@@ -226,10 +276,13 @@ where
     <I as IndexedSource>::GetExpr: 'static,
     <S as IndexedSource>::GetExpr: 'static,
 {
-    type LenExpr = <I as IndexedSource>::LenExpr;
+    type LenExpr = ZipLen<<I as IndexedSource>::LenExpr, <S as IndexedSource>::LenExpr>;
 
     fn len(&self) -> Self::LenExpr {
-        IndexedSource::len(&self.iter)
+        ZipLen::new(
+            IndexedSource::len(&self.iter),
+            IndexedSource::len(&self.other),
+        )
     }
 }
 
@@ -243,14 +296,17 @@ where
     <S as IndexedSource>::GetExpr: 'static,
 {
     type Item = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
-    type LenExpr = <I as IndexedSource>::LenExpr;
+    type LenExpr = ZipLen<<I as IndexedSource>::LenExpr, <S as IndexedSource>::LenExpr>;
     type GetExpr = ZipGetAt<I, S>;
 
     fn len(&self) -> Self::LenExpr {
-        IndexedSource::len(&self.iter)
+        ZipLen::new(
+            IndexedSource::len(&self.iter),
+            IndexedSource::len(&self.other),
+        )
     }
 
-    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
+    unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         ZipGetAt::new(self.iter, self.other, index)
     }
 }
@@ -266,19 +322,22 @@ where
 {
     /// Drive a loop over `(primary_elem, secondary_elem)` pairs.
     ///
-    /// The primary source's length drives the loop; the secondary is accessed
-    /// at the same 0-based index. Caller must ensure equal-length sources.
+    /// Both sources are accessed at the same 0-based index and iteration stops
+    /// at the shorter source.
     pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
         F: FnOnce(&mut Ctx, Var<<I as IndexedSource>::Item>, Var<<S as IndexedSource>::Item>)
             + 'static,
     {
         let i = ctx.var(0u64);
-        let prim_len = IndexedSource::len(&self.iter);
+        let len = ctx.bind(ZipLen::new(
+            IndexedSource::len(&self.iter),
+            IndexedSource::len(&self.other),
+        ));
         let prim = self.iter;
         let sec = self.other;
 
-        ctx.while_loop(lt(i, prim_len), move |ctx| {
+        ctx.while_loop(lt(i, len), move |ctx| {
             let pair = ctx.bind(ZipGetAt::new(prim.clone(), sec.clone(), i));
             let elem1 = ctx.bind(pair.first());
             let elem2 = ctx.bind(pair.second());

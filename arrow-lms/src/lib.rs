@@ -4,8 +4,8 @@
 //! is a `Slice<FfiArray>`: host code prepares one with [`prepare_record_batch`]
 //! (read), and staged code recovers typed columns with `batch.primitive::<T>(idx)`.
 //! Output materialization lives in the consumer (`sql-gen`'s `SVec`-backed
-//! `OutCols`). Mutability is the reference flavor — `SRef` reads, `SRefMut`
-//! writes — over one lifetime-free [`FfiArray`] type.
+//! `OutCols`). Read descriptors and owner-backed writable validity descriptors
+//! are separate types.
 //!
 //! Scope: primitive arrays only. Validity is a first-class staged view.
 
@@ -22,9 +22,9 @@ pub use array::{
     ValidityNullCount, ValiditySource, ValidityView,
 };
 pub use ffi::{
-    ffi_from_primitive, ffi_from_string_view, prepare_array_refs, prepare_arrays,
-    prepare_dyn_arrays, prepare_record_batch, FfiArray, FfiBuffer, FfiError, FfiValidity,
-    PreparedFfiBatch,
+    prepare_array_refs, prepare_arrays, prepare_dyn_arrays, prepare_record_batch,
+    prepare_validity_mut, FfiArray, FfiBuffer, FfiError, FfiValidity, FfiValidityMut,
+    PreparedFfiBatch, PreparedFfiValidityMut,
 };
 // `ffi_mut` now holds only the standalone `ValidityView` write ops (re-exported
 // from `array`); the host output path moved to the consumer.

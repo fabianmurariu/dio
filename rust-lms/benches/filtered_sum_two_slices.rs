@@ -62,16 +62,14 @@ fn build_filtered_sum_lms() -> impl Fn(&[i64], &[i64], i64) -> i64 {
     let f = compiler.fun3(
         "filtered_sum",
         |ctx, x: Var<SRef<Slice<i64>>>, y: Var<SRef<Slice<i64>>>, z: Var<i64>| {
-            let i = ctx.var(0u64);
             let acc = ctx.var(0i64);
             let v = ctx.var(0i64);
 
-            ctx.while_loop(lt(i, x.len()), move |ctx| {
-                ctx.store(v, x.get_unchecked(i) + y.get_unchecked(i));
+            x.staged_iter().zip(y).for_each(ctx, move |ctx, xi, yi| {
+                ctx.store(v, xi + yi);
                 ctx.if_then(gt(v, z), move |ctx| {
                     ctx.store(acc, acc + v);
                 });
-                ctx.store(i, i + 1u64);
             });
             acc
         },

@@ -31,11 +31,13 @@ fn sum_i32_column() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("sum", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        let col = batch.primitive::<i32>(0);
+        // SAFETY: `batch()` constructs a one-column Int32 batch.
+        let col = unsafe { batch.primitive::<i32>(0) };
         let acc = ctx.var(0i32);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, col.len()), move |ctx| {
-            let v = ctx.bind(col.value_unchecked(i));
+            // SAFETY: the loop condition proves `i < col.len()`.
+            let v = ctx.bind(unsafe { col.value_unchecked(i) });
             ctx.store(acc, add(acc, v));
             ctx.store(i, add(i, 1u64));
         });
@@ -57,11 +59,13 @@ fn empty_column_sums_to_zero() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("sum", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        let col = batch.primitive::<i32>(0);
+        // SAFETY: `batch()` constructs a one-column Int32 batch.
+        let col = unsafe { batch.primitive::<i32>(0) };
         let acc = ctx.var(0i32);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, col.len()), move |ctx| {
-            let v = ctx.bind(col.value_unchecked(i));
+            // SAFETY: the loop condition proves `i < col.len()`.
+            let v = ctx.bind(unsafe { col.value_unchecked(i) });
             ctx.store(acc, add(acc, v));
             ctx.store(i, add(i, 1u64));
         });
@@ -80,13 +84,16 @@ fn sum_skips_nulls_via_is_valid() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("sum_valid", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        let col = batch.primitive::<i32>(0);
+        // SAFETY: `nullable_batch()` constructs a one-column Int32 batch.
+        let col = unsafe { batch.primitive::<i32>(0) };
         let acc = ctx.var(0i32);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, col.len()), move |ctx| {
-            let valid = ctx.bind(col.validity().is_valid(i));
+            // SAFETY: the loop condition proves `i < col.len()`.
+            let valid = ctx.bind(unsafe { col.validity().is_valid(i) });
             ctx.if_then(valid, move |ctx| {
-                let v = ctx.bind(col.value_unchecked(i));
+                // SAFETY: the surrounding loop proves `i < col.len()`.
+                let v = ctx.bind(unsafe { col.value_unchecked(i) });
                 ctx.store(acc, add(acc, v));
             });
             ctx.store(i, add(i, 1u64));
@@ -113,11 +120,13 @@ fn is_valid_respects_sliced_bitmap_offset() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("count_valid", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        let col = batch.primitive::<i32>(0);
+        // SAFETY: the prepared batch has one Int32 column.
+        let col = unsafe { batch.primitive::<i32>(0) };
         let acc = ctx.var(0i64);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, col.len()), move |ctx| {
-            let valid = ctx.bind(col.validity().is_valid(i));
+            // SAFETY: the loop condition proves `i < col.len()`.
+            let valid = ctx.bind(unsafe { col.validity().is_valid(i) });
             ctx.if_then(valid, move |ctx| ctx.store(acc, add(acc, 1i64)));
             ctx.store(i, add(i, 1u64));
         });
@@ -137,11 +146,13 @@ fn read_i16_from_erased_dyn_arrays() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("sum_i16", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
-        let col = batch.primitive::<i16>(0);
+        // SAFETY: `arrays` contains one Int16 array.
+        let col = unsafe { batch.primitive::<i16>(0) };
         let acc = ctx.var(0i16);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, col.len()), move |ctx| {
-            let v = ctx.bind(col.value_unchecked(i));
+            // SAFETY: the loop condition proves `i < col.len()`.
+            let v = ctx.bind(unsafe { col.value_unchecked(i) });
             ctx.store(acc, add(acc, v));
             ctx.store(i, add(i, 1u64));
         });

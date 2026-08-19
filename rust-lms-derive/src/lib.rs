@@ -423,19 +423,19 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 }
             }
 
-            // A non-slice reference `&T` / `&mut T` is an *opaque* handle: the
-            // staged side only passes the pointer back to extern calls, so `T`
-            // need not be a `StagedType`. Wrap it in `Opaque<T>`.
+            // A non-slice reference `&T` / `&mut T` is represented as a raw
+            // opaque pointer. Generated code cannot create a Rust reference or
+            // track its borrow lifetime, so staging the call remains unsafe.
             if type_ref.mutability.is_some() {
-                // &mut T -> SRefMut<Opaque<T>>
-                Ok(
-                    quote! { ::rust_lms::refer::SRefMut<'static, ::rust_lms::opaque::Opaque<#elem_ty>> },
-                )
+                // &mut T -> SMutPtr<Opaque<T>>
+                Ok(quote! {
+                    ::rust_lms::refer::SMutPtr<::rust_lms::opaque::Opaque<#elem_ty>>
+                })
             } else {
-                // &T -> SRef<Opaque<T>>
-                Ok(
-                    quote! { ::rust_lms::refer::SRef<'static, ::rust_lms::opaque::Opaque<#elem_ty>> },
-                )
+                // &T -> SPtr<Opaque<T>>
+                Ok(quote! {
+                    ::rust_lms::refer::SPtr<::rust_lms::opaque::Opaque<#elem_ty>>
+                })
             }
         }
         Type::Tuple(tuple) if tuple.elems.is_empty() => {
@@ -468,7 +468,8 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 ///
 /// - Primitives: `i8`, `u8`, `i16`, `u16`, `i32`, `u32`, `i64`, `u64`, `f32`, `f64`, `bool`
 /// - Pointers: `*const T`, `*mut T`
-/// - References: `&T`, `&mut T` (for FFI-safe T)
+/// - References: `&T`, `&mut T` (mapped to raw opaque pointers; calls are unsafe
+///   to stage because generated code cannot prove the borrow)
 /// - Slices: `&[T]`, `&mut [T]` (converted to FatSlice/FatSliceMut)
 /// - Option: `COption<T>`
 /// - Fat slices: `FatSlice<T>`, `FatSliceMut<T>`
@@ -589,7 +590,12 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         quote! { (#(#param_staged_types,)*) }
     };
 
-    let safe_extern_impl = if input.sig.unsafety.is_none() {
+    let has_reference_param = input.sig.inputs.iter().any(|arg| match arg {
+        FnArg::Typed(pat_type) => matches!(&*pat_type.ty, Type::Reference(_)),
+        FnArg::Receiver(_) => false,
+    });
+
+    let safe_extern_impl = if input.sig.unsafety.is_none() && !has_reference_param {
         quote! {
             unsafe impl ::rust_lms::ffi::SafeExternFn for #type_name {}
         }

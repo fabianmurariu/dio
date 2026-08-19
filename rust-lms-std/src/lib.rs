@@ -15,4 +15,4 @@ pub mod record;
 pub mod svec;
 
 pub use record::{DynamicRecord, FieldId, RecordLayout};
-pub use svec::{svec_grow, HostVec, RawVec, RawVecType, SVec, SvecGrowExtern};
+pub use svec::{svec_grow, HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern};

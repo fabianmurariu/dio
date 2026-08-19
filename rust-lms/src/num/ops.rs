@@ -955,9 +955,9 @@ impl_num_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
 impl_rem_op_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
 impl_bit_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
 
-impl_num_ops_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
-impl_rem_op_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
-impl_bit_ops_for!(['a, P, I] crate::refer::ArrayIndex<'a, P, I>);
+impl_num_ops_for!([P, I] crate::refer::ArrayIndex<P, I>);
+impl_rem_op_for!([P, I] crate::refer::ArrayIndex<P, I>);
+impl_bit_ops_for!([P, I] crate::refer::ArrayIndex<P, I>);
 
 // Struct field accessors.
 impl_num_ops_for!([P, F] crate::r#struct::LoadField<P, F>);

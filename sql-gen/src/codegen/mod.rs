@@ -36,6 +36,13 @@ use crate::output::{OutColHandle, OutputHandle};
 use crate::plan::Operator;
 use crate::runtime::Runtime;
 use crate::scan::Inputs;
+
+fn string_builder_mut(
+    builder: *mut StringViewBuilder,
+) -> impl Staged<Out = SMutPtr<Opaque<StringViewBuilder>>> + Copy {
+    const_mut_ptr::<Opaque<StringViewBuilder>>(builder)
+}
+
 use crate::value::{ColVal, Nullness, Row, StrVal};
 
 use aggregate::{Agg, CountFast, count_fast};
@@ -182,15 +189,16 @@ impl Prim for f64 {
     }
 }
 
-/// A staged expression yielding a single read-only input batch (`&[FfiArray]`) —
-/// one stream batch, produced inside [`gen_scan`] and consumed by the row reads.
-pub trait BatchSource: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
-impl<T> BatchSource for T where T: Staged<Out = SRef<'static, Slice<FfiArray>>> + Copy + 'static {}
+/// A staged expression yielding one lifetime-free `(ptr, len)` descriptor array.
+/// The scan or join owner retains the pointed-to batch for the enclosing loop.
+pub trait BatchSource: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
+impl<T> BatchSource for T where T: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
 
-/// A staged expression yielding the input streams (`&mut Inputs`), threaded through
-/// the operator walk so [`gen_scan`] can pull batches via `scan_next`.
-pub trait InputsSource: Staged<Out = SRefMut<'static, Opaque<Inputs>>> + Copy + 'static {}
-impl<T> InputsSource for T where T: Staged<Out = SRefMut<'static, Opaque<Inputs>>> + Copy + 'static {}
+/// Raw staged pointer derived from the kernel's real `&mut Inputs` parameter.
+/// It is threaded through the operator walk so [`gen_scan`] can call `scan_next`
+/// without fabricating an internal reference lifetime.
+pub trait InputsSource: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
+impl<T> InputsSource for T where T: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
 
 /// Downstream continuation, invoked once per emitted row at code-generation
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
@@ -309,8 +317,13 @@ pub(crate) fn gen_op<I: InputsSource>(
                         let inc = match cf {
                             CountFast::Star => len,
                             CountFast::Col(col) => {
-                                let nulls =
-                                    ctx.bind(batch.primitive::<u64>(col).validity().null_count());
+                                // SAFETY: the scan schema proves `col` exists;
+                                // this path reads only validity metadata, not values.
+                                let nulls = ctx.bind(
+                                    unsafe { batch.primitive::<u64>(col) }
+                                        .validity()
+                                        .null_count(),
+                                );
                                 ctx.bind(sub(len, nulls))
                             }
                         };
@@ -356,9 +369,8 @@ pub(crate) fn gen_op<I: InputsSource>(
     }
 }
 
-/// The staged batch a [`for_each_batch`] body receives: `&[FfiArray]` rebuilt from
-/// the stream's current descriptor pointer (a `BatchSource`).
-type ScanBatch = Var<SRef<'static, Slice<FfiArray>>>;
+/// The staged raw slice descriptor received by a [`for_each_batch`] body.
+type ScanBatch = Var<FatSliceType<FfiArray>>;
 
 /// Drive the OUTER batch loop of table `table`: pull batches from the stream
 /// (`scan_next`, null = exhausted → break), rebuild each `&[FfiArray]` batch, and
@@ -380,13 +392,17 @@ fn for_each_batch<I: InputsSource>(
 
     ctx.while_loop(Const::<bool>::new(true), move |ctx| {
         // Pull the next batch; a null descriptor pointer means the stream is done.
-        let descs = ctx.bind(call_extern2(scan_next, inputs, Const::<u64>::new(table)));
+        // SAFETY: the compiled entry point receives exclusive access to live
+        // `Inputs`; scan callbacks are sequenced by this outer loop.
+        let descs = ctx
+            .bind(unsafe { call_extern2_unchecked(scan_next, inputs, Const::<u64>::new(table)) });
         ctx.if_then(ptr_is_null(descs), |ctx| ctx.break_loop());
-        // Rebuild the borrowed batch (`&[FfiArray]`) from (ptr, column count).
-        let batch = ctx.bind(slice_ref_from_raw_parts::<FfiArray, _, _>(
-            descs,
-            Const::<u64>::new(ncols),
-        ));
+        // Rebuild a lifetime-free raw batch descriptor from (ptr, column count).
+        // SAFETY: `Inputs` retains the current descriptor array until the next
+        // callback, and Phase 1 schema validation proves it has `ncols` entries.
+        let batch = ctx.bind(unsafe {
+            slice_from_raw_parts::<FfiArray, _, _>(descs, Const::<u64>::new(ncols))
+        });
         let len = gen_len(ctx, batch, &key_dt);
         body(ctx, batch, len);
     });
@@ -424,9 +440,14 @@ pub(crate) fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) ->
     // A `Utf8View` column's `values` holds one 16-byte view per row, so its
     // element count (read via any type) is the row count.
     if matches!(dt, DataType::Utf8View) {
-        return ctx.bind(batch.primitive::<u64>(0).len());
+        // SAFETY: the batch was schema-validated; only the descriptor length is
+        // read, so the placeholder physical marker is never dereferenced.
+        return ctx.bind(unsafe { batch.primitive::<u64>(0) }.len());
     }
-    dispatch_prim!(dt, M => ctx.bind(batch.primitive::<M>(0).len()))
+    dispatch_prim!(dt, M => {
+        // SAFETY: dispatch selects the staged type matching the validated field.
+        ctx.bind(unsafe { batch.primitive::<M>(0) }.len())
+    })
 }
 
 /// Read column `col` at row `i`, attaching validity iff the field is nullable.
@@ -442,8 +463,10 @@ pub(crate) fn gen_read<B: BatchSource>(
     }
     let nullable = field.is_nullable();
     dispatch_prim!(field.data_type(), M => {
-        let view = batch.primitive::<M>(col);
-        let value = ctx.bind(view.value_unchecked(i));
+        // SAFETY: schema validation proves `col` exists with physical type `M`.
+        let view = unsafe { batch.primitive::<M>(col) };
+        // SAFETY: all callers invoke `gen_read` inside the batch row loop.
+        let value = ctx.bind(unsafe { view.value_unchecked(i) });
         M::wrap(value, read_nullness(ctx, view, nullable, i))
     })
 }
@@ -458,15 +481,19 @@ fn gen_read_str<B: BatchSource>(
     field: &Field,
     i: Var<u64>,
 ) -> ColVal {
-    let views = batch.primitive::<u64>(col);
+    // SAFETY: a validated Utf8View descriptor stores 16-byte views; this code
+    // intentionally reads each view as its two u64 halves.
+    let views = unsafe { batch.primitive::<u64>(col) };
     let base = ctx.bind(mul(i, 2u64));
-    let lo = ctx.bind(views.value_unchecked(base));
-    let hi = ctx.bind(views.value_unchecked(add(base, 1u64)));
-    // The typed opaque reference back to the arrow array, for the extern fallback.
-    let array = ctx.bind(opaque_ref::<StringViewArray, _>(load_field(
-        batch.get_ref_unchecked(col as u64),
-        FfiArrayType::array(),
-    )));
+    // SAFETY: `i` is in the row loop, so halves `2*i` and `2*i+1` exist.
+    let lo = ctx.bind(unsafe { views.value_unchecked(base) });
+    let hi = ctx.bind(unsafe { views.value_unchecked(add(base, 1u64)) });
+    // SAFETY: `col` is schema-validated and the current batch retains this
+    // descriptor and its originating `StringViewArray` for the row loop.
+    let descriptor = unsafe { slice_get_ptr_unchecked(batch, col as u64) };
+    let array = ctx.bind(ptr_cast::<Opaque<StringViewArray>, u8, _>(unsafe {
+        load_field_unchecked(descriptor, FfiArrayType::array())
+    }));
     let null = read_nullness(ctx, views, field.is_nullable(), i);
     ColVal::Str(
         StrVal::Column {
@@ -486,11 +513,12 @@ fn read_nullness<P, M>(
     i: Var<u64>,
 ) -> Nullness
 where
-    P: Staged<Out = SRef<'static, FfiArray>> + Clone + 'static,
+    P: Staged<Out = SPtr<FfiArray>> + Clone + 'static,
     M: StagedType + 'static,
 {
     if nullable {
-        Nullness::Nullable(ctx.bind(view.validity().is_valid(i)))
+        // SAFETY: `i` is bounded by this batch's row loop.
+        Nullness::Nullable(ctx.bind(unsafe { view.validity().is_valid(i) }))
     } else {
         Nullness::NonNull
     }
@@ -510,7 +538,9 @@ pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: 
         OutColHandle::Str { builder } => write_str_col(ctx, *builder, cv, cx),
         OutColHandle::Fixed { values, validity } => {
             dispatch_prim!(field.data_type(), M => {
-                let vals = SVec::<M>::new(*values, cx.rt.svec_grow);
+                // SAFETY: the output owns this control block with element type
+                // `M` and retains it for the compiled kernel's lifetime.
+                let vals = unsafe { SVec::<M>::from_raw_unchecked(*values, cx.rt.svec_grow) };
                 let v = M::coerce(ctx, cv);
                 vals.push(ctx, v);
                 // A nullable column pushes a validity flag for *every* row (the
@@ -520,7 +550,12 @@ pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: 
                         Nullness::NonNull => ctx.bind(Const::<bool>::new(true)),
                         Nullness::Nullable(valid) => valid,
                     };
-                    SVec::<bool>::new(*valid_ctrl, cx.rt.svec_grow).push(ctx, flag);
+                    // SAFETY: nullable output owns a bool control block and
+                    // retains it for the compiled kernel's lifetime.
+                    unsafe {
+                        SVec::<bool>::from_raw_unchecked(*valid_ctrl, cx.rt.svec_grow)
+                    }
+                    .push(ctx, flag);
                 }
             })
         }
@@ -544,21 +579,21 @@ fn write_str_col(ctx: &mut Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx:
     // resolve unconditionally and branch only on which extern to call.
     let (ptr, len) = resolve(ctx, sv, cx.rt.str_ptr);
     let emit_append = move |ctx: &mut Ctx| {
-        ctx.emit(call_extern2(
-            append,
-            const_opaque_mut::<StringViewBuilder>(builder),
-            slice_from_raw_parts::<u8, _, _>(ptr, len),
-        ));
+        // SAFETY: the resolved string owner remains live for this append call,
+        // `len` is its byte length, and `OutCols` exclusively owns the builder.
+        let bytes = unsafe { slice_from_raw_parts::<u8, _, _>(ptr, len) };
+        ctx.emit(unsafe { call_extern2_unchecked(append, string_builder_mut(builder), bytes) });
     };
     match cv.nullness() {
         Nullness::NonNull => emit_append(ctx),
         Nullness::Nullable(valid) => {
             ctx.if_then(valid, emit_append);
             ctx.if_then(not(valid), move |ctx| {
-                ctx.emit(call_extern1(
-                    append_null,
-                    const_opaque_mut::<StringViewBuilder>(builder),
-                ));
+                // SAFETY: `OutCols` retains and exclusively owns the builder
+                // throughout the generated kernel call.
+                ctx.emit(unsafe {
+                    call_extern1_unchecked(append_null, string_builder_mut(builder))
+                });
             });
         }
     }

@@ -45,26 +45,44 @@ points and detached entry points are explicit.
 
 **Phase 1 verification (2026-08-18):** `cargo test --workspace --all-targets`
 and `cargo test --workspace --doc` pass. Workspace Clippy with warnings denied
-reports 17 findings outside the PR-01 diff and no new PR-01 findings: three
-`type_complexity`, two generated `too_many_arguments`, three
-`len_without_is_empty`, four `wrong_self_convention`, two `expect_fun_call`,
-one `clone_on_copy`, and two `bool_assert_comparison` diagnostics. These remain
+initially reported 17 findings outside the PR-01 diff and no new PR-01
+findings. The subsequent `CodegenAction` alias reduced the current baseline to
+16: two `type_complexity`, two generated `too_many_arguments`, three
+`len_without_is_empty`, four `wrong_self_convention`, two `expect_fun_call`, one
+`clone_on_copy`, and two `bool_assert_comparison` diagnostics. These remain
 tracked for the API-consolidation phase.
 
 ## Phase 2: Pointer and ownership model
 
 1. Replace address-as-`u64` paths with `SPtr<T>`/`SMutPtr<T>`.
+   **Status: complete.** Raw pointer operations are separate from staged Rust
+   references and require explicit unsafe dereference/offset/store operations.
 2. Stop fabricating `'static` staged references from raw addresses.
+   **Status: complete.** Opaque extern arguments and SQL scan/join batches now
+   remain raw pointers or lifetime-free raw slice descriptors internally.
 3. Split Arrow descriptors into typed read-only and writable forms with
-   lifetimes or scoped owners.
+   lifetimes or scoped owners. **Status: complete.** Prepared host owners retain
+   source borrows; read-only and writable wire descriptors are distinct and
+   their fields are private. Validity mutation also keeps `null_count` in sync,
+   pulling PR-13 forward from Phase 4.
 4. Connect `HostVec<T>` and `SVec<T>` through an opaque typed handle; make raw
-   control blocks private and harden allocation arithmetic.
+   control blocks private and harden allocation arithmetic. **Status:
+   complete.** Dynamic SQL dispatch uses the documented unsafe raw escape hatch.
 5. Add RAII ownership and `MaybeUninit`-correct construction for opaque
-   iterators.
+   iterators. **Status: complete.** Raw ownership transfer and iterator-kind
+   contracts are unsafe; untransferred owners drop normally.
 6. Make unchecked pointer, slice, and indexed operations unsafe; make zip stop
-   at the shorter input.
+   at the shorter input. **Status: complete.** Unequal-length zip regressions
+   cover both iterator paths.
 
-Covers PR-03, PR-07, PR-09, PR-10, PR-11, and PR-12.
+Covers PR-03, PR-07, PR-09, the ownership portion of PR-10, PR-11, PR-12,
+and PR-13.
+
+**Phase 2 verification (2026-08-18):** Every bounded fix was followed by
+`cargo test --workspace --all-targets` and `cargo test --workspace --doc`; the
+final runs pass. This includes all `sql-gen` grouping, join, streaming, output,
+string, and property tests. Workspace Clippy with warnings denied reports only
+the existing 16-diagnostic Phase 5 baseline and no new Phase 2 diagnostics.
 
 ## Phase 3: ABI correctness
 
@@ -81,7 +99,8 @@ Covers PR-05 and removes duplicated lowering described in the review.
 
 1. Finish no-unwind FFI error propagation for allocation, indexing, join,
    grouping, and output callbacks. Covers the remaining PR-10 and PR-16 work.
-2. Keep validity bitmaps and `null_count` consistent. Covers PR-13.
+2. Keep validity bitmaps and `null_count` consistent. Covers PR-13. **Status:
+   complete in Phase 2.**
 3. Implement SQL three-valued truth tables. Covers PR-14.
 4. Validate range steps and overflow-safe lengths. Covers PR-15.
 5. Replace truncating row/group identifiers. Covers PR-17.

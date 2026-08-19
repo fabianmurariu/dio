@@ -1,17 +1,10 @@
-//! FFI descriptors for primitive Arrow arrays — read *and* write.
+//! FFI descriptors for primitive Arrow arrays.
 //!
-//! The layout is deliberately small and **lifetime-free**: an erased `(ptr,
-//! len)` buffer, a validity bitmap over one, and the array = values + validity.
-//! Staged code reinterprets these as ordinary `rust-lms` slices. A *batch* is
-//! just a slice of [`FfiArray`] — there is no wrapper type: read code takes
-//! `SRef<Slice<FfiArray>>` (`&[FfiArray]`), write code `SRefMut<Slice<FfiArray>>`
-//! (`&mut [FfiArray]`). Mutability is the reference flavor, not a second type.
-//!
-//! Descriptors carry no lifetime (raw pointers): a `&mut` is invariant in its
-//! pointee's lifetimes, so a lifetimed descriptor could not be handed to a
-//! kernel whose ABI type is `'static`. Host safety lives at the *slice* border —
-//! `&[FfiArray]` / `&mut [FfiArray]` cannot outlive the `Prepared*` owner — and
-//! the raw pointers' "arrow data must outlive the call" is the caller contract.
+//! The wire structs remain lifetime-free because generated code consumes their
+//! `repr(C)` layout. Safe host construction is lifetime-bearing: read batches
+//! come from [`PreparedFfiBatch`], while writable bitmap descriptors come from
+//! [`PreparedFfiValidityMut`]. Their raw fields are private and read-only and
+//! writable buffers are distinct staged types.
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -26,19 +19,18 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-/// Erased `(ptr, len)` buffer. `ptr` is `*mut` to serve both flavors; the read
-/// path only ever reaches it through an `SRef`, which emits no writes.
+/// Erased read-only `(ptr, len)` buffer used inside prepared Arrow descriptors.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiBuffer {
+    #[staged(SPtr<u8>)]
+    ptr: *const u8,
     #[staged(u64)]
-    pub ptr: *mut u8,
-    #[staged(u64)]
-    pub len: usize,
+    len: usize,
 }
 
 const _: () = {
-    assert!(std::mem::size_of::<*mut u8>() == 8);
+    assert!(std::mem::size_of::<*const u8>() == 8);
     assert!(std::mem::size_of::<usize>() == 8);
     assert!(std::mem::offset_of!(FfiBuffer, ptr) == 0);
     assert!(std::mem::offset_of!(FfiBuffer, len) == 8);
@@ -49,36 +41,24 @@ const _: () = {
 // Individual buffer validity remains the unsafe conversion caller's contract.
 unsafe impl<T: StagedType> SliceRepr<T> for FfiBuffer {}
 
-// SAFETY: FfiBuffer stores a mutable pointer at offset 0. Individual instances
-// must still be exclusively writable before they are converted to mutable
-// slices.
-unsafe impl<T: StagedType> MutSliceRepr<T> for FfiBuffer {}
-
 impl FfiBuffer {
-    pub const fn empty() -> Self {
+    const fn empty() -> Self {
         Self {
-            ptr: std::ptr::null_mut(),
+            ptr: std::ptr::null(),
             len: 0,
         }
     }
 
-    /// # Safety
-    /// `ptr` must be valid for the interpretation `len` names, for as long as the
-    /// owning descriptor is used.
-    pub const unsafe fn from_raw_parts(ptr: *mut u8, len: usize) -> Self {
-        Self { ptr, len }
-    }
-
-    pub fn from_bytes(bytes: &[u8]) -> Self {
+    fn from_bytes(bytes: &[u8]) -> Self {
         Self {
-            ptr: bytes.as_ptr() as *mut u8,
+            ptr: bytes.as_ptr(),
             len: bytes.len(),
         }
     }
 
-    pub fn from_typed_slice<T>(slice: &[T]) -> Self {
+    fn from_typed_slice<T>(slice: &[T]) -> Self {
         Self {
-            ptr: slice.as_ptr() as *mut u8,
+            ptr: slice.as_ptr().cast::<u8>(),
             len: slice.len(),
         }
     }
@@ -91,13 +71,13 @@ impl FfiBuffer {
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiValidity {
     #[staged(FfiBuffer)]
-    pub bytes: FfiBuffer,
+    bytes: FfiBuffer,
     #[staged(u64)]
-    pub bit_offset: u64,
+    bit_offset: u64,
     #[staged(u64)]
-    pub bit_len: u64,
+    bit_len: u64,
     #[staged(u64)]
-    pub null_count: u64,
+    null_count: u64,
 }
 
 impl FfiValidity {
@@ -110,7 +90,7 @@ impl FfiValidity {
         }
     }
 
-    pub fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
+    fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
         match nulls {
             Some(nulls) if nulls.null_count() != 0 => Self {
                 bytes: FfiBuffer::from_bytes(nulls.inner().values()),
@@ -138,11 +118,11 @@ impl FfiValidity {
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiArray {
     #[staged(FfiBuffer)]
-    pub values: FfiBuffer,
+    values: FfiBuffer,
     #[staged(FfiValidity)]
-    pub validity: FfiValidity,
-    #[staged(u64)]
-    pub array: *const u8,
+    validity: FfiValidity,
+    #[staged(SPtr<u8>)]
+    array: *const u8,
 }
 
 impl FfiArray {
@@ -171,6 +151,55 @@ pub struct PreparedFfiBatch<'data> {
     _borrow: PhantomData<&'data [u8]>,
 }
 
+/// Mutable `(ptr, len)` buffer used only by owner-backed writable descriptors.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, StagedType)]
+pub struct FfiBufferMut {
+    #[staged(SMutPtr<u8>)]
+    ptr: *mut u8,
+    #[staged(u64)]
+    len: usize,
+}
+
+// SAFETY: this private repr(C) descriptor stores a writable byte pointer and a
+// u64-sized byte count at the offsets consumed by slice lowering.
+unsafe impl SliceRepr<u8> for FfiBufferMut {}
+unsafe impl MutSliceRepr<u8> for FfiBufferMut {}
+
+/// Writable validity descriptor. Safe construction requires a
+/// [`PreparedFfiValidityMut`] owner, so it cannot outlive or escape the mutable
+/// bitmap borrow.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, StagedType)]
+pub struct FfiValidityMut {
+    #[staged(FfiBufferMut)]
+    bytes: FfiBufferMut,
+    #[staged(u64)]
+    bit_offset: u64,
+    #[staged(u64)]
+    bit_len: u64,
+    #[staged(u64)]
+    null_count: u64,
+}
+
+/// Host owner for a writable validity descriptor.
+pub struct PreparedFfiValidityMut<'data> {
+    descriptor: FfiValidityMut,
+    _borrow: PhantomData<&'data mut [u8]>,
+}
+
+impl PreparedFfiValidityMut<'_> {
+    /// Borrow the descriptor for a generated call. The borrow cannot outlive
+    /// the original mutable bitmap borrow held by this owner.
+    pub fn descriptor_mut(&mut self) -> &mut FfiValidityMut {
+        &mut self.descriptor
+    }
+
+    pub fn null_count(&self) -> u64 {
+        self.descriptor.null_count
+    }
+}
+
 impl<'data> PreparedFfiBatch<'data> {
     /// The read batch handed to the kernel: `SRef<Slice<FfiArray>>` at runtime.
     pub fn arrays(&self) -> &[FfiArray] {
@@ -194,6 +223,10 @@ pub enum FfiError {
         expected: usize,
         actual: usize,
     },
+    BitmapTooShort {
+        bit_len: usize,
+        byte_len: usize,
+    },
 }
 
 impl fmt::Display for FfiError {
@@ -209,6 +242,10 @@ impl fmt::Display for FfiError {
             Self::MismatchedLength { index, expected, actual } => {
                 write!(f, "array {index} has length {actual}, expected {expected}")
             }
+            Self::BitmapTooShort { bit_len, byte_len } => write!(
+                f,
+                "validity bitmap has {byte_len} bytes, too short for {bit_len} bits"
+            ),
         }
     }
 }
@@ -216,7 +253,7 @@ impl fmt::Display for FfiError {
 impl std::error::Error for FfiError {}
 
 /// Build an erased descriptor from an Arrow primitive array.
-pub fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiArray {
+fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.values()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
@@ -230,13 +267,42 @@ pub fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> F
 /// Staged code reads a view as two `u64` halves; `octet_length` needs only the
 /// low 32 bits of the first. The data buffers are not referenced here — that
 /// comes with actual byte access (which will `gc` to a single buffer first).
-pub fn ffi_from_string_view(array: &StringViewArray) -> FfiArray {
+fn ffi_from_string_view(array: &StringViewArray) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.views().as_ref()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
         // Opaque pointer to the array itself, for extern `&str`/transform calls.
         array: (array as *const StringViewArray).cast::<u8>(),
     }
+}
+
+/// Prepare a writable validity bitmap over `bit_len` leading bits.
+pub fn prepare_validity_mut(
+    bitmap: &mut [u8],
+    bit_len: usize,
+) -> Result<PreparedFfiValidityMut<'_>, FfiError> {
+    let required = bit_len.div_ceil(8);
+    if bitmap.len() < required {
+        return Err(FfiError::BitmapTooShort {
+            bit_len,
+            byte_len: bitmap.len(),
+        });
+    }
+    let valid_count = (0..bit_len)
+        .filter(|bit| bitmap[*bit / 8] & (1 << (*bit % 8)) != 0)
+        .count();
+    Ok(PreparedFfiValidityMut {
+        descriptor: FfiValidityMut {
+            bytes: FfiBufferMut {
+                ptr: bitmap.as_mut_ptr(),
+                len: required,
+            },
+            bit_offset: 0,
+            bit_len: bit_len as u64,
+            null_count: (bit_len - valid_count) as u64,
+        },
+        _borrow: PhantomData,
+    })
 }
 
 /// Prepare a `RecordBatch` for a compiled kernel.
@@ -334,16 +400,23 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError>
 mod tests {
     use super::*;
 
-    fn assert_slice_representations<T: StagedType>()
+    fn assert_read_slice_representation<T: StagedType>()
     where
-        FfiBuffer: SliceRepr<T> + MutSliceRepr<T>,
+        FfiBuffer: SliceRepr<T>,
+    {
+    }
+
+    fn assert_mut_slice_representation()
+    where
+        FfiBufferMut: SliceRepr<u8> + MutSliceRepr<u8>,
     {
     }
 
     #[test]
     fn buffer_is_an_explicit_slice_representation() {
-        assert_slice_representations::<u8>();
-        assert_slice_representations::<i64>();
+        assert_read_slice_representation::<u8>();
+        assert_read_slice_representation::<i64>();
+        assert_mut_slice_representation();
     }
 
     #[test]

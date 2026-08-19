@@ -17,6 +17,14 @@ use super::numeric::{canonical_f64, coerce_f64, to_f64, to_i64};
 use super::strings::{as_str, resolve};
 use super::{CodegenCtx, InputsSource, Yld, gen_op};
 
+fn group_ref(state: *mut GroupState) -> impl Staged<Out = SPtr<Opaque<GroupState>>> + Copy {
+    const_ptr::<Opaque<GroupState>>(state)
+}
+
+fn group_mut(state: *mut GroupState) -> impl Staged<Out = SMutPtr<Opaque<GroupState>>> + Copy {
+    const_mut_ptr::<Opaque<GroupState>>(state)
+}
+
 /// GROUP BY as a push operator: fold each input row into the Rust-hosted group
 /// state (baked buffers indexed by `gidx`), then emit one *manifested* Row per
 /// group downstream. Keeps the hot fold loop in the JIT and lets the projection /
@@ -105,7 +113,9 @@ pub(crate) fn gen_grouped<I: InputsSource>(
                     build_bytes_key(ctx, bk, &row, &schema_f, &cx_c, state)
                 }
             };
-            let rec = layout.wrap(rec_ptr);
+            // SAFETY: each upsert returns a record allocated with `layout` that
+            // remains live until the next upsert; folding performs no upsert.
+            let rec = unsafe { layout.wrap(rec_ptr) };
             for agg in &resolved_f {
                 agg.fold(ctx, rec, &row, &schema_f, &cx_c);
             }
@@ -114,17 +124,16 @@ pub(crate) fn gen_grouped<I: InputsSource>(
 
     // Emit: one manifested Row per group, pushed downstream in the same kernel. The
     // records buffer is fully grown now, so its base is stable — fetch it once.
-    let num_groups = ctx.bind(call_extern1(
-        cx.rt.group_len,
-        const_opaque::<GroupState>(state),
-    ));
-    let base = ctx.bind(call_extern1(
-        cx.rt.group_records_base,
-        const_opaque_mut::<GroupState>(state),
-    ));
+    // SAFETY: `run_kernel` retains `state`; the fold is complete, so these
+    // shared/mutable calls are sequenced without host or generated aliases.
+    let num_groups = ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_len, group_ref(state)) });
+    let base =
+        ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_records_base, group_mut(state)) });
     let g = ctx.var(0u64);
     ctx.while_loop(lt(g, num_groups), move |ctx| {
-        let rec = layout.record(ctx, base, g);
+        // SAFETY: `g < num_groups`, and `base` addresses the stable records
+        // buffer after the fold has completed.
+        let rec = unsafe { layout.record(ctx, base, g) };
         let key_cols = match &key_source {
             KeySource::Single(_) => {
                 vec![emit_single_key(ctx, key_fields, key_valid, rec)]
@@ -171,11 +180,10 @@ fn fold_single_key(
             // The table keys on `u64` bits (grouping is sign-agnostic); a no-op cast.
             let key = to_i64(ctx, key_cv);
             let key_bits = ctx.bind(int_cast::<u64, i64, _>(key));
-            let call = call_extern2(
-                cx.rt.group_upsert,
-                const_opaque_mut::<GroupState>(state),
-                key_bits,
-            );
+            // SAFETY: `run_kernel` retains and exclusively lends `state` to
+            // generated calls, which are sequenced by the emitted program.
+            let call =
+                unsafe { call_extern2_unchecked(cx.rt.group_upsert, group_mut(state), key_bits) };
             finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
         }
         KeyFields::Float(_) => {
@@ -183,22 +191,19 @@ fn fold_single_key(
             let key = coerce_f64(ctx, key_cv);
             let canon = canonical_f64(ctx, key);
             let key_bits = ctx.bind(bitcast::<u64, f64, _>(canon));
-            let call = call_extern2(
-                cx.rt.group_upsert,
-                const_opaque_mut::<GroupState>(state),
-                key_bits,
-            );
+            // SAFETY: as above, this call has exclusive access to live state.
+            let call =
+                unsafe { call_extern2_unchecked(cx.rt.group_upsert, group_mut(state), key_bits) };
             finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
         }
         KeyFields::Str { .. } => {
             // Pass the key's content bytes; the extern copies them into its pool.
             let (ptr, len) = resolve(ctx, as_str(key_cv), cx.rt.str_ptr);
-            let call = call_extern3(
-                cx.rt.group_upsert_str,
-                const_opaque_mut::<GroupState>(state),
-                ptr,
-                len,
-            );
+            // SAFETY: state is exclusively available and `resolve` returns live
+            // string bytes with the corresponding length.
+            let call = unsafe {
+                call_extern3_unchecked(cx.rt.group_upsert_str, group_mut(state), ptr, len)
+            };
             finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
         }
         KeyFields::Composite { .. } => {
@@ -266,13 +271,15 @@ where
                 Nullness::Nullable(b) => b,
                 Nullness::NonNull => ctx.bind(Const::<bool>::new(true)),
             };
-            let null_call = call_extern1(
-                cx.rt.group_upsert_null,
-                const_opaque_mut::<GroupState>(state),
-            );
+            // SAFETY: `state` remains live and is exclusively accessed by the
+            // selected generated branch.
+            let null_call =
+                unsafe { call_extern1_unchecked(cx.rt.group_upsert_null, group_mut(state)) };
             let rec_ptr = ctx.bind(if_then_else(valid, valid_call, null_call));
             let valid_bits = ctx.bind(select(valid, 1i64, 0i64));
-            layout.wrap(rec_ptr).set(ctx, valid_field, valid_bits);
+            // SAFETY: both upsert branches return a writable record allocated
+            // with `layout` and no further upsert occurs before this write.
+            unsafe { layout.wrap(rec_ptr) }.set(ctx, valid_field, valid_bits);
             rec_ptr
         }
     }
@@ -411,7 +418,9 @@ fn pack_and_upsert(
     state: *mut GroupState,
 ) -> Var<SMutPtr<u8>> {
     let scratch = ctx.bind(stack_alloc(packed.nbytes));
-    let prec = packed.layout.wrap(scratch);
+    // SAFETY: the stack allocation is exactly one record using `packed.layout`
+    // and remains live throughout this generated function.
+    let prec = unsafe { packed.layout.wrap(scratch) };
     let bitmap = ctx.var(0u64);
     for col in &packed.cols {
         let cv = gen_expr(ctx, &col.expr, schema, row, cx);
@@ -447,12 +456,16 @@ fn pack_and_upsert(
         }
     }
     prec.set(ctx, packed.bitmap, bitmap);
-    ctx.bind(call_extern3(
-        cx.rt.group_upsert_str,
-        const_opaque_mut::<GroupState>(state),
-        ptr_as_const(scratch),
-        Const::<u64>::new(packed.nbytes as u64),
-    ))
+    // SAFETY: state is exclusively available; `scratch` contains exactly one
+    // initialized packed key of `packed.nbytes` bytes.
+    ctx.bind(unsafe {
+        call_extern3_unchecked(
+            cx.rt.group_upsert_str,
+            group_mut(state),
+            ptr_as_const(scratch),
+            Const::<u64>::new(packed.nbytes as u64),
+        )
+    })
 }
 
 /// Unpack a group's pooled packed key into its output key `ColVal`s (nulls from the
@@ -462,7 +475,9 @@ fn unpack_composite(
     packed: &PackedKey,
     packed_ptr: Var<SMutPtr<u8>>,
 ) -> Vec<ColVal> {
-    let prec = packed.layout.wrap(packed_ptr);
+    // SAFETY: `packed_ptr` was stored by the matching packed-key layout and the
+    // group state retains its backing pool while results are emitted.
+    let prec = unsafe { packed.layout.wrap(packed_ptr) };
     let bitmap = prec.get(ctx, packed.bitmap);
     packed
         .cols
@@ -503,10 +518,8 @@ fn build_bytes_key(
     cx: &CodegenCtx,
     state: *mut GroupState,
 ) -> Var<SMutPtr<u8>> {
-    ctx.emit(call_extern1(
-        cx.rt.group_key_reset,
-        const_opaque_mut::<GroupState>(state),
-    ));
+    // SAFETY: the run owns `state`, and generated state mutations are sequenced.
+    ctx.emit(unsafe { call_extern1_unchecked(cx.rt.group_key_reset, group_mut(state)) });
     let bitmap = ctx.var(0u64);
     let mut pushables = Vec::with_capacity(bk.cols.len());
     for col in &bk.cols {
@@ -547,51 +560,42 @@ fn build_bytes_key(
         pushables.push(pushable);
     }
     // Push the bitmap first, then each column in order.
-    ctx.emit(call_extern2(
-        cx.rt.group_key_push_u64,
-        const_opaque_mut::<GroupState>(state),
-        bitmap,
-    ));
+    // SAFETY: state is live and exclusively available for this mutation.
+    ctx.emit(unsafe { call_extern2_unchecked(cx.rt.group_key_push_u64, group_mut(state), bitmap) });
     for p in pushables {
         match p {
-            Pushable::U64(v) => ctx.emit(call_extern2(
-                cx.rt.group_key_push_u64,
-                const_opaque_mut::<GroupState>(state),
-                v,
-            )),
+            Pushable::U64(v) => {
+                // SAFETY: state is live and mutations are sequenced.
+                ctx.emit(unsafe {
+                    call_extern2_unchecked(cx.rt.group_key_push_u64, group_mut(state), v)
+                })
+            }
             // SAFETY: `ptr` and `len` come from a resolved Arrow string that
             // remains live for the duration of this generated call.
             Pushable::Bytes(ptr, len) => ctx.emit(unsafe {
-                call_extern3_unchecked(
-                    cx.rt.group_key_push_bytes,
-                    const_opaque_mut::<GroupState>(state),
-                    ptr,
-                    len,
-                )
+                call_extern3_unchecked(cx.rt.group_key_push_bytes, group_mut(state), ptr, len)
             }),
         }
     }
-    ctx.bind(call_extern1(
-        cx.rt.group_upsert_composite,
-        const_opaque_mut::<GroupState>(state),
-    ))
+    // SAFETY: state is live and exclusively available for the completed key.
+    ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_upsert_composite, group_mut(state)) })
 }
 
 /// Load a value of type `T` at byte offset `off` in `base` (a runtime offset, since a
 /// string column's length shifts everything after it).
-fn load_at<T: StagedType + CopyType + 'static>(
+unsafe fn load_at_unchecked<T: StagedType + CopyType + 'static>(
     ctx: &mut Ctx,
     base: Var<SMutPtr<u8>>,
     off: Var<i64>,
 ) -> Var<T> {
-    ctx.bind(load_ref_mut(ptr_cast_mut::<T, u8, _>(ptr_offset_mut(
-        base, off,
-    ))))
+    // SAFETY: required by this helper's caller.
+    ctx.bind(unsafe { load_mut(ptr_cast_mut::<T, u8, _>(ptr_offset_mut(base, off))) })
 }
 
 /// A `*const u8` at byte offset `off` in `base`.
-fn ptr_at(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
-    ctx.bind(ptr_as_const(ptr_offset_mut(base, off)))
+unsafe fn ptr_at_unchecked(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
+    // SAFETY: required by this helper's caller.
+    ctx.bind(ptr_as_const(unsafe { ptr_offset_mut(base, off) }))
 }
 
 /// Unpack a variable-length composite key (the pooled flat bytes: `[bitmap | col0 |
@@ -599,7 +603,9 @@ fn ptr_at(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>>
 /// `ColVal`s, walking a running byte offset.
 fn unpack_bytes(ctx: &mut Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec<ColVal> {
     let off0 = ctx.var(0i64);
-    let bitmap = load_at::<u64>(ctx, flat_ptr, off0);
+    // SAFETY: the group state created this flat key using `bk`'s format and
+    // retains the complete allocation while groups are emitted.
+    let bitmap = unsafe { load_at_unchecked::<u64>(ctx, flat_ptr, off0) };
     let offset = ctx.var(8i64); // running byte offset (past the bitmap)
     let mut out = Vec::with_capacity(bk.cols.len());
     for col in &bk.cols {
@@ -612,19 +618,26 @@ fn unpack_bytes(ctx: &mut Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec
         };
         match col.kind {
             BytesColKind::I64 => {
-                out.push(ColVal::I64(load_at::<i64>(ctx, flat_ptr, offset), null));
+                // SAFETY: `offset` follows `bk`'s encoded column layout.
+                let value = unsafe { load_at_unchecked::<i64>(ctx, flat_ptr, offset) };
+                out.push(ColVal::I64(value, null));
                 let next = ctx.bind(add(offset, 8i64));
                 ctx.store(offset, next);
             }
             BytesColKind::F64 => {
-                out.push(ColVal::F64(load_at::<f64>(ctx, flat_ptr, offset), null));
+                // SAFETY: `offset` follows `bk`'s encoded column layout.
+                let value = unsafe { load_at_unchecked::<f64>(ctx, flat_ptr, offset) };
+                out.push(ColVal::F64(value, null));
                 let next = ctx.bind(add(offset, 8i64));
                 ctx.store(offset, next);
             }
             BytesColKind::Str => {
-                let len = load_at::<u64>(ctx, flat_ptr, offset);
+                // SAFETY: string columns encode an in-allocation u64 length at
+                // the current offset, followed by exactly that many bytes.
+                let len = unsafe { load_at_unchecked::<u64>(ctx, flat_ptr, offset) };
                 let content_off = ctx.bind(add(offset, 8i64));
-                let ptr = ptr_at(ctx, flat_ptr, content_off);
+                // SAFETY: `content_off` addresses the encoded string bytes.
+                let ptr = unsafe { ptr_at_unchecked(ctx, flat_ptr, content_off) };
                 out.push(ColVal::Str(
                     StrVal::Bytes {
                         ptr,

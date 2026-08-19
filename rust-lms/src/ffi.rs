@@ -298,7 +298,13 @@ where
 }
 
 /// Build a staged `FatSlice<T>` from a typed pointer (`SPtr<T>`) and element length.
-pub fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P, L::Staged, T>
+///
+/// # Safety
+///
+/// The pointer must be aligned and valid for `len` initialized elements for the
+/// full duration of every generated-code use. The memory must not be mutated
+/// while an extern call holds the resulting shared slice.
+pub unsafe fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P, L::Staged, T>
 where
     T: StagedType + 'static,
     P: Staged<Out = SPtr<T>>,
@@ -308,58 +314,6 @@ where
         ptr,
         len: len.into_staged(),
         _elem: PhantomData,
-    }
-}
-
-// =============================================================================
-// SliceRefFromRawParts: rebuild a borrowed slice `&[T]` from (ptr, len)
-// =============================================================================
-
-/// The **reference** flavor of [`slice_from_raw_parts`]: yields a
-/// `SRef<Slice<T>>` (`&[T]`) instead of a `FatSlice<T>`, so it feeds the slice
-/// *read* ops (`primitive`/`get_ref_unchecked`). Both share one materialization —
-/// a `(ptr, len)` header on a stack slot — and that layout *is* how a
-/// memory-resolved `SRef<Slice<T>>` is read (`ptr`@0, `len`@8), so this is a
-/// no-extra-code reinterpret of the same header. Use it to rebuild a borrowed
-/// batch from a raw descriptor pointer plus a known column count (e.g. a value
-/// returned by a scan-stream extern).
-pub struct SliceRefFromRawParts<P, L, T> {
-    inner: SliceFromRawParts<P, L, T>,
-}
-
-impl<P: Clone, L: Clone, T> Clone for SliceRefFromRawParts<P, L, T> {
-    fn clone(&self) -> Self {
-        Self {
-            inner: self.inner.clone(),
-        }
-    }
-}
-
-impl<P: Copy, L: Copy, T> Copy for SliceRefFromRawParts<P, L, T> {}
-
-unsafe impl<P, L, T> Staged for SliceRefFromRawParts<P, L, T>
-where
-    P: Staged<Out = SPtr<T>>,
-    L: Staged<Out = u64>,
-    T: StagedType + 'static,
-{
-    type Out = crate::refer::SRef<'static, crate::slice::Slice<T>>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Same `(ptr, len)` stack header as `FatSlice`; only the static type differs.
-        self.inner.codegen(ctx)
-    }
-}
-
-/// Build a staged `&[T]` (`SRef<Slice<T>>`) from a typed pointer and element length.
-pub fn slice_ref_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceRefFromRawParts<P, L::Staged, T>
-where
-    T: StagedType + 'static,
-    P: Staged<Out = SPtr<T>>,
-    L: IntoStaged<u64>,
-{
-    SliceRefFromRawParts {
-        inner: slice_from_raw_parts(ptr, len),
     }
 }
 
@@ -532,7 +486,9 @@ impl_extern_args!(8; A, B, C, D, E, F, G, H);
 /// # Safety
 ///
 /// Implementations must ensure that:
-/// - `Args` and `Ret` exactly match the function's Rust parameter and return types
+/// - `Args` and `Ret` exactly match the function's ABI. Rust references are
+///   represented by raw `SPtr<Opaque<T>>` / `SMutPtr<Opaque<T>>` markers rather
+///   than fabricated staged references.
 /// - `FN_PTR` points to a valid `extern "C"` function with the declared signature
 pub unsafe trait ExternFn {
     /// The complete staged parameter signature.
@@ -724,6 +680,24 @@ where
 ///     let mut compiler = Compiler::new();
 ///     let function = compiler.extern_fn::<ReadPointerExtern>();
 ///     let pointer = const_ptr::<i64>(std::ptr::null());
+///     let _ = call_extern1(function, pointer);
+/// }
+/// ```
+///
+/// Safe Rust functions with reference parameters also require the unchecked
+/// constructor, because a staged raw pointer cannot prove a Rust borrow:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[extern_fn]
+/// extern "C" fn read_borrow(value: &i64) -> i64 { *value }
+///
+/// fn main() {
+///     let mut compiler = Compiler::new();
+///     let function = compiler.extern_fn::<ReadBorrowExtern>();
+///     let value = 1i64;
+///     let pointer = const_ptr::<Opaque<i64>>(&value);
 ///     let _ = call_extern1(function, pointer);
 /// }
 /// ```

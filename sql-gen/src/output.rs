@@ -43,9 +43,9 @@ impl ValVec {
     /// Stable control-block pointer to bake into the kernel.
     fn control_ptr(&mut self) -> *mut RawVec {
         match self {
-            ValVec::I32(v) => v.control_ptr(),
-            ValVec::I64(v) => v.control_ptr(),
-            ValVec::F64(v) => v.control_ptr(),
+            ValVec::I32(v) => v.as_raw_control_ptr(),
+            ValVec::I64(v) => v.as_raw_control_ptr(),
+            ValVec::F64(v) => v.as_raw_control_ptr(),
         }
     }
 
@@ -125,7 +125,7 @@ impl OutCols {
                 },
                 HostOutCol::Fixed { values, validity } => OutColHandle::Fixed {
                     values: values.control_ptr(),
-                    validity: validity.as_mut().map(|v| v.control_ptr()),
+                    validity: validity.as_mut().map(|v| v.as_raw_control_ptr()),
                 },
             })
             .collect();

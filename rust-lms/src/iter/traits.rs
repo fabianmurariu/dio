@@ -431,8 +431,7 @@ pub trait IndexedStagedIterator: StagedIterator {
     /// Zip this (indexed) iterator with a secondary random-access source.
     ///
     /// Both sources are accessed at the same 0-based position each iteration.
-    /// The primary source's length drives the loop; the caller must ensure the
-    /// secondary has at least that many elements.
+    /// Iteration stops at the shorter source, matching [`std::iter::Zip`].
     ///
     /// Only available for iterators that also implement `IndexedSource` (slice
     /// iterators and slice variable references).
@@ -457,7 +456,13 @@ pub trait IndexedSource: Clone + 'static {
     type GetExpr: Staged<Out = Self::Item> + 'static;
 
     fn len(&self) -> Self::LenExpr;
-    fn get_at(self, index: Var<u64>) -> Self::GetExpr;
+    /// Return an expression that reads the item at `index` without checking it.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than the length returned by `len` for
+    /// this source.
+    unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr;
 }
 
 // =============================================================================

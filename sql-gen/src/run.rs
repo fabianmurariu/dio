@@ -233,7 +233,14 @@ fn build_join_materialized(
     let f = compiler.fun1(
         "build_materialize",
         move |ctx, in_v: Var<SRefMut<Opaque<Inputs>>>| {
-            gen_build(ctx, in_v, &build_c, &key_expr, &out_schema_c, &cx)
+            gen_build(
+                ctx,
+                ref_mut_as_ptr(in_v),
+                &build_c,
+                &key_expr,
+                &out_schema_c,
+                &cx,
+            )
         },
     );
     let compiled = compiler.compile(f).map_err(exec_err)?;
@@ -323,7 +330,7 @@ fn run_kernel(
     };
 
     let f = compiler.fun1("query", move |ctx, in_v: Var<SRefMut<Opaque<Inputs>>>| {
-        gen_collect(ctx, in_v, op, &out_schema, &cx)
+        gen_collect(ctx, ref_mut_as_ptr(in_v), op, &out_schema, &cx)
     });
     let compiled = compiler.compile(f).map_err(exec_err)?;
 

@@ -53,12 +53,12 @@ pub unsafe extern "C" fn graph_nodes_drop(it: *mut ()) {
 
 /// The kind: bundles next/drop (and len/next_value for the ExactSize path).
 struct NodesKind;
-impl OpaqueIterKind for NodesKind {
+unsafe impl OpaqueIterKind for NodesKind {
     type Item = u64;
     type Next = GraphNodesNextExtern;
     type Drop = GraphNodesDropExtern;
 }
-impl ExactSizeOpaqueIterKind for NodesKind {
+unsafe impl ExactSizeOpaqueIterKind for NodesKind {
     type Len = GraphNodesLenExtern;
     type NextValue = GraphNodesNextValueExtern;
 }
@@ -75,8 +75,11 @@ fn plain_count_via_next_drop() {
 
     // fn(&Graph) -> u64 : drive the external iterator and count it.
     let f = compiler.fun1("count_nodes", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        nodes.iter(handle).count(ctx)
+        // SAFETY: the entry point requires a live shared `&Graph` for the call.
+        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+        // `NodesKind` supplies that handle's matching operations.
+        unsafe { nodes.iter(handle) }.count(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");
     let kernel = compiled.as_fn();
@@ -94,8 +97,13 @@ fn plain_sum_and_filter() {
 
     // Sum the node ids > 2, branchlessly.
     let f = compiler.fun1("sum_big", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        nodes.iter(handle).filter(|x| lt(2u64, x)).sum(ctx)
+        // SAFETY: the entry point requires a live shared `&Graph` for the call.
+        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+        // `NodesKind` supplies that handle's matching operations.
+        unsafe { nodes.iter(handle) }
+            .filter(|x| lt(2u64, x))
+            .sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");
     let kernel = compiled.as_fn();
@@ -112,8 +120,11 @@ fn exact_size_count_is_o1_and_sum_works() {
 
     // count(): O(1), just len(it).
     let count_fn = compiler.fun1("count_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        nodes.iter(handle).count(ctx)
+        // SAFETY: the entry point requires a live shared `&Graph` for the call.
+        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+        // `NodesKind` supplies that handle's matching exact-size operations.
+        unsafe { nodes.iter(handle) }.count(ctx)
     });
     let compiled = compiler.compile(count_fn).expect("compile");
     let count = compiled.as_fn();
@@ -124,8 +135,11 @@ fn exact_size_count_is_o1_and_sum_works() {
     let producer = compiler.extern_fn::<GraphIterNodesExtern>();
     let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
     let sum_fn = compiler.fun1("sum_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        nodes.iter(handle).sum(ctx)
+        // SAFETY: the entry point requires a live shared `&Graph` for the call.
+        let handle = unsafe { call_extern1_unchecked(producer, ref_as_ptr(g)) };
+        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+        // `NodesKind` supplies that handle's matching exact-size operations.
+        unsafe { nodes.iter(handle) }.sum(ctx)
     });
     let compiled = compiler.compile(sum_fn).expect("compile");
     let sum = compiled.as_fn();

@@ -11,10 +11,20 @@ fn stack_alloc_write_read_roundtrip() {
         let buf = ctx.bind(stack_alloc(16));
         // buf[0] = a ; buf[1] = b  (via typed i64 pointer indexing)
         let p = ptr_cast_mut::<i64, u8, _>(buf);
-        ctx.emit(store(ptr_offset_mut(p, Const::<i64>::new(0)), a));
-        ctx.emit(store(ptr_offset_mut(p, Const::<i64>::new(1)), b));
-        let ra = ctx.bind(load_ref_mut(ptr_offset_mut(p, Const::<i64>::new(0))));
-        let rb = ctx.bind(load_ref_mut(ptr_offset_mut(p, Const::<i64>::new(1))));
+        // SAFETY: `stack_alloc(16)` provides two aligned i64 slots that remain
+        // live for the generated function; both offsets are in bounds.
+        let (write_a, write_b, read_a, read_b) = unsafe {
+            (
+                store(ptr_offset_mut(p, Const::<i64>::new(0)), a),
+                store(ptr_offset_mut(p, Const::<i64>::new(1)), b),
+                load_mut(ptr_offset_mut(p, Const::<i64>::new(0))),
+                load_mut(ptr_offset_mut(p, Const::<i64>::new(1))),
+            )
+        };
+        ctx.emit(write_a);
+        ctx.emit(write_b);
+        let ra = ctx.bind(read_a);
+        let rb = ctx.bind(read_b);
         add(ra, rb)
     });
     let compiled = compiler.compile(f).expect("compile");

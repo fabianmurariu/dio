@@ -24,6 +24,14 @@ use super::expr::gen_expr;
 use super::numeric::to_i64;
 use super::{CodegenCtx, InputsSource, Yld, gen_len, gen_op, gen_read, write_col};
 
+fn join_ref(state: *mut JoinState) -> impl Staged<Out = SPtr<Opaque<JoinState>>> + Copy {
+    const_ptr::<Opaque<JoinState>>(state)
+}
+
+fn join_mut(state: *mut JoinState) -> impl Staged<Out = SMutPtr<Opaque<JoinState>>> + Copy {
+    const_mut_ptr::<Opaque<JoinState>>(state)
+}
+
 /// Insert the current build row's key + `Locator(rb_pos, row)` into the host
 /// multimap (the JIT proxy for `hm += (key, rec)`). `key_cv` is the row's key
 /// value; a NULL key is skipped (it never matches).
@@ -38,13 +46,11 @@ fn emit_key_insert(
     let key_i64 = to_i64(ctx, key_cv);
     let key = ctx.bind(int_cast::<u64, i64, _>(key_i64));
     let insert = move |ctx: &mut Ctx| {
-        ctx.emit(call_extern4(
-            rt.join_insert,
-            const_opaque_mut::<JoinState>(state),
-            key,
-            rb_pos,
-            row,
-        ));
+        // SAFETY: the build driver retains `state`, generated mutations are
+        // sequenced, and the locator values refer to the retained relation.
+        ctx.emit(unsafe {
+            call_extern4_unchecked(rt.join_insert, join_mut(state), key, rb_pos, row)
+        });
     };
     match key_cv.nullness() {
         Nullness::NonNull => insert(ctx),
@@ -71,21 +77,19 @@ pub(crate) fn gen_build_index(
     let key_field: Field = rel_schema.field(key_col).clone();
     let key_dt = key_field.data_type().clone();
 
-    let count = ctx.bind(call_extern1(
-        rt.join_rel_count,
-        const_opaque::<JoinState>(state),
-    ));
+    // SAFETY: the build driver retains `state` and does not mutate it while
+    // this shared call executes.
+    let count = ctx.bind(unsafe { call_extern1_unchecked(rt.join_rel_count, join_ref(state)) });
     let b = ctx.var(0u64);
     ctx.while_loop(lt(b, count), move |ctx| {
-        let descs = ctx.bind(call_extern2(
-            rt.join_left_batch,
-            const_opaque::<JoinState>(state),
-            b,
-        ));
-        let batch = ctx.bind(slice_ref_from_raw_parts::<FfiArray, _, _>(
-            descs,
-            Const::<u64>::new(ncols),
-        ));
+        // SAFETY: `b < count`; `state` retains all relation batches.
+        let descs =
+            ctx.bind(unsafe { call_extern2_unchecked(rt.join_left_batch, join_ref(state), b) });
+        // SAFETY: `JoinState` retains each descriptor array, and schema
+        // validation guarantees exactly `ncols` entries.
+        let batch = ctx.bind(unsafe {
+            slice_from_raw_parts::<FfiArray, _, _>(descs, Const::<u64>::new(ncols))
+        });
         let len = gen_len(ctx, batch, &key_dt);
         let row = ctx.var(0u64);
         ctx.store(row, 0u64);
@@ -188,32 +192,40 @@ pub(crate) fn gen_join<I: InputsSource>(
             // The per-match loop: look up the key's `Locator` run, then for each
             // read `.rb_pos`/`.row`, `gen_read` the located left row, emit `[l | r]`.
             let probe = move |ctx: &mut Ctx| {
-                let count = ctx.bind(call_extern2(
-                    rt.join_probe_count,
-                    const_opaque::<JoinState>(state),
-                    key,
-                ));
-                let base = ctx.bind(call_extern2(
-                    rt.join_probe_base,
-                    const_opaque::<JoinState>(state),
-                    key,
-                ));
+                // SAFETY: the probe driver retains immutable `state` for both
+                // calls; their results describe the same key's locator run.
+                let count = ctx.bind(unsafe {
+                    call_extern2_unchecked(rt.join_probe_count, join_ref(state), key)
+                });
+                let base = ctx.bind(unsafe {
+                    call_extern2_unchecked(rt.join_probe_base, join_ref(state), key)
+                });
                 let i = ctx.var(0u64);
                 ctx.while_loop(lt(i, count), move |ctx| {
-                    let loc = ctx.bind(ptr_offset(base, int_cast::<i64, u64, _>(i)));
-                    let rb_pos = ctx.bind(load_field(loc, LocatorType::rb_pos()));
-                    let row_u32 = ctx.bind(load_field(loc, LocatorType::row()));
+                    // SAFETY: `join_probe_base` returns `count` initialized
+                    // Locators, and the loop condition proves `i < count`.
+                    let loc = ctx.bind(unsafe { ptr_offset(base, int_cast::<i64, u64, _>(i)) });
+                    // SAFETY: `loc` identifies an initialized `Locator` from
+                    // the probe run, and these are its generated field tokens.
+                    let rb_pos =
+                        ctx.bind(unsafe { load_field_unchecked(loc, LocatorType::rb_pos()) });
+                    let row_u32 =
+                        ctx.bind(unsafe { load_field_unchecked(loc, LocatorType::row()) });
                     let b = ctx.bind(int_cast::<u64, u32, _>(rb_pos));
                     let r = ctx.bind(int_cast::<u64, u32, _>(row_u32));
-                    let descs = ctx.bind(call_extern2(
-                        rt.join_left_batch,
-                        const_opaque::<JoinState>(state),
-                        b,
-                    ));
-                    let left_batch = ctx.bind(slice_ref_from_raw_parts::<FfiArray, _, _>(
-                        descs,
-                        Const::<u64>::new(ncols_left as u64),
-                    ));
+                    // SAFETY: locators were created from retained relation
+                    // batches, so `b` identifies a live descriptor array.
+                    let descs = ctx.bind(unsafe {
+                        call_extern2_unchecked(rt.join_left_batch, join_ref(state), b)
+                    });
+                    // SAFETY: `JoinState` retains this batch and its validated
+                    // schema guarantees `ncols_left` descriptor entries.
+                    let left_batch = ctx.bind(unsafe {
+                        slice_from_raw_parts::<FfiArray, _, _>(
+                            descs,
+                            Const::<u64>::new(ncols_left as u64),
+                        )
+                    });
                     let mut row: Row = (0..ncols_left)
                         .map(|c| gen_read(ctx, left_batch, c, left_schema.field(c), r))
                         .collect();

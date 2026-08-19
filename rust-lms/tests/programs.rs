@@ -28,7 +28,8 @@ fn test_compute_stats() {
             let val = ctx.var(0.0f64);
 
             ctx.while_loop(lt(i, data.clone().len()), move |ctx| {
-                ctx.store(val, data.clone().get_unchecked(i));
+                // SAFETY: the loop condition proves `i < data.len()`.
+                ctx.store(val, unsafe { data.clone().get_unchecked(i) });
                 ctx.if_then(gt(val, v), move |ctx| {
                     ctx.store(count, count + 1u64);
                     ctx.store(sum, sum + val);

@@ -1,8 +1,8 @@
-//! Concept 1: opaque external borrows (`Opaque<T>` behind `SRef`/`SRefMut`).
+//! Concept 1: opaque external borrows.
 //!
-//! Staged code receives an opaque `&Graph` / `&mut Graph`, never inspects it,
-//! and hands it to `extern "C"` functions. The compiled kernel's ABI is
-//! `extern "C" fn(&Graph) -> _`, so a real `&graph` is passed directly.
+//! The compiled entry point receives a real `&Graph` / `&mut Graph`, exposes its
+//! address as a raw opaque pointer, and uses an unsafe staging boundary when it
+//! hands that pointer to an `extern "C"` function.
 
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
@@ -32,7 +32,8 @@ fn opaque_ref_param_round_trips() {
 
     // fn(&Graph) -> u64 : just delegate to the extern.
     let f = compiler.fun1("count_nodes", move |_ctx, g: Var<SRef<Opaque<Graph>>>| {
-        call_extern1(node_count, g)
+        // SAFETY: the compiled entry point requires a live shared `&Graph`.
+        unsafe { call_extern1_unchecked(node_count, ref_as_ptr(g)) }
     });
     let compiled = compiler.compile(f).expect("compile");
     let kernel = compiled.as_fn();
@@ -53,8 +54,11 @@ fn opaque_mut_ref_param() {
     let f = compiler.fun1(
         "push_and_count",
         move |ctx, g: Var<SRefMut<Opaque<Graph>>>| {
-            ctx.emit(call_extern2(push, g, Const::<u64>::new(99)));
-            call_extern1(node_count, ref_as_const(g))
+            let g_ptr = ref_mut_as_ptr(g);
+            // SAFETY: the entry point receives an exclusive `&mut Graph`, and
+            // these calls are sequenced without concurrent access.
+            ctx.emit(unsafe { call_extern2_unchecked(push, g_ptr, Const::<u64>::new(99)) });
+            unsafe { call_extern1_unchecked(node_count, ptr_as_const(g_ptr)) }
         },
     );
     let compiled = compiler.compile(f).expect("compile");

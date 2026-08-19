@@ -46,7 +46,7 @@ pub enum StrVal {
     Column {
         lo: Var<u64>,
         hi: Var<u64>,
-        array: Var<SRef<'static, Opaque<StringViewArray>>>,
+        array: Var<SPtr<Opaque<StringViewArray>>>,
         row: Var<u64>,
     },
     Bytes {

@@ -56,7 +56,8 @@
 //! });
 //! ```
 
-use crate::refer::{SRef, SRefMut};
+use crate::ffi::FatSliceType;
+use crate::refer::{SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
@@ -119,6 +120,67 @@ pub unsafe trait MutSliceRepr<T: StagedType>: SliceRepr<T> {}
 pub struct AsSlice<P, T> {
     repr: P,
     _elem: PhantomData<T>,
+}
+
+/// Re-types a raw pointer to a repr-compatible `(ptr, len)` descriptor as a
+/// lifetime-free staged [`FatSliceType<T>`].
+pub struct AsRawSlice<P, T> {
+    repr: P,
+    _elem: PhantomData<T>,
+}
+
+impl<P: Clone, T> Clone for AsRawSlice<P, T> {
+    fn clone(&self) -> Self {
+        Self {
+            repr: self.repr.clone(),
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, T> Copy for AsRawSlice<P, T> {}
+
+unsafe impl<P, R, T> Staged for AsRawSlice<P, T>
+where
+    P: Staged<Out = SPtr<R>>,
+    R: SliceRepr<T>,
+    T: StagedType,
+{
+    type Out = FatSliceType<T>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.repr.codegen(ctx)
+    }
+}
+
+/// Extension trait for raw pointers to repr-compatible slice descriptors.
+pub trait ReprRawSliceOps<R>: Staged<Out = SPtr<R>> + Sized
+where
+    R: StagedType,
+{
+    /// Interpret the pointed-to descriptor as a lifetime-free raw slice.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live and aligned for
+    /// reads of `len` initialized values of `T` for every generated-code use.
+    unsafe fn into_raw_slice<T>(self) -> AsRawSlice<Self, T>
+    where
+        T: StagedType,
+        R: SliceRepr<T>,
+    {
+        AsRawSlice {
+            repr: self,
+            _elem: PhantomData,
+        }
+    }
+}
+
+impl<R, S> ReprRawSliceOps<R> for S
+where
+    R: StagedType,
+    S: Staged<Out = SPtr<R>> + Sized,
+{
 }
 
 impl<P: Clone, T> Clone for AsSlice<P, T> {
@@ -386,6 +448,13 @@ impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
 
 impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
 
+impl<T: StagedType> SliceType for FatSliceType<T> {
+    type Elem = T;
+    type ElemRef = SPtr<T>;
+}
+
+impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
+
 /// Marker for *mutable* slices (`SRefMut<Slice<T>>`). Gates the writing ops
 /// (`set_unchecked`) so they cannot be called on an immutable slice.
 pub trait MutSliceType: SliceType + slice_type_sealed::MutableSealed {}
@@ -477,6 +546,50 @@ where
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         element_addr::<S>(ctx, data_ptr, index)
+    }
+}
+
+/// Get a lifetime-free raw pointer to an element without bounds checking.
+#[derive(Clone, Copy)]
+pub struct SliceGetPtrUnchecked<S, I> {
+    slice: S,
+    index: I,
+}
+
+unsafe impl<S, I> Staged for SliceGetPtrUnchecked<S, I>
+where
+    S: Staged,
+    S::Out: SliceType,
+    I: Staged<Out = u64>,
+{
+    type Out = SPtr<ElemOf<S>>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let index = self.index.codegen(ctx);
+        let data_ptr = ctx.slice_data_ptr(&self.slice);
+        element_addr::<S>(ctx, data_ptr, index)
+    }
+}
+
+/// Get a raw element pointer from any staged slice representation.
+///
+/// # Safety
+///
+/// At execution, `index` must be less than `slice`'s element count. Any later
+/// dereference must also satisfy the source storage's lifetime and aliasing
+/// requirements.
+pub unsafe fn slice_get_ptr_unchecked<S, I>(
+    slice: S,
+    index: I,
+) -> SliceGetPtrUnchecked<S, I::Staged>
+where
+    S: Staged,
+    S::Out: SliceType,
+    I: IntoStaged<u64>,
+{
+    SliceGetPtrUnchecked {
+        slice,
+        index: index.into_staged(),
     }
 }
 
@@ -661,7 +774,12 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     /// Accepts any value that can be converted into a u64 staged expression for the index.
     /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
     /// `arr.get_ref_unchecked(Const::<u64>::new(5))`.
-    fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length and the
+    /// resulting reference must obey the source slice's aliasing contract.
+    unsafe fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
         I: IntoStaged<u64>,
     {
@@ -674,7 +792,11 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     /// Get an element by value without bounds checking.
     ///
     /// Only available for `CopyType` elements.
-    fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length.
+    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
         I: IntoStaged<u64>,
         T: CopyType,
@@ -686,7 +808,11 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     }
 
     /// Get a sub-slice without bounds checking.
-    fn slice_unchecked<START, END>(
+    ///
+    /// # Safety
+    ///
+    /// At execution, `start <= end` and `end <= self.len()` must hold.
+    unsafe fn slice_unchecked<START, END>(
         self,
         start: START,
         end: END,
@@ -707,6 +833,59 @@ impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where
     S: Staged<Out = SRef<'a, Slice<T>>> + Clone
 {
 }
+
+// =============================================================================
+// Extension trait for lifetime-free FatSliceType<T> operations
+// =============================================================================
+
+/// Read operations on a lifetime-free raw `(ptr, len)` slice descriptor.
+#[allow(clippy::len_without_is_empty)] // `len` is staged; host-side emptiness is unknowable.
+pub trait RawSliceOps<T: StagedType>: Staged<Out = FatSliceType<T>> + Sized + Clone {
+    fn len(self) -> SliceLen<Self> {
+        SliceLen { slice: self }
+    }
+
+    /// Read an element without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this descriptor's element count,
+    /// and its pointer must remain live and aligned for `T`.
+    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
+    where
+        I: IntoStaged<u64>,
+        T: CopyType,
+    {
+        SliceGetUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
+    }
+
+    /// Create a raw sub-slice without bounds checking.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `start <= end` and `end <= self.len()` must hold, and the
+    /// source pointer must remain live for every use of the result.
+    unsafe fn slice_unchecked<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
+    where
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
+    {
+        SliceSliceUnchecked {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
+    }
+}
+
+impl<T: StagedType, S> RawSliceOps<T> for S where S: Staged<Out = FatSliceType<T>> + Sized + Clone {}
 
 // =============================================================================
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
@@ -732,7 +911,12 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     }
 
     /// Get a mutable reference to an element without bounds checking.
-    fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length, and no
+    /// overlapping staged reference may be used while the result is live.
+    unsafe fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
         I: IntoStaged<u64>,
     {
@@ -743,7 +927,11 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     }
 
     /// Get an element by value without bounds checking.
-    fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length.
+    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
     where
         I: IntoStaged<u64>,
         T: CopyType,
@@ -758,7 +946,12 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     ///
     /// Accepts any value that can be converted into staged expressions.
     /// This allows ergonomic usage like `arr.set_unchecked(0u64, 42i64)`.
-    fn set_unchecked<I, V>(
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length and the
+    /// mutable slice must remain exclusively accessible for the write.
+    unsafe fn set_unchecked<I, V>(
         self,
         index: I,
         value: V,
@@ -775,7 +968,12 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     }
 
     /// Get a mutable sub-slice without bounds checking.
-    fn slice_mut_unchecked<START, END>(
+    ///
+    /// # Safety
+    ///
+    /// At execution, `start <= end` and `end <= self.len()` must hold. No
+    /// overlapping staged reference may be used while the result is live.
+    unsafe fn slice_mut_unchecked<START, END>(
         self,
         start: START,
         end: END,
@@ -795,7 +993,15 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     ///
     /// Only available for `CopyType` elements. Ergonomic like the other ops:
     /// `arr.swap_unchecked(0u64, lo + 1u64)`.
-    fn swap_unchecked<I, J>(self, i: I, j: J) -> SliceSwapUnchecked<Self, I::Staged, J::Staged>
+    ///
+    /// # Safety
+    ///
+    /// At execution, both `i` and `j` must be less than this slice's length.
+    unsafe fn swap_unchecked<I, J>(
+        self,
+        i: I,
+        j: J,
+    ) -> SliceSwapUnchecked<Self, I::Staged, J::Staged>
     where
         I: IntoStaged<u64>,
         J: IntoStaged<u64>,

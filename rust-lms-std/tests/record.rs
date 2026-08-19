@@ -42,7 +42,9 @@ fn jit_writes_typed_fields_into_packed_records() {
     let fill = compiler.fun1("fill", move |ctx, n: Var<u64>| {
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, n), move |ctx| {
-            let rec: DynamicRecord = layout.record(ctx, const_mut_ptr::<u8>(base), i);
+            // SAFETY: the test calls this kernel with `n == N`; `buf` contains
+            // exactly N records using this layout and remains live for the call.
+            let rec: DynamicRecord = unsafe { layout.record(ctx, const_mut_ptr::<u8>(base), i) };
             // key = i*100 ; val = i*100 + 0.5 ; count = i
             let k = ctx.bind(mul(int_cast::<i64, u64, _>(i), 100i64));
             rec.set(ctx, key, k);
@@ -87,7 +89,9 @@ fn cross_layout_token_panics() {
     // The closure runs at codegen time; `get` asserts the brand and panics there.
     let _ = compiler.fun0("bad", move |ctx| {
         let ptr = ctx.bind(const_mut_ptr::<u8>(base));
-        let rec = b.wrap(ptr); // record branded `b`
+        // SAFETY: `base` points to a live, aligned one-record buffer. The test
+        // deliberately supplies a token from a different layout afterward.
+        let rec = unsafe { b.wrap(ptr) }; // record branded `b`
         rec.get(ctx, a_field) // token from `a` → panic
     });
 }

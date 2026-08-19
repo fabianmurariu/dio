@@ -33,10 +33,10 @@ pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use map::Map;
 pub use opaque::{
-    box_dyn_exact_iter, box_dyn_iter, emplace_iter, DynExactIter, DynIter, ExactSizeOpaqueIter,
-    ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, OpaqueHandle, OpaqueIter, OpaqueIterFns,
-    OpaqueIterKind, OpaqueIterSlot, RegisterScalar, ReusedOpaqueIter, ReusedOpaqueIterFns,
-    ReusedOpaqueIterKind, OPAQUE_ITER_INLINE_CAP,
+    box_dyn_exact_iter, box_dyn_iter, emplace_iter, DynExactIter, DynIter, ExactOpaqueIterOwner,
+    ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, OpaqueHandle, OpaqueIter,
+    OpaqueIterFns, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, RegisterScalar,
+    ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, OPAQUE_ITER_INLINE_CAP,
 };
 pub use range_iter::{range, range_step, RangeIter, RangeStep};
 pub use scan::Scan;
@@ -46,4 +46,4 @@ pub use take_while::TakeWhile;
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
-pub use zip::{Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType};
+pub use zip::{Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen};

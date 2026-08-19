@@ -212,6 +212,41 @@ fn test_iter_zip_dot_product() {
 }
 
 #[test]
+fn test_iter_zip_stops_at_shorter_secondary() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun2(
+        "zip_short_secondary",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
+            let total = ctx.var(0i64);
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                ctx.store(total, total + ai + bi);
+            });
+            total
+        },
+    );
+    let compiled = compiler.compile(f).expect("compile failed");
+
+    assert_eq!(compiled.call(&[1, 2, 3, 4][..], &[10, 20][..]), 33);
+}
+
+#[test]
+fn test_iter_zip_stops_at_shorter_primary_through_combinator() {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun2(
+        "zip_short_primary",
+        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
+            a.staged_iter()
+                .zip(b)
+                .map(|pair| pair.first() * pair.second())
+                .sum(ctx)
+        },
+    );
+    let compiled = compiler.compile(f).expect("compile failed");
+
+    assert_eq!(compiled.call(&[2, 3][..], &[10, 20, 30, 40][..]), 80);
+}
+
+#[test]
 fn test_iter_zip_element_wise_sum() {
     let mut compiler = Compiler::new();
 

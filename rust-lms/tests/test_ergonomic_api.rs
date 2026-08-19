@@ -85,7 +85,8 @@ fn test_ergonomic_slice_operations() {
 
     // fn get_second(arr: &[i64]) -> i64
     let get_second = compiler.fun1("get_second", |_ctx, arr: Var<SRef<Slice<i64>>>| {
-        arr.get_unchecked(1u64) // Ergonomic index - no Const needed!
+        // SAFETY: this test calls the kernel only with slices of length >= 2.
+        unsafe { arr.get_unchecked(1u64) } // Ergonomic index - no Const needed!
     });
 
     let compiled = compiler.compile(get_second).expect("compilation failed");
@@ -104,7 +105,8 @@ fn test_ergonomic_slice_set() {
 
     // fn set_first(arr: &mut [i64])
     let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
-        arr.set_unchecked(0u64, 999i64) // Both index and value are ergonomic!
+        // SAFETY: this test calls the kernel only with non-empty slices.
+        unsafe { arr.set_unchecked(0u64, 999i64) } // Both arguments are ergonomic.
     });
 
     let compiled = compiler.compile(set_first).expect("compilation failed");
@@ -124,9 +126,11 @@ fn test_ergonomic_slice_subslice() {
     let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<i64>>>| {
         let i = ctx.var(0u64);
         let total = ctx.var(0i64);
-        let sub = arr.slice_unchecked(1u64, 4u64);
+        // SAFETY: this test calls the kernel only with slices of length >= 4.
+        let sub = unsafe { arr.slice_unchecked(1u64, 4u64) };
         ctx.while_loop(lt(i, sub.clone().len()), move |ctx| {
-            ctx.store(total, total + sub.clone().get_unchecked(i));
+            // SAFETY: the loop condition proves `i < sub.len()`.
+            ctx.store(total, total + unsafe { sub.clone().get_unchecked(i) });
             ctx.store(i, i + 1u64);
         });
         total

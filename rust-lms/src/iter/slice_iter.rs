@@ -56,7 +56,8 @@ where
             // Bind the element *inside* the loop: no dead pre-loop init, and the
             // frontend resolves this single-def var to the loaded value with no
             // copy — so the emitted body matches a hand-written `while_loop`.
-            let elem = ctx.bind(SliceRefOps::get_unchecked(slice.clone(), i));
+            // SAFETY: the loop condition proves `i < slice.len()`.
+            let elem = ctx.bind(unsafe { SliceRefOps::get_unchecked(slice.clone(), i) });
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
         });
@@ -92,8 +93,9 @@ where
         self.slice.clone().len()
     }
 
-    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
-        SliceRefOps::get_unchecked(self.slice, index)
+    unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
+        // SAFETY: forwarded from `IndexedSource::get_at`'s caller.
+        unsafe { SliceRefOps::get_unchecked(self.slice, index) }
     }
 }
 
@@ -114,8 +116,9 @@ where
         SliceRefOps::len(*self)
     }
 
-    fn get_at(self, index: Var<u64>) -> Self::GetExpr {
-        SliceRefOps::get_unchecked(self, index)
+    unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
+        // SAFETY: forwarded from `IndexedSource::get_at`'s caller.
+        unsafe { SliceRefOps::get_unchecked(self, index) }
     }
 }
 

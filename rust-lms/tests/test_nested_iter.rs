@@ -51,13 +51,13 @@ pub unsafe extern "C" fn nums_neighbours(g: &Nums, n: u64, slot: *mut ()) {
 }
 
 struct NodesK;
-impl ReusedOpaqueIterKind for NodesK {
+unsafe impl ReusedOpaqueIterKind for NodesK {
     type Item = u64;
     type Init = NumsNodesExtern;
 }
 
 struct NeighK;
-impl ReusedOpaqueIterKind for NeighK {
+unsafe impl ReusedOpaqueIterKind for NeighK {
     type Item = u64;
     type Init = NumsNeighboursExtern;
 }
@@ -71,8 +71,9 @@ fn nested_traversal_sums_neighbours_with_zero_allocation() {
     // sum over all nodes of (sum of that node's neighbour ids)
     let f = compiler.fun1("sum_neighbours", move |ctx, g: Var<SRef<Opaque<Nums>>>| {
         let total = ctx.var(0u64);
-        nodes.iter1(g).for_each(ctx, move |ctx, n| {
-            neigh.iter2(g, n).for_each(ctx, move |ctx, dst| {
+        let g_ptr = ref_as_ptr(g);
+        nodes.iter1(g_ptr).for_each(ctx, move |ctx, n| {
+            neigh.iter2(g_ptr, n).for_each(ctx, move |ctx, dst| {
                 ctx.store(total, add(total, dst));
             });
         });

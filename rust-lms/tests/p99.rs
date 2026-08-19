@@ -21,7 +21,8 @@ fn p99_01_last_element() {
         ctx.store(n, arr.len());
         let result = ctx.var(0i64);
         ctx.if_then(gt(n, 0u64), move |ctx| {
-            ctx.store(result, arr.get_unchecked(n - 1u64));
+            // SAFETY: this branch proves `n > 0`, so `n - 1 < n`.
+            ctx.store(result, unsafe { arr.get_unchecked(n - 1u64) });
         });
         result
     });
@@ -53,7 +54,8 @@ fn p99_05_reverse_in_place() {
         ctx.while_loop(lt(lo + 1u64, hi_plus_1), move |ctx| {
             let hi = ctx.var(0u64);
             ctx.store(hi, hi_plus_1 - 1u64);
-            ctx.emit(arr.swap_unchecked(lo, hi));
+            // SAFETY: the loop maintains `lo < hi < n`.
+            ctx.emit(unsafe { arr.swap_unchecked(lo, hi) });
             ctx.store(lo, lo + 1u64);
             ctx.store(hi_plus_1, hi);
         });

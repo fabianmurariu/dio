@@ -69,6 +69,8 @@ pub(crate) struct FunDef {
     pub param_var_ids: Vec<usize>,
 }
 
+type CodegenAction = Box<dyn FnOnce(&mut CompilationContext) + 'static>;
+
 // =============================================================================
 // Ctx: Imperative context for building staged function bodies
 // =============================================================================
@@ -91,7 +93,7 @@ pub(crate) struct FunDef {
 /// ```
 pub struct Ctx {
     pub(crate) next_var_id: usize,
-    actions: Vec<Box<dyn FnOnce(&mut CompilationContext) + 'static>>,
+    actions: Vec<CodegenAction>,
 }
 
 impl Ctx {

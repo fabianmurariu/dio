@@ -44,7 +44,11 @@ pub type OpaqueHandle = SMutPtr<()>;
 ///
 /// - `Next`: `extern "C" fn(*mut ()) -> COption<Item>`
 /// - `Drop`: `extern "C" fn(*mut ())`
-pub trait OpaqueIterKind: 'static {
+/// # Safety
+///
+/// `Next` and `Drop` must operate on the same handle representation. `Next`
+/// may only read or mutate the handle and `Drop` must consume it exactly once.
+pub unsafe trait OpaqueIterKind: 'static {
     /// The element type (an integer ≤ 64 bits for the `next` register path).
     type Item: RegisterScalar;
     /// `next(it) -> COption<Item>`.
@@ -58,7 +62,12 @@ pub trait OpaqueIterKind: 'static {
 ///
 /// - `Len`: `extern "C" fn(*mut ()) -> u64`
 /// - `NextValue`: `extern "C" fn(*mut ()) -> Item` (valid for `len` calls)
-pub trait ExactSizeOpaqueIterKind: OpaqueIterKind {
+/// # Safety
+///
+/// `Len` and `NextValue` must use the same handle representation as
+/// [`OpaqueIterKind`]. `NextValue` must return one initialized item for every
+/// call up to the length reported by `Len`.
+pub unsafe trait ExactSizeOpaqueIterKind: OpaqueIterKind {
     /// `len(it) -> u64`.
     type Len: ExternFn<Args = (OpaqueHandle,), Ret = u64>;
     /// `next_value(it) -> Item`, called exactly `len` times (no `Option`).
@@ -85,7 +94,13 @@ impl<K: OpaqueIterKind> Copy for OpaqueIterFns<K> {}
 
 impl<K: OpaqueIterKind> OpaqueIterFns<K> {
     /// Wrap a handle expression (the producer's result) into a source.
-    pub fn iter<H>(self, handle: H) -> OpaqueIter<K, H>
+    ///
+    /// # Safety
+    ///
+    /// The expression must evaluate to a fresh live handle for `K`. Ownership
+    /// is transferred to the returned iterator, which will call `K::Drop`
+    /// exactly once when its staged traversal exits.
+    pub unsafe fn iter<H>(self, handle: H) -> OpaqueIter<K, H>
     where
         H: Staged<Out = OpaqueHandle> + 'static,
     {
@@ -115,7 +130,13 @@ impl<K: ExactSizeOpaqueIterKind> Copy for ExactSizeOpaqueIterFns<K> {}
 
 impl<K: ExactSizeOpaqueIterKind> ExactSizeOpaqueIterFns<K> {
     /// Wrap a handle expression into an ExactSize source (counted loop).
-    pub fn iter<H>(self, handle: H) -> ExactSizeOpaqueIter<K, H>
+    ///
+    /// # Safety
+    ///
+    /// The expression must evaluate to a fresh live handle for `K`. Ownership
+    /// is transferred to the returned iterator, which will call `K::Drop`
+    /// exactly once after its final use.
+    pub unsafe fn iter<H>(self, handle: H) -> ExactSizeOpaqueIter<K, H>
     where
         H: Staged<Out = OpaqueHandle> + 'static,
     {
@@ -279,22 +300,88 @@ macro_rules! impl_register_scalar {
 
 impl_register_scalar!(u64, i64, u32, i32, u16, i16, u8, i8, f32, f64, bool);
 
-/// Double-box an iterator into a thin `*mut ()` handle (the inner `Box<dyn ..>`
-/// is a fat pointer; the outer box makes the handle a single pointer).
+/// RAII owner for a thin, double-boxed dynamic iterator handle.
 ///
-/// The iterator may borrow its source: the handle is created and dropped within
-/// one kernel call, where the borrow is live (the opaque-pointer contract), so
-/// the lifetime is erased here. Pair with [`DynIter<T>`].
-pub fn box_dyn_iter<'a, T: 'a>(it: impl Iterator<Item = T> + 'a) -> *mut () {
-    let inner: Box<dyn Iterator<Item = T> + 'a> = Box::new(it);
-    Box::into_raw(Box::new(inner)) as *mut ()
+/// Dropping this value releases an iterator that was never transferred to
+/// generated code. Use [`into_raw`](Self::into_raw) only at the extern boundary
+/// that returns the handle to a matching [`DynIter<T>`].
+pub struct OpaqueIterOwner<'a, T: 'a> {
+    raw: *mut Box<dyn Iterator<Item = T> + 'a>,
 }
 
-/// Like [`box_dyn_iter`] but preserves `ExactSizeIterator` (the `len` /
-/// counted-loop fast path). Pair with [`DynExactIter<T>`].
-pub fn box_dyn_exact_iter<'a, T: 'a>(it: impl ExactSizeIterator<Item = T> + 'a) -> *mut () {
+impl<T> Drop for OpaqueIterOwner<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: `raw` comes from `Box::into_raw` below and ownership has not
+        // been transferred while this owner still exists.
+        unsafe { drop(Box::from_raw(self.raw)) };
+    }
+}
+
+impl<'a, T> OpaqueIterOwner<'a, T> {
+    /// Transfer ownership into an erased handle returned by an extern producer.
+    ///
+    /// # Safety
+    ///
+    /// The handle must be consumed exactly once by the `next`/`drop` functions
+    /// for [`DynIter<T>`], before any data borrowed by the iterator expires. It
+    /// must not be reconstructed or freed through any other type.
+    pub unsafe fn into_raw(self) -> *mut () {
+        let raw = self.raw.cast();
+        std::mem::forget(self);
+        raw
+    }
+}
+
+/// Double-box an iterator into an RAII-owned thin handle (the inner
+/// `Box<dyn ..>` is a fat pointer; the outer box makes the handle one pointer).
+///
+/// The owner retains the iterator's borrow lifetime and frees it unless raw
+/// ownership is explicitly transferred at an extern producer boundary. Pair
+/// the transferred handle with [`DynIter<T>`].
+pub fn box_dyn_iter<'a, T: 'a>(it: impl Iterator<Item = T> + 'a) -> OpaqueIterOwner<'a, T> {
+    let inner: Box<dyn Iterator<Item = T> + 'a> = Box::new(it);
+    OpaqueIterOwner {
+        raw: Box::into_raw(Box::new(inner)),
+    }
+}
+
+/// RAII owner for a thin, double-boxed exact-size iterator handle.
+pub struct ExactOpaqueIterOwner<'a, T: 'a> {
+    raw: *mut Box<dyn ExactSizeIterator<Item = T> + 'a>,
+}
+
+impl<T> Drop for ExactOpaqueIterOwner<'_, T> {
+    fn drop(&mut self) {
+        // SAFETY: `raw` comes from `Box::into_raw` below and ownership has not
+        // been transferred while this owner still exists.
+        unsafe { drop(Box::from_raw(self.raw)) };
+    }
+}
+
+impl<'a, T> ExactOpaqueIterOwner<'a, T> {
+    /// Transfer ownership into an erased handle returned by an extern producer.
+    ///
+    /// # Safety
+    ///
+    /// The handle must be consumed exactly once by the `len`/`next_value`/`drop`
+    /// functions for [`DynExactIter<T>`], before any borrowed data expires. It
+    /// must not be reconstructed or freed through any other type.
+    pub unsafe fn into_raw(self) -> *mut () {
+        let raw = self.raw.cast();
+        std::mem::forget(self);
+        raw
+    }
+}
+
+/// Like [`box_dyn_iter`] but preserves `ExactSizeIterator` for the `len` /
+/// counted-loop fast path. Pair a transferred handle with [`DynExactIter<T>`].
+pub fn box_dyn_exact_iter<'a, T: 'a>(
+    it: impl ExactSizeIterator<Item = T> + 'a,
+) -> ExactOpaqueIterOwner<'a, T> {
     let inner: Box<dyn ExactSizeIterator<Item = T> + 'a> = Box::new(it);
-    Box::into_raw(Box::new(inner)) as *mut ()
+    ExactOpaqueIterOwner {
+        raw: Box::into_raw(Box::new(inner)),
+    }
 }
 
 // SAFETY for all of the below: `it` is a handle from `box_dyn_iter` /
@@ -384,7 +471,7 @@ dyn_extern!(
 /// Kind for a `Box<dyn Iterator<Item = T>>` (scalar `T`). Drive it with
 /// [`Compiler::opaque_iter_fns`] over the producer's handle.
 pub struct DynIter<T>(PhantomData<T>);
-impl<T: RegisterScalar> OpaqueIterKind for DynIter<T> {
+unsafe impl<T: RegisterScalar> OpaqueIterKind for DynIter<T> {
     type Item = T;
     type Next = DynNext<T>;
     type Drop = DynDrop<T>;
@@ -394,12 +481,12 @@ impl<T: RegisterScalar> OpaqueIterKind for DynIter<T> {
 /// loop and O(1) `count` via [`Compiler::exact_opaque_iter_fns`] (also usable via
 /// the plain next/drop path).
 pub struct DynExactIter<T>(PhantomData<T>);
-impl<T: RegisterScalar> OpaqueIterKind for DynExactIter<T> {
+unsafe impl<T: RegisterScalar> OpaqueIterKind for DynExactIter<T> {
     type Item = T;
     type Next = DynExactNext<T>;
     type Drop = DynExactDrop<T>;
 }
-impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
+unsafe impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
     type Len = DynLen<T>;
     type NextValue = DynNextValue<T>;
 }
@@ -442,7 +529,11 @@ pub struct OpaqueIterSlot<T> {
 /// for `it`'s concrete type. Call this from a producer's `init` extern fn.
 ///
 /// # Safety
-/// `slot` must point to a live, otherwise-uninitialized `OpaqueIterSlot<T>`.
+///
+/// `slot` must point to valid, properly aligned, exclusively writable storage
+/// for an otherwise-uninitialized `OpaqueIterSlot<T>`. Once this function
+/// returns, the caller must drive and drop the initialized iterator exactly
+/// once before reusing the storage.
 pub unsafe fn emplace_iter<T, I>(slot: *mut OpaqueIterSlot<T>, it: I)
 where
     T: Copy,
@@ -460,24 +551,35 @@ where
         drop(Box::from_raw(data as *mut I));
     }
 
-    let slot = &mut *slot;
-    slot.next = Some(next_thunk::<T, I>);
+    // Treat the complete slot as uninitialized. Forming `&mut OpaqueIterSlot`
+    // here would falsely claim that its function pointers and data pointer were
+    // already initialized.
+    let slot = &mut *slot.cast::<MaybeUninit<OpaqueIterSlot<T>>>();
+    let slot = slot.as_mut_ptr();
+    std::ptr::addr_of_mut!((*slot).next).write(Some(next_thunk::<T, I>));
     if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
         && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
     {
-        let dst = slot.storage.as_mut_ptr() as *mut I;
+        let dst = std::ptr::addr_of_mut!((*slot).storage).cast::<I>();
         std::ptr::write(dst, it);
-        slot.data = dst as *mut u8;
-        slot.drop = Some(drop_inline::<I>);
+        std::ptr::addr_of_mut!((*slot).data).write(dst.cast());
+        std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_inline::<I>));
     } else {
-        slot.data = Box::into_raw(Box::new(it)) as *mut u8;
-        slot.drop = Some(drop_heap::<I>);
+        let data = Box::into_raw(Box::new(it)).cast();
+        std::ptr::addr_of_mut!((*slot).data).write(data);
+        std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_heap::<I>));
     }
 }
 
 /// A reused-storage opaque-iterator kind: just the `init` extern that builds the
 /// iterator into a caller-provided slot (`init(args.., slot: *mut ())`).
-pub trait ReusedOpaqueIterKind: 'static {
+/// # Safety
+///
+/// `Init` must initialize the final argument as exactly one
+/// [`OpaqueIterSlot<Self::Item>`] using [`emplace_iter`]. If it returns, every
+/// slot field must be initialized and the stored iterator must remain valid
+/// until the generated traversal calls its drop thunk exactly once.
+pub unsafe trait ReusedOpaqueIterKind: 'static {
     /// Element type (scalar; `T == T::RuntimeValue`).
     type Item: RegisterScalar;
     /// `init(args.., slot: *mut ())` — calls [`emplace_iter`].
@@ -577,5 +679,62 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
             },
             consumer,
         );
+    }
+}
+
+#[cfg(test)]
+mod tests {
+    use std::cell::Cell;
+
+    use super::*;
+
+    struct DropIter<'a> {
+        drops: &'a Cell<u32>,
+    }
+
+    impl Iterator for DropIter<'_> {
+        type Item = u64;
+
+        fn next(&mut self) -> Option<Self::Item> {
+            None
+        }
+    }
+
+    impl ExactSizeIterator for DropIter<'_> {
+        fn len(&self) -> usize {
+            0
+        }
+    }
+
+    impl Drop for DropIter<'_> {
+        fn drop(&mut self) {
+            self.drops.set(self.drops.get() + 1);
+        }
+    }
+
+    #[test]
+    fn iterator_owner_drops_an_untransferred_handle() {
+        let drops = Cell::new(0);
+        drop(box_dyn_iter(DropIter { drops: &drops }));
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn exact_iterator_owner_drops_an_untransferred_handle() {
+        let drops = Cell::new(0);
+        drop(box_dyn_exact_iter(DropIter { drops: &drops }));
+        assert_eq!(drops.get(), 1);
+    }
+
+    #[test]
+    fn transferred_handle_is_owned_by_matching_drop_function() {
+        let drops = Cell::new(0);
+        let owner = box_dyn_iter(DropIter { drops: &drops });
+        // SAFETY: the handle is immediately consumed exactly once by the
+        // matching `DynIter<u64>` drop implementation while `drops` is live.
+        let raw = unsafe { owner.into_raw() };
+        assert_eq!(drops.get(), 0);
+        unsafe { dyn_drop::<u64>(raw) };
+        assert_eq!(drops.get(), 1);
     }
 }

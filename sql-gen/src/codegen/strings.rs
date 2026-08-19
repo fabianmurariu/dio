@@ -21,13 +21,22 @@ pub(crate) fn resolve(
 ) -> (Var<SPtr<u8>>, Var<u64>) {
     match sv {
         StrVal::Column { lo, array, row, .. } => {
-            let ptr = ctx.bind(call_extern2(str_ptr, array, row));
+            // SAFETY: the current input/join batch retains `array`, and `row`
+            // is bounded by that batch's row loop.
+            let ptr = ctx.bind(unsafe { call_extern2_unchecked(str_ptr, array, row) });
             let len = ctx.bind(bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64));
             (ptr, len)
         }
         StrVal::Bytes { ptr, len, .. } => (ptr, len),
     }
 }
+
+fn resolved_bytes(ptr: Var<SPtr<u8>>, len: Var<u64>) -> impl Staged<Out = FatSliceType<u8>> + Copy {
+    // SAFETY: every `StrVal` owner retains the resolved allocation for the
+    // kernel call, and `len` is the byte length reported by that same value.
+    unsafe { slice_from_raw_parts::<u8, _, _>(ptr, len) }
+}
+
 /// The 16-byte view halves of a string, as staged `u64`s — for the equality fast
 /// path. A `Column` has them as `Var`s; a literal's are host constants baked in.
 /// A produced `Bytes` (no precomputed view) has none → resolve to bytes instead.
@@ -74,8 +83,8 @@ pub(crate) fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Va
                     let (bp, bl) = resolve(ctx, r, str_ptr);
                     let eq = ctx.bind(call_extern2(
                         bytes_eq,
-                        slice_from_raw_parts::<u8, _, _>(ap, al),
-                        slice_from_raw_parts::<u8, _, _>(bp, bl),
+                        resolved_bytes(ap, al),
+                        resolved_bytes(bp, bl),
                     ));
                     ctx.store(result, eq);
                 });
@@ -88,8 +97,8 @@ pub(crate) fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Va
             let (bp, bl) = resolve(ctx, r, str_ptr);
             ctx.bind(call_extern2(
                 bytes_eq,
-                slice_from_raw_parts::<u8, _, _>(ap, al),
-                slice_from_raw_parts::<u8, _, _>(bp, bl),
+                resolved_bytes(ap, al),
+                resolved_bytes(bp, bl),
             ))
         }
     }

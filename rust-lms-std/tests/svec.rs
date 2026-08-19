@@ -5,6 +5,12 @@
 use rust_lms::prelude::*;
 use rust_lms_std::{HostVec, SVec, SvecGrowExtern};
 
+#[test]
+#[should_panic(expected = "HostVec does not support zero-sized element types")]
+fn zero_sized_elements_are_rejected() {
+    let _ = HostVec::<()>::new();
+}
+
 /// Push `0,10,20,…` for `i in 0..n` into an `SVec`, forcing several grows
 /// (`cap` 0→4→8→16), then check the host reads back every value and the kernel
 /// returns the right length.
@@ -14,7 +20,9 @@ fn push_grows_and_reads_back() {
 
     let mut compiler = Compiler::new();
     let grow = compiler.extern_fn::<SvecGrowExtern>();
-    let svec = SVec::<i64>::new(host.control_ptr(), grow);
+    // SAFETY: `host` owns an i64 control block and outlives compilation and
+    // every call through `compiled`.
+    let svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
 
     let fill = compiler.fun1("fill", move |ctx, n: Var<u64>| {
         let i = ctx.var(0u64);
@@ -42,7 +50,9 @@ fn get_after_grow() {
 
     let mut compiler = Compiler::new();
     let grow = compiler.extern_fn::<SvecGrowExtern>();
-    let svec = SVec::<i64>::new(host.control_ptr(), grow);
+    // SAFETY: `host` owns an i64 control block and outlives compilation and
+    // every call through `compiled`.
+    let svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
 
     let sum_fn = compiler.fun1("sum", move |ctx, n: Var<u64>| {
         // push 0..n
@@ -57,7 +67,8 @@ fn get_after_grow() {
         let j = ctx.var(0u64);
         let count = svec.len(ctx);
         ctx.while_loop(lt(j, count), move |ctx| {
-            let e = svec.get(ctx, j);
+            // SAFETY: the loop condition proves `j < count == svec.len()`.
+            let e = unsafe { svec.get(ctx, j) };
             ctx.store(acc, add(acc, e));
             ctx.store(j, add(j, 1u64));
         });
@@ -79,7 +90,9 @@ fn set_overwrites() {
 
     let mut compiler = Compiler::new();
     let grow = compiler.extern_fn::<SvecGrowExtern>();
-    let svec = SVec::<u64>::new(host.control_ptr(), grow);
+    // SAFETY: `host` owns a u64 control block and outlives compilation and
+    // every call through `compiled`.
+    let svec = unsafe { SVec::<u64>::new(host.handle(), grow) };
 
     let build = compiler.fun0("build", move |ctx| {
         // push 5 zeros
@@ -91,9 +104,11 @@ fn set_overwrites() {
         });
         // set[2] = 42, set[4] = 7
         let (two, forty_two) = (ctx.var(2u64), ctx.var(42u64));
-        svec.set(ctx, two, forty_two);
+        // SAFETY: five initialized elements were pushed above.
+        unsafe { svec.set(ctx, two, forty_two) };
         let (four, seven) = (ctx.var(4u64), ctx.var(7u64));
-        svec.set(ctx, four, seven);
+        // SAFETY: five initialized elements were pushed above.
+        unsafe { svec.set(ctx, four, seven) };
         svec.len(ctx)
     });
     let compiled = compiler.compile(build).expect("compile");

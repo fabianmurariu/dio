@@ -2,6 +2,48 @@
 
 Reviewed: 2026-08-17
 
+## Remediation status
+
+Last updated: 2026-08-18
+
+Phases 1 and 2 are complete. The next milestone is **Phase 3: ABI
+correctness**, starting with PR-05's target-aware aggregate classification and
+copy lowering. The detailed implementation order and verification record are
+in `docs/project_review_plan.md`.
+
+Phase 2 replaced integer-address/reference fabrication with explicit staged raw
+pointers, split Arrow read/write ownership, typed the normal `HostVec`/`SVec`
+path, added opaque-iterator ownership, and made unchecked access unsafe. Scan,
+join, grouping, string, and output code in `sql-gen` now use those raw-pointer
+boundaries; its complete integration suite remains green.
+
+Cross-cutting Phase 5 cleanup is also pending. The current workspace Clippy
+baseline with warnings denied is 16 diagnostics; the `CodegenAction` alias
+removed the former `Ctx::actions` type-complexity warning.
+
+| Finding | Status | Planned phase |
+| --- | --- | --- |
+| PR-01: Compiled entry-point ownership and JIT memory | Fixed | Phase 1 |
+| PR-02: Trusted layout and codegen traits | Fixed | Phase 1 |
+| PR-03: Raw addresses and fabricated reference lifetimes | Fixed | Phase 2 |
+| PR-04: Typed external function signatures | Fixed | Phase 1 |
+| PR-05: Target-correct aggregate ABI lowering | Pending | Phase 3 |
+| PR-06: Unrestricted slice reinterpretation | Fixed | Phase 1 |
+| PR-07: Typed, owned Arrow buffer descriptors | Fixed | Phase 2 |
+| PR-08: Stream schema validation and scan failures | Fixed | Phase 1 |
+| PR-09: Typed `SVec<T>` allocation ownership | Fixed | Phase 2 |
+| PR-10: Forgeable raw FFI descriptors and failure paths | Partially fixed | Phases 2 and 4 |
+| PR-11: Opaque iterator ownership and initialization | Fixed | Phase 2 |
+| PR-12: Safe unchecked pointer, slice, and iterator operations | Fixed | Phase 2 |
+| PR-13: Validity bitmap `null_count` consistency | Fixed | Phase 2 (pulled forward) |
+| PR-14: SQL three-valued boolean logic | Pending | Phase 4 |
+| PR-15: Range step and length validation | Pending | Phase 4 |
+| PR-16: Panics at public SQL boundaries | Partially fixed | Phase 4 |
+| PR-17: Truncating row and group identifiers | Pending | Phase 4 |
+| PR-18: Repeated evaluation in `min` and `max` | Pending | Phase 4 |
+| PR-19: Empty iterator extrema | Pending | Phase 4 |
+| PR-20: Duplicate effects in `Ctx::let_var` | Pending | Phase 4 |
+
 ## Scope
 
 This review covers the root Cargo workspace: `rust-lms`, `rust-lms-derive`,

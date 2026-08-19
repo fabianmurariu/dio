@@ -88,19 +88,32 @@ impl RecordLayout {
 
     /// A [`DynamicRecord`] for record `index` in a packed array based at `base`
     /// (`base + index * stride`). Use in an emit loop that walks records by index.
-    pub fn record<B>(&self, ctx: &mut Ctx, base: B, index: Var<u64>) -> DynamicRecord
+    ///
+    /// # Safety
+    ///
+    /// At execution, `base.add(index * self.stride())` must identify a live,
+    /// initialized record allocated with this layout and remain writable for
+    /// every use of the returned handle.
+    pub unsafe fn record<B>(&self, ctx: &mut Ctx, base: B, index: Var<u64>) -> DynamicRecord
     where
         B: Staged<Out = SMutPtr<u8>> + 'static,
     {
         let stride = self.stride() as i64;
         let byte_off = ctx.bind(mul(int_cast::<i64, u64, _>(index), stride));
-        let ptr = ctx.bind(ptr_offset_mut(base, byte_off));
-        self.wrap(ptr)
+        // SAFETY: required by this method's contract.
+        let ptr = ctx.bind(unsafe { ptr_offset_mut(base, byte_off) });
+        // SAFETY: the computed pointer inherits the contract above.
+        unsafe { self.wrap(ptr) }
     }
 
     /// A [`DynamicRecord`] over an already-computed record pointer (e.g. one an
     /// extern handed back). Brands it with this layout so its tokens are accepted.
-    pub fn wrap(&self, ptr: Var<SMutPtr<u8>>) -> DynamicRecord {
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must identify a live, initialized record allocated with this
+    /// layout and remain writable for every use of the returned handle.
+    pub unsafe fn wrap(&self, ptr: Var<SMutPtr<u8>>) -> DynamicRecord {
         DynamicRecord {
             layout_id: self.id,
             ptr,
@@ -163,7 +176,9 @@ impl DynamicRecord {
         field: FieldId<T>,
     ) -> Var<T> {
         self.check(field.layout, field.index);
-        ctx.bind(load_ref_mut(self.field_ptr::<T>(field.offset)))
+        // SAFETY: `DynamicRecord`'s construction contract keeps the record
+        // live, while the branded field token proves the offset and type.
+        ctx.bind(unsafe { load_mut(self.field_ptr::<T>(field.offset)) })
     }
 
     /// Store `v` into field `field`.
@@ -174,7 +189,9 @@ impl DynamicRecord {
         v: Var<T>,
     ) {
         self.check(field.layout, field.index);
-        ctx.emit(store(self.field_ptr::<T>(field.offset), v));
+        // SAFETY: `DynamicRecord`'s construction contract keeps the record
+        // writable, while the branded field token proves the offset and type.
+        ctx.emit(unsafe { store(self.field_ptr::<T>(field.offset), v) });
     }
 
     /// `(ptr + offset) as *mut T`.
@@ -182,7 +199,10 @@ impl DynamicRecord {
         &self,
         offset: usize,
     ) -> impl Staged<Out = SMutPtr<T>> {
-        ptr_cast_mut::<T, u8, _>(ptr_offset_mut(self.ptr, Const::<i64>::new(offset as i64)))
+        // SAFETY: all `FieldId` offsets lie within the branded record layout.
+        ptr_cast_mut::<T, u8, _>(unsafe {
+            ptr_offset_mut(self.ptr, Const::<i64>::new(offset as i64))
+        })
     }
 
     #[track_caller]

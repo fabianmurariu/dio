@@ -258,7 +258,9 @@ fn euler_08_largest_product_of_k_adjacent() {
             let prod = ctx.var(1i64);
             let j = ctx.var(0u64);
             ctx.while_loop(lt(j, k), move |ctx| {
-                ctx.store(prod, prod * digits.get_unchecked(i + j));
+                // SAFETY: the outer loop maintains `i + k <= n`, and this
+                // loop proves `j < k`, so `i + j < n` for tested inputs.
+                ctx.store(prod, prod * unsafe { digits.get_unchecked(i + j) });
                 ctx.store(j, j + 1u64);
             });
             ctx.if_then(gt(prod, best), move |ctx| {
@@ -486,7 +488,8 @@ fn euler_21_amicable_sum() {
                     });
                     ctx.store(d, d + 1u64);
                 });
-                ctx.emit(sigma.set_unchecked(i, s));
+                // SAFETY: the loop condition proves `i < sigma.len()`.
+                ctx.emit(unsafe { sigma.set_unchecked(i, s) });
                 ctx.store(i, i + 1u64);
             });
             Const::<()>::new(())
@@ -503,10 +506,12 @@ fn euler_21_amicable_sum() {
             let a = ctx.var(2u64);
             ctx.while_loop(lt(a, n), move |ctx| {
                 let b = ctx.var(0u64);
-                ctx.store(b, sigma.get_unchecked(a));
+                // SAFETY: the loop condition proves `a < sigma.len()`.
+                ctx.store(b, unsafe { sigma.get_unchecked(a) });
                 ctx.if_then(gt(b, a), move |ctx| {
                     ctx.if_then(lt(b, n), move |ctx| {
-                        ctx.if_then(eq(sigma.get_unchecked(b), a), move |ctx| {
+                        // SAFETY: this branch proves `b < n == sigma.len()`.
+                        ctx.if_then(eq(unsafe { sigma.get_unchecked(b) }, a), move |ctx| {
                             ctx.store(total, total + a + b);
                         });
                     });
@@ -621,7 +626,9 @@ fn euler_34_digit_factorials() {
                 ctx.store(m, n);
                 let sum = ctx.var(0u64);
                 ctx.while_loop(gt(m, 0u64), move |ctx| {
-                    ctx.store(sum, sum + fact.get_unchecked(m % 10u64));
+                    // SAFETY: decimal digits are in `0..10`; callers supply
+                    // the ten-entry factorial lookup table.
+                    ctx.store(sum, sum + unsafe { fact.get_unchecked(m % 10u64) });
                     ctx.store(m, m / 10u64);
                 });
                 ctx.if_then(eq(sum, n), move |ctx| {
@@ -678,7 +685,10 @@ fn euler_67_max_path_sum_triangle() {
             ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);
             let i = ctx.var(0u64);
             ctx.while_loop(lt(i, num_rows), move |ctx| {
-                ctx.emit(workspace.set_unchecked(i, tri.get_unchecked(last_row_offset + i)));
+                // SAFETY: callers supply a `num_rows` workspace and a complete
+                // triangular input; this loop bounds `i` to the bottom row.
+                let value = unsafe { tri.get_unchecked(last_row_offset + i) };
+                ctx.emit(unsafe { workspace.set_unchecked(i, value) });
                 ctx.store(i, i + 1u64);
             });
 
@@ -695,16 +705,22 @@ fn euler_67_max_path_sum_triangle() {
                 ctx.while_loop(lt(j, row + 1u64), move |ctx| {
                     let l = ctx.var(0i64);
                     let r = ctx.var(0i64);
-                    ctx.store(l, workspace.get_unchecked(j));
-                    ctx.store(r, workspace.get_unchecked(j + 1u64));
+                    // SAFETY: `j < row + 1 < num_rows`, so both frontier
+                    // indices are within the workspace.
+                    ctx.store(l, unsafe { workspace.get_unchecked(j) });
+                    ctx.store(r, unsafe { workspace.get_unchecked(j + 1u64) });
                     let best = ctx.var(0i64);
                     ctx.store(best, select(gt(l, r), l, r));
-                    ctx.emit(workspace.set_unchecked(j, tri.get_unchecked(row_offset + j) + best));
+                    // SAFETY: `j` is within the workspace and `row_offset + j`
+                    // is within the complete triangular input.
+                    let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
+                    ctx.emit(unsafe { workspace.set_unchecked(j, value) });
                     ctx.store(j, j + 1u64);
                 });
                 ctx.store(row_plus_1, row_plus_1 - 1u64);
             });
-            workspace.get_unchecked(0u64)
+            // SAFETY: tested calls use at least one triangle row.
+            unsafe { workspace.get_unchecked(0u64) }
         },
     );
 

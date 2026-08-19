@@ -4,7 +4,7 @@
 //! [`svec_grow`] extern) reallocs and writes the new pointer back. See the crate
 //! docs for the why.
 
-use std::alloc::{alloc, dealloc, realloc, Layout};
+use std::alloc::{alloc, dealloc, handle_alloc_error, realloc, Layout};
 use std::marker::PhantomData;
 
 use rust_lms::prelude::*;
@@ -19,16 +19,45 @@ use rust_lms::prelude::*;
 #[derive(Clone, Copy, StagedType)]
 pub struct RawVec {
     #[staged(SMutPtr<u8>)]
-    pub ptr: *mut u8,
+    ptr: *mut u8,
     #[staged(u64)]
-    pub len: usize,
+    len: usize,
     #[staged(u64)]
-    pub cap: usize,
+    cap: usize,
     #[staged(u64)]
-    pub elem_size: usize,
+    elem_size: usize,
     #[staged(u64)]
-    pub elem_align: usize,
+    elem_align: usize,
 }
+
+fn allocation_layout(cap: usize, elem_size: usize, elem_align: usize) -> Layout {
+    let Some(bytes) = cap.checked_mul(elem_size) else {
+        std::process::abort();
+    };
+    let Ok(layout) = Layout::from_size_align(bytes, elem_align) else {
+        std::process::abort();
+    };
+    layout
+}
+
+/// An element-typed handle to a [`HostVec`]'s stable control block.
+///
+/// This prevents the ordinary [`SVec`] constructor from pairing a host vector
+/// with the wrong staged runtime element type. It deliberately does not borrow
+/// the host owner because staged values are retained by [`Ctx`]; the lifetime
+/// requirement therefore remains part of [`SVec::new`]'s safety contract.
+pub struct HostVecHandle<R> {
+    ctrl: *mut RawVec,
+    _r: PhantomData<fn() -> R>,
+}
+
+impl<R> Clone for HostVecHandle<R> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<R> Copy for HostVecHandle<R> {}
 
 /// Host owner of an [`SVec`]'s storage: allocates the buffer, keeps the control
 /// block at a stable address (in a `Box`), and frees on drop. The host allocates
@@ -44,6 +73,10 @@ pub struct HostVec<R> {
 impl<R> HostVec<R> {
     /// An empty vec (no allocation until the first `push` grows it).
     pub fn new() -> Self {
+        assert!(
+            std::mem::size_of::<R>() != 0,
+            "HostVec does not support zero-sized element types"
+        );
         HostVec {
             raw: Box::new(RawVec {
                 ptr: std::ptr::null_mut(),
@@ -56,9 +89,20 @@ impl<R> HostVec<R> {
         }
     }
 
-    /// The stable address of the control block — bake this into the kernel (via
-    /// [`SVec::new`]). Valid until this `HostVec` is dropped.
-    pub fn control_ptr(&mut self) -> *mut RawVec {
+    /// A typed handle to the stable control block for [`SVec::new`].
+    pub fn handle(&mut self) -> HostVecHandle<R> {
+        HostVecHandle {
+            ctrl: &mut *self.raw,
+            _r: PhantomData,
+        }
+    }
+
+    /// The untyped control-block address for runtime-selected staged types.
+    ///
+    /// Pairing this pointer with an [`SVec`] requires
+    /// [`SVec::from_raw_unchecked`], which makes the lost type relationship
+    /// explicit at the call site.
+    pub fn as_raw_control_ptr(&mut self) -> *mut RawVec {
         &mut *self.raw
     }
 
@@ -96,8 +140,7 @@ impl<R> Drop for HostVec<R> {
             // `elem_size`/`elem_align`, so the layout matches the allocation.
             unsafe {
                 let layout =
-                    Layout::from_size_align(self.raw.cap * self.raw.elem_size, self.raw.elem_align)
-                        .expect("valid layout");
+                    allocation_layout(self.raw.cap, self.raw.elem_size, self.raw.elem_align);
                 dealloc(self.raw.ptr, layout);
             }
         }
@@ -111,19 +154,26 @@ impl<R> Drop for HostVec<R> {
 #[extern_fn]
 #[no_mangle]
 pub extern "C" fn svec_grow(v: &mut RawVec) {
-    let new_cap = if v.cap == 0 { 4 } else { v.cap * 2 };
+    let new_cap = if v.cap == 0 {
+        4
+    } else {
+        let Some(new_cap) = v.cap.checked_mul(2) else {
+            std::process::abort();
+        };
+        new_cap
+    };
     // SAFETY: sizes/aligns are the ones the buffer was (or will be) allocated with.
     unsafe {
-        let new_bytes = new_cap * v.elem_size;
+        let new_layout = allocation_layout(new_cap, v.elem_size, v.elem_align);
         let new_ptr = if v.ptr.is_null() {
-            let layout = Layout::from_size_align(new_bytes, v.elem_align).expect("valid layout");
-            alloc(layout)
+            alloc(new_layout)
         } else {
-            let old_layout =
-                Layout::from_size_align(v.cap * v.elem_size, v.elem_align).expect("valid layout");
-            realloc(v.ptr, old_layout, new_bytes)
+            let old_layout = allocation_layout(v.cap, v.elem_size, v.elem_align);
+            realloc(v.ptr, old_layout, new_layout.size())
         };
-        assert!(!new_ptr.is_null(), "svec_grow: allocation failed");
+        if new_ptr.is_null() {
+            handle_alloc_error(new_layout);
+        }
         v.ptr = new_ptr;
         v.cap = new_cap;
     }
@@ -147,9 +197,34 @@ impl<T> Clone for SVec<T> {
 impl<T> Copy for SVec<T> {}
 
 impl<T: StagedType + CopyType + 'static> SVec<T> {
-    /// Build a handle from a baked control-block pointer ([`HostVec::control_ptr`])
-    /// and the registered grow extern (`compiler.extern_fn::<SvecGrowExtern>()`).
-    pub fn new(ctrl: *mut RawVec, grow: ExternRef<SvecGrowExtern>) -> Self {
+    /// Build a handle from a typed host-vector handle and the registered grow
+    /// extern (`compiler.extern_fn::<SvecGrowExtern>()`).
+    ///
+    /// # Safety
+    ///
+    /// The source [`HostVec`] must remain live and exclusively available to
+    /// generated code for every use of the returned handle.
+    pub unsafe fn new(
+        handle: HostVecHandle<T::RuntimeValue>,
+        grow: ExternRef<SvecGrowExtern>,
+    ) -> Self {
+        // SAFETY: the typed handle establishes the element layout relationship;
+        // the caller supplies the remaining lifetime and exclusivity guarantee.
+        unsafe { Self::from_raw_unchecked(handle.ctrl, grow) }
+    }
+
+    /// Build a handle from an untyped, baked control-block pointer.
+    ///
+    /// This is the escape hatch for SQL code generation, where the staged type
+    /// is selected dynamically alongside the matching host vector.
+    ///
+    /// # Safety
+    ///
+    /// `ctrl` must point to a live [`RawVec`] whose element layout exactly
+    /// matches `T::RuntimeValue`. The control block and its allocation must
+    /// remain live and exclusively available to generated code for every use
+    /// of the returned handle.
+    pub unsafe fn from_raw_unchecked(ctrl: *mut RawVec, grow: ExternRef<SvecGrowExtern>) -> Self {
         SVec {
             ctrl,
             grow,
@@ -165,39 +240,64 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// The buffer pointer, typed to `T` — reloaded from the control block so it
     /// reflects the latest growth. `*(ctrl.ptr) as *mut T`.
     fn data(&self) -> impl Staged<Out = SMutPtr<T>> + Copy {
-        ptr_cast_mut::<T, u8, _>(load_field(self.ctrl(), RawVecType::ptr()))
+        // SAFETY: guaranteed by `SVec::new`; `ptr` is a field of the live
+        // control block and has the declared staged type.
+        ptr_cast_mut::<T, u8, _>(unsafe { load_field_unchecked(self.ctrl(), RawVecType::ptr()) })
     }
 
     /// Current element count.
     pub fn len(&self, ctx: &mut Ctx) -> Var<u64> {
-        ctx.bind(load_field(self.ctrl(), RawVecType::len()))
+        // SAFETY: guaranteed by `SVec::new`; `len` is a field of the live
+        // control block.
+        ctx.bind(unsafe { load_field_unchecked(self.ctrl(), RawVecType::len()) })
     }
 
     /// Element `i` (unchecked). `*(data + i)`.
-    pub fn get(&self, ctx: &mut Ctx, i: Var<u64>) -> Var<T> {
+    ///
+    /// # Safety
+    ///
+    /// At execution, `i` must be less than the vector's initialized length.
+    pub unsafe fn get(&self, ctx: &mut Ctx, i: Var<u64>) -> Var<T> {
         let idx = ctx.bind(int_cast::<i64, u64, _>(i));
-        ctx.bind(load_ref_mut(ptr_offset_mut(self.data(), idx)))
+        // SAFETY: callers of this unchecked operation must keep `i < len`;
+        // `SVec::new` guarantees the allocation and element layout.
+        ctx.bind(unsafe { load_mut(ptr_offset_mut(self.data(), idx)) })
     }
 
     /// Store `v` at element `i` (unchecked). `*(data + i) = v`.
-    pub fn set(&self, ctx: &mut Ctx, i: Var<u64>, v: Var<T>) {
+    ///
+    /// # Safety
+    ///
+    /// At execution, `i` must be less than the vector's allocated capacity. If
+    /// it is beyond the current length, callers must also maintain the vector's
+    /// initialized-length invariant before the vector is read or dropped.
+    pub unsafe fn set(&self, ctx: &mut Ctx, i: Var<u64>, v: Var<T>) {
         let idx = ctx.bind(int_cast::<i64, u64, _>(i));
-        ctx.emit(store(ptr_offset_mut(self.data(), idx), v));
+        // SAFETY: callers of this unchecked operation must keep `i < cap`;
+        // `SVec::new` guarantees the allocation and element layout.
+        ctx.emit(unsafe { store(ptr_offset_mut(self.data(), idx), v) });
     }
 
     /// Append `v`, growing the buffer if full. `if len==cap { grow }; data[len]=v; len++`.
     pub fn push(&self, ctx: &mut Ctx, v: Var<T>) {
         let len = self.len(ctx);
-        let cap = ctx.bind(load_field(self.ctrl(), RawVecType::cap()));
+        // SAFETY: guaranteed by `SVec::new`; `cap` is a field of the live
+        // control block.
+        let cap = ctx.bind(unsafe { load_field_unchecked(self.ctrl(), RawVecType::cap()) });
         let ctrl = self.ctrl;
         let grow = self.grow;
         ctx.if_then(eq(len, cap), move |ctx| {
-            ctx.emit(call_extern1(grow, const_opaque_mut::<RawVec>(ctrl)));
+            let ctrl_ptr = const_mut_ptr::<Opaque<RawVec>>(ctrl);
+            // SAFETY: `HostVec` owns this stable control block for the kernel
+            // call, and generated code is its only accessor during growth.
+            ctx.emit(unsafe { call_extern1_unchecked(grow, ctrl_ptr) });
         });
         // `grow` leaves `len` unchanged but may move the buffer — reload `data`.
         let idx = ctx.bind(int_cast::<i64, u64, _>(len));
-        ctx.emit(store(ptr_offset_mut(self.data(), idx), v));
+        // SAFETY: growth establishes `len < cap`, so `data[len]` is writable.
+        ctx.emit(unsafe { store(ptr_offset_mut(self.data(), idx), v) });
         let next = ctx.bind(add(len, 1u64));
-        ctx.emit(store_ref(field_addr(self.ctrl(), RawVecType::len()), next));
+        // SAFETY: `len` is a writable field of the live control block.
+        ctx.emit(unsafe { store(field_addr(self.ctrl(), RawVecType::len()), next) });
     }
 }
