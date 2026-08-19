@@ -167,15 +167,16 @@ pub mod prelude {
     };
     pub use crate::pool::{pool_append, BytesPool, PoolAppendExtern};
     pub use crate::r#struct::{
-        field_addr, field_path, load_field_unchecked, CopyFieldAccess, Field, FieldAddr, FieldPath,
-        FieldRefOf, LoadField, OwnedFieldAccess, PointerLike, RefFieldAccess,
+        field_addr, field_addr_mut_unchecked, field_path, load_field_mut, load_field_unchecked,
+        CopyFieldAccess, Field, FieldAddr, FieldPath, FieldRefOf, LoadField, OwnedFieldAccess,
+        PointerLike, RefFieldAccess,
     };
     pub use crate::refer::{
         array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
-        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
-        ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref, ArrayIndex, ConstPtr,
-        LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast, PtrIsNull, PtrOffset, PtrOffsetMut,
-        SMutPtr, SPtr, SRef, SRefMut, Store, StoreRef,
+        load_ref_mut_unchecked, ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset,
+        ptr_offset_mut, ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
+        store_ref_unchecked, ArrayIndex, ConstPtr, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef,
+        PtrCast, PtrIsNull, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, SRef, SRefMut, Store, StoreRef,
     };
     pub use crate::slice::{
         slice_get_ptr_unchecked, AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, RawSliceOps,

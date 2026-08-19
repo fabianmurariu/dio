@@ -1301,7 +1301,7 @@ mod tests {
             match_opt_mut_ref(
                 ctx,
                 opt,
-                |_ctx, ptr| mul(load_ref_mut(ptr), 2i64),
+                |_ctx, mut ptr| mul(load_ref_mut(&mut ptr), 2i64),
                 Const::<i64>::new(-1),
             )
         });
@@ -1335,12 +1335,12 @@ mod tests {
                 match_opt_mut_ref(
                     ctx,
                     opt,
-                    |_ctx, ptr| {
+                    |_ctx, mut ptr| {
                         // Load current value, add 1, store back, and assign to result
-                        let incremented = add(load_ref_mut(ptr), 1i64);
+                        let incremented = add(load_ref_mut(&mut ptr), 1i64);
                         (
-                            store_ref(ptr, incremented),
-                            assign(*result, load_ref_mut(ptr)),
+                            store_ref(&mut ptr, incremented),
+                            assign(*result, load_ref_mut(&mut ptr)),
                         )
                     },
                     assign(*result, -1i64),

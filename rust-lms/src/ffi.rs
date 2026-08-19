@@ -26,7 +26,7 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr};
 use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::StagedType;
+use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 
 // =============================================================================
@@ -47,13 +47,21 @@ use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSl
 /// }
 /// ```
 #[repr(C)]
-#[derive(Debug, Clone, Copy)]
+#[derive(Debug)]
 pub struct FatSlice<T> {
     /// Pointer to the first element
     pub ptr: *const T,
     /// Number of elements
     pub len: usize,
 }
+
+impl<T> Clone for FatSlice<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for FatSlice<T> {}
 
 impl<T> FatSlice<T> {
     /// Create a new FatSlice from a pointer and length.
@@ -171,10 +179,18 @@ pub type FfiSliceMut<T> = FatSliceMut<T>;
 // =============================================================================
 
 /// Staged type marker for FatSlice<T>
-#[derive(Clone, Copy, Debug)]
+#[derive(Debug)]
 pub struct FatSliceType<T> {
     _phantom: PhantomData<T>,
 }
+
+impl<T> Clone for FatSliceType<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T> Copy for FatSliceType<T> {}
 
 unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     type RuntimeValue = FatSlice<T::RuntimeValue>;
@@ -204,6 +220,8 @@ unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
         vec![types::I64, types::I64]
     }
 }
+
+unsafe impl<T: StagedType> CopyType for FatSliceType<T> {}
 
 /// Staged type marker for FatSliceMut<T>
 #[derive(Clone, Copy, Debug)]

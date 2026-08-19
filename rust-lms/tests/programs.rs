@@ -14,10 +14,10 @@ fn test_compute_stats() {
         |ctx,
          data: Var<SRef<Slice<f64>>>,
          v: Var<f64>,
-         count_ptr: Var<SRefMut<u64>>,
-         min_ptr: Var<SRefMut<f64>>,
-         max_ptr: Var<SRefMut<f64>>,
-         sum_ptr: Var<SRefMut<f64>>| {
+         mut count_ptr: Var<SRefMut<u64>>,
+         mut min_ptr: Var<SRefMut<f64>>,
+         mut max_ptr: Var<SRefMut<f64>>,
+         mut sum_ptr: Var<SRefMut<f64>>| {
             let i = ctx.var(0u64);
             // Accumulators kept in register-resident locals; values flushed to
             // the output pointers only at the end.
@@ -40,10 +40,10 @@ fn test_compute_stats() {
             });
 
             // Emit the 4 store_refs as side effects, then return ().
-            ctx.emit(store_ref(count_ptr, count));
-            ctx.emit(store_ref(min_ptr, min));
-            ctx.emit(store_ref(max_ptr, max));
-            ctx.emit(store_ref(sum_ptr, sum));
+            ctx.emit(store_ref(&mut count_ptr, count));
+            ctx.emit(store_ref(&mut min_ptr, min));
+            ctx.emit(store_ref(&mut max_ptr, max));
+            ctx.emit(store_ref(&mut sum_ptr, sum));
             Const::<()>::new(())
         },
     );
@@ -81,8 +81,9 @@ fn test_compute_stats() {
 fn test_simple_store_load() {
     let mut compiler = Compiler::new();
 
-    let inc_fn = compiler.fun1("increment", |_ctx, ptr: Var<SRefMut<u64>>| {
-        store_ref(ptr, load_ref_mut(ptr) + 1u64)
+    let inc_fn = compiler.fun1("increment", |_ctx, mut ptr: Var<SRefMut<u64>>| {
+        let current = load_ref_mut(&mut ptr);
+        store_ref(&mut ptr, current + 1u64)
     });
 
     let compiled = compiler.compile(inc_fn).expect("Failed to compile");

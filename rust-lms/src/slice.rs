@@ -58,7 +58,7 @@
 
 use crate::ffi::FatSliceType;
 use crate::refer::{SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
@@ -352,6 +352,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     }
 }
 
+unsafe impl<'a, T: StagedType> CopyType for SRef<'a, Slice<T>> {}
+
 // =============================================================================
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
@@ -373,7 +375,7 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     }
 
     fn is_copy_struct() -> bool {
-        true // Fat pointer is Copy (the pointer itself, not what it points to)
+        true // ABI-classified as a two-register aggregate; not semantically Copy.
     }
 
     fn num_abi_values() -> usize {
@@ -891,15 +893,106 @@ impl<T: StagedType, S> RawSliceOps<T> for S where S: Staged<Out = FatSliceType<T
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
 // =============================================================================
 
+impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
+    /// Reborrow this unique slice handle to read its length.
+    pub fn len(&self) -> SliceLen<VarUse<SRefMut<'a, Slice<T>>>> {
+        SliceLen {
+            slice: self.use_once(),
+        }
+    }
+
+    /// Reborrow this unique slice handle to read one element.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length.
+    pub unsafe fn get_unchecked<I>(
+        &self,
+        index: I,
+    ) -> SliceGetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged>
+    where
+        I: IntoStaged<u64>,
+        T: CopyType,
+    {
+        SliceGetUnchecked {
+            slice: self.use_once(),
+            index: index.into_staged(),
+        }
+    }
+
+    /// Reborrow this unique slice handle for one element write.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length.
+    pub unsafe fn set_unchecked<I, V>(
+        &mut self,
+        index: I,
+        value: V,
+    ) -> SliceSetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
+    where
+        I: IntoStaged<u64>,
+        V: IntoStaged<T>,
+    {
+        SliceSetUnchecked {
+            slice: self.use_once(),
+            index: index.into_staged(),
+            value: value.into_staged(),
+        }
+    }
+
+    /// Reborrow this unique slice handle to swap two elements.
+    ///
+    /// # Safety
+    ///
+    /// At execution, both indices must be less than this slice's length.
+    pub unsafe fn swap_unchecked<I, J>(
+        &mut self,
+        i: I,
+        j: J,
+    ) -> SliceSwapUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, J::Staged>
+    where
+        I: IntoStaged<u64>,
+        J: IntoStaged<u64>,
+        T: CopyType,
+    {
+        SliceSwapUnchecked {
+            slice: self.use_once(),
+            i: i.into_staged(),
+            j: j.into_staged(),
+        }
+    }
+
+    /// Reborrow this unique slice handle to construct a mutable sub-slice.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `start <= end <= self.len()` must hold, and the caller
+    /// must not use an overlapping view while the result is active.
+    pub unsafe fn slice_mut_unchecked<START, END>(
+        &mut self,
+        start: START,
+        end: END,
+    ) -> SliceSliceUnchecked<VarUse<SRefMut<'a, Slice<T>>>, START::Staged, END::Staged>
+    where
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
+    {
+        SliceSliceUnchecked {
+            slice: self.use_once(),
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
+    }
+}
+
 /// Extension trait for mutable slice operations.
 ///
 /// The read-only ops (`len`, `as_mut_ptr`, `get_*`, `slice_mut_unchecked`)
 /// build the same unified op structs as [`SliceRefOps`]; the associated
 /// `ElemRef`/`Out` keep their mutable flavor automatically. `set_unchecked` is
 /// gated on `MutSliceType`, so it only exists here.
-pub trait SliceMutOps<'a, T: StagedType + 'a>:
-    Staged<Out = SRefMut<'a, Slice<T>>> + Sized + Clone
-{
+pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized {
     /// Get the length of the slice.
     fn len(self) -> SliceLen<Self> {
         SliceLen { slice: self }
@@ -1015,8 +1108,20 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>:
     }
 }
 
-impl<'a, T: StagedType + 'a, S> SliceMutOps<'a, T> for S where
-    S: Staged<Out = SRefMut<'a, Slice<T>>> + Clone
+impl<'a, P, R, T> SliceMutOps<'a, T> for AsMutSlice<P, T>
+where
+    P: Staged<Out = SRefMut<'a, R>>,
+    R: MutSliceRepr<T> + 'a,
+    T: StagedType + 'a,
+{
+}
+
+impl<'a, S, START, END, T> SliceMutOps<'a, T> for SliceSliceUnchecked<S, START, END>
+where
+    S: Staged<Out = SRefMut<'a, Slice<T>>>,
+    START: Staged<Out = u64>,
+    END: Staged<Out = u64>,
+    T: StagedType + 'a,
 {
 }
 

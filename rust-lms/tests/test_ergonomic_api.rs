@@ -104,7 +104,7 @@ fn test_ergonomic_slice_set() {
     let mut compiler = Compiler::new();
 
     // fn set_first(arr: &mut [i64])
-    let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let set_first = compiler.fun1("set_first", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         // SAFETY: this test calls the kernel only with non-empty slices.
         unsafe { arr.set_unchecked(0u64, 999i64) } // Both arguments are ergonomic.
     });

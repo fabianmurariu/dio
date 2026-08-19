@@ -470,11 +470,11 @@ fn euler_15_lattice_paths() {
 fn euler_21_amicable_sum() {
     let fill = {
         let mut compiler = Compiler::new();
-        let fill_sigma = compiler.fun1("e21_sigma", |ctx, sigma: Var<SRefMut<Slice<u64>>>| {
+        let fill_sigma = compiler.fun1("e21_sigma", |ctx, mut sigma: Var<SRefMut<Slice<u64>>>| {
             let n = ctx.var(0u64);
             ctx.store(n, sigma.len());
             let i = ctx.var(2u64);
-            ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.while_loop(lt(i, n), |ctx| {
                 let s = ctx.var(1u64);
                 let d = ctx.var(2u64);
                 ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
@@ -678,13 +678,13 @@ fn euler_67_max_path_sum_triangle() {
         "e67",
         |ctx,
          tri: Var<SRef<Slice<i64>>>,
-         workspace: Var<SRefMut<Slice<i64>>>,
+         mut workspace: Var<SRefMut<Slice<i64>>>,
          num_rows: Var<u64>| {
             // Seed workspace with the bottom row.
             let last_row_offset = ctx.var(0u64);
             ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);
             let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, num_rows), move |ctx| {
+            ctx.while_loop(lt(i, num_rows), |ctx| {
                 // SAFETY: callers supply a `num_rows` workspace and a complete
                 // triangular input; this loop bounds `i` to the bottom row.
                 let value = unsafe { tri.get_unchecked(last_row_offset + i) };
@@ -696,13 +696,13 @@ fn euler_67_max_path_sum_triangle() {
             // counter unsigned (it never reaches 0 during the loop body).
             let row_plus_1 = ctx.var(0u64);
             ctx.store(row_plus_1, num_rows - 1u64);
-            ctx.while_loop(gt(row_plus_1, 0u64), move |ctx| {
+            ctx.while_loop(gt(row_plus_1, 0u64), |ctx| {
                 let row = ctx.var(0u64);
                 ctx.store(row, row_plus_1 - 1u64);
                 let row_offset = ctx.var(0u64);
                 ctx.store(row_offset, row * (row + 1u64) / 2u64);
                 let j = ctx.var(0u64);
-                ctx.while_loop(lt(j, row + 1u64), move |ctx| {
+                ctx.while_loop(lt(j, row + 1u64), |ctx| {
                     let l = ctx.var(0i64);
                     let r = ctx.var(0i64);
                     // SAFETY: `j < row + 1 < num_rows`, so both frontier

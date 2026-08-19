@@ -54,7 +54,7 @@ fn opaque_mut_ref_param() {
     let f = compiler.fun1(
         "push_and_count",
         move |ctx, g: Var<SRefMut<Opaque<Graph>>>| {
-            let g_ptr = ref_mut_as_ptr(g);
+            let g_ptr = ctx.bind(ref_mut_as_ptr(g));
             // SAFETY: the entry point receives an exclusive `&mut Graph`, and
             // these calls are sequenced without concurrent access.
             ctx.emit(unsafe { call_extern2_unchecked(push, g_ptr, Const::<u64>::new(99)) });

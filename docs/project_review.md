@@ -4,12 +4,31 @@ Reviewed: 2026-08-17
 
 ## Remediation status
 
-Last updated: 2026-08-18
+Last updated: 2026-08-19
 
-Phases 1 and 2 are complete. The next milestone is **Phase 3: ABI
-correctness**, starting with PR-05's target-aware aggregate classification and
-copy lowering. The detailed implementation order and verification record are
-in `docs/project_review_plan.md`.
+Phases 1 and 2 are complete. **Phase 2A: staged reference ownership** now blocks
+Phase 3 because the generated API must represent `&mut T` as a unique
+capability before reference-taking extern calls can be classified safely. The
+detailed implementation order and verification record are in
+`docs/project_review_plan.md`.
+
+Phase 2A step 1 is complete: `Var<T>` is `Copy` only for `CopyType` values,
+`SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable loads,
+stores, and slice operations now borrow the unique staged handle for one AST
+operation. Consuming `SRefMut` into `SMutPtr` makes the raw-pointer boundary
+explicit, and repeated raw use requires binding the result to a copyable staged
+pointer variable. Mutable validity views no longer clone their root reference.
+
+Still pending in Phase 2A:
+
+- Replace the `'static` staged-parameter marker with an invocation-lifetime
+  abstraction such as `RuntimeParam::Arg<'call>`.
+- Preserve `SRef`/`SRefMut` in derived extern signatures and add call
+  constructors that use Rust reborrows instead of raw-pointer demotion.
+- Replace temporary unchecked mutable field/reference projections with scoped
+  projection and disjoint-splitting APIs.
+- Audit mutable options, slices, structs, and SQL callbacks, then remove escape
+  hatches that no longer have a justified caller-side proof.
 
 Phase 2 replaced integer-address/reference fabrication with explicit staged raw
 pointers, split Arrow read/write ownership, typed the normal `HostVec`/`SVec`
@@ -25,7 +44,7 @@ removed the former `Ctx::actions` type-complexity warning.
 | --- | --- | --- |
 | PR-01: Compiled entry-point ownership and JIT memory | Fixed | Phase 1 |
 | PR-02: Trusted layout and codegen traits | Fixed | Phase 1 |
-| PR-03: Raw addresses and fabricated reference lifetimes | Fixed | Phase 2 |
+| PR-03: Raw addresses, fabricated lifetimes, and copyable mutable references | Partially fixed | Phases 2 and 2A |
 | PR-04: Typed external function signatures | Fixed | Phase 1 |
 | PR-05: Target-correct aggregate ABI lowering | Pending | Phase 3 |
 | PR-06: Unrestricted slice reinterpretation | Fixed | Phase 1 |

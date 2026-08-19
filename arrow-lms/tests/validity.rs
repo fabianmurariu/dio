@@ -12,7 +12,7 @@ fn set_null_clears_bits_standalone() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("clear", |ctx, v: Var<SRefMut<FfiValidityMut>>| {
-        let view = ValidityView::new(v);
+        let mut view = ValidityView::new(v);
         for bit in [1u64, 3, 6, 3] {
             let i = ctx.var(bit);
             // SAFETY: every constant index is below the prepared bit length 8.
@@ -37,7 +37,7 @@ fn set_valid_sets_bits_standalone() {
 
     let mut compiler = Compiler::new();
     let f = compiler.fun1("mark", |ctx, v: Var<SRefMut<FfiValidityMut>>| {
-        let view = ValidityView::new(v);
+        let mut view = ValidityView::new(v);
         for bit in [0u64, 2, 5, 2] {
             let i = ctx.var(bit);
             // SAFETY: every constant index is below the prepared bit length 8.

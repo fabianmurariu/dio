@@ -10,7 +10,7 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{CompilationContext, Staged, Var, VarUse};
 use crate::types::{CopyType, StagedType};
 use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
 use std::marker::PhantomData;
@@ -46,6 +46,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
     }
 }
 
+unsafe impl<'a, T: StagedType> CopyType for SRef<'a, T> {}
+
 // =============================================================================
 // SRefMut<T> - Mutable reference type
 // =============================================================================
@@ -55,14 +57,6 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
 pub struct SRefMut<'a, T> {
     _phantom: PhantomData<&'a mut T>,
 }
-
-// As with `SRef`, a mutable-reference handle is always Copy regardless of `T`.
-impl<'a, T> Clone for SRefMut<'a, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<'a, T> Copy for SRefMut<'a, T> {}
 
 unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T> {
     type RuntimeValue = &'a mut T::RuntimeValue;
@@ -234,7 +228,27 @@ where
 }
 
 /// Create a load operation from a mutable reference/pointer
-pub fn load_ref_mut<'a, P, T>(ptr: P) -> LoadMutRef<'a, P>
+pub fn load_ref_mut<'a, T>(ptr: &mut Var<SRefMut<'a, T>>) -> LoadMutRef<'a, VarUse<SRefMut<'a, T>>>
+where
+    T: StagedType + 'a,
+{
+    LoadMutRef {
+        ptr: ptr.use_once(),
+        _marker: PhantomData,
+    }
+}
+
+/// Load through an arbitrary staged mutable-reference expression.
+///
+/// Prefer [`load_ref_mut`], which reborrows a unique mutable-reference
+/// variable. This escape hatch is needed for projected references until field
+/// projections carry scoped borrow provenance.
+///
+/// # Safety
+///
+/// `ptr` must be the only active staged mutable reference used to access its
+/// pointee for this generated operation.
+pub unsafe fn load_ref_mut_unchecked<'a, P, T>(ptr: P) -> LoadMutRef<'a, P>
 where
     P: Staged<Out = SRefMut<'a, T>>,
     T: StagedType + 'a,
@@ -311,7 +325,30 @@ where
 }
 
 /// Create a store operation (for references)
-pub fn store_ref<'a, P, V, T>(ptr: P, val: V) -> StoreRef<'a, P, V>
+pub fn store_ref<'a, V, T>(
+    ptr: &mut Var<SRefMut<'a, T>>,
+    val: V,
+) -> StoreRef<'a, VarUse<SRefMut<'a, T>>, V>
+where
+    V: Staged<Out = T>,
+    T: StagedType + 'a,
+{
+    StoreRef {
+        ptr: ptr.use_once(),
+        val,
+        _marker: PhantomData,
+    }
+}
+
+/// Store through an arbitrary staged mutable-reference expression.
+///
+/// Prefer [`store_ref`], which reborrows a unique mutable-reference variable.
+///
+/// # Safety
+///
+/// `ptr` must be the only active staged mutable reference used to access its
+/// pointee for this generated operation.
+pub unsafe fn store_ref_unchecked<'a, P, V, T>(ptr: P, val: V) -> StoreRef<'a, P, V>
 where
     P: Staged<Out = SRefMut<'a, T>>,
     V: Staged<Out = T>,
@@ -742,8 +779,11 @@ mod tests {
     fn test_load_store_i64() {
         let mut compiler = Compiler::new();
 
-        let write_fn = compiler.fun1("write_42", |_ctx, ptr: Var<SRefMut<i64>>| {
-            (store_ref(ptr, Const::<i64>::new(42)), load_ref_mut(ptr))
+        let write_fn = compiler.fun1("write_42", |_ctx, mut ptr: Var<SRefMut<i64>>| {
+            (
+                store_ref(&mut ptr, Const::<i64>::new(42)),
+                load_ref_mut(&mut ptr),
+            )
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");

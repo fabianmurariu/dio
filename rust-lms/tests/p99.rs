@@ -43,7 +43,7 @@ fn p99_01_last_element() {
 fn p99_05_reverse_in_place() {
     let mut compiler = Compiler::new();
 
-    let f = compiler.fun1("p05_reverse", |ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let f = compiler.fun1("p05_reverse", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         let n = ctx.var(0u64);
         ctx.store(n, arr.len());
         // Two-pointer swap. We track `lo` and `hi+1` so unsigned arithmetic
@@ -51,7 +51,7 @@ fn p99_05_reverse_in_place() {
         let lo = ctx.var(0u64);
         let hi_plus_1 = ctx.var(0u64);
         ctx.store(hi_plus_1, n);
-        ctx.while_loop(lt(lo + 1u64, hi_plus_1), move |ctx| {
+        ctx.while_loop(lt(lo + 1u64, hi_plus_1), |ctx| {
             let hi = ctx.var(0u64);
             ctx.store(hi, hi_plus_1 - 1u64);
             // SAFETY: the loop maintains `lo < hi < n`.

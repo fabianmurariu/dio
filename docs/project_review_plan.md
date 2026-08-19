@@ -84,6 +84,50 @@ final runs pass. This includes all `sql-gen` grouping, join, streaming, output,
 string, and property tests. Workspace Clippy with warnings denied reports only
 the existing 16-diagnostic Phase 5 baseline and no new Phase 2 diagnostics.
 
+## Phase 2A: Staged reference ownership
+
+This phase was inserted before ABI work after the `SRefMut`/extern audit. Raw
+pointer separation alone does not make staged Rust references honest if their
+AST handles can still be copied or if extern metadata immediately erases them
+back to raw pointers.
+
+1. **Make mutable staged variables unique.** Make `Var<T>` `Copy` only when
+   `T: CopyType`; keep `SRef` copyable and make `SRefMut` non-`Copy`. Mutable
+   loads, stores, and direct slice operations borrow the root handle and store
+   a crate-controlled single-use variable occurrence in the deferred AST.
+   Consuming conversion to `SMutPtr` remains available, after which repeated
+   use is explicitly raw-pointer code. **Status: complete.**
+2. **Separate staging scope from invocation lifetime.** Replace
+   `SRefMut<'static, T>` as the function-parameter convention with a parameter
+   abstraction whose runtime argument is generic over each call, for example
+   `RuntimeParam::Arg<'call> = &'call mut T`. Keep `Compiled::call` safe and
+   prevent reference parameters or results from escaping their invocation.
+   **Status: pending.**
+3. **Preserve references in extern metadata.** Derive `&T` as a staged shared
+   reference and `&mut T` as a staged unique reference rather than as `SPtr` or
+   `SMutPtr`. Add reference-aware call constructors that borrow unique
+   arguments simultaneously, so Rust rejects passing the same mutable handle
+   twice. Raw-pointer and forgeable-descriptor callbacks remain unsafe.
+   **Status: pending.**
+4. **Add scoped projections and splitting.** Make mutable field, element, and
+   sub-slice projections borrow their parent capability. Provide explicit
+   operations for statically disjoint fields and checked dynamic indices.
+   Remove `field_addr_mut_unchecked`, `load_ref_mut_unchecked`, and
+   `store_ref_unchecked` where a scoped operation can express the proof.
+   **Status: pending.**
+5. **Audit higher-level owners.** Migrate mutable options, Arrow validity,
+   opaque inputs, pools, and SQL callbacks. Safe APIs must not clone a mutable
+   root, manufacture a second handle with the same provenance, or hide a raw
+   descriptor validity requirement. **Status: pending.**
+
+**Phase 2A step 1 verification (2026-08-19):**
+`cargo test --workspace --all-targets` and `cargo test --workspace --doc` pass.
+The latter includes a compile-fail regression proving that
+`Var<SRefMut<'static, T>>` cannot be duplicated; a positive test confirms that
+`Var<SRef<'static, T>>` remains `Copy`. The complete `sql-gen` integration and
+property suite passes after binding its consumed `&mut Inputs` parameter into
+an explicit copyable raw-pointer variable.
+
 ## Phase 3: ABI correctness
 
 1. Introduce one target-aware ABI classification and copy-lowering service.

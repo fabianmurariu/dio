@@ -11,7 +11,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::Module;
 use std::collections::HashMap;
 
-use crate::types::{ConstantType, StagedType};
+use crate::types::{ConstantType, CopyType, StagedType};
 use cranelift_codegen::ir::types;
 
 // =============================================================================
@@ -191,40 +191,69 @@ pub unsafe trait Staged {
 }
 
 // =============================================================================
-// VarRef<T> - Lightweight, Copy-able variable reference
+// VarRef<T> - Typed staged variable handle
 // =============================================================================
 
-/// A lightweight reference to a staged variable.
+/// A typed handle to a staged variable.
 ///
-/// `VarRef<T>` is just an index into the Compiler's variable tracking.
-/// It's always Copy, enabling easy reuse in expressions.
+/// The handle is `Copy` only when the staged value has copy semantics. This is
+/// significant for staged mutable references: duplicating their variable ID
+/// would duplicate the exclusive capability represented by `&mut T`.
 ///
 /// # Example
 /// ```ignore
 /// let x: VarRef<i64> = compiler.var();
 /// let expr = add(x, x);  // x used twice - no problem, it's Copy!
 /// ```
+///
+/// Mutable staged references are unique capabilities and cannot be copied:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn duplicate(reference: Var<SRefMut<'static, i64>>) {
+///     let first = reference;
+///     let second = reference;
+///     let _ = (first, second);
+/// }
+/// ```
 pub struct Var<T: StagedType> {
     pub(crate) id: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 
-// Manually implement Clone and Copy: a `Var` is just an id, so it is always
-// Copy regardless of `T` (no `T: Copy` bound — that would leak into every
-// generic that holds a `Var`).
-impl<T: StagedType> Clone for Var<T> {
+/// An owned, single-use occurrence of a staged variable.
+///
+/// This is produced internally after an API has borrowed a non-`Copy` `Var`.
+/// Keeping it distinct from `Var` prevents callers from duplicating an
+/// exclusive staged handle while still allowing the deferred AST node to own
+/// the variable ID it will lower later.
+#[doc(hidden)]
+pub struct VarUse<T: StagedType> {
+    id: usize,
+    _phantom: std::marker::PhantomData<T>,
+}
+
+impl<T: CopyType> Clone for Var<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T: StagedType> Copy for Var<T> {}
+impl<T: CopyType> Copy for Var<T> {}
 
 impl<T: StagedType> Var<T> {
     /// Create a new variable reference with the given ID
     pub(crate) fn new(id: usize) -> Self {
         Var {
             id,
+            _phantom: std::marker::PhantomData,
+        }
+    }
+
+    pub(crate) fn use_once(&self) -> VarUse<T> {
+        VarUse {
+            id: self.id,
             _phantom: std::marker::PhantomData,
         }
     }
@@ -239,6 +268,22 @@ unsafe impl<T: StagedType> Staged for Var<T> {
             .var_map
             .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
+        ctx.builder.use_var(*var)
+    }
+
+    fn var_id(&self) -> Option<usize> {
+        Some(self.id)
+    }
+}
+
+unsafe impl<T: StagedType> Staged for VarUse<T> {
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let var = ctx
+            .var_map
+            .get(&self.id)
+            .unwrap_or_else(|| panic!("Variable {} not found in var_map", self.id));
         ctx.builder.use_var(*var)
     }
 
@@ -597,24 +642,23 @@ impl<T: StagedType, EXPR> LetVar<T, EXPR> {
     /// Get the underlying variable reference
     pub fn var(&self) -> Var<T>
     where
-        T: Copy,
+        T: CopyType,
     {
         self.var
     }
 }
 
-// Manually implement Clone (Var<T> is always Copy, clone the expr)
-impl<T: StagedType + Copy, EXPR: Clone> Clone for LetVar<T, EXPR> {
+impl<T: CopyType, EXPR: Clone> Clone for LetVar<T, EXPR> {
     fn clone(&self) -> Self {
         LetVar {
-            var: self.var.clone(), // Var<T> is Copy
+            var: self.var,
             init: self.init.clone(),
         }
     }
 }
 
 // InitVar is Copy when EXPR is Copy (like Const<T>)
-impl<T: StagedType + Copy, EXPR: Copy> Copy for LetVar<T, EXPR> {}
+impl<T: CopyType, EXPR: Copy> Copy for LetVar<T, EXPR> {}
 
 // Deref to allow transparent access to the underlying Var
 impl<T: StagedType, EXPR> std::ops::Deref for LetVar<T, EXPR> {

@@ -246,7 +246,7 @@ impl Ctx {
     where
         C: crate::staged::IntoStaged<bool>,
         C::Staged: 'static,
-        F: FnOnce(&mut Ctx) + 'static,
+        F: FnOnce(&mut Ctx),
     {
         let cond = cond.into_staged();
         let mut child = Ctx::new(self.next_var_id);
@@ -514,7 +514,7 @@ impl Ctx {
     pub fn if_then<C, F>(&mut self, cond: C, then: F)
     where
         C: Staged<Out = bool> + 'static,
-        F: FnOnce(&mut Ctx) + 'static,
+        F: FnOnce(&mut Ctx),
     {
         let mut child = Ctx::new(self.next_var_id);
         then(&mut child);
@@ -550,8 +550,8 @@ impl Ctx {
     pub fn if_then_else<C, T, E>(&mut self, cond: C, then: T, els: E)
     where
         C: Staged<Out = bool> + 'static,
-        T: FnOnce(&mut Ctx) + 'static,
-        E: FnOnce(&mut Ctx) + 'static,
+        T: FnOnce(&mut Ctx),
+        E: FnOnce(&mut Ctx),
     {
         // Stage both branches into child contexts, keeping var ids disjoint.
         let mut then_child = Ctx::new(self.next_var_id);

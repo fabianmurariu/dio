@@ -51,6 +51,10 @@ fn test_bool_comparison() {
 
 #[test]
 fn test_varref_is_copy() {
+    fn assert_copy<T: Copy>() {}
+
+    assert_copy::<Var<SRef<'static, i64>>>();
+
     let mut compiler = Compiler::new();
 
     // Use x multiple times - no clone needed!

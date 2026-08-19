@@ -40,7 +40,7 @@ fn test_slice_sum() {
     let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
         let i = ctx.var(0u64);
         let total = ctx.var(0i64);
-        ctx.while_loop(lt(i, arr.len()), move |ctx| {
+        ctx.while_loop(lt(i, arr.len()), |ctx| {
             // SAFETY: the loop condition proves `i < arr.len()`.
             ctx.store(total, total + unsafe { arr.get_unchecked(i) });
             ctx.store(i, i + 1u64);
@@ -56,7 +56,7 @@ fn test_slice_sum() {
 #[test]
 fn test_slice_mutable_set() {
     let mut compiler = Compiler::new();
-    let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let set_first = compiler.fun1("set_first", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         // SAFETY: this test calls the kernel only with non-empty slices.
         unsafe { arr.set_unchecked(0u64, 999i64) }
     });
@@ -71,7 +71,7 @@ fn test_slice_mutable_set() {
 #[test]
 fn test_slice_mutable_fill() {
     let mut compiler = Compiler::new();
-    let fill = compiler.fun1("fill", |ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let fill = compiler.fun1("fill", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, arr.len()), move |ctx| {
             // SAFETY: the loop condition proves `i < arr.len()`.
@@ -111,7 +111,7 @@ fn test_slice_subslice() {
 #[test]
 fn test_slice_swap() {
     let mut compiler = Compiler::new();
-    let swap = compiler.fun1("swap_ends", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let swap = compiler.fun1("swap_ends", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         // swap arr[0] and arr[last]
         let last = arr.len() - 1u64;
         // SAFETY: this test calls the kernel only with non-empty slices.
@@ -152,7 +152,7 @@ fn test_slice_of_slice() {
 fn test_mut_subslice_stays_mutable() {
     // A sub-slice of `&mut [T]` is itself `&mut [T]`, so `set_unchecked` works.
     let mut compiler = Compiler::new();
-    let set = compiler.fun1("mut_sub_set", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
+    let set = compiler.fun1("mut_sub_set", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
         // sub = &mut arr[1..3]; sub[1] = 777  =>  writes arr[2]
         // SAFETY: this test uses slices of length >= 3; both the range and
         // element index are within bounds and no overlapping view is used.
