@@ -125,7 +125,7 @@ pub mod types;
 /// Do not use directly.
 #[doc(hidden)]
 pub mod _internal {
-    pub use crate::r#struct::Field;
+    pub use crate::r#struct::{DisjointField, Field};
 }
 
 /// Commonly used types and traits
@@ -167,28 +167,30 @@ pub mod prelude {
     };
     pub use crate::pool::{pool_append, BytesPool, PoolAppendExtern};
     pub use crate::r#struct::{
-        field_addr, field_addr_mut_unchecked, field_path, load_field_mut, load_field_unchecked,
-        CopyFieldAccess, Field, FieldAddr, FieldPath, FieldRefOf, LoadField, OwnedFieldAccess,
-        PointerLike, RefFieldAccess,
+        field_addr, field_mut, field_path, load_field_mut, load_field_unchecked, split_fields_mut,
+        CopyFieldAccess, DisjointField, Field, FieldAddr, FieldPath, FieldRefOf, LoadField,
+        MutField, OwnedFieldAccess, PointerLike, RefFieldAccess, SplitFieldsMut,
     };
     pub use crate::refer::{
         array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
-        load_ref_mut_unchecked, ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset,
-        ptr_offset_mut, ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
-        store_ref_unchecked, ArrayIndex, ConstPtr, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef,
-        PtrCast, PtrIsNull, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, SRef, SRefMut, Store, StoreRef,
+        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
+        ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref, ArrayIndex, ConstPtr,
+        IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast, PtrIsNull, PtrOffset,
+        PtrOffsetMut, SMutPtr, SPtr, SRef, SRefMut, Store, StoreRef,
     };
     pub use crate::slice::{
         slice_get_ptr_unchecked, AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, RawSliceOps,
-        ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetPtrUnchecked, SliceLen,
-        SliceMutOps, SliceRefOps, SliceRepr, SliceType,
+        ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
+        SliceLen, SliceMutOps, SliceRefOps, SliceRepr, SliceSet, SliceType,
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
         Var,
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
-    pub use crate::types::{ConstantType, CopyType, RuntimeParam, RuntimeResult, StagedType};
+    pub use crate::types::{
+        ConstantType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType,
+    };
     // Re-export derive macro
     #[cfg(feature = "derive")]
     pub use rust_lms_derive::{extern_fn, StagedType};

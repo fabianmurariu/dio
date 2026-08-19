@@ -5,7 +5,7 @@
 //! - `Var<SRef<Point>>` would mean `fn(&Point)` - pass by reference (not tested here)
 
 use rust_lms::prelude::*;
-use rust_lms::refer::SRef;
+use rust_lms::refer::{SRef, SRefMut};
 
 // Test with simple Copy struct
 // Note: Structs MUST be Copy for pass-by-value semantics
@@ -16,6 +16,42 @@ pub struct Point {
     x: i64,
     #[staged(f64)]
     y: f64,
+}
+
+#[test]
+fn test_scoped_mutable_field_operations() {
+    let mut compiler = Compiler::new();
+    let update = compiler.fun1("update_point", |ctx, mut point: Var<SRefMut<Point>>| {
+        {
+            let mut x = field_mut(&mut point, PointType::x());
+            let old = ctx.bind(x.load());
+            ctx.emit(x.store(old + 1i64));
+        }
+
+        load_field_mut(&mut point, PointType::x())
+    });
+
+    let compiled = compiler.compile(update).expect("compilation failed");
+    let mut point = Point { x: 41, y: 3.15 };
+    assert_eq!(compiled.call(&mut point), 42);
+    assert_eq!(point.x, 42);
+}
+
+#[test]
+fn test_split_disjoint_mutable_fields() {
+    let mut compiler = Compiler::new();
+    let update = compiler.fun1("split_point", |ctx, point: Var<SRefMut<Point>>| {
+        let (x, y) = split_fields_mut(point, PointType::x(), PointType::y());
+        ctx.emit(store_ref(x, Const::<i64>::new(17)));
+        ctx.emit(store_ref(y, Const::<f64>::new(2.5)));
+        Const::<()>::new(())
+    });
+
+    let compiled = compiler.compile(update).expect("compilation failed");
+    let mut point = Point { x: 0, y: 0.0 };
+    compiled.call(&mut point);
+    assert_eq!(point.x, 17);
+    assert_eq!(point.y, 2.5);
 }
 
 #[test]

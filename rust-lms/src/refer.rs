@@ -275,34 +275,49 @@ where
     }
 }
 
-/// Create a load operation from a mutable reference/pointer
-pub fn load_ref_mut<'a, T>(ptr: &mut Var<SRefMut<'a, T>>) -> LoadMutRef<'a, VarUse<SRefMut<'a, T>>>
-where
-    T: StagedType + 'a,
-{
-    LoadMutRef {
-        ptr: ptr.use_once(),
-        _marker: PhantomData,
-    }
+/// Convert a unique staged reference into one owned occurrence for an
+/// operation.
+///
+/// A mutable-reference expression is consumed. A mutable-reference variable is
+/// instead reborrowed into a crate-controlled [`VarUse`], allowing a later
+/// sequential operation to reborrow the same root again.
+pub trait IntoMutRef<'a, T: StagedType + 'a> {
+    type Staged: Staged<Out = SRefMut<'a, T>>;
+
+    fn into_mut_ref(self) -> Self::Staged;
 }
 
-/// Load through an arbitrary staged mutable-reference expression.
-///
-/// Prefer [`load_ref_mut`], which reborrows a unique mutable-reference
-/// variable. This escape hatch is needed for projected references until field
-/// projections carry scoped borrow provenance.
-///
-/// # Safety
-///
-/// `ptr` must be the only active staged mutable reference used to access its
-/// pointee for this generated operation.
-pub unsafe fn load_ref_mut_unchecked<'a, P, T>(ptr: P) -> LoadMutRef<'a, P>
+impl<'a, P, T> IntoMutRef<'a, T> for P
 where
     P: Staged<Out = SRefMut<'a, T>>,
     T: StagedType + 'a,
 {
+    type Staged = P;
+
+    fn into_mut_ref(self) -> Self::Staged {
+        self
+    }
+}
+
+impl<'a, T> IntoMutRef<'a, T> for &mut Var<SRefMut<'a, T>>
+where
+    T: StagedType + 'a,
+{
+    type Staged = VarUse<SRefMut<'a, T>>;
+
+    fn into_mut_ref(self) -> Self::Staged {
+        self.use_once()
+    }
+}
+
+/// Create a load operation from a unique mutable reference.
+pub fn load_ref_mut<'a, P, T>(ptr: P) -> LoadMutRef<'a, P::Staged>
+where
+    P: IntoMutRef<'a, T>,
+    T: StagedType + 'a,
+{
     LoadMutRef {
-        ptr,
+        ptr: ptr.into_mut_ref(),
         _marker: PhantomData,
     }
 }
@@ -372,38 +387,15 @@ where
     }
 }
 
-/// Create a store operation (for references)
-pub fn store_ref<'a, V, T>(
-    ptr: &mut Var<SRefMut<'a, T>>,
-    val: V,
-) -> StoreRef<'a, VarUse<SRefMut<'a, T>>, V>
+/// Create a store operation through a unique mutable reference.
+pub fn store_ref<'a, P, V, T>(ptr: P, val: V) -> StoreRef<'a, P::Staged, V>
 where
+    P: IntoMutRef<'a, T>,
     V: Staged<Out = T>,
     T: StagedType + 'a,
 {
     StoreRef {
-        ptr: ptr.use_once(),
-        val,
-        _marker: PhantomData,
-    }
-}
-
-/// Store through an arbitrary staged mutable-reference expression.
-///
-/// Prefer [`store_ref`], which reborrows a unique mutable-reference variable.
-///
-/// # Safety
-///
-/// `ptr` must be the only active staged mutable reference used to access its
-/// pointee for this generated operation.
-pub unsafe fn store_ref_unchecked<'a, P, V, T>(ptr: P, val: V) -> StoreRef<'a, P, V>
-where
-    P: Staged<Out = SRefMut<'a, T>>,
-    V: Staged<Out = T>,
-    T: StagedType + 'a,
-{
-    StoreRef {
-        ptr,
+        ptr: ptr.into_mut_ref(),
         val,
         _marker: PhantomData,
     }

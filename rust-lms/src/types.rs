@@ -145,6 +145,17 @@ pub unsafe trait ConstantType: StagedType {
 /// must have ordinary Rust copy semantics.
 pub unsafe trait CopyType: StagedType<RuntimeValue: Copy> + Copy {}
 
+mod direct_value_sealed {
+    pub trait Sealed {}
+}
+
+/// Staged scalar values represented directly by one Cranelift SSA value.
+///
+/// This sealed bound excludes aggregate `CopyType` values whose staged value is
+/// an address. Generic memory operations use it when they must load or store
+/// the value directly rather than invoke aggregate copy lowering.
+pub trait DirectValue: ConstantType + CopyType + direct_value_sealed::Sealed {}
+
 /// Maps a staged function parameter to the Rust value accepted by one safe
 /// invocation of generated code.
 ///
@@ -428,3 +439,14 @@ unsafe impl ConstantType for () {
 unsafe impl CopyType for () {}
 
 impl_by_value_runtime_type!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool, ());
+
+macro_rules! impl_direct_value {
+    ($($ty:ty),+ $(,)?) => {
+        $(
+            impl direct_value_sealed::Sealed for $ty {}
+            impl DirectValue for $ty {}
+        )+
+    };
+}
+
+impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool);

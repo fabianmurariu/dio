@@ -188,6 +188,18 @@ where
 /// Staged type for `Option<&mut T>` using niche optimization.
 ///
 /// Single i64 value: null = None, non-null = Some(&mut T)
+///
+/// A staged optional mutable reference remains a unique capability:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn duplicate(value: Var<OptMutRefType<'static, i64>>) {
+///     let first = value;
+///     let second = value;
+///     let _ = (first, second);
+/// }
+/// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub struct OptMutRefType<'a, T: StagedType> {
     _phantom: PhantomData<&'a mut T>,
@@ -367,7 +379,6 @@ pub fn opt_ref_none<'a, T: StagedType>() -> OptRefNone<'a, T> {
 }
 
 /// Expression to create `Some(&mut value)` for niche-optimized mutable reference option.
-#[derive(Clone)]
 pub struct OptMutRefSome<'a, T: StagedType, E> {
     reference: E,
     _phantom: PhantomData<&'a mut T>,
@@ -1396,8 +1407,7 @@ mod tests {
         let mut val = 41i64;
         let returned = f.call(Some(&mut val));
         assert_eq!(returned, 42);
-        // Note: we can't easily check val was mutated due to Rust's borrow checker
-        // but the function does mutate it
+        assert_eq!(val, 42);
 
         // None case
         assert_eq!(f.call(None), -1);

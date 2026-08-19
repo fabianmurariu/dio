@@ -199,9 +199,17 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         }
     });
 
-    let field_items = named_fields.iter().enumerate().map(|(idx, field)| {
+    let field_markers: Vec<_> = named_fields
+        .iter()
+        .map(|field| format_ident!("__field_{}", field.ident.as_ref().unwrap()))
+        .collect();
+
+    let field_items = named_fields
+        .iter()
+        .zip(&field_markers)
+        .enumerate()
+        .map(|(idx, (field, marker))| {
         let field_name = field.ident.as_ref().unwrap();
-        let marker = format_ident!("__field_{}", field_name);
         let staged_ty = resolve_staged_ty(field);
 
         // The marker is a pure `PhantomData` handle, so it needs no bounds and
@@ -229,7 +237,23 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 #marker(::core::marker::PhantomData)
             }
         }
-    });
+        });
+
+    let mut disjoint_field_impls = Vec::new();
+    for (left_index, left) in field_markers.iter().enumerate() {
+        for (right_index, right) in field_markers.iter().enumerate() {
+            if left_index == right_index {
+                continue;
+            }
+            disjoint_field_impls.push(quote! {
+                unsafe impl #trusted_impl_generics
+                    ::rust_lms::_internal::DisjointField<#right #ty_generics>
+                    for #left #ty_generics
+                    #trusted_where_clause
+                {}
+            });
+        }
+    }
 
     // CopyType is conditional: the struct is a staged `CopyType` exactly when all
     // of its field staged types are (merged with the struct's own `where`).
@@ -256,6 +280,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             use super::*;
 
             #(#field_items)*
+            #(#disjoint_field_impls)*
         }
 
         unsafe impl #trusted_impl_generics ::rust_lms::types::StagedType for #struct_name #ty_generics #trusted_where_clause {

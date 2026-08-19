@@ -141,6 +141,30 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             .ins()
             .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
     }
+
+    /// Resolve both parts of a slice while evaluating a memory-resolved slice
+    /// expression only once.
+    pub(crate) fn slice_parts(&mut self, slice: &impl Staged) -> (Value, Value) {
+        if let Some(var_id) = slice.var_id() {
+            if let Some(sv) = self.slice_vars.get(&var_id).copied() {
+                return (
+                    self.builder.use_var(sv.ptr_var),
+                    self.builder.use_var(sv.len_var),
+                );
+            }
+        }
+
+        let slice_ptr = slice.codegen(self);
+        let data_ptr = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
+        let len = self
+            .builder
+            .ins()
+            .load(types::I64, MemFlags::trusted(), slice_ptr, 8);
+        (data_ptr, len)
+    }
 }
 
 // =============================================================================
@@ -158,7 +182,9 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
 /// exactly match `Self::Out`. Any emitted memory access, call, or control flow
 /// must uphold the contracts of the staged operands it consumes. If `var_id`
 /// returns an ID, it must identify a compiler variable containing that same
-/// output representation.
+/// output representation. An implementation whose `Out` is not [`CopyType`]
+/// must not offer a safe `Copy` or `Clone` implementation that duplicates the
+/// staged value's ownership capability.
 ///
 /// ```compile_fail
 /// use rust_lms::prelude::*;

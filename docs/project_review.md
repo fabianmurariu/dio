@@ -6,13 +6,11 @@ Reviewed: 2026-08-17
 
 Last updated: 2026-08-19
 
-Phases 1 and 2 are complete. **Phase 2A: staged reference ownership** now blocks
-Phase 3 because the generated API must represent `&mut T` as a unique
-capability before reference-taking extern calls can be classified safely. The
+Phases 1, 2, and 2A are complete. **Phase 3: ABI correctness** is next. The
 detailed implementation order and verification record are in
 `docs/project_review_plan.md`.
 
-Phase 2A steps 1 through 3 are complete. `Var<T>` is `Copy` only for `CopyType`
+Phase 2A steps 1 through 5 are complete. `Var<T>` is `Copy` only for `CopyType`
 values, `SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable
 loads, stores, and slice operations borrow the unique staged handle for one AST
 operation. Consuming `SRefMut` into `SMutPtr` makes the raw-pointer boundary
@@ -39,12 +37,23 @@ ABI wrappers, with descriptor hardening still tracked by PR-10. Pool and
 opaque-iterator examples now use the safe reference path, while SQL and `SVec`
 baked-pointer paths remain explicitly unchecked.
 
-Still pending in Phase 2A:
+Mutable field reborrows now use a scoped `MutField` token that exposes only
+terminal operations. The derive macro emits type-level disjointness witnesses,
+allowing `split_fields_mut` to consume one parent capability and return two
+known-disjoint projections. Mutable element and sub-slice references consume
+their parent; bounds-checked scalar `get_or`/`set` operations reborrow only for
+one terminal operation and evaluate a non-variable slice expression only once.
+Slice data-pointer access now returns `SPtr`/`SMutPtr`, including for empty
+slices, rather than incorrectly claiming a Rust reference. The temporary
+`field_addr_mut_unchecked`, `load_ref_mut_unchecked`, and
+`store_ref_unchecked` APIs have been removed.
 
-- Replace temporary unchecked mutable field/reference projections with scoped
-  projection and disjoint-splitting APIs.
-- Audit mutable options, slices, structs, and SQL callbacks, then remove escape
-  hatches that no longer have a justified caller-side proof.
+The final ownership audit found no remaining safe capability duplication.
+Mutable options are consumed when matched, Arrow validity writes use scoped
+field operations, and pool and opaque callbacks use safe staged reborrows. SQL,
+dynamic records, and `SVec` intentionally consume their owning reference or
+owner-backed handle before entering documented raw-pointer operations; those
+operations remain checked by their explicit unsafe contracts.
 
 Phase 2 replaced integer-address/reference fabrication with explicit staged raw
 pointers, split Arrow read/write ownership, typed the normal `HostVec`/`SVec`
@@ -60,7 +69,7 @@ removed the former `Ctx::actions` type-complexity warning.
 | --- | --- | --- |
 | PR-01: Compiled entry-point ownership and JIT memory | Fixed | Phase 1 |
 | PR-02: Trusted layout and codegen traits | Fixed | Phase 1 |
-| PR-03: Raw addresses, fabricated lifetimes, and copyable mutable references | Partially fixed | Phases 2 and 2A |
+| PR-03: Raw addresses, fabricated lifetimes, and copyable mutable references | Fixed | Phases 2 and 2A |
 | PR-04: Typed external function signatures | Fixed | Phase 1 |
 | PR-05: Target-correct aggregate ABI lowering | Pending | Phase 3 |
 | PR-06: Unrestricted slice reinterpretation | Fixed | Phase 1 |

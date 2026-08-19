@@ -123,11 +123,21 @@ back to raw pointers.
    operations for statically disjoint fields and checked dynamic indices.
    Remove `field_addr_mut_unchecked`, `load_ref_mut_unchecked`, and
    `store_ref_unchecked` where a scoped operation can express the proof.
-   **Status: pending.**
+   `MutField` now borrows a parent for terminal field/descriptor operations;
+   the derive macro generates disjoint-field witnesses for consuming
+   `split_fields_mut`. Mutable element and sub-slice reference projections
+   consume their parent. `get_or` and `set` provide bounds-checked scalar
+   access without producing references or duplicating evaluation of their
+   slice expression, while slice data-pointer access now returns honest
+   raw-pointer markers. The three temporary unchecked projection APIs have
+   been removed. **Status: complete.**
 5. **Audit higher-level owners.** Migrate mutable options, Arrow validity,
    opaque inputs, pools, and SQL callbacks. Safe APIs must not clone a mutable
    root, manufacture a second handle with the same provenance, or hide a raw
-   descriptor validity requirement. **Status: pending.**
+   descriptor validity requirement. Mutable options remain consuming and
+   non-`Copy`; Arrow validity uses scoped fields; pools and opaque iterators use
+   safe extern reborrows. SQL, dynamic records, and `SVec` retain explicit raw
+   paths after consuming an owner-backed capability. **Status: complete.**
 
 **Phase 2A step 1 verification (2026-08-19):**
 `cargo test --workspace --all-targets` and `cargo test --workspace --doc` pass.
@@ -150,6 +160,18 @@ cover shared and slice reference calls, sequential mutable reborrows, pool
 callbacks, and opaque iterators. Compile-fail regressions prove that one unique
 staged root cannot satisfy two mutable parameters in the same extern call and
 that Rust slice-reference C ABIs are excluded from safe extern calls. The
+rust-lms library Clippy count remains at its existing 13-warning baseline.
+
+**Phase 2A steps 4 and 5 verification (2026-08-19):** Each bounded projection,
+splitting, checked-indexing, and raw-slice-pointer fix was followed by
+`cargo test --workspace --all-targets`; every run passed, including all
+`sql-gen` integration and property suites. Runtime regressions cover scoped
+field mutation, two disjoint mutable fields, checked in/out-of-bounds slice
+access, consuming mutable element/sub-slice projections, Arrow validity
+updates, single evaluation of checked slice operands, and empty-slice raw
+pointers. Compile-fail regressions reject a live parent alongside a scoped
+field, duplicate field splitting, parent reuse after mutable sub-slicing, and
+duplicated optional mutable references. Workspace doctests pass, and the
 rust-lms library Clippy count remains at its existing 13-warning baseline.
 
 ## Phase 3: ABI correctness

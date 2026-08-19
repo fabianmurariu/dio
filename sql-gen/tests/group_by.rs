@@ -1071,6 +1071,19 @@ fn group_by_aliased_key_and_agg() {
 }
 
 #[test]
+fn group_by_aliased_key_and_agg_with_having() {
+    let rb = batch(vec![1, 1, 2, 1, 2], vec![10, 20, 30, 40, 50]);
+    let out = exec_jit(
+        "SELECT key as k, sum(value) as total FROM t GROUP BY key having total > 70 ",
+        "t",
+        &rb,
+    )
+    .unwrap();
+    assert_eq!(out.num_rows(), 1);
+    assert_eq!(as_map(&out, 1), BTreeMap::from([(2, 80)]));
+}
+
+#[test]
 fn group_by_aliased_expr() {
     let rb = batch(vec![1, 2, 1, 2, 1], vec![1, 2, 3, 4, 5]);
     let out = exec_jit(

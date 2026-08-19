@@ -57,10 +57,13 @@
 //! ```
 
 use crate::ffi::FatSliceType;
-use crate::refer::{SPtr, SRef, SRefMut};
+use crate::r#struct::{Field, FieldAddr, MutField};
+use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use crate::types::{CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
+use cranelift_codegen::ir::{
+    condcodes::IntCC, types, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -458,19 +461,23 @@ mod slice_type_sealed {
 /// impl SliceType for FabricatedSlice {
 ///     type Elem = u8;
 ///     type ElemRef = SPtr<u8>;
+///     type DataPtr = SPtr<u8>;
 /// }
 /// ```
 pub trait SliceType: StagedType + slice_type_sealed::Sealed {
     /// Element type (`T`).
     type Elem: StagedType;
-    /// Reference-to-element produced by `as_ptr`/`get_ref_unchecked`:
+    /// Reference-to-element produced by `get_ref_unchecked`:
     /// `SRef<T>` for an immutable slice, `SRefMut<T>` for a mutable one.
     type ElemRef: StagedType;
+    /// Raw pointer produced by `as_ptr` / `as_mut_ptr`.
+    type DataPtr: StagedType;
 }
 
 impl<'a, T: StagedType> SliceType for SRef<'a, Slice<T>> {
     type Elem = T;
     type ElemRef = SRef<'a, T>;
+    type DataPtr = SPtr<T>;
 }
 
 impl<'a, T: StagedType> slice_type_sealed::Sealed for SRef<'a, Slice<T>> {}
@@ -478,6 +485,7 @@ impl<'a, T: StagedType> slice_type_sealed::Sealed for SRef<'a, Slice<T>> {}
 impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
     type Elem = T;
     type ElemRef = SRefMut<'a, T>;
+    type DataPtr = SMutPtr<T>;
 }
 
 impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
@@ -485,6 +493,7 @@ impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
 impl<T: StagedType> SliceType for FatSliceType<T> {
     type Elem = T;
     type ElemRef = SPtr<T>;
+    type DataPtr = SPtr<T>;
 }
 
 impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
@@ -537,8 +546,8 @@ where
 // SliceAsPtr: Get raw pointer to slice data
 // =============================================================================
 
-/// Get the data pointer of a slice. Yields `SRef<T>` for an immutable slice and
-/// `SRefMut<T>` for a mutable one (via `SliceType::ElemRef`).
+/// Get the raw data pointer of a slice. Empty slices are valid inputs, so this
+/// deliberately does not claim to produce a Rust reference marker.
 #[derive(Clone, Copy)]
 pub struct SliceAsPtr<S> {
     slice: S,
@@ -549,7 +558,7 @@ where
     S: Staged,
     S::Out: SliceType,
 {
-    type Out = <S::Out as SliceType>::ElemRef;
+    type Out = <S::Out as SliceType>::DataPtr;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.slice_data_ptr(&self.slice)
@@ -636,6 +645,122 @@ where
 pub struct SliceGetUnchecked<S, I> {
     slice: S,
     index: I,
+}
+
+// =============================================================================
+// Bounds-checked scalar element operations
+// =============================================================================
+
+/// Read a scalar element when `index < len`, otherwise evaluate `default`.
+pub struct SliceGetOr<S, I, D> {
+    slice: S,
+    index: I,
+    default: D,
+}
+
+unsafe impl<S, I, D> Staged for SliceGetOr<S, I, D>
+where
+    S: Staged,
+    S::Out: SliceType,
+    ElemOf<S>: DirectValue,
+    I: Staged<Out = u64>,
+    D: Staged<Out = ElemOf<S>>,
+{
+    type Out = ElemOf<S>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let index = self.index.codegen(ctx);
+        let (data_ptr, len) = ctx.slice_parts(&self.slice);
+        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+
+        let get_block = ctx.builder.create_block();
+        let default_block = ctx.builder.create_block();
+        let merge_block = ctx.builder.create_block();
+        ctx.builder
+            .append_block_param(merge_block, ElemOf::<S>::cranelift_type());
+        ctx.builder
+            .ins()
+            .brif(in_bounds, get_block, &[], default_block, &[]);
+
+        ctx.builder.switch_to_block(get_block);
+        ctx.builder.seal_block(get_block);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
+        let value = ctx.builder.ins().load(
+            ElemOf::<S>::cranelift_type(),
+            MemFlags::trusted(),
+            element_ptr,
+            0,
+        );
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(value)]);
+
+        ctx.builder.switch_to_block(default_block);
+        ctx.builder.seal_block(default_block);
+        let default = self.default.codegen(ctx);
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(default)]);
+
+        ctx.builder.switch_to_block(merge_block);
+        ctx.builder.seal_block(merge_block);
+        ctx.builder.block_params(merge_block)[0]
+    }
+}
+
+/// Write a scalar element when `index < len`, returning whether the write ran.
+pub struct SliceSet<S, I, V> {
+    slice: S,
+    index: I,
+    value: V,
+}
+
+unsafe impl<S, I, V> Staged for SliceSet<S, I, V>
+where
+    S: Staged,
+    S::Out: MutSliceType,
+    ElemOf<S>: DirectValue,
+    I: Staged<Out = u64>,
+    V: Staged<Out = ElemOf<S>>,
+{
+    type Out = bool;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let index = self.index.codegen(ctx);
+        let (data_ptr, len) = ctx.slice_parts(&self.slice);
+        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+
+        let set_block = ctx.builder.create_block();
+        let out_of_bounds_block = ctx.builder.create_block();
+        let merge_block = ctx.builder.create_block();
+        ctx.builder.append_block_param(merge_block, types::I8);
+        ctx.builder
+            .ins()
+            .brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
+
+        ctx.builder.switch_to_block(set_block);
+        ctx.builder.seal_block(set_block);
+        let value = self.value.codegen(ctx);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
+        ctx.builder
+            .ins()
+            .store(MemFlags::trusted(), value, element_ptr, 0);
+        let written = ctx.builder.ins().iconst(types::I8, 1);
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(written)]);
+
+        ctx.builder.switch_to_block(out_of_bounds_block);
+        ctx.builder.seal_block(out_of_bounds_block);
+        let not_written = ctx.builder.ins().iconst(types::I8, 0);
+        ctx.builder
+            .ins()
+            .jump(merge_block, &[BlockArg::Value(not_written)]);
+
+        ctx.builder.switch_to_block(merge_block);
+        ctx.builder.seal_block(merge_block);
+        ctx.builder.block_params(merge_block)[0]
+    }
 }
 
 unsafe impl<S, I> Staged for SliceGetUnchecked<S, I>
@@ -803,6 +928,20 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
         SliceAsPtr { slice: self }
     }
 
+    /// Read `index` when it is in bounds, otherwise return `default`.
+    fn get_or<I, D>(self, index: I, default: D) -> SliceGetOr<Self, I::Staged, D::Staged>
+    where
+        I: IntoStaged<u64>,
+        D: IntoStaged<T>,
+        T: DirectValue,
+    {
+        SliceGetOr {
+            slice: self,
+            index: index.into_staged(),
+            default: default.into_staged(),
+        }
+    }
+
     /// Get a reference to an element without bounds checking.
     ///
     /// Accepts any value that can be converted into a u64 staged expression for the index.
@@ -921,6 +1060,87 @@ pub trait RawSliceOps<T: StagedType>: Staged<Out = FatSliceType<T>> + Sized + Cl
 
 impl<T: StagedType, S> RawSliceOps<T> for S where S: Staged<Out = FatSliceType<T>> + Sized + Clone {}
 
+type MutFieldSlice<'stage, T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<'stage, T>>, F>, E>;
+
+impl<'borrow, 'stage, T, F> MutField<'borrow, 'stage, T, F>
+where
+    T: StagedType + 'stage,
+    F: Field<Parent = T>,
+    F::Out: 'stage,
+{
+    fn as_mut_slice_once<E>(&mut self) -> MutFieldSlice<'stage, T, F, E>
+    where
+        E: StagedType + 'stage,
+        F::Out: MutSliceRepr<E>,
+    {
+        AsMutSlice {
+            repr: self.use_once(),
+            _elem: PhantomData,
+        }
+    }
+
+    /// Read the length stored in a mutable slice-descriptor field.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a live, aligned, exclusively owned buffer
+    /// for its recorded element count.
+    pub unsafe fn slice_len<E>(&mut self) -> SliceLen<MutFieldSlice<'stage, T, F, E>>
+    where
+        E: StagedType + 'stage,
+        F::Out: MutSliceRepr<E>,
+    {
+        SliceLen {
+            slice: self.as_mut_slice_once(),
+        }
+    }
+
+    /// Read one element from a mutable slice-descriptor field.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a live, aligned, exclusively owned buffer,
+    /// and `index` must be less than its recorded element count at execution.
+    pub unsafe fn slice_get_unchecked<E, I>(
+        &mut self,
+        index: I,
+    ) -> SliceGetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged>
+    where
+        E: CopyType + 'stage,
+        I: IntoStaged<u64>,
+        F::Out: MutSliceRepr<E>,
+    {
+        SliceGetUnchecked {
+            slice: self.as_mut_slice_once(),
+            index: index.into_staged(),
+        }
+    }
+
+    /// Write one element through a mutable slice-descriptor field.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a live, aligned, exclusively owned buffer,
+    /// and `index` must be less than its recorded element count at execution.
+    pub unsafe fn slice_set_unchecked<E, I, V>(
+        &mut self,
+        index: I,
+        value: V,
+    ) -> SliceSetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged, V::Staged>
+    where
+        E: StagedType + 'stage,
+        I: IntoStaged<u64>,
+        V: IntoStaged<E>,
+        F::Out: MutSliceRepr<E>,
+    {
+        SliceSetUnchecked {
+            slice: self.as_mut_slice_once(),
+            index: index.into_staged(),
+            value: value.into_staged(),
+        }
+    }
+}
+
 // =============================================================================
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
 // =============================================================================
@@ -930,6 +1150,57 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
     pub fn len(&self) -> SliceLen<VarUse<SRefMut<'a, Slice<T>>>> {
         SliceLen {
             slice: self.use_once(),
+        }
+    }
+
+    /// Read `index` when it is in bounds, otherwise return `default`.
+    pub fn get_or<I, D>(
+        &self,
+        index: I,
+        default: D,
+    ) -> SliceGetOr<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, D::Staged>
+    where
+        I: IntoStaged<u64>,
+        D: IntoStaged<T>,
+        T: DirectValue,
+    {
+        SliceGetOr {
+            slice: self.use_once(),
+            index: index.into_staged(),
+            default: default.into_staged(),
+        }
+    }
+
+    /// Write `index` when it is in bounds, returning whether the write ran.
+    pub fn set<I, V>(
+        &mut self,
+        index: I,
+        value: V,
+    ) -> SliceSet<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
+    where
+        I: IntoStaged<u64>,
+        V: IntoStaged<T>,
+        T: DirectValue,
+    {
+        SliceSet {
+            slice: self.use_once(),
+            index: index.into_staged(),
+            value: value.into_staged(),
+        }
+    }
+
+    /// Consume this unique slice and project one mutable element.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length.
+    pub unsafe fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
+    where
+        I: IntoStaged<u64>,
+    {
+        SliceGetRefUnchecked {
+            slice: self,
+            index: index.into_staged(),
         }
     }
 
@@ -995,23 +1266,33 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
         }
     }
 
-    /// Reborrow this unique slice handle to construct a mutable sub-slice.
+    /// Consume this unique slice handle to construct a mutable sub-slice.
     ///
     /// # Safety
     ///
-    /// At execution, `start <= end <= self.len()` must hold, and the caller
-    /// must not use an overlapping view while the result is active.
+    /// At execution, `start <= end <= self.len()` must hold. The consuming
+    /// receiver prevents the parent handle from being reused.
+    ///
+    /// ```compile_fail
+    /// use rust_lms::prelude::*;
+    ///
+    /// fn overlapping(slice: Var<SRefMut<'static, Slice<i64>>>) {
+    ///     let sub = unsafe { slice.slice_mut_unchecked(0u64, 1u64) };
+    ///     let _parent_len = slice.len();
+    ///     let _ = sub;
+    /// }
+    /// ```
     pub unsafe fn slice_mut_unchecked<START, END>(
-        &mut self,
+        self,
         start: START,
         end: END,
-    ) -> SliceSliceUnchecked<VarUse<SRefMut<'a, Slice<T>>>, START::Staged, END::Staged>
+    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
     where
         START: IntoStaged<u64>,
         END: IntoStaged<u64>,
     {
         SliceSliceUnchecked {
-            slice: self.use_once(),
+            slice: self,
             start: start.into_staged(),
             end: end.into_staged(),
         }
@@ -1033,6 +1314,34 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     /// Get the raw mutable data pointer.
     fn as_mut_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
+    }
+
+    /// Read `index` when it is in bounds, otherwise return `default`.
+    fn get_or<I, D>(self, index: I, default: D) -> SliceGetOr<Self, I::Staged, D::Staged>
+    where
+        I: IntoStaged<u64>,
+        D: IntoStaged<T>,
+        T: DirectValue,
+    {
+        SliceGetOr {
+            slice: self,
+            index: index.into_staged(),
+            default: default.into_staged(),
+        }
+    }
+
+    /// Write `index` when it is in bounds, returning whether the write ran.
+    fn set<I, V>(self, index: I, value: V) -> SliceSet<Self, I::Staged, V::Staged>
+    where
+        I: IntoStaged<u64>,
+        V: IntoStaged<T>,
+        T: DirectValue,
+    {
+        SliceSet {
+            slice: self,
+            index: index.into_staged(),
+            value: value.into_staged(),
+        }
     }
 
     /// Get a mutable reference to an element without bounds checking.

@@ -34,41 +34,32 @@ impl ValidityView<Var<SRefMut<'static, FfiValidityMut>>> {
     ///
     /// At execution, `i` must be less than the prepared bitmap's bit length.
     pub unsafe fn set_null(&mut self, ctx: &mut Ctx, i: Var<u64>) {
-        // SAFETY: the mutable validity view must own exclusive access to its
-        // live bitmap buffer for the duration of generated execution.
-        let bytes_read = unsafe {
-            field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::bytes())
-                .as_mut_slice::<u8>()
-        };
-        // SAFETY: this impl is restricted to staged mutable references to
-        // `FfiValidity`.
         let (byte_index, mask) = bit_location_mut(ctx, &mut self.validity, i);
         let byte_index = ctx.bind(byte_index);
         // SAFETY: `i` is in range by this method's contract, so its computed
-        // byte lies within the prepared bitmap.
-        let old = ctx.bind(int_cast::<u64, u8, _>(unsafe {
-            bytes_read.get_unchecked(byte_index)
-        }));
+        // byte lies within the live, owner-backed bitmap descriptor.
+        let old = {
+            let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
+            ctx.bind(int_cast::<u64, u8, _>(unsafe {
+                bytes.slice_get_unchecked::<u8, _>(byte_index)
+            }))
+        };
         let was_valid = ctx.bind(not(eq(bitand::<u64, _, _>(old, mask), 0u64)));
         let not_mask = bitxor::<u64, _, _>(mask, Const::<u64>::new(u64::MAX));
         let cleared = int_cast::<u8, u64, _>(bitand::<u64, _, _>(old, not_mask));
-        // SAFETY: the read above is complete before this fresh mutable
-        // projection writes the same in-range byte.
-        let bytes_write = unsafe {
-            field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::bytes())
-                .as_mut_slice::<u8>()
-        };
-        ctx.emit(unsafe { bytes_write.set_unchecked(byte_index, cleared) });
+        // SAFETY: the read above is complete and the same byte remains within
+        // the exclusively owned bitmap descriptor.
+        {
+            let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
+            ctx.emit(unsafe { bytes.slice_set_unchecked::<u8, _, _>(byte_index, cleared) });
+        }
         ctx.if_then(was_valid, |ctx| {
             let count = ctx.bind(load_field_mut(
                 &mut self.validity,
                 FfiValidityMutType::null_count(),
             ));
-            // SAFETY: this is the only access to `null_count` in this branch.
-            let count_ref = unsafe {
-                field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::null_count())
-            };
-            ctx.emit(unsafe { store_ref_unchecked(count_ref, add(count, 1u64)) });
+            let mut count_field = field_mut(&mut self.validity, FfiValidityMutType::null_count());
+            ctx.emit(count_field.store(add(count, 1u64)));
         });
     }
 
@@ -78,40 +69,31 @@ impl ValidityView<Var<SRefMut<'static, FfiValidityMut>>> {
     ///
     /// At execution, `i` must be less than the prepared bitmap's bit length.
     pub unsafe fn set_valid(&mut self, ctx: &mut Ctx, i: Var<u64>) {
-        // SAFETY: the mutable validity view must own exclusive access to its
-        // live bitmap buffer for the duration of generated execution.
-        let bytes_read = unsafe {
-            field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::bytes())
-                .as_mut_slice::<u8>()
-        };
-        // SAFETY: this impl is restricted to staged mutable references to
-        // `FfiValidity`.
         let (byte_index, mask) = bit_location_mut(ctx, &mut self.validity, i);
         let byte_index = ctx.bind(byte_index);
         // SAFETY: `i` is in range by this method's contract, so its computed
-        // byte lies within the prepared bitmap.
-        let old = ctx.bind(int_cast::<u64, u8, _>(unsafe {
-            bytes_read.get_unchecked(byte_index)
-        }));
+        // byte lies within the live, owner-backed bitmap descriptor.
+        let old = {
+            let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
+            ctx.bind(int_cast::<u64, u8, _>(unsafe {
+                bytes.slice_get_unchecked::<u8, _>(byte_index)
+            }))
+        };
         let was_null = ctx.bind(eq(bitand::<u64, _, _>(old, mask), 0u64));
         let set = int_cast::<u8, u64, _>(bitor::<u64, _, _>(old, mask));
-        // SAFETY: the read above is complete before this fresh mutable
-        // projection writes the same in-range byte.
-        let bytes_write = unsafe {
-            field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::bytes())
-                .as_mut_slice::<u8>()
-        };
-        ctx.emit(unsafe { bytes_write.set_unchecked(byte_index, set) });
+        // SAFETY: the read above is complete and the same byte remains within
+        // the exclusively owned bitmap descriptor.
+        {
+            let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
+            ctx.emit(unsafe { bytes.slice_set_unchecked::<u8, _, _>(byte_index, set) });
+        }
         ctx.if_then(was_null, |ctx| {
             let count = ctx.bind(load_field_mut(
                 &mut self.validity,
                 FfiValidityMutType::null_count(),
             ));
-            // SAFETY: this is the only access to `null_count` in this branch.
-            let count_ref = unsafe {
-                field_addr_mut_unchecked(&mut self.validity, FfiValidityMutType::null_count())
-            };
-            ctx.emit(unsafe { store_ref_unchecked(count_ref, sub(count, 1u64)) });
+            let mut count_field = field_mut(&mut self.validity, FfiValidityMutType::null_count());
+            ctx.emit(count_field.store(sub(count, 1u64)));
         });
     }
 }
