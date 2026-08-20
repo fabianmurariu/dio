@@ -327,8 +327,10 @@ impl Ctx {
                 .builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), option_ptr, 0);
-            let payload_alignment = Item::align_of();
-            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
+            // Single source of truth for the COption payload offset (see
+            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
+            let payload_offset =
+                crate::option::COptionType::<Item>::payload_offset() as i32;
             let val =
                 ctx.builder
                     .ins()
@@ -464,8 +466,10 @@ impl Ctx {
                 .builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), option_ptr, 0);
-            let payload_alignment = Item::align_of();
-            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
+            // Single source of truth for the COption payload offset (see
+            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
+            let payload_offset =
+                crate::option::COptionType::<Item>::payload_offset() as i32;
             let val =
                 ctx.builder
                     .ins()

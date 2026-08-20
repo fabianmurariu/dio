@@ -129,7 +129,15 @@ unsafe impl<T: StagedType> StagedType for COptionType<T> {
 }
 
 impl<T: StagedType> COptionType<T> {
-    fn payload_offset() -> usize {
+    /// Byte offset of the payload inside the `#[repr(C, u64)] COption<T>` layout:
+    /// the 8-byte discriminant rounded up to `T`'s alignment.
+    ///
+    /// This is the single source of truth for the payload offset. Every codegen
+    /// site that loads/stores through a `COption` — including the opaque-iterator
+    /// loop in `func.rs`, which cannot see `COption`'s Rust layout directly — must
+    /// call this rather than re-deriving `align_up(8, align)` inline, per the
+    /// project's "slice/pointer layout lives in exactly one place" invariant.
+    pub(crate) fn payload_offset() -> usize {
         let alignment = T::align_of();
         debug_assert!(alignment.is_power_of_two());
         8usize.div_ceil(alignment) * alignment

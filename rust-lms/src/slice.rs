@@ -101,6 +101,20 @@ pub struct Slice<T: StagedType> {
 /// The staged representation of `Self` must store a pointer at byte offset 0
 /// and a `u64` element count at byte offset 8. The pointer must have the same
 /// representation as a pointer to `T`.
+///
+/// # Why this is an open `unsafe trait`, not sealed
+///
+/// This is deliberately implementable by downstream crates, and it must stay
+/// that way: the only implementors today are `arrow-lms`'s `FfiBuffer` /
+/// `FfiBufferMut`, and `arrow-lms` is a *separate* crate. Sealing (a private
+/// supertrait) would confine impls to `rust-lms` itself and break the intended
+/// pattern where a data-layer crate defines its own `#[repr(C)]` descriptor and
+/// witnesses its layout. `unsafe` — plus the `unsafe fn as_slice` on the read
+/// side — is the whole safety boundary: an implementor must uphold the offset/
+/// representation contract above under `unsafe impl`, and no *safe* code can
+/// reinterpret an arbitrary `SRef<R>` as a slice (proven by the `compile_fail`
+/// doctest on `ReprSliceOps::as_slice`). Do not seal this without first moving
+/// every descriptor type into `rust-lms`.
 pub unsafe trait SliceRepr<T: StagedType>: StagedType {}
 
 /// Unsafe layout witness for staged types that can also be decoded as a

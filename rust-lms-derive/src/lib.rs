@@ -30,6 +30,22 @@ fn is_path(ty: &Type, expected: &str) -> bool {
 /// These mappings intentionally erase a Rust field to an integer with the same
 /// bits. All other fields must use a staged marker whose `RuntimeValue` is the
 /// field's actual Rust type.
+///
+/// # 64-bit interlock
+///
+/// This allowlist is only sound because `usize`, `isize`, and every thin/wide
+/// data pointer are 8 bytes on the targets rust-lms supports, so erasing them to
+/// `u64`/`i64` neither changes size nor alignment. That 8-byte assumption is
+/// enforced elsewhere: `rust-lms/build.rs` refuses to compile on any target
+/// outside the six 64-bit triples. This function does **not** re-check it.
+///
+/// The erasure is nonetheless fail-safe rather than trusted: for every field the
+/// derive also emits a `LAYOUT_VALID` `const` assertion (see `layout_checks`)
+/// comparing `size_of`/`align_of` of the field against its staged marker's
+/// `RuntimeValue`. If a future target ever made these types not-8-bytes, that
+/// assertion would turn the mismatch into a compile error instead of silent UB —
+/// so the worst outcome of the implicit dependency is a failed build, not a
+/// miscompile. Keep this allowlist and `build.rs`'s target list in agreement.
 fn is_supported_erased_field(field_ty: &Type, staged_ty: &Type) -> bool {
     (is_path(field_ty, "usize") && is_path(staged_ty, "u64"))
         || (is_path(field_ty, "isize") && is_path(staged_ty, "i64"))

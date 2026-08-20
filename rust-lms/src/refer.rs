@@ -648,6 +648,18 @@ pub fn const_mut_ptr<T: StagedType>(p: *mut T::RuntimeValue) -> ConstPtr<SMutPtr
 /// Use it to turn a raw byte buffer (`SMutPtr<u8>` loaded from a control block) into
 /// a typed `SMutPtr<T>` for element-strided indexing. Prefer the [`ptr_cast`] /
 /// [`ptr_cast_mut`] constructors, which fix the input to a real pointer type.
+///
+/// # Why this is safe despite reinterpreting the pointee
+///
+/// The cast itself cannot cause undefined behavior: it produces no instructions
+/// (the address value is unchanged) and only rewrites the *stage-0* type. The
+/// "the new pointee type is correct" claim is therefore an obligation that is
+/// **redeemed at the point of use, not here** — every way to actually touch the
+/// pointee (`load`, `store`, `ptr_offset`, `array_index`) is an `unsafe` staging
+/// operation whose contract already requires a valid, correctly-typed, aligned
+/// address. So a wrong `ptr_cast` is not itself unsound; it only becomes unsound
+/// through a later `unsafe` deref, which is where the audit belongs. Read a safe
+/// `ptr_cast` as "relabel this address", never as a proof that the bytes match `T`.
 pub struct PtrCast<P, S> {
     ptr: P,
     _s: PhantomData<S>,
