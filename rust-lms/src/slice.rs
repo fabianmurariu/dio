@@ -13,7 +13,7 @@
 //! offset 8: len (usize)             - number of elements
 //! ```
 //!
-//! At the ABI boundary, slice references are passed as 2 x i64 (ptr, len).
+//! At generated-function boundaries, a pointer to this descriptor is passed.
 //!
 //! # Canonical Staged representation
 //!
@@ -21,8 +21,8 @@
 //! resolved one of two ways (see [`CompilationContext::slice_data_ptr`] /
 //! [`CompilationContext::slice_len`], which are the only code that knows this):
 //!
-//! - **register-resolved** — slice *parameters* are split at the ABI boundary
-//!   into two Cranelift variables (`ptr_var`, `len_var`) kept in
+//! - **register-resolved** — slice *parameters* load the descriptor into two
+//!   Cranelift variables (`ptr_var`, `len_var`) kept in
 //!   `ctx.slice_vars` keyed by `var_id`. Slice ops read those registers
 //!   directly, with no memory access (the fast path for tight loops).
 //! - **memory-resolved** — subslices (and any operand without a `var_id`) have
@@ -342,14 +342,6 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
         true // Fat pointer is Copy
     }
 
-    fn num_abi_values() -> usize {
-        2 // ptr, len
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![types::I64, types::I64]
-    }
-
     fn is_fat_pointer() -> bool {
         true // Slice references are fat pointers
     }
@@ -395,14 +387,6 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
 
     fn is_copy_struct() -> bool {
         true // ABI-classified as a two-register aggregate; not semantically Copy.
-    }
-
-    fn num_abi_values() -> usize {
-        2
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![types::I64, types::I64]
     }
 
     fn is_fat_pointer() -> bool {

@@ -2,11 +2,11 @@
 //!
 //! This derive macro generates:
 //! - Field token types for accessing struct fields
-//! - StagedType implementation with pass-by-value semantics
+//! - StagedType implementation with aggregate value semantics
 //! - CopyType implementation (if all fields are Copy)
 //! - Field accessor methods
 //!
-//! # Pass-by-Value Semantics
+//! # Aggregate Value Semantics
 //!
 //! Structs derived with `StagedType` use pass-by-value semantics at the Rust ABI level:
 //! - `Var<Point>` means `fn(Point)` - the struct is passed by value
@@ -19,7 +19,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, Data, DeriveInput, Fields, FnArg, ItemFn, ReturnType, Type,
+    parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Fields, FnArg,
+    ItemFn, Meta, ReturnType, Token, Type,
 };
 
 fn is_path(ty: &Type, expected: &str) -> bool {
@@ -70,12 +71,16 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
 
     // Check for repr(C)
     let has_repr_c = input.attrs.iter().any(|attr| {
-        if attr.path().is_ident("repr") {
-            if let Ok(meta_list) = attr.meta.require_list() {
-                return meta_list.tokens.to_string() == "C";
-            }
+        if !attr.path().is_ident("repr") {
+            return false;
         }
-        false
+        attr.parse_args_with(Punctuated::<Meta, Token![,]>::parse_terminated)
+            .map(|items| {
+                items
+                    .iter()
+                    .any(|item| matches!(item, Meta::Path(path) if path.is_ident("C")))
+            })
+            .unwrap_or(false)
     });
 
     if !has_repr_c {
@@ -110,6 +115,11 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     };
 
     let struct_name = &input.ident;
+    let visibility = &input.vis;
+    let field_visibility = match visibility {
+        syn::Visibility::Inherited => quote! { pub(super) },
+        _ => quote! { #visibility },
+    };
 
     // Split the struct's generics so every generated impl/type carries them.
     // `<'a, M: StagedType>` -> impl_generics (with bounds), ty_generics (`<'a, M>`),
@@ -216,7 +226,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         // no `where`; only the `Field` impl references the parent struct (as
         // `Parent` and in `offset_of!`), so the struct's `where` goes there.
         quote! {
-            pub struct #marker #ty_generics ( #phantom_ty );
+            #field_visibility struct #marker #ty_generics ( #phantom_ty );
 
             impl #impl_generics ::core::clone::Clone for #marker #ty_generics {
                 fn clone(&self) -> Self { *self }
@@ -233,7 +243,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 const INDEX: usize = #idx;
             }
 
-            pub fn #field_name #impl_generics () -> #marker #ty_generics {
+            #field_visibility fn #field_name #impl_generics () -> #marker #ty_generics {
                 #marker(::core::marker::PhantomData)
             }
         }
@@ -276,7 +286,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         // Field token module. The markers are internal (`__field_*`) and the
         // module/marker names trip the case lints, so allow them here.
         #[allow(non_camel_case_types, non_snake_case)]
-        pub mod #field_module_name {
+        #visibility mod #field_module_name {
             use super::*;
 
             #(#field_items)*
@@ -309,16 +319,6 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 true
             }
 
-            fn num_abi_values() -> usize {
-                // Number of i64s needed to hold this struct (round up).
-                ::std::mem::size_of::<#struct_name #ty_generics>().div_ceil(8)
-            }
-
-            fn abi_types() -> Vec<::cranelift_codegen::ir::Type> {
-                // Return N x I64 where N = num_abi_values
-                let n = ::std::mem::size_of::<#struct_name #ty_generics>().div_ceil(8);
-                vec![::cranelift_codegen::ir::types::I64; n]
-            }
         }
 
         unsafe impl #trusted_impl_generics ::rust_lms::types::RuntimeParam for #struct_name #ty_generics #trusted_where_clause {
@@ -577,12 +577,14 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
 
     // Extract parameter types
     let mut param_staged_types = Vec::new();
+    let mut param_rust_types = Vec::new();
     let mut errors = Vec::new();
 
     for input_arg in &input.sig.inputs {
         match input_arg {
             FnArg::Typed(pat_type) => {
                 let ty = &*pat_type.ty;
+                param_rust_types.push(ty.clone());
                 match rust_type_to_staged_type(ty) {
                     Ok(staged_type) => param_staged_types.push(staged_type),
                     Err(e) => errors.push(syn::Error::new_spanned(ty, e)),
@@ -607,6 +609,10 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
                 quote! { () }
             }
         },
+    };
+    let return_rust_type = match &input.sig.output {
+        ReturnType::Default => quote! { () },
+        ReturnType::Type(_, ty) => quote! { #ty },
     };
 
     // If there were any errors, return them
@@ -653,6 +659,14 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! {}
         };
 
+    let thunk_name = format_ident!("__rust_lms_thunk_{}", fn_name);
+    let thunk_args: Vec<_> = (0..param_rust_types.len())
+        .map(|index| format_ident!("__rust_lms_arg_{index}"))
+        .collect();
+    let thunk_arg_ptrs: Vec<_> = (0..param_rust_types.len())
+        .map(|index| format_ident!("__rust_lms_arg_ptr_{index}"))
+        .collect();
+
     // Generate the output
     let expanded = quote! {
         #input
@@ -663,16 +677,34 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         #[allow(non_camel_case_types)]
         pub struct #type_name;
 
+        #[doc(hidden)]
+        unsafe extern "C" fn #thunk_name(
+            #(#thunk_arg_ptrs: *const u8,)*
+            __rust_lms_output: *mut u8,
+        ) {
+            #(
+                let #thunk_args: #param_rust_types = unsafe {
+                    #thunk_arg_ptrs.cast::<#param_rust_types>().read()
+                };
+            )*
+            let __rust_lms_result: #return_rust_type = unsafe {
+                #fn_name(#(#thunk_args),*)
+            };
+            if ::core::mem::size_of::<#return_rust_type>() != 0 {
+                unsafe {
+                    __rust_lms_output
+                        .cast::<#return_rust_type>()
+                        .write(__rust_lms_result);
+                }
+            }
+        }
+
         unsafe impl ::rust_lms::ffi::ExternFn for #type_name {
             type Args = #args_staged_type;
             type Ret = #return_staged_type;
 
             const NAME: &'static str = #fn_name_str;
-            const FN_PTR: *const u8 = #fn_name as *const u8;
-
-            fn return_abi_types() -> Vec<::cranelift_codegen::ir::Type> {
-                <#return_staged_type as ::rust_lms::types::StagedType>::abi_types()
-            }
+            const FN_PTR: *const u8 = #thunk_name as *const u8;
         }
 
         #safe_extern_impl

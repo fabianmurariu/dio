@@ -4,11 +4,24 @@ Reviewed: 2026-08-17
 
 ## Remediation status
 
-Last updated: 2026-08-19
+Last updated: 2026-08-20
 
-Phases 1, 2, and 2A are complete. **Phase 3: ABI correctness** is next. The
-detailed implementation order and verification record are in
+Phases 1, 2, and 2A are complete. **Phase 3: ABI correctness is implemented and
+passes locally on `aarch64-apple-darwin`.** A native six-target GitHub Actions
+matrix now runs the ABI regressions on both supported architectures across
+Linux, macOS, and Windows; its first remote run is still pending. Phase 4 is
+next. The detailed order and verification record are in
 `docs/project_review_plan.md`.
+
+Phase 3 removed platform aggregate classification from `StagedType`. Internal
+functions, compiled entry points, extern calls, and opaque-iterator callbacks
+now use one canonical ABI: a pointer to exact storage for every argument plus a
+caller-owned output pointer and no IR return values. Rust-facing wrappers
+marshal typed values through those slots, while `#[extern_fn]` emits a
+Rust-compiled thunk that owns the real platform ABI. Aggregate copies use exact
+sizes and alignments, `COption` uses its actual payload offset, and unit writes
+no result. The old rounded `i64` chunking, `>16` indirect rule,
+`num_abi_values`, `abi_types`, and `should_pass_by_pointer` are gone.
 
 Phase 2A steps 1 through 5 are complete. `Var<T>` is `Copy` only for `CopyType`
 values, `SRef` remains copyable, and `SRefMut` is non-`Copy`. Direct mutable
@@ -71,7 +84,7 @@ removed the former `Ctx::actions` type-complexity warning.
 | PR-02: Trusted layout and codegen traits | Fixed | Phase 1 |
 | PR-03: Raw addresses, fabricated lifetimes, and copyable mutable references | Fixed | Phases 2 and 2A |
 | PR-04: Typed external function signatures | Fixed | Phase 1 |
-| PR-05: Target-correct aggregate ABI lowering | Pending | Phase 3 |
+| PR-05: Target-correct aggregate ABI lowering | Fixed; six-target CI run pending | Phase 3 |
 | PR-06: Unrestricted slice reinterpretation | Fixed | Phase 1 |
 | PR-07: Typed, owned Arrow buffer descriptors | Fixed | Phase 2 |
 | PR-08: Stream schema validation and scan failures | Fixed | Phase 1 |

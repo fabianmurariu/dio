@@ -1,3 +1,7 @@
+//! Functions and control flow: constants and arithmetic, `fun1`/`call`, recursion,
+//! `if_then_else`/`seq`/`let_var`/`assign`, `while_loop`, multi-parameter functions,
+//! and owner-checked vs unchecked compiled function pointers.
+
 use rust_lms::func::*;
 use rust_lms::prelude::*;
 
@@ -103,11 +107,20 @@ fn test_unchecked_function_pointer_while_owner_is_live() {
     let add = compiler.fun2("add", |_ctx, a: Var<i64>, b: Var<i64>| add(a, b));
     let compiled = compiler.compile(add).expect("compilation failed");
 
-    // SAFETY: `compiled` remains live for every invocation of this detached
-    // pointer, and the function embeds no host allocation addresses.
+    // SAFETY: `compiled` remains live for the invocation, and each pointer
+    // names correctly typed and aligned input/output storage.
     let add_fn = unsafe { compiled.as_fn_unchecked() };
-
-    assert_eq!(add_fn(20, 22), 42);
+    let a = 20i64;
+    let b = 22i64;
+    let mut output = std::mem::MaybeUninit::<i64>::uninit();
+    unsafe {
+        add_fn(
+            std::ptr::from_ref(&a).cast(),
+            std::ptr::from_ref(&b).cast(),
+            output.as_mut_ptr().cast(),
+        );
+        assert_eq!(output.assume_init(), 42);
+    }
 }
 
 #[test]

@@ -212,14 +212,6 @@ unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     fn is_copy_struct() -> bool {
         true
     }
-
-    fn num_abi_values() -> usize {
-        2 // ptr + len
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![types::I64, types::I64]
-    }
 }
 
 unsafe impl<T: StagedType> CopyType for FatSliceType<T> {}
@@ -261,14 +253,6 @@ unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
 
     fn is_copy_struct() -> bool {
         true
-    }
-
-    fn num_abi_values() -> usize {
-        2 // ptr + len
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![types::I64, types::I64]
     }
 }
 
@@ -459,31 +443,17 @@ mod extern_args_sealed {
 /// A sealed tuple of staged parameter types for an [`ExternFn`].
 ///
 /// Implementations are provided for `()` and tuples up to arity eight. Keeping
-/// this sealed ensures that the type-level signature and the ABI metadata are
-/// always derived from the same staged types.
+/// this sealed ensures that the type-level signature is always derived from
+/// the staged parameter types.
 pub trait ExternArgs: extern_args_sealed::Sealed {
     /// Number of logical parameters in the tuple.
     const LEN: usize;
-
-    /// Cranelift ABI values used by each logical parameter.
-    fn abi_types() -> Vec<Vec<cranelift_codegen::ir::Type>>;
-
-    /// Whether each logical parameter is passed indirectly.
-    fn pass_by_pointer() -> Vec<bool>;
 }
 
 impl extern_args_sealed::Sealed for () {}
 
 impl ExternArgs for () {
     const LEN: usize = 0;
-
-    fn abi_types() -> Vec<Vec<cranelift_codegen::ir::Type>> {
-        Vec::new()
-    }
-
-    fn pass_by_pointer() -> Vec<bool> {
-        Vec::new()
-    }
 }
 
 macro_rules! impl_extern_args {
@@ -492,14 +462,6 @@ macro_rules! impl_extern_args {
 
         impl<$($T: StagedType),+> ExternArgs for ($($T,)+) {
             const LEN: usize = $len;
-
-            fn abi_types() -> Vec<Vec<cranelift_codegen::ir::Type>> {
-                vec![$($T::abi_types()),+]
-            }
-
-            fn pass_by_pointer() -> Vec<bool> {
-                vec![$($T::should_pass_by_pointer()),+]
-            }
         }
     };
 }
@@ -540,25 +502,6 @@ pub unsafe trait ExternFn {
 
     /// Function pointer as raw bytes
     const FN_PTR: *const u8;
-
-    /// Get the Cranelift ABI parameter types.
-    /// Returns a Vec of (num_abi_values, types) for each logical parameter.
-    fn param_abi_types() -> Vec<Vec<cranelift_codegen::ir::Type>> {
-        Self::Args::abi_types()
-    }
-
-    /// Get the Cranelift ABI return types.
-    fn return_abi_types() -> Vec<cranelift_codegen::ir::Type>;
-
-    /// Returns true if the return type is a struct that should be passed by pointer
-    fn return_by_pointer() -> bool {
-        Self::Ret::should_pass_by_pointer()
-    }
-
-    /// For each parameter, returns true if it should be passed by pointer (>16 bytes)
-    fn param_by_pointer() -> Vec<bool> {
-        Self::Args::pass_by_pointer()
-    }
 }
 
 /// An [`ExternFn`] whose target can be invoked by safe Rust when every value in
@@ -753,8 +696,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
-        let call = ctx.builder.ins().call(func_ref, &[]);
-        finish_extern_call::<S::Ret>(ctx, call)
+        emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
 }
 
@@ -794,8 +736,7 @@ where
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
 
-        let call = ctx.builder.ins().call(func_ref, &args);
-        finish_extern_call::<S::Ret>(ctx, call)
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -935,8 +876,7 @@ where
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
 
-        let call = ctx.builder.ins().call(func_ref, &args);
-        finish_extern_call::<S::Ret>(ctx, call)
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -1004,74 +944,63 @@ where
     CallExtern2 { func, arg0, arg1 }
 }
 
-/// Append `arg`'s ABI value(s) to `args`.
-///
-/// Slice references may be represented by two compiler variables instead of a
-/// pointer to a descriptor. Other multi-value arguments are flattened from
-/// their in-memory copy-struct representation.
+/// Append a pointer to `arg`'s canonical ABI storage to `args`.
 fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<Value>, arg: &A)
 where
     A: Staged,
     A::Out: UncheckedExternArg<AType>,
     AType: StagedType,
 {
-    if AType::is_fat_pointer() {
-        if let Some(slice_vars) = arg
-            .var_id()
-            .and_then(|var_id| ctx.slice_vars.get(&var_id).copied())
-        {
-            args.push(ctx.builder.use_var(slice_vars.ptr_var));
-            args.push(ctx.builder.use_var(slice_vars.len_var));
-            return;
-        }
+    let arg_value = arg.codegen(ctx);
+    push_extern_value::<AType>(ctx, args, arg_value);
+}
 
-        let descriptor = arg.codegen(ctx);
-        for offset in [0, 8] {
-            args.push(
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), descriptor, offset),
-            );
-        }
-    } else if AType::is_copy_struct() && AType::num_abi_values() > 1 {
-        let arg_val = arg.codegen(ctx);
-        for i in 0..AType::num_abi_values() {
-            let offset = (i * 8) as i32;
-            let val = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), arg_val, offset);
-            args.push(val);
-        }
+pub(crate) fn push_extern_value<T: StagedType>(
+    ctx: &mut CompilationContext,
+    args: &mut Vec<Value>,
+    value: Value,
+) {
+    if T::is_copy_struct() {
+        args.push(value);
     } else {
-        args.push(arg.codegen(ctx));
+        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            (T::size_of() as u32).max(1),
+            T::align_of().trailing_zeros() as u8,
+        ));
+        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        if T::size_of() != 0 {
+            ctx.builder
+                .ins()
+                .store(MemFlags::trusted(), value, slot_ptr, 0);
+        }
+        args.push(slot_ptr);
     }
 }
 
-/// Materialize an extern call's result: a multi-value copy-struct return is
-/// spilled to a stack slot (whose address is returned); any other return is the
-/// single result value. Shared by every `CallExternN::codegen`.
-fn finish_extern_call<Ret: StagedType>(
+/// Call a Rust-generated thunk through the canonical storage-pointer ABI.
+pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
-    call: cranelift_codegen::ir::Inst,
+    func_ref: cranelift_codegen::ir::FuncRef,
+    mut args: Vec<Value>,
 ) -> Value {
-    if Ret::is_copy_struct() && Ret::num_abi_values() > 1 {
-        let align_shift = Ret::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            Ret::size_of() as u32,
-            align_shift,
-        ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
-        let results = ctx.builder.inst_results(call).to_vec();
-        for (i, val) in results.iter().enumerate() {
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), *val, slot_ptr, (i * 8) as i32);
-        }
-        slot_ptr
+    let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        StackSlotKind::ExplicitSlot,
+        (Ret::size_of() as u32).max(1),
+        Ret::align_of().trailing_zeros() as u8,
+    ));
+    let output_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+    args.push(output_ptr);
+    ctx.builder.ins().call(func_ref, &args);
+
+    if Ret::is_copy_struct() {
+        output_ptr
+    } else if Ret::size_of() == 0 {
+        ctx.get_unit_value()
     } else {
-        ctx.builder.inst_results(call)[0]
+        ctx.builder
+            .ins()
+            .load(Ret::cranelift_type(), MemFlags::trusted(), output_ptr, 0)
     }
 }
 
@@ -1106,8 +1035,7 @@ where
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
 
-        let call = ctx.builder.ins().call(func_ref, &args);
-        finish_extern_call::<S::Ret>(ctx, call)
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -1205,8 +1133,7 @@ where
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
         push_extern_arg::<_, DType>(ctx, &mut args, &self.arg3);
 
-        let call = ctx.builder.ins().call(func_ref, &args);
-        finish_extern_call::<S::Ret>(ctx, call)
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 

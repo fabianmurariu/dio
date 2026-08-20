@@ -25,10 +25,9 @@ use cranelift_frontend::FunctionBuilder;
 /// # Safety
 ///
 /// `RuntimeValue`, `cranelift_type`, `size_of`, and `align_of` must describe one
-/// consistent runtime representation. The ABI methods must classify that same
-/// representation correctly, and every value produced for this type must be a
-/// valid `RuntimeValue`. Incorrect implementations can make generated code
-/// perform invalid loads, stores, calls, or Rust function-pointer conversions.
+/// consistent runtime representation, and every value produced for this type
+/// must be a valid `RuntimeValue`. Incorrect implementations can make generated
+/// code perform invalid loads, stores, calls, or Rust value construction.
 ///
 /// The derive macro rejects field markers with incompatible runtime types:
 ///
@@ -75,32 +74,10 @@ pub unsafe trait StagedType {
         Self::size_of()
     }
 
-    /// Returns true if this is a Copy struct that should be passed by value.
-    /// When true, the type is passed in registers at the ABI boundary but
-    /// stored to a stack slot internally for field access via pointer.
+    /// Returns true when staged values use an indirect aggregate
+    /// representation for field access and exact byte copies.
     fn is_copy_struct() -> bool {
         false
-    }
-
-    /// Returns true if this struct should be passed by pointer at the ABI level.
-    ///
-    /// On ARM64, structs larger than 16 bytes are passed by pointer according
-    /// to the C ABI (caller allocates memory, passes pointer). This method
-    /// detects that case to generate correct calling convention code.
-    ///
-    /// For structs ≤16 bytes, returns false (pass in registers).
-    /// For structs >16 bytes, returns true (pass by pointer).
-    fn should_pass_by_pointer() -> bool {
-        // Only applies to copy structs larger than 16 bytes
-        Self::is_copy_struct() && Self::size_of() > 16
-    }
-
-    /// Number of primitive values this type flattens to at the ABI boundary.
-    /// For primitives: 1
-    /// For structs ≤16 bytes: number of register-sized values needed
-    /// For structs >16 bytes: 1 (pointer)
-    fn num_abi_values() -> usize {
-        1
     }
 
     /// Returns true if this is a fat pointer (e.g., slice reference).
@@ -108,13 +85,6 @@ pub unsafe trait StagedType {
     /// registers instead of a stack slot for better performance.
     fn is_fat_pointer() -> bool {
         false
-    }
-
-    /// Get the Cranelift types for each ABI value.
-    /// For primitives: just the cranelift_type
-    /// For structs: sequence of I64s (or I64+F64 mix if we support floats in structs)
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        vec![Self::cranelift_type()]
     }
 }
 

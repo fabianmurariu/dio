@@ -11,14 +11,13 @@
 //! Functions with 0-8 parameters are supported via `fun0`, `fun1`, ..., `fun8`.
 //! Each returns a type-safe `FunRefN` that encodes the parameter and return types.
 //!
-//! # Struct Pass-by-Value
+//! # Aggregate Values
 //!
-//! For `#[repr(C)] Copy` structs, this module implements pass-by-value semantics:
-//! - At the Rust ABI level: `fn(Point) -> Point` (value semantics)
-//! - At the Cranelift level: multiple i64 parameters, stored to stack slot
-//! - Internally: pointer to stack slot for field access
+//! Generated functions use a private, platform-independent storage-pointer ABI.
+//! Rust-facing wrappers preserve value semantics without exposing platform
+//! aggregate classification to Cranelift.
 
-use crate::staged::{assign, CompilationContext, Staged, Var};
+use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, Staged, Var};
 use crate::types::{RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
@@ -29,28 +28,9 @@ use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
 use std::marker::PhantomData;
+use std::mem::MaybeUninit;
 
 pub use crate::func_impl::*;
-
-// =============================================================================
-// StructInfo: Information about struct types for ABI handling
-// =============================================================================
-
-/// Information about a struct type needed for ABI handling.
-///
-/// This captures the struct's layout so we can:
-/// 1. Pass it as multiple i64 values at the ABI boundary
-/// 2. Create a properly-sized stack slot
-/// 3. Store/load the values to/from the stack slot
-#[derive(Clone, Debug)]
-pub struct StructInfo {
-    /// Size in bytes
-    pub size: u32,
-    /// Alignment in bytes
-    pub alignment: u32,
-    /// Number of i64 values needed at ABI boundary
-    pub num_abi_values: usize,
-}
 
 // =============================================================================
 // Internal: FunDef - Stored function definition
@@ -290,17 +270,16 @@ impl Ctx {
     /// `if_then` to exit early. Panics at codegen time if called outside a loop.
     /// Drive a push loop over an opaque external iterator via `next`/`drop`.
     ///
-    /// Emits the register-consume loop (see `iter::opaque`):
+    /// Emits the storage-pointer loop (see `iter::opaque`):
     /// ```text
-    /// header: (tag, val) = next(it)     ; COption<Item> in two return regs
+    /// header: next(&it, &option)        ; Rust thunk writes COption<Item>
     ///         brif tag, body, exit      ; tag: 1 = Some, 0 = None
     /// body:   elem = val ; <consumer> ; jump header
     /// exit:   drop(it)
     /// ```
     /// `drop` sits at the top of `exit`, which is reached both by the `None`
     /// branch and by any `break_loop` from the body, so the handle is always
-    /// freed. The value register feeds the element `Var` directly — no stack
-    /// slot, no `COption` materialization.
+    /// freed. The element is loaded from the exact `COption<Item>` payload.
     ///
     /// `Item` must be an integer no wider than 64 bits (the `COption` FFI ABI
     /// returns the payload in an integer register). Float/compound items go via
@@ -334,16 +313,26 @@ impl Ctx {
 
             ctx.builder.ins().jump(header, &[]);
 
-            // header: call next(it); branch on the discriminant register.
+            // header: call the canonical thunk and branch on the stored tag.
             ctx.builder.switch_to_block(header);
             let it = ctx.var_map[&handle_id];
             let it_val = ctx.builder.use_var(it);
             let next_ref = ctx.get_extern_func_ref(next_id);
-            let call = ctx.builder.ins().call(next_ref, &[it_val]);
-            let (tag, val) = {
-                let r = ctx.builder.inst_results(call);
-                (r[0], r[1])
-            };
+            let mut args = Vec::with_capacity(1);
+            crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
+            let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
+                ctx, next_ref, args,
+            );
+            let tag = ctx
+                .builder
+                .ins()
+                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
+            let payload_alignment = Item::align_of();
+            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
+            let val =
+                ctx.builder
+                    .ins()
+                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
             ctx.builder.ins().brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register (already the element's ABI type,
@@ -367,7 +356,9 @@ impl Ctx {
             ctx.builder.seal_block(exit);
             let it_val2 = ctx.builder.use_var(it);
             let drop_ref = ctx.get_extern_func_ref(drop_id);
-            ctx.builder.ins().call(drop_ref, &[it_val2]);
+            let mut args = Vec::with_capacity(1);
+            crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
+            crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
         }));
     }
 
@@ -411,11 +402,7 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let call_conv = if cfg!(target_os = "windows") {
-                cranelift_codegen::isa::CallConv::WindowsFastcall
-            } else {
-                cranelift_codegen::isa::CallConv::SystemV
-            };
+            let call_conv = ctx.module.isa().default_call_conv();
 
             // One per-level slot, reserved once in the frame and reused.
             let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
@@ -428,16 +415,29 @@ impl Ctx {
             // Producer builds the iterator into the slot (fills the mini-vtable).
             init_call(ctx, slot_ptr);
 
-            // `extern "C"` signatures for the indirect next/drop calls.
+            // Canonical storage-pointer signatures for indirect next/drop.
             let mut next_sig = Signature::new(call_conv);
-            next_sig.params.push(AbiParam::new(types::I64)); // data ptr
-            next_sig.returns.push(AbiParam::new(types::I64)); // COption tag
-            next_sig.returns.push(AbiParam::new(item_cty)); // COption value
+            next_sig.params.push(AbiParam::new(types::I64)); // data slot
+            next_sig.params.push(AbiParam::new(types::I64)); // output slot
             let next_sigref = ctx.builder.import_signature(next_sig);
 
             let mut drop_sig = Signature::new(call_conv);
             drop_sig.params.push(AbiParam::new(types::I64));
+            drop_sig.params.push(AbiParam::new(types::I64));
             let drop_sigref = ctx.builder.import_signature(drop_sig);
+
+            let data_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                8,
+                3,
+            ));
+            let data_ptr = ctx.builder.ins().stack_addr(types::I64, data_slot, 0);
+            let option_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+                StackSlotKind::ExplicitSlot,
+                crate::option::COptionType::<Item>::size_of() as u32,
+                crate::option::COptionType::<Item>::align_of().trailing_zeros() as u8,
+            ));
+            let option_ptr = ctx.builder.ins().stack_addr(types::I64, option_slot, 0);
 
             let header = ctx.builder.create_block();
             let body = ctx.builder.create_block();
@@ -454,14 +454,22 @@ impl Ctx {
                 ctx.builder
                     .ins()
                     .load(types::I64, MemFlags::trusted(), slot_ptr, next_off);
-            let call = ctx
+            ctx.builder
+                .ins()
+                .store(MemFlags::trusted(), data, data_ptr, 0);
+            ctx.builder
+                .ins()
+                .call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
+            let tag = ctx
                 .builder
                 .ins()
-                .call_indirect(next_sigref, next_fn, &[data]);
-            let (tag, val) = {
-                let r = ctx.builder.inst_results(call);
-                (r[0], r[1])
-            };
+                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
+            let payload_alignment = Item::align_of();
+            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
+            let val =
+                ctx.builder
+                    .ins()
+                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
             ctx.builder.ins().brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register, replay consumer, loop.
@@ -491,7 +499,10 @@ impl Ctx {
                     .load(types::I64, MemFlags::trusted(), slot_ptr, drop_off);
             ctx.builder
                 .ins()
-                .call_indirect(drop_sigref, drop_fn, &[data2]);
+                .store(MemFlags::trusted(), data2, data_ptr, 0);
+            ctx.builder
+                .ins()
+                .call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
         }));
     }
 
@@ -604,8 +615,7 @@ pub(crate) struct ExternFnDef {
     /// Unique link name (`NAME` + the fn pointer), so distinct monomorphizations
     /// of a generic extern fn don't collide in cranelift's name-keyed symbol map.
     pub name: String,
-    pub param_abi_types: Vec<Vec<cranelift_codegen::ir::Type>>,
-    pub return_abi_types: Vec<cranelift_codegen::ir::Type>,
+    pub num_params: usize,
     pub fn_ptr: *const u8,
 }
 
@@ -667,8 +677,7 @@ impl<'a> Compiler<'a> {
         self.extern_functions.push(ExternFnDef {
             // Disambiguate generic instantiations (same NAME, different fn ptr).
             name: format!("{}_{:x}", S::NAME, S::FN_PTR as usize),
-            param_abi_types: S::param_abi_types(),
-            return_abi_types: S::return_abi_types(),
+            num_params: S::NUM_PARAMS,
             fn_ptr: S::FN_PTR,
         });
 
@@ -1067,12 +1076,9 @@ impl<'a> Compiler<'a> {
     /// returning a `Compiled<T>` that owns the JIT module and can extract
     /// the computed value.
     ///
-    /// # Struct Handling
-    ///
-    /// For functions with struct parameters or returns:
-    /// - Parameters: Multiple i64 values are received, stored to a stack slot,
-    ///   and the variable holds the stack slot pointer
-    /// - Returns: The result pointer is used to load multiple i64 values for return
+    /// Generated functions use one storage pointer per logical parameter and
+    /// one caller-owned output pointer. This keeps aggregate classification out
+    /// of the private JIT ABI.
     pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
@@ -1098,14 +1104,9 @@ impl<'a> Compiler<'a> {
 
         let mut module = JITModule::new(builder);
 
-        // Get the default calling convention for this platform
-        // This ensures proper ABI compatibility, especially important for external function calls
-        // Using SystemV on Unix-like systems, WindowsFastcall on Windows
-        let call_conv = if cfg!(target_os = "windows") {
-            cranelift_codegen::isa::CallConv::WindowsFastcall
-        } else {
-            cranelift_codegen::isa::CallConv::SystemV
-        };
+        // Use the convention selected from the complete target triple. In
+        // particular, Apple AArch64 is distinct from generic System V.
+        let call_conv = module.isa().default_call_conv();
 
         // First pass: declare all internal functions
         let mut func_map: HashMap<usize, FuncId> = HashMap::new();
@@ -1115,17 +1116,12 @@ impl<'a> Compiler<'a> {
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
 
-                // Add all ABI param types (multiple per logical param for structs)
-                for param_info in &func_def.param_infos {
-                    for abi_type in &param_info.abi_types {
-                        sig.params.push(AbiParam::new(*abi_type));
-                    }
+                // Private JIT ABI: one storage pointer per logical parameter,
+                // followed by one output storage pointer.
+                for _ in &func_def.param_infos {
+                    sig.params.push(AbiParam::new(types::I64));
                 }
-
-                // Add all ABI return types (multiple for structs)
-                for abi_type in &func_def.return_info.abi_types {
-                    sig.returns.push(AbiParam::new(*abi_type));
-                }
+                sig.params.push(AbiParam::new(types::I64));
 
                 let func_id = module
                     .declare_function(&func_def.name, Linkage::Local, &sig)
@@ -1142,16 +1138,8 @@ impl<'a> Compiler<'a> {
             let mut sig = module.make_signature();
             sig.call_conv = call_conv;
 
-            // Add all ABI param types
-            for param_types in &extern_def.param_abi_types {
-                for abi_type in param_types {
-                    sig.params.push(AbiParam::new(*abi_type));
-                }
-            }
-
-            // Add return types
-            for abi_type in &extern_def.return_abi_types {
-                sig.returns.push(AbiParam::new(*abi_type));
+            for _ in 0..=extern_def.num_params {
+                sig.params.push(AbiParam::new(types::I64));
             }
 
             // Declare the function (will be linked to the actual function pointer)
@@ -1166,10 +1154,8 @@ impl<'a> Compiler<'a> {
         let mut main_sig = module.make_signature();
         main_sig.call_conv = call_conv;
 
-        // For main function, use the expression's return type ABI types
-        for abi_type in S::Out::abi_types() {
-            main_sig.returns.push(AbiParam::new(abi_type));
-        }
+        // `__main__` writes its result into caller-owned storage.
+        main_sig.params.push(AbiParam::new(types::I64));
 
         let main_func_id = module
             .declare_function("__main__", Linkage::Local, &main_sig)
@@ -1186,14 +1172,10 @@ impl<'a> Compiler<'a> {
                 let mut sig = module.make_signature();
                 sig.call_conv = call_conv;
 
-                for param_info in &func_def.param_infos {
-                    for abi_type in &param_info.abi_types {
-                        sig.params.push(AbiParam::new(*abi_type));
-                    }
+                for _ in &func_def.param_infos {
+                    sig.params.push(AbiParam::new(types::I64));
                 }
-                for abi_type in &func_def.return_info.abi_types {
-                    sig.returns.push(AbiParam::new(*abi_type));
-                }
+                sig.params.push(AbiParam::new(types::I64));
 
                 let mut func_ctx = module.make_context();
                 func_ctx.func.signature = sig;
@@ -1214,81 +1196,51 @@ impl<'a> Compiler<'a> {
 
                     // Handle all parameters
                     let block_params = builder.block_params(entry_block).to_vec();
-                    let mut abi_idx = 0;
-
                     for (param_idx, param_info) in func_def.param_infos.iter().enumerate() {
                         let var_id = func_def.param_var_ids[param_idx];
+                        let storage_ptr = block_params[param_idx];
 
-                        if let Some(ref struct_info) = param_info.struct_info {
-                            if param_info.pass_by_pointer {
-                                // LARGE STRUCT (>16 bytes): Passed by pointer
-                                // The caller already has the struct in memory and passes a pointer.
-                                // We use that pointer directly without copying.
-                                let ptr_value = block_params[abi_idx];
-                                let param_var = builder.declare_var(types::I64);
-                                builder.def_var(param_var, ptr_value);
-                                var_map.insert(var_id, param_var);
-                                abi_idx += 1;
-                            } else if param_info.is_fat_pointer {
-                                // FAT POINTER (slice): Store ptr and len in separate variables
-                                // This avoids stack slot loads in tight loops
-                                let ptr_value = block_params[abi_idx];
-                                let len_value = block_params[abi_idx + 1];
-
-                                // Create separate Cranelift variables for ptr and len
+                        if param_info.is_aggregate {
+                            if param_info.is_fat_pointer {
+                                let ptr_value = builder.ins().load(
+                                    types::I64,
+                                    MemFlags::trusted(),
+                                    storage_ptr,
+                                    0,
+                                );
+                                let len_value = builder.ins().load(
+                                    types::I64,
+                                    MemFlags::trusted(),
+                                    storage_ptr,
+                                    8,
+                                );
                                 let ptr_var = builder.declare_var(types::I64);
                                 let len_var = builder.declare_var(types::I64);
                                 builder.def_var(ptr_var, ptr_value);
                                 builder.def_var(len_var, len_value);
-
-                                // Store in slice_vars for optimized access
                                 slice_vars
                                     .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
-
-                                // Store ptr_var in var_map - slice operations should use slice_vars
-                                // for the optimized path. The fallback path (loading from stack)
-                                // is not supported for parameter slices.
-                                var_map.insert(var_id, ptr_var);
-
-                                abi_idx += 2;
-                            } else {
-                                // SMALL STRUCT (≤16 bytes): Passed by value in registers
-                                // Create stack slot, store values, use pointer
-                                let align_shift = struct_info.alignment.trailing_zeros() as u8;
-                                let stack_slot =
-                                    builder.create_sized_stack_slot(StackSlotData::new(
-                                        StackSlotKind::ExplicitSlot,
-                                        struct_info.size,
-                                        align_shift,
-                                    ));
-
-                                let slot_ptr = builder.ins().stack_addr(types::I64, stack_slot, 0);
-
-                                // Store each i64 value to the stack slot
-                                for i in 0..struct_info.num_abi_values {
-                                    let offset = (i * 8) as i32;
-                                    builder.ins().store(
-                                        MemFlags::trusted(),
-                                        block_params[abi_idx],
-                                        slot_ptr,
-                                        offset,
-                                    );
-                                    abi_idx += 1;
-                                }
-
-                                // Declare variable to hold the stack pointer
-                                let param_var = builder.declare_var(types::I64);
-                                builder.def_var(param_var, slot_ptr);
-                                var_map.insert(var_id, param_var);
                             }
+
+                            // Aggregate expressions are represented by a pointer to
+                            // their complete runtime storage.
+                            let param_var = builder.declare_var(types::I64);
+                            builder.def_var(param_var, storage_ptr);
+                            var_map.insert(var_id, param_var);
                         } else {
-                            // PRIMITIVE PARAMETER: Direct binding
-                            let param_value = block_params[abi_idx];
-                            let param_type = param_info.abi_types[0];
-                            let param_var = builder.declare_var(param_type);
+                            let param_value = if param_info.size == 0 {
+                                builder.ins().iconst(types::I8, 0)
+                            } else {
+                                builder.ins().load(
+                                    param_info.value_type,
+                                    MemFlags::trusted(),
+                                    storage_ptr,
+                                    0,
+                                )
+                            };
+                            let param_var = builder.declare_var(param_info.value_type);
                             builder.def_var(param_var, param_value);
                             var_map.insert(var_id, param_var);
-                            abi_idx += 1;
                         }
                     }
 
@@ -1309,30 +1261,23 @@ impl<'a> Compiler<'a> {
                         (func_def.body)(&mut ctx)
                     };
 
-                    // Handle return - either primitive or struct
-                    if let Some(ref struct_info) = func_def.return_info.struct_info {
-                        if func_def.return_info.pass_by_pointer {
-                            // LARGE STRUCT RETURN (>16 bytes): Return pointer directly
-                            builder.ins().return_(&[result]);
-                        } else {
-                            // SMALL STRUCT RETURN (≤16 bytes): Load multiple values from the result pointer
-                            let mut return_values = Vec::with_capacity(struct_info.num_abi_values);
-                            for i in 0..struct_info.num_abi_values {
-                                let offset = (i * 8) as i32;
-                                let val = builder.ins().load(
-                                    types::I64,
-                                    MemFlags::trusted(),
-                                    result,
-                                    offset,
-                                );
-                                return_values.push(val);
-                            }
-                            builder.ins().return_(&return_values);
-                        }
-                    } else {
-                        // PRIMITIVE RETURN: Direct return
-                        builder.ins().return_(&[result]);
+                    let output_ptr = block_params[func_def.param_infos.len()];
+                    if func_def.return_info.is_aggregate {
+                        let config = module.isa().frontend_config();
+                        emit_copy_nonoverlapping(
+                            &mut builder,
+                            config,
+                            output_ptr,
+                            result,
+                            func_def.return_info.size as usize,
+                            func_def.return_info.alignment as usize,
+                        );
+                    } else if func_def.return_info.size != 0 {
+                        builder
+                            .ins()
+                            .store(MemFlags::trusted(), result, output_ptr, 0);
                     }
+                    builder.ins().return_(&[]);
 
                     builder.finalize();
                 }
@@ -1360,6 +1305,7 @@ impl<'a> Compiler<'a> {
                 let mut builder_context = FunctionBuilderContext::new();
                 let mut builder = FunctionBuilder::new(&mut func_ctx.func, &mut builder_context);
                 let entry_block = builder.create_block();
+                builder.append_block_params_for_function_params(entry_block);
                 builder.switch_to_block(entry_block);
                 builder.seal_block(entry_block);
 
@@ -1382,24 +1328,23 @@ impl<'a> Compiler<'a> {
                     expr.codegen(&mut ctx)
                 };
 
-                // Handle return for main function
+                let output_ptr = builder.block_params(entry_block)[0];
                 if S::Out::is_copy_struct() {
-                    // STRUCT RETURN: Load multiple values from the result pointer
-                    let num_values = S::Out::num_abi_values();
-                    let mut return_values = Vec::with_capacity(num_values);
-                    for i in 0..num_values {
-                        let offset = (i * 8) as i32;
-                        let val =
-                            builder
-                                .ins()
-                                .load(types::I64, MemFlags::trusted(), result, offset);
-                        return_values.push(val);
-                    }
-                    builder.ins().return_(&return_values);
-                } else {
-                    // PRIMITIVE RETURN
-                    builder.ins().return_(&[result]);
+                    let config = module.isa().frontend_config();
+                    emit_copy_nonoverlapping(
+                        &mut builder,
+                        config,
+                        output_ptr,
+                        result,
+                        S::Out::size_of(),
+                        S::Out::align_of(),
+                    );
+                } else if S::Out::size_of() != 0 {
+                    builder
+                        .ins()
+                        .store(MemFlags::trusted(), result, output_ptr, 0);
                 }
+                builder.ins().return_(&[]);
 
                 builder.finalize();
             }
@@ -1483,23 +1428,26 @@ impl<'a, T: StagedType> Drop for Compiled<'a, T> {
 
 impl<'a, T: StagedType> Compiled<'a, T> {
     /// Execute the compiled code and return the result.
-    ///
-    pub fn run(&self) -> T::RuntimeValue
-    where
-        T::RuntimeValue: Copy,
-    {
-        // SAFETY: compile creates `__main__` with this exact zero-argument C ABI
-        // signature, and borrowing self keeps its executable memory live.
-        let func: extern "C" fn() -> T::RuntimeValue =
-            unsafe { std::mem::transmute(self.main_ptr) };
-        func()
+    pub fn run(&self) -> T::RuntimeValue {
+        let mut output = MaybeUninit::<T::RuntimeValue>::uninit();
+        // SAFETY: `compile` creates `__main__` with the canonical one-output-
+        // pointer signature and writes a valid `T::RuntimeValue` before return.
+        let function: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(self.main_ptr) };
+        unsafe {
+            function(output.as_mut_ptr().cast());
+            output.assume_init()
+        }
     }
 
     /// Read the generated function address returned by a function-valued
     /// `__main__` trampoline.
     unsafe fn function_entry_ptr(&self) -> *const u8 {
-        let get_ptr: extern "C" fn() -> i64 = unsafe { std::mem::transmute(self.main_ptr) };
-        get_ptr() as usize as *const u8
+        let mut output = MaybeUninit::<*const u8>::uninit();
+        let get_ptr: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(self.main_ptr) };
+        unsafe {
+            get_ptr(output.as_mut_ptr().cast());
+            output.assume_init()
+        }
     }
 }
 
@@ -1542,6 +1490,12 @@ impl<F> Clone for CompiledFn<'_, F> {
 
 impl<F> Copy for CompiledFn<'_, F> {}
 
+macro_rules! raw_argument_pointer {
+    ($type:ident) => {
+        *const u8
+    };
+}
+
 // Generate borrowed entry points and direct calls for every function arity.
 macro_rules! impl_compiled_fn {
     // Base case: zero parameters
@@ -1553,11 +1507,15 @@ macro_rules! impl_compiled_fn {
             where
                 'compiled: 'call,
             {
-                // SAFETY: RuntimeResult witnesses the entry point's result ABI,
+                let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
+                // SAFETY: RuntimeResult witnesses the output storage layout,
                 // and the wrapper keeps the generated code live for 'call.
-                let function: extern "C" fn() -> OUT::Output<'call> =
+                let function: unsafe extern "C" fn(*mut u8) =
                     unsafe { std::mem::transmute(self.function) };
-                function()
+                unsafe {
+                    function(output.as_mut_ptr().cast());
+                    output.assume_init()
+                }
             }
         }
 
@@ -1594,10 +1552,11 @@ macro_rules! impl_compiled_fn {
             /// # Safety
             ///
             /// The returned pointer must never be invoked after `self` is
-            /// dropped.
+            /// dropped. Its argument must point to writable, properly aligned
+            /// storage for `OUT::RuntimeValue`.
             pub unsafe fn as_fn_unchecked(
                 &self,
-            ) -> extern "C" fn() -> OUT::RuntimeValue {
+            ) -> unsafe extern "C" fn(*mut u8) {
                 unsafe { std::mem::transmute(self.function_entry_ptr()) }
             }
         }
@@ -1614,12 +1573,22 @@ macro_rules! impl_compiled_fn {
             where
                 'compiled: 'call,
             {
-                // SAFETY: RuntimeParam and RuntimeResult witness the generated
-                // entry point's ABI. The shared 'call lifetime enforces the
-                // staged reference contract at each invocation.
-                let function: extern "C" fn($($T::Arg<'call>),+) -> OUT::Output<'call> =
+                let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
+                // SAFETY: RuntimeParam and RuntimeResult witness the storage
+                // layouts. The shared 'call lifetime enforces the staged
+                // reference contract at each invocation.
+                let function: unsafe extern "C" fn(
+                    $(raw_argument_pointer!($T)),+,
+                    *mut u8,
+                ) =
                     unsafe { std::mem::transmute(self.function) };
-                function($($arg),+)
+                unsafe {
+                    function(
+                        $(std::ptr::from_ref(&$arg).cast::<u8>()),+,
+                        output.as_mut_ptr().cast(),
+                    );
+                    output.assume_init()
+                }
             }
         }
 
@@ -1648,10 +1617,13 @@ macro_rules! impl_compiled_fn {
             /// # Safety
             ///
             /// The returned pointer must never be invoked after `self` is
-            /// dropped.
+            /// dropped. Each input must point to the exact runtime
+            /// representation of its corresponding staged parameter, and the
+            /// final pointer must reference writable, properly aligned output
+            /// storage.
             pub unsafe fn as_fn_unchecked(
                 &self,
-            ) -> extern "C" fn($($T::RuntimeValue),+) -> OUT::RuntimeValue {
+            ) -> unsafe extern "C" fn($(raw_argument_pointer!($T)),+, *mut u8) {
                 unsafe { std::mem::transmute(self.function_entry_ptr()) }
             }
         }

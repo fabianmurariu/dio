@@ -172,7 +172,7 @@ impl Compiler<'_> {
 }
 
 // =============================================================================
-// OpaqueIter: next/drop source (register-consume loop)
+// OpaqueIter: next/drop source (storage-pointer loop)
 // =============================================================================
 
 /// A [`StagedIterator`] over an opaque external iterator, driven by `next`/`drop`.
@@ -194,7 +194,7 @@ where
     where
         F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
     {
-        // Bind the handle once, then drive the register-consume loop.
+        // Bind the handle once, then drive the storage-pointer loop.
         let handle = ctx.bind(self.handle);
         ctx.opaque_for_each::<K::Item, F>(
             handle,
@@ -274,12 +274,10 @@ where
 //
 // The library supplies the `next`/`drop`/`len`/`next_value` extern fns
 // generically (monomorphized per item type), so a user only writes the
-// domain-specific producer that boxes their iterator. Scalar items only — a
-// `COption<Item>` must fit in registers for the register-consume `next`; compound
-// items use a separate out-param path.
+// domain-specific producer that boxes their iterator. Scalar items only: the
+// loop loads the `COption<Item>` payload into one SSA value.
 
-/// Staged scalar item whose `COption` fits in registers (≤ 16 bytes), so the
-/// register-consume `next` path is valid.
+/// Staged scalar item supported by the direct `COption` payload-load path.
 mod register_scalar_sealed {
     pub trait Sealed {}
 }
@@ -413,11 +411,30 @@ unsafe extern "C" fn dyn_exact_drop<T>(it: *mut ()) {
     ));
 }
 
+macro_rules! dyn_thunk {
+    ($thunk:ident, $function:ident, $ret:ty) => {
+        unsafe extern "C" fn $thunk<T: Copy>(input: *const u8, output: *mut u8) {
+            let input = unsafe { input.cast::<*mut ()>().read() };
+            let result: $ret = unsafe { $function::<T>(input) };
+            if std::mem::size_of::<$ret>() != 0 {
+                unsafe { output.cast::<$ret>().write(result) };
+            }
+        }
+    };
+}
+
+dyn_thunk!(dyn_next_thunk, dyn_next, COption<T>);
+dyn_thunk!(dyn_drop_thunk, dyn_drop, ());
+dyn_thunk!(dyn_exact_next_thunk, dyn_exact_next, COption<T>);
+dyn_thunk!(dyn_exact_drop_thunk, dyn_exact_drop, ());
+dyn_thunk!(dyn_len_thunk, dyn_len, u64);
+dyn_thunk!(dyn_next_value_thunk, dyn_next_value, T);
+
 /// Generate a generic `ExternFn` marker over `T` for one of the library iterator
 /// fns. The link name is disambiguated by the fn pointer at registration, so the
 /// shared `NAME` across monomorphizations is fine. Every fn takes one `*mut ()`.
 macro_rules! dyn_extern {
-    ($Marker:ident, $func:ident, $ret_ty:ty, $ret_abi:expr) => {
+    ($Marker:ident, $name:ident, $thunk:ident, $ret_ty:ty) => {
         #[doc(hidden)]
         pub struct $Marker<T>(PhantomData<T>);
         unsafe impl<T> ExternFn for $Marker<T>
@@ -427,46 +444,23 @@ macro_rules! dyn_extern {
         {
             type Args = (OpaqueHandle,);
             type Ret = $ret_ty;
-            const NAME: &'static str = stringify!($func);
-            const FN_PTR: *const u8 = $func::<T::RuntimeValue> as *const u8;
-            fn return_abi_types() -> Vec<cranelift_codegen::ir::Type> {
-                $ret_abi
-            }
+            const NAME: &'static str = stringify!($name);
+            const FN_PTR: *const u8 = $thunk::<T::RuntimeValue> as *const u8;
         }
     };
 }
 
-/// The type-correct ABI of a `COption<T>` return: an i64 discriminant followed
-/// by the payload's real ABI types, so a scalar payload (e.g. `f64`) is returned
-/// in the right register class. (`COptionType::abi_types` is all-i64 for the
-/// generic struct paths; here we need the precise classification.)
-fn coption_return_abi<T: StagedType>() -> Vec<cranelift_codegen::ir::Type> {
-    let mut v = vec![cranelift_codegen::ir::types::I64];
-    v.extend(T::abi_types());
-    v
-}
-
-dyn_extern!(DynNext, dyn_next, COptionType<T>, coption_return_abi::<T>());
-dyn_extern!(DynDrop, dyn_drop, (), <() as StagedType>::abi_types());
+dyn_extern!(DynNext, dyn_next, dyn_next_thunk, COptionType<T>);
+dyn_extern!(DynDrop, dyn_drop, dyn_drop_thunk, ());
 dyn_extern!(
     DynExactNext,
     dyn_exact_next,
-    COptionType<T>,
-    coption_return_abi::<T>()
+    dyn_exact_next_thunk,
+    COptionType<T>
 );
-dyn_extern!(
-    DynExactDrop,
-    dyn_exact_drop,
-    (),
-    <() as StagedType>::abi_types()
-);
-dyn_extern!(DynLen, dyn_len, u64, <u64 as StagedType>::abi_types());
-dyn_extern!(
-    DynNextValue,
-    dyn_next_value,
-    T,
-    <T as StagedType>::abi_types()
-);
+dyn_extern!(DynExactDrop, dyn_exact_drop, dyn_exact_drop_thunk, ());
+dyn_extern!(DynLen, dyn_len, dyn_len_thunk, u64);
+dyn_extern!(DynNextValue, dyn_next_value, dyn_next_value_thunk, T);
 
 /// Kind for a `Box<dyn Iterator<Item = T>>` (scalar `T`). Drive it with
 /// [`Compiler::opaque_iter_fns`] over the producer's handle.
@@ -503,7 +497,7 @@ unsafe impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
 // module/`OpaqueIterSlot` docs.
 
 use crate::staged::CompilationContext;
-use cranelift_codegen::ir::{InstBuilder, Value};
+use cranelift_codegen::ir::Value;
 use std::mem::MaybeUninit;
 
 /// Inline storage budget (bytes) for a reused-storage iterator. Iterators that
@@ -519,9 +513,10 @@ pub const OPAQUE_ITER_INLINE_CAP: usize = 256;
 #[repr(C, align(16))]
 pub struct OpaqueIterSlot<T> {
     storage: [MaybeUninit<u8>; OPAQUE_ITER_INLINE_CAP],
-    next: Option<unsafe extern "C" fn(*mut u8) -> COption<T>>,
-    drop: Option<unsafe extern "C" fn(*mut u8)>,
+    next: Option<unsafe extern "C" fn(*const u8, *mut u8)>,
+    drop: Option<unsafe extern "C" fn(*const u8, *mut u8)>,
     data: *mut u8,
+    _item: PhantomData<T>,
 }
 
 /// Build `it` into `slot`: placed inline if it fits [`OPAQUE_ITER_INLINE_CAP`],
@@ -541,14 +536,21 @@ where
 {
     // Monomorphic mini-vtable thunks for the concrete `I` (known here in the
     // producer, type-erased on the staged side). Non-capturing → coerce to fn.
-    unsafe extern "C" fn next_thunk<T: Copy, I: Iterator<Item = T>>(data: *mut u8) -> COption<T> {
-        (*(data as *mut I)).next().into()
+    unsafe extern "C" fn next_thunk<T: Copy, I: Iterator<Item = T>>(
+        data: *const u8,
+        output: *mut u8,
+    ) {
+        let data = unsafe { data.cast::<*mut u8>().read() };
+        let result: COption<T> = unsafe { (*(data as *mut I)).next().into() };
+        unsafe { output.cast::<COption<T>>().write(result) };
     }
-    unsafe extern "C" fn drop_inline<I>(data: *mut u8) {
-        std::ptr::drop_in_place(data as *mut I);
+    unsafe extern "C" fn drop_inline<I>(data: *const u8, _output: *mut u8) {
+        let data = unsafe { data.cast::<*mut u8>().read() };
+        unsafe { std::ptr::drop_in_place(data as *mut I) };
     }
-    unsafe extern "C" fn drop_heap<I>(data: *mut u8) {
-        drop(Box::from_raw(data as *mut I));
+    unsafe extern "C" fn drop_heap<I>(data: *const u8, _output: *mut u8) {
+        let data = unsafe { data.cast::<*mut u8>().read() };
+        unsafe { drop(Box::from_raw(data as *mut I)) };
     }
 
     // Treat the complete slot as uninitialized. Forming `&mut OpaqueIterSlot`
@@ -556,6 +558,7 @@ where
     // already initialized.
     let slot = &mut *slot.cast::<MaybeUninit<OpaqueIterSlot<T>>>();
     let slot = slot.as_mut_ptr();
+    std::ptr::addr_of_mut!((*slot)._item).write(PhantomData);
     std::ptr::addr_of_mut!((*slot).next).write(Some(next_thunk::<T, I>));
     if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
         && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
@@ -608,7 +611,12 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     {
         ReusedOpaqueIter {
             init: self.init,
-            args: Box::new(move |c| vec![a.codegen(c)]),
+            args: Box::new(move |c| {
+                let value = a.codegen(c);
+                let mut args = Vec::with_capacity(1);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, value);
+                args
+            }),
         }
     }
 
@@ -623,7 +631,14 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     {
         ReusedOpaqueIter {
             init: self.init,
-            args: Box::new(move |c| vec![a.codegen(c), b.codegen(c)]),
+            args: Box::new(move |c| {
+                let a = a.codegen(c);
+                let b = b.codegen(c);
+                let mut args = Vec::with_capacity(2);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, a);
+                crate::ffi::push_extern_value::<BType>(c, &mut args, b);
+                args
+            }),
         }
     }
 }
@@ -673,9 +688,9 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
             data_off,
             move |cctx, slot_ptr| {
                 let mut a = (args)(cctx);
-                a.push(slot_ptr);
+                crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
                 let init_ref = cctx.get_extern_func_ref(init_id);
-                cctx.builder.ins().call(init_ref, &a);
+                crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
             },
             consumer,
         );

@@ -6,6 +6,7 @@
 //! - `Const<T>`: Typed constants (Copy-able)
 
 use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, Value};
+use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::Module;
@@ -13,6 +14,28 @@ use std::collections::HashMap;
 
 use crate::types::{ConstantType, CopyType, StagedType};
 use cranelift_codegen::ir::types;
+
+/// Emit an exact copy between non-overlapping, equally aligned runtime slots.
+pub(crate) fn emit_copy_nonoverlapping(
+    builder: &mut FunctionBuilder<'_>,
+    config: TargetFrontendConfig,
+    destination: Value,
+    source: Value,
+    size: usize,
+    alignment: usize,
+) {
+    let alignment = u8::try_from(alignment).expect("runtime alignment exceeds u8");
+    builder.emit_small_memory_copy(
+        config,
+        destination,
+        source,
+        size as u64,
+        alignment,
+        alignment,
+        true,
+        MemFlags::trusted(),
+    );
+}
 
 // =============================================================================
 // Compilation Context
@@ -98,6 +121,21 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             self.unit_value = Some(val);
             val
         }
+    }
+
+    /// Copy one runtime value between non-overlapping, equally aligned slots.
+    ///
+    /// Unlike the former aggregate ABI loops, this copies exactly `size`
+    /// bytes and therefore never widens a partial trailing word.
+    pub(crate) fn copy_nonoverlapping(
+        &mut self,
+        destination: Value,
+        source: Value,
+        size: usize,
+        alignment: usize,
+    ) {
+        let config = self.module.isa().frontend_config();
+        emit_copy_nonoverlapping(self.builder, config, destination, source, size, alignment);
     }
 
     /// Resolve the data pointer (`*T`) of a slice operand.

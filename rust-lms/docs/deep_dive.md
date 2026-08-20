@@ -5,7 +5,9 @@ or AI agent. It explains the *mental model* first, then walks the codebase modul
 by module, and finishes with the ABI/codegen details and the invariants you must
 not break.
 
-If you only read one section, read [The mental model](#1-the-mental-model).
+If you only read one section, read [The mental model](#1-the-mental-model). For a
+construct-by-construct reference — every staged type/op and the Cranelift it emits —
+jump to the [cheat sheet](#18-cheat-sheet-staged-constructs--what-they-emit).
 
 ---
 
@@ -85,20 +87,33 @@ obvious: pull operands' `Value`s via `operand.codegen(ctx)`, emit one or two
 ### `StagedType` — the universe of staged types
 
 ```rust
-pub trait StagedType {
+pub unsafe trait StagedType {         // `unsafe`: a hand-written impl must match its own layout
     type RuntimeValue;                          // the real Rust type at runtime
+    const LAYOUT_VALID: () = ();                // #[derive] fills this with layout checks
     fn cranelift_type() -> Type;                // I64 / F64 / I8 / …
     fn size_of() -> usize;        fn align_of() -> usize;
     fn is_copy_struct() -> bool;  fn is_fat_pointer() -> bool;
-    fn num_abi_values() -> usize; fn abi_types() -> Vec<Type>;
-    fn should_pass_by_pointer() -> bool;
 }
 ```
 
-The ABI-related methods (`num_abi_values`, `abi_types`, `should_pass_by_pointer`,
-`is_fat_pointer`) drive how a value is passed across the function boundary — see
-[§10](#10-the-abi-how-values-cross-the-boundary). Primitives override only the
-basics; structs and slices override the ABI methods.
+`is_copy_struct` selects the indirect aggregate representation used for exact
+copies and field access. `is_fat_pointer` enables the slice `(ptr, len)` cache;
+neither method classifies the platform C ABI. See
+[§10](#10-the-abi-how-values-cross-the-boundary).
+
+`StagedType` is an **`unsafe` trait**: `#[derive(StagedType)]` proves the layout is
+sound (its `LAYOUT_VALID` const wires up the checks), so a hand-written impl is the
+one place you take on that obligation.
+
+Two refinements gate the **runtime boundary** — what a compiled function's
+arguments and result may be:
+
+- **`RuntimeParam`** — a type usable as a call *argument* (`type Arg<'call>`).
+- **`RuntimeResult`** — a type usable as a call *return* (`type Output<'call>`).
+- **`DirectValue`** (sealed) — the plain scalar/`Copy` values that cross by value.
+
+`Compiled::call` / `CompiledFn::call` are generic over these, which is exactly what
+type-checks `sum_pos_sq.call(&data[..])` against the staged signature.
 
 ### Type markers
 
@@ -223,68 +238,23 @@ the body can call itself.
 - `compiler.compile(expr)` lowers everything: it declares all internal + extern +
   the `__main__` function, then defines each one by walking the stored bodies,
   finalizes the JIT module, and returns `Compiled<OUT>`.
-- `Compiled::run()` executes a nullary computation and returns its value;
-  `Compiled::as_fn()` returns a typed `extern "C" fn(...)` pointer when you
-  compiled a *function reference* (so you can call it many times with different
-  inputs). Note: `as_fn` works by compiling `__main__` to *return the function
-  pointer*, then transmuting it.
+- `Compiled::run()` executes a nullary computation and returns its value.
+- `Compiled::as_fn()` returns a **`CompiledFn`** — a typed, owner-checked callable
+  you invoke with `.call(args)` as many times as you like. It *borrows* the
+  `Compiled`, so the executable memory can't be freed while a callable exists, and
+  its argument / return types are the `RuntimeParam` / `RuntimeResult` types from
+  [§3](#3-the-type-system). When you must hold a bare pointer past that borrow,
+  `unsafe { Compiled::as_fn_unchecked() }` hands out the raw `extern "C"` entry
+  point under a uniform **by-pointer** convention (each argument as `*const`, the
+  result written through an out-`*mut`) — and you then owe the "keep `Compiled`
+  alive" contract yourself.
 
 ### `Compiled` owns the JIT module
 
 `Compiled<T>` holds the `JITModule`; dropping it frees the executable memory, so
 keep it alive as long as you hold function pointers into it.
 
----
-
-## 7. Two authoring styles
-
-There are two ways to write a body. They interoperate freely.
-
-### (a) Imperative — the `Ctx` builder (preferred)
-
-`Ctx` (aka `VarBuilder`) records *actions* (closures that emit IR) in declaration
-order. You call side-effecting methods and return the result expression:
-
-```rust
-let factorial = compiler.fun1("factorial", |ctx, n: Var<i64>| {
-    let i      = ctx.var(1i64);     // declare & init a local -> Var<i64>
-    let result = ctx.var(1i64);
-    ctx.while_loop(lt(i, n + 1i64), move |ctx| {
-        ctx.store(result, result * i);
-        ctx.store(i, i + 1i64);
-    });
-    result                          // returned value
-});
-```
-
-`Ctx` methods: `var`/`let_var` (declare+init), `bind` (evaluate an expression once
-into a fresh var), `store`/`emit` (statements), `if_then`/`if_then_else`,
-`while_loop`, and `break_loop` (jump to the innermost loop's exit). No `Clone`
-bounds, no tuple threading — this is the ergonomic path and what most tests use.
-
-### (b) Expression-tree — tuples + combinators
-
-Tuples implement `Staged` (`src/tuple.rs`): a tuple runs each element for side
-effects and yields the **last** element's value. Combined with `assign` and the
-`while_loop`/`if_then_else` *expression* constructs (`src/control.rs`), you can
-write a whole body as one value:
-
-```rust
-( (i, sum),                                   // init LetVars
-  while_loop(lt(*i, arr.len()), (
-      assign(*sum, *sum + arr.get_unchecked(*i)),
-      assign(*i, *i + 1u64),
-  )),
-  *sum )                                       // result
-```
-
-The imperative `Ctx` style (a) covers the same ground with less ceremony, so new
-code should prefer it; style (b) is mostly of interest when you want the whole body
-to be a single value expression.
-
----
-
-## 8. Control flow
+## 7. Control flow
 
 `src/control.rs`:
 
@@ -306,7 +276,7 @@ imperative mirrors of these and are usually what you reach for.
 
 ---
 
-## 9. Memory: references, slices, and structs
+## 8. Memory: references, slices, and structs
 
 ### References & pointers — `src/refer.rs`
 
@@ -321,9 +291,11 @@ Four pointer flavors, all i64 at the IR level, distinguished by type tags so the
 | `SMutPtr<T>`     | `*mut T`   | `RustPtr` |
 
 Operations: `load`/`load_ref`/`load_mut` (deref-read), `store`/`store_ref`
-(deref-write, mutable only), `ptr_offset`(`_mut`) (scaled pointer arithmetic), and
-`array_index` (offset + load). Mutability is enforced by the type: `store_ref`
-only accepts `SRefMut`.
+(deref-write, mutable only), `ptr_offset`(`_mut`) (scaled pointer arithmetic),
+`array_index` (offset + load), `ptr_is_null` (a `ptr == 0` test, for
+null-sentinel externs), and the reinterprets `ref_as_const` / `ref_as_ptr` /
+`ref_mut_as_ptr` (reference → raw pointer). Mutability is enforced by the type:
+`store_ref` only accepts `SRefMut`.
 
 ### Slices — `src/slice.rs`
 
@@ -336,9 +308,9 @@ Within the staged graph a slice's `codegen` value is a single i64, resolved two
 ways (the *only* code that knows this is `CompilationContext::slice_data_ptr` /
 `slice_len`):
 
-- **register-resolved** — slice *parameters* are split at the ABI boundary into
+- **register-resolved** — on function entry the slice descriptor is loaded into
   two Cranelift variables (`ptr_var`, `len_var`) kept in `ctx.slice_vars`. Slice
-  ops read those registers directly — no memory traffic, the fast path for loops.
+  ops read those registers directly, the fast path for loops.
 - **memory-resolved** — sub-slices (and anything without a `var_id`) are a pointer
   to a `(ptr, len)` pair on a stack slot (`ptr` at +0, `len` at +8).
 
@@ -353,41 +325,52 @@ a `&mut [T]` is still a `&mut [T]` supporting `len`/`get`/`set`/`slice` again. O
 ### Structs — `src/struct.rs` + `#[derive(StagedType)]`
 
 `#[derive(StagedType)]` on a `#[repr(C)] Copy` struct (in `rust-lms-derive`)
-generates a `…Type` module of field tokens (each implementing `Field` with a
-`memoffset`-computed `OFFSET`), the `StagedType` ABI impl, and a `CopyType` impl
+generates a `…Type` module of field tokens (each implementing `Field` with an
+`offset_of!`-computed `OFFSET`), the `StagedType` layout impl, and a `CopyType` impl
 gated on all fields being `CopyType`. Field access is split across four traits so
 the *type* decides what's legal:
 
 - `CopyFieldAccess::get` — load a Copy field (any struct-like input).
 - `RefFieldAccess::get_ref` — `&field` (pointer inputs only; preserves lifetime).
 - `MutRefFieldAccess::get_ref_mut` — `&mut field` (mutable pointer inputs only).
-- `OwnedFieldAccess::field`/`get_ptr` — navigate/raw-pointer into by-value structs
-  (`Var<Owned<T>>`); **no** `get_ref` (would dangle into a stack slot).
+- `OwnedFieldAccess::field`/`get_ptr` — navigate/raw-pointer into by-value
+  aggregate expressions; **no** `get_ref` (it could dangle into a stack slot).
 
-`Owned<T>` (`src/types.rs`) is the marker that says "this struct came in by value";
-it forwards all ABI methods to `T` but distinguishes by-value from by-reference in
-the type system so lifetimes stay sound.
+For *writing* fields there are three free functions: `load_field_mut` (read a Copy
+field through a unique `&mut`), `field_mut` (a mutable handle to one field, to
+`store` into), and **`split_fields_mut`** — split one `&mut struct` into *two
+statically-disjoint* field references at once. Asking for the same field twice is a
+**compile error**: the derive only emits a disjointness witness for distinct
+fields, so overlapping `&mut`s can't be expressed.
 
 ---
 
-## 10. The ABI: how values cross the boundary
+## 9. The ABI: how values cross the boundary
 
-The trickiest part of `compile` (`src/func.rs`) is matching the platform C ABI
-(SystemV on Unix, WindowsFastcall on Windows) so JIT'd functions interop with real
-Rust `extern "C"` fns. Four cases, driven by the `StagedType` ABI methods:
+Generated functions use one private ABI on every supported target:
 
-1. **Primitive** — one ABI value, bound straight to a Cranelift variable.
-2. **Small struct (≤16 bytes)** — passed in registers (N×i64). On entry the values
-   are stored to a fresh stack slot and the variable holds the slot pointer (so
-   field access is uniform pointer+offset). On return they are reloaded.
-3. **Large struct (>16 bytes)** — `should_pass_by_pointer()` is true; passed as a
-   single pointer the caller already owns; used in place, no copy.
-4. **Fat pointer (slice)** — `is_fat_pointer()` is true; the `(ptr, len)` pair is
-   bound to **two** Cranelift variables recorded in `slice_vars` (the
-   register-resolved encoding above).
+```text
+unsafe extern "C" fn(arg0: *const u8, ..., output: *mut u8)
+```
 
-`as_fn()` returns an `extern "C" fn(...)` precisely so these conventions line up
-with Rust's view of the same signature.
+Each logical argument is a pointer to its exact, aligned runtime storage. The
+caller spills scalars to a stack slot and passes aggregate storage directly. The
+callee loads scalars; aggregate values continue to use their storage pointer.
+Every result is written to caller-owned output storage: scalars use one typed
+store, aggregates use one exact-size copy, and unit writes nothing. Generated
+functions have no Cranelift return values.
+
+`Compiled::call` / `CompiledFn::call` create those input slots from the typed
+`RuntimeParam` values and use `MaybeUninit<RuntimeResult::Output>` for the output.
+The safe API therefore retains normal Rust value/reference semantics without
+transmuting the code address to a platform-native aggregate signature.
+
+`#[extern_fn]` generates a Rust-compiled storage-pointer thunk. The thunk reads
+the typed arguments, calls the real `extern "C"` function normally, and writes
+the result to output storage. Rust therefore owns System V, Windows, Apple
+AArch64, homogeneous-float, aligned, and indirect aggregate classification;
+Cranelift only sees pointer-sized values. `as_fn_unchecked` exposes this raw
+storage-pointer signature, not the original typed Rust signature.
 
 ### Set `RUST_LMS_DEBUG_IR=1` to see the generated IR
 
@@ -400,7 +383,7 @@ the first thing to reach for when codegen looks wrong.
 
 ---
 
-## 11. Staged iterators
+## 10. Staged iterators
 
 `src/iter/` is a **push-based**, fully-fused iterator framework. There is no
 runtime iterator object: a `StagedIterator` emits an imperative loop, and the
@@ -434,7 +417,7 @@ design rationale and the roadmap toward unrolling/SIMD.
 
 ---
 
-## 12. Staging-time optionals vs FFI optionals
+## 11. Staging-time optionals vs FFI optionals
 
 Two distinct "maybe a value" tools — do not confuse them:
 
@@ -454,7 +437,7 @@ memory or cross FFI → `COption`.
 
 ---
 
-## 13. FFI: calling back into Rust
+## 12. FFI: calling back into Rust
 
 `src/ffi.rs` + `#[extern_fn]` (in `rust-lms-derive`) let JIT code call ordinary
 Rust functions:
@@ -471,14 +454,29 @@ let r = call_extern1(f, slice_arg);
 ```
 
 `#[extern_fn]` generates a `…Extern` zero-sized type implementing the `ExternFn`
-trait, carrying the symbol name, function pointer, and ABI types (mapping Rust
-param/return types to staged types). `compiler.extern_fn::<S>()` registers the
-symbol with the JIT and returns a typed `ExternRef`. `FatSlice`/`FatSliceMut` are
-the `#[repr(C)]` slice representations that survive the C ABI by value.
+trait, plus the Rust storage-pointer thunk described in §10. The trait carries
+the complete staged argument and result types. `compiler.extern_fn::<S>()`
+registers the thunk with the JIT and returns a typed `ExternRef`.
+`FatSlice`/`FatSliceMut` remain the explicit `#[repr(C)]` slice values accepted
+by ordinary Rust APIs.
+
+**Safe vs unchecked calls.** `#[extern_fn]` on a *safe* `extern "C"` fn also derives
+`SafeExternFn`, and the `call_externN` constructors *require* it — so calling a safe
+extern is itself safe. An `unsafe` extern (or one whose signature isn't ABI-stable,
+e.g. a bare `&[T]` param) does **not** implement `SafeExternFn` and must go through
+the `call_externN_unchecked` constructors — themselves `unsafe fn`s — where you take
+on the target's contract.
+
+**Host scratch & pools.** Two host-memory helpers round this out: `stack_alloc(n)`
+gives the kernel a runtime-writable scratch slot on its own frame (typed writes,
+freed with the frame), and `BytesPool` is a host-owned, append-only byte arena the
+kernel grows through the `pool_append` extern — the pattern for interned strings /
+buffers that must outlive a single kernel call. (Both are the substrate `rust-lms-std`
+and the SQL engine build growable state on.)
 
 ---
 
-## 14. A worked example, end to end
+## 13. A worked example, end to end
 
 ```rust
 use rust_lms::prelude::*;
@@ -494,19 +492,20 @@ let f = compiler.fun1("sum_pos_sq", |ctx, arr: Var<SRef<Slice<f64>>>| {
 });
 
 let compiled = compiler.compile(f).expect("compile");
-let sum_pos_sq = compiled.as_fn();     // extern "C" fn(&[f64]) -> f64
+let sum_pos_sq = compiled.as_fn();     // CompiledFn over fn(&[f64]) -> f64
 
 let data = [1.0, -2.0, 3.0, -4.0];
-assert_eq!(sum_pos_sq(&data[..]), 1.0 + 9.0);
+assert_eq!(sum_pos_sq.call(&data[..]), 1.0 + 9.0);
 ```
 
 What happened: stage 0 built `SliceIter → Filter → Map → sum`, which emitted a
 single Cranelift loop that loads each `f64`, branches on `> 0`, squares, and
-accumulates; `compile` JIT'd it; `as_fn` gave a native function pointer.
+accumulates; `compile` JIT'd it; `as_fn` returned an owner-borrowing
+`CompiledFn`.
 
 ---
 
-## 15. Invariants & gotchas for contributors
+## 14. Invariants & gotchas for contributors
 
 - **You are emitting code, not interpreting.** Every `Staged::codegen` must leave
   the builder in a valid state (current block terminated appropriately, blocks
@@ -522,20 +521,20 @@ accumulates; `compile` JIT'd it; `as_fn` gave a native function pointer.
   when correctness allows — it preserves vectorizability.
 - **Unchecked means unchecked.** Slice/pointer ops do no bounds checks; safety is
   the staged-program author's contract, surfaced through Rust types where possible
-  (mutability, lifetimes via `SRef`/`Owned`).
-- **`Compiled` owns the executable memory.** Keep it alive while using `as_fn`
-  pointers.
+  (mutability and lifetimes via `SRef`/`SRefMut`).
+- **`Compiled` owns the executable memory.** Safe `as_fn` wrappers borrow it;
+  raw pointers from `as_fn_unchecked` must not outlive it.
 - **Debug with `RUST_LMS_DEBUG_IR=1`.**
 
 ---
 
-## 16. Module map
+## 15. Module map
 
 | Path | Responsibility |
 |------|----------------|
 | `src/lib.rs` | crate docs, module wiring, `prelude` |
 | `src/staged.rs` | `Staged`, `Var`, `Const`, `IntoStaged`, `Assign`, `LetVar`, `CompilationContext`, slice/unit helpers |
-| `src/types.rs` | `StagedType`, `ConstantType`, `CopyType`, type markers, `Owned<T>` |
+| `src/types.rs` | `StagedType`, `ConstantType`, `CopyType`, runtime-boundary traits, type markers |
 | `src/num/` | `Num`/`IntNum`/`FloatNum` traits (`traits.rs`); `Add`…`Eq`, `Select`, `min`/`max`, operator sugar (`ops.rs`) |
 | `src/control.rs` | `IfThenElse`, `IfThen`, `While`, `Not` |
 | `src/func.rs` | `Compiler`, `Ctx`/`VarBuilder`, `fun0..8`(`_rec`), `compile`, `Compiled`, ABI lowering |
@@ -548,18 +547,81 @@ accumulates; `compile` JIT'd it; `as_fn` gave a native function pointer.
 | `src/iter/` | push-based staged iterators: sources, combinators, terminals (`traits.rs`) |
 | `src/staged_opt.rs` | `StagedOpt`, `When`/`then_some`, `s_some`/`s_none` |
 | `src/option.rs` | `COption<T>`, `OptRefType`/`OptMutRefType`, match/unwrap ops |
-| `src/ffi.rs` | `FatSlice`/`FatSliceMut`, `ExternFn`, `ExternRef`, `call_externN` |
+| `src/ffi.rs` | `FatSlice`/`FatSliceMut`, `ExternFn`/`SafeExternFn`, `ExternRef`, `call_externN`(`_unchecked`), `stack_alloc` |
+| `src/pool.rs` | `BytesPool` + the `pool_append` extern (host-owned append-only arena) |
 | `rust-lms-derive/` | `#[derive(StagedType)]`, `#[extern_fn]` proc macros |
-| `sql-gen/` | (early) SQL → staged-code generation over `datafusion-sql` + `arrow` |
+| `rust-lms-std/` | typed staged data structures — growable `SVec` (handle indirection) and packed query records (`RecordLayout`/`DynamicRecord`/`FieldId`) |
+| `arrow-lms/` | staged Apache Arrow interop — `FfiArray` column descriptors + validity bitmaps read inside a kernel |
+| `sql-gen/` | SQL → JIT engine: datafusion front-end + optimizer → one rust-lms kernel per query (scan/filter/project, `GROUP BY`, strings, streaming, hash joins) |
 
 ---
 
-## 17. Where to read next
+## 16. Where to read next
 
-- **Tests are the spec.** `tests/programs.rs`, `tests/p99.rs`, `tests/euler.rs`,
+- **Tests are the spec.** `tests/test_func.rs` (functions & control flow),
   `tests/test_iter.rs`, `tests/test_slices.rs`, `tests/test_structs.rs`,
-  `tests/test_extern_fn.rs`, `tests/type_safety.rs` are the best worked examples of
-  every feature, in idiomatic modern style.
+  `tests/test_extern_fn.rs`, `tests/type_safety.rs`, and the end-to-end showcases
+  `tests/programs.rs`, `tests/p99.rs`, `tests/euler.rs` are the best worked examples
+  of every feature, in idiomatic modern style.
 - `benches/filtered_sum_two_slices.rs` for performance-shaped code.
 - `docs/staged_iterator_api.md` and `docs/loop_unrolling_design.md` for the
   iterator design and the unrolling/SIMD roadmap.
+- **Built on rust-lms:** `rust-lms-std` (growable `SVec`, packed records) and the
+  `sql-gen` engine (its `docs/` cover `group_by.md`, `table_scan.md`, `joins.md`)
+  are the largest worked examples of using the library to build a compiler.
+
+---
+
+## 17. Cheat sheet: staged constructs → what they emit
+
+Every row is a stage-0 construct, the runtime type it produces (`Out`), and the
+Cranelift it lowers to at stage 1. "no runtime object" means the abstraction is
+gone after staging — only the emitted instructions remain.
+
+| Category | Stage-0 construct | Runtime (`Out`) | Emits at stage 1 |
+|---|---|---|---|
+| **Types** | `i64` / `u64` (`U64Type`) | `i64`/`u64` | `I64` |
+| | `i32` / `u32` (`I32Type`/`U32Type`) | `i32`/`u32` | `I32` |
+| | `f64` (`F64Type`) | `f64` | `F64` |
+| | `bool` (`BoolType`) | `bool` | `I8` |
+| | `()` (`UnitType`) | `()` | `I8` unit constant |
+| **Values** | `Const::<T>::new(v)` | `T` | `iconst` / `f64const` |
+| | `Var<T>` | `T` | a Cranelift SSA variable (`use_var`) |
+| | literal `5i64` (`IntoStaged`) | `T` | folded to a `Const` |
+| **Arithmetic** | `add`/`sub`/`mul`/`div`/`rem` or `+ - * / %` | `T: Num` | `iadd`/`imul`/`sdiv`/`udiv`/`fdiv`/`srem`… (signed/unsigned/float by `T`) |
+| | `bitand`/`bitor`/`bitxor`/`shl`/`shr` | `T: IntNum` | `band`/`bor`/`bxor`/`ishl`/`ushr`/`sshr` |
+| | `not(b)` | `bool` | `icmp_imm eq 0` |
+| | `select(c,a,b)` | `T` | `select` (branchless cmov) |
+| | `min`/`max` | `T` | `icmp`/`fcmp` + `select` (branchless) |
+| **Compare** | `lt`/`gt`/`eq` | **`bool`** | `icmp`/`fcmp` (CC picked by `T`) |
+| **Cast** | `int_cast::<TO,FROM>` | `TO` | `sextend`/`uextend`/`ireduce` (or no-op) |
+| | `int_to_float` | `f64` | `fcvt_from_sint`/`_uint` |
+| | `bitcast::<TO,FROM>` | `TO` | same-size reinterpret (`bitcast`/no-op) |
+| **Control** | `if_then_else(c,a,b)` | `T` | then/else/merge blocks; merge **block param = phi** |
+| | `if_then(c, body)` | `()` | `brif` into a one-sided then/merge |
+| | `while_loop(cond, body)` | `()` | header/body/exit blocks + back-edge |
+| | `break_loop()` | `()` | `jump` to the innermost loop exit |
+| | tuple `(a, b, c)` | last elem's `Out` | run `a`,`b` for effect; yield `c` |
+| **Refs / ptrs** | `SRef<T>`/`SRefMut<T>`/`SPtr<T>`/`SMutPtr<T>` | `&T`/`&mut T`/`*const T`/`*mut T` | `I64` |
+| | `load`/`load_ref` · `store`/`store_ref` | `T` · `()` | `load` · `store` |
+| | `ptr_offset(p,i)` · `array_index(p,i)` | ptr · `T` | scaled `iadd` · `iadd`+`load` |
+| | `ptr_is_null(p)` | `bool` | `icmp eq 0` |
+| **Slices** | `SRef<Slice<T>>` / `SRefMut<Slice<T>>` | `&[T]` / `&mut [T]` | descriptor storage; `(ptr,len)` cached in vars on function entry |
+| | `.len()` · `.get_unchecked(i)` · `.set_unchecked(i,v)` | `u64` · `T` · `()` | reg/`load @+8` · `load` · `store` |
+| | `.slice_unchecked(a,b)` | same slice type | materialize `(ptr+a, b−a)` on a stack slot |
+| **Structs** | `#[derive(StagedType)]` struct | the struct | `I64` pointer to exact aggregate storage (§10) |
+| | field `get` / `get_ref` / `field_mut` / `store` | `T` / `&field` / — / `()` | `load` / offset / offset / `store` |
+| | `split_fields_mut(s, f1, f2)` | two disjoint `&mut` | two field offsets (distinct fields only — else a compile error) |
+| **Iterators** | `arr.staged_iter()`, `range(a,b)` | — | a loop *source* (no runtime object) |
+| | `.map`/`.filter`/`.filter_map`/`.scan`/`.take_while`/`.skip_while`/`.zip` | — | wrap the consumer with `if_then`s — **no new loop** |
+| | `.sum`/`.count`/`.min`/`.max`/`.fold(ctx)` | reduced `T` | ONE fused loop |
+| | `.sum_if`/`.count_if` | `T`/`u64` | fused loop, branchless `select` add |
+| | `.any`/`.all`/`.position`/`.find_map` | `bool`/…/`StagedOpt` | fused loop + `break_loop` |
+| **Optionals** | `StagedOpt` (`then_some`, `s_some`/`s_none`) | — (not a `StagedType`) | control flow only — no memory |
+| | `COption<T>` | `#[repr(C, u64)]` value | discriminant + payload in memory |
+| **Functions** | `fun0..8`(`_rec`) | — | a Cranelift function |
+| | `call0..N(f, args…)` | fn's `OUT` | `call` |
+| | `Compiled::as_fn()` | — | a `CompiledFn` (`.call(args)`); `as_fn_unchecked` → raw by-ptr entry |
+| **FFI / host** | `#[extern_fn]` + `call_externN` | fn's `Ret` | imported symbol + `call` (safe iff `SafeExternFn`) |
+| | `FatSlice<T>` | `&[T]` by value | `(ptr,len)` two `I64` by value |
+| | `stack_alloc(n)` · `BytesPool`/`pool_append` | `SMutPtr<u8>` · — | a `stack_slot` addr · host arena grown via an extern |

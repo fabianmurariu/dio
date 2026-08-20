@@ -1,103 +1,52 @@
-//! # rust-lms: Type-Safe Staged Computation in Rust
+//! # rust-lms: type-safe staged computation in Rust
 //!
-//! A Rust implementation of multi-stage programming inspired by Scala LMS (Lightweight Modular Staging).
+//! Multi-stage programming in the spirit of Scala LMS (Lightweight Modular
+//! Staging). You build a *description* of a computation out of ordinary,
+//! strongly-typed Rust values — [`Staged`](staged::Staged) values like
+//! [`Var<T>`](staged::Var), `add(x, y)`, and staged iterators —
+//! [`Compiler::compile`](func::Compiler::compile) lowers it to Cranelift IR and
+//! JIT-compiles it to a native function you can call.
 //!
-//! ## Overview
+//! **A value's Rust type encodes its staged type**, so the Rust compiler *is* the
+//! staged type checker: an `i64`/`bool` mix-up, a write through a `&[T]`, or a
+//! returned dangling field reference simply doesn't type-check — there is no
+//! separate runtime type system to get wrong.
 //!
-//! This library provides a type-safe framework for building staged computations that compile
-//! to efficient machine code via Cranelift. Key features:
-//!
-//! - **Compile-time type safety**: Invalid operations are caught at compile time
-//! - **Zero-cost abstractions**: `Var<T>` and `Const<T>` are Copy when possible
-//! - **Heterogeneous operations**: Operations can change output types (e.g., comparison → bool)
-//! - **Full composability**: Any `Staged` value works anywhere a `Staged` value is expected
-//! - **Dynamic dispatch support**: Boxing via `.boxed()` when needed
-//!
-//! ## Quick Example
-//!
-//! ```ignore
+//! ```
 //! use rust_lms::prelude::*;
-//! use cranelift_frontend::Variable;
 //!
-//! // Create variables and constants
-//! let x = Var::<i64>::new(Variable::from_u32(0));
-//! let five = Const::<i64>::new(5);
-//! let two = Const::<i64>::new(2);
-//!
-//! // Build expressions: (x + 5) * 2
-//! let expr = mul(add(x, five), two);
-//!
-//! // x is Copy, so we can reuse it!
-//! let expr2 = add(x, x);
-//!
-//! // Comparisons change type to Bool
-//! let comparison = lt(x, Const::new(100));
-//!
-//! // This won't compile - type mismatch caught at compile time!
-//! // let bad = add(x, comparison);  // ERROR: can't add I64 and Bool
+//! let mut compiler = Compiler::new();
+//! // square(x) = x * x
+//! let square = compiler.fun1("square", |_ctx, x: Var<i64>| mul(x, x));
+//! let compiled = compiler.compile(square).expect("compile");
+//! assert_eq!(compiled.as_fn().call(7), 49); // owner-checked callable
 //! ```
 //!
-//! ## Architecture
+//! ## Two phases
 //!
-//! ### Core Traits
+//! - **Stage 0 ("now"):** plain Rust that *builds* the computation. Nothing runs
+//!   on data — you are assembling a typed `Staged` tree.
+//! - **Stage 1 ("later"):** `compile` JIT-compiles that tree into a native
+//!   function; call it as many times as you like.
 //!
-//! - [`Staged`](staged::Staged): Anything that can generate runtime code
-//! - [`StagedType`](types::StagedType): Types that can participate in staged computation
+//! ## Design in one breath
 //!
-//! ### Value Types
+//! - **Values vs operations.** [`Var<T>`](staged::Var) / [`Const<T>`](staged::Const)
+//!   are pure values; operations (`Add<L,R>`, `Lt<L,R>`, …) are *separate* structs
+//!   that also implement [`Staged`](staged::Staged). Their trait bounds are the
+//!   type system — `Add` requires both sides share a `Num` type; a comparison's
+//!   `Out` is `bool`, not the input type.
+//! - **[`StagedType`](types::StagedType)** is the contract a type satisfies to be
+//!   staged: its Cranelift representation plus ABI (how it passes as an argument /
+//!   return value / struct field).
 //!
-//! - [`Var<T>`](staged::Var): Typed variable references (Copy-able)
-//! - [`Const<T>`](staged::Const): Typed constants (Copy-able)
+//! ## Where to look
 //!
-//! ### Type Markers
-//!
-//! - [`i64`](types::i64), [`u64`](u64): Integer types
-//! - [`f64`](f64): Floating-point type
-//! - [`bool`](bool): Boolean type
-//!
-//! ### Operations
-//!
-//! - Arithmetic: [`Add`](num::Add), [`Sub`](num::Sub), [`Mul`](num::Mul), [`Div`](num::Div)
-//! - Comparison: [`Lt`](num::Lt), [`Eq`](num::Eq)
-//!
-//! ## Design Principles
-//!
-//! ### 1. Separation of Values and Operations
-//!
-//! Unlike traditional expression trees where operations are part of the value enum,
-//! this design separates:
-//! - **Values**: `Var<T>`, `Const<T>` - only represent "pure" values
-//! - **Operations**: `Add<L,R>`, `Lt<L,R>` - separate structs that also implement `Staged`
-//!
-//! ### 2. Type-Level Constraints
-//!
-//! Operations use trait bounds to ensure type safety:
-//!
-//! ```ignore
-//! impl<L, R, T> Staged for Add<L, R>
-//! where
-//!     L: Staged<Out = T>,  // Left must produce type T
-//!     R: Staged<Out = T>,  // Right must produce type T
-//!     T: StagedType + SupportsAdd,  // T must support addition
-//! {
-//!     type Out = T;  // Result is also type T
-//! }
-//! ```
-//!
-//! ### 3. Heterogeneous Operations
-//!
-//! Some operations change types:
-//!
-//! ```ignore
-//! impl<L, R, T> Staged for Lt<L, R>
-//! where
-//!     L: Staged<Out = T>,
-//!     R: Staged<Out = T>,
-//!     T: StagedType + SupportsComparison,
-//! {
-//!     type Out = bool;  // Always returns Bool, not T!
-//! }
-//! ```
+//! - [`prelude`] re-exports the everyday surface — numbers & operators, control
+//!   flow, references/pointers/slices, structs & tuples, iterators, optionals,
+//!   FFI. Glob-import it.
+//! - `docs/deep_dive.md` is the full architecture walkthrough: the mental model,
+//!   every subsystem, the ABI, and the invariants to respect.
 
 // Let `#[derive(StagedType)]`'s absolute `::rust_lms::…` paths resolve when the
 // derive is used *inside* this crate (e.g. iter::zip::ZipItem), not just downstream.

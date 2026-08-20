@@ -8,9 +8,9 @@
 //!
 //! # FFI-Safe Options
 //!
-//! `COption<T>` uses `#[repr(C, u64)]` for predictable ABI:
+//! `COption<T>` uses `#[repr(C, u64)]` for predictable layout:
 //! - Discriminant at offset 0 (u64): 0 = None, 1 = Some
-//! - Value at offset 8: T
+//! - Value at the first properly aligned offset after the discriminant
 //!
 //! This allows safe interop with Rust code across FFI boundaries.
 //!
@@ -36,7 +36,7 @@ use std::marker::PhantomData;
 ///
 /// Uses `#[repr(C, u64)]` enum:
 /// - Discriminant: u64 at offset 0 (0 = None, 1 = Some)
-/// - Value: T at offset 8 (only valid for Some variant)
+/// - Value: T at the first properly aligned offset after the discriminant
 ///
 /// This has identical memory layout to `struct { tag: u64, value: T }`.
 #[repr(C, u64)]
@@ -120,24 +120,19 @@ unsafe impl<T: StagedType> StagedType for COptionType<T> {
     }
 
     fn size_of() -> usize {
-        // u64 discriminant + T (with alignment)
-        8 + T::size_of()
+        std::mem::size_of::<COption<T::RuntimeValue>>()
     }
 
     fn align_of() -> usize {
-        8 // u64 alignment
+        std::mem::align_of::<COption<T::RuntimeValue>>()
     }
+}
 
-    fn num_abi_values() -> usize {
-        // Number of i64s needed to hold this struct (round up).
-        Self::size_of().div_ceil(8)
-    }
-
-    fn abi_types() -> Vec<cranelift_codegen::ir::Type> {
-        // All-i64: the generic struct param/return paths reassemble through
-        // integer registers. (The opaque-iterator register-consume path declares
-        // its own type-correct return ABI; see `iter::opaque`.)
-        vec![types::I64; Self::num_abi_values()]
+impl<T: StagedType> COptionType<T> {
+    fn payload_offset() -> usize {
+        let alignment = T::align_of();
+        debug_assert!(alignment.is_power_of_two());
+        8usize.div_ceil(alignment) * alignment
     }
 }
 
@@ -248,11 +243,12 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         let value = self.value.codegen(ctx);
 
         // Allocate stack slot for COption<T>
-        let size = (8 + T::size_of()) as u32;
+        let size = COptionType::<T>::size_of() as u32;
+        let alignment = COptionType::<T>::align_of();
         let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             size,
-            3, // 8-byte alignment (2^3 = 8)
+            alignment.trailing_zeros() as u8,
         ));
 
         let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
@@ -261,23 +257,17 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         let one = ctx.builder.ins().iconst(types::I64, 1);
         ctx.builder.ins().store(MemFlags::trusted(), one, ptr, 0);
 
-        // Store value at offset 8
+        let payload_offset = COptionType::<T>::payload_offset() as i64;
+        let payload_ptr = ctx.builder.ins().iadd_imm(ptr, payload_offset);
+
+        // Store the payload at its actual aligned offset.
         if T::is_copy_struct() {
-            // For structs, value is a pointer - copy the struct data
-            let struct_size = T::size_of();
-            for i in 0..(struct_size / 8) {
-                let offset = (i * 8) as i32;
-                let val = ctx
-                    .builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), value, offset);
-                ctx.builder
-                    .ins()
-                    .store(MemFlags::trusted(), val, ptr, 8 + offset);
-            }
+            // Aggregate staged values are addresses of their storage.
+            ctx.copy_nonoverlapping(payload_ptr, value, T::size_of(), T::align_of());
         } else {
-            // For primitives, store directly
-            ctx.builder.ins().store(MemFlags::trusted(), value, ptr, 8);
+            ctx.builder
+                .ins()
+                .store(MemFlags::trusted(), value, payload_ptr, 0);
         }
 
         ptr
@@ -302,11 +292,12 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let size = (8 + T::size_of()) as u32;
+        let size = COptionType::<T>::size_of() as u32;
+        let alignment = COptionType::<T>::align_of();
         let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             size,
-            3,
+            alignment.trailing_zeros() as u8,
         ));
 
         let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
@@ -633,16 +624,18 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
             .ins()
             .brif(discriminant, some_block, &[], none_block, &[]);
 
-        // Some block: load value from offset 8
+        let payload_offset = COptionType::<T>::payload_offset() as i64;
+
+        // Some block: load the aligned payload.
         ctx.builder.switch_to_block(some_block);
         ctx.builder.seal_block(some_block);
         let some_val = if T::is_copy_struct() {
-            // For structs, return pointer to the value (offset 8 from opt_ptr)
-            ctx.builder.ins().iadd_imm(opt_ptr, 8)
+            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
         } else {
+            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
             ctx.builder
                 .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), opt_ptr, 8)
+                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
         };
         ctx.builder
             .ins()
@@ -734,14 +727,16 @@ where
         ctx.builder.switch_to_block(some_block);
         ctx.builder.seal_block(some_block);
 
-        // Load the value and bind it to the variable
+        let payload_offset = COptionType::<T>::payload_offset() as i64;
+
+        // Load the value and bind it to the variable.
         let bound_val = if T::is_copy_struct() {
-            // For structs, the variable holds a pointer to the value
-            ctx.builder.ins().iadd_imm(opt_ptr, 8)
+            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
         } else {
+            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
             ctx.builder
                 .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), opt_ptr, 8)
+                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
         };
 
         // Declare and define the bound variable
@@ -1018,6 +1013,30 @@ mod tests {
     use crate::num::add;
     use crate::prelude::*;
 
+    #[repr(C, align(16))]
+    #[derive(Clone, Copy)]
+    struct AlignedPayload([u8; 16]);
+
+    unsafe impl StagedType for AlignedPayload {
+        type RuntimeValue = Self;
+
+        fn cranelift_type() -> cranelift_codegen::ir::Type {
+            types::I64
+        }
+
+        fn size_of() -> usize {
+            std::mem::size_of::<Self>()
+        }
+
+        fn align_of() -> usize {
+            std::mem::align_of::<Self>()
+        }
+
+        fn is_copy_struct() -> bool {
+            true
+        }
+    }
+
     #[test]
     fn test_c_option_layout() {
         // Verify layout matches our assumptions
@@ -1036,6 +1055,26 @@ mod tests {
             assert_eq!(*none_ptr, 0); // None discriminant
             assert_eq!(*some_ptr, 1); // Some discriminant
         }
+    }
+
+    #[test]
+    fn c_option_respects_overaligned_payload_layout() {
+        assert_eq!(COptionType::<AlignedPayload>::payload_offset(), 16);
+        assert_eq!(COptionType::<AlignedPayload>::size_of(), 32);
+        assert_eq!(COptionType::<AlignedPayload>::align_of(), 16);
+        assert_eq!(
+            COptionType::<AlignedPayload>::size_of(),
+            std::mem::size_of::<COption<AlignedPayload>>()
+        );
+        assert_eq!(
+            COptionType::<AlignedPayload>::align_of(),
+            std::mem::align_of::<COption<AlignedPayload>>()
+        );
+
+        let option = COption::Some(AlignedPayload([0x5a; 16]));
+        let bytes = &option as *const COption<AlignedPayload> as *const u8;
+        // SAFETY: the payload offset and its first byte are within `option`.
+        assert_eq!(unsafe { *bytes.add(16) }, 0x5a);
     }
 
     #[test]

@@ -3,13 +3,14 @@
 use cranelift_codegen::ir::{
     condcodes::IntCC, types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
 };
+use cranelift_module::Module;
 
 use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::r#struct::{load_field_unchecked, Field, LoadField};
-use crate::staged::{CompilationContext, Staged, Var};
+use crate::staged::{emit_copy_nonoverlapping, CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
@@ -219,16 +220,16 @@ where
 
 fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: Value, ptr: Value, offset: i32) {
     if T::is_copy_struct() {
-        for i in 0..T::num_abi_values() {
-            let field_offset = (i * 8) as i32;
-            let chunk =
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), value, field_offset);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), chunk, ptr, offset + field_offset);
-        }
+        let destination = ctx.builder.ins().iadd_imm(ptr, i64::from(offset));
+        let config = ctx.module.isa().frontend_config();
+        emit_copy_nonoverlapping(
+            ctx.builder,
+            config,
+            destination,
+            value,
+            T::size_of(),
+            T::align_of(),
+        );
     } else {
         ctx.builder
             .ins()

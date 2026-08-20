@@ -177,11 +177,29 @@ rust-lms library Clippy count remains at its existing 13-warning baseline.
 ## Phase 3: ABI correctness
 
 1. Introduce one target-aware ABI classification and copy-lowering service.
+   The final design avoids native aggregate classification entirely: all JIT
+   boundaries use canonical storage pointers, while target call conventions
+   come from the complete target ISA. Exact-size copy lowering is centralized.
+   **Status: complete.**
 2. Remove rounded eight-byte aggregate loads/stores and fix aligned option
-   payload layout.
-3. Correct unit and trampoline calling conventions.
+   payload layout. **Status: complete.**
+3. Correct unit and trampoline calling conventions. Internal and compiled
+   trampolines now take caller-owned output storage; `#[extern_fn]` and opaque
+   iterator callbacks use Rust-compiled storage-pointer thunks. Unit has no IR
+   return and writes no output bytes. **Status: complete.**
 4. Add ABI tests for partial-word, floating-point, aligned, nested, and indirect
-   aggregates on every supported target.
+   aggregates on every supported target. `test_abi.rs` covers all shapes plus
+   unit through internal and extern paths. The native GitHub Actions matrix
+   covers `aarch64` and `x86_64` on Linux, macOS, and Windows. **Status:
+   implemented; first remote matrix run pending.**
+
+**Phase 3 local verification (2026-08-20):** Every bounded fix was followed by
+`cargo test --workspace --all-targets`. The final run passes on
+`aarch64-apple-darwin`, including the complete `sql-gen` integration/property
+suite, opaque and reused-storage iterator paths, README checks, exact `COption`
+layout tests, and the new ABI shape regressions. Unsupported targets fail from
+`rust-lms/build.rs` with the exact six-target allowlist. The CI workflow executes
+the same full command natively on all six supported triples.
 
 Covers PR-05 and removes duplicated lowering described in the review.
 

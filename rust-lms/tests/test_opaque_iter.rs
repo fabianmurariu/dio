@@ -2,7 +2,7 @@
 //!
 //! Stands in for a graph library (e.g. raphtory): `graph_iter_nodes(&Graph)`
 //! returns a boxed `IntoIter<u64>` as an opaque `*mut ()` handle, and the staged
-//! iterator drives it via `next`/`drop` (register-consume loop) or, on the
+//! iterator drives it via `next`/`drop` (storage-pointer loop) or, on the
 //! ExactSize path, `len`/`next_value` (counted loop, O(1) `count`).
 
 // Test-helper extern fns deref the opaque `*mut ()` handle by contract.
