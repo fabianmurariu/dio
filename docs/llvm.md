@@ -195,10 +195,15 @@ back.
     never at the current position. rust-lms declares variables lazily (on first
     assignment), which can be *inside a loop*; an alloca emitted there would allocate
     every iteration and typically block promotion. Entry-block placement is mandatory.
-  - **Run `mem2reg` explicitly** as a pass, not by trusting the ExecutionEngine's
-    optimization level (which may be `O0`). melior lacks a high-level constructor for
-    it, but `mlir-sys 220` exposes `mlirCreateTransformsMem2Reg`, wrappable via
-    `Pass::from_raw`.
+  - **Promote the allocas to SSA.** The Phase -1 spike found that **`mlir-sys 220`
+    exposes no `mlirCreateTransformsMem2Reg`** and melior's `pass::transform` has no
+    mem2reg constructor, so an explicit *MLIR-level* mem2reg pass is unavailable through
+    these bindings today. In the spike, LLVM's own mem2reg (run by `ExecutionEngine` at
+    opt level ≥ 2) promotes the allocas and the mutable loop runs correctly — so relying
+    on the LLVM opt pipeline is a valid baseline. If MLIR-level promotion is later
+    wanted (e.g. to optimize before translation), wrap a raw pass with
+    `melior::pass::Pass::from_raw_fn` once a suitable symbol is available. Do **not**
+    assume opt level `O0` promotes — the engine must run at ≥ 2, or add the pass.
   - **Keep ABI/output stack slots distinct from variable slots.** ABI slots hold the
     storage pointers that escape to calls and normally *cannot* be promoted; only the
     variable slots should be fed to `mem2reg`.
@@ -460,23 +465,40 @@ a `Bool` value, `brif`/`select` take one, and load/store of a `Bool` field inser
 
 ## 10. Phased plan
 
-**Phase -1 — MLIR spike (do this BEFORE the wide Cranelift refactor).** A throwaway
-standalone binary that proves the four load-bearing MLIR mechanics work end to end,
-so we don't commit to the `dyn Backend` + `ValueId` refactor on faith. Prove:
+**Phase -1 — MLIR spike — DONE ✅** (`mlir-spike/`, excluded from the workspace). A
+standalone melior binary that proves the load-bearing MLIR mechanics work end to end,
+so we don't commit to the `dyn Backend` + `ValueId` refactor on faith. **All five
+checks pass** against Homebrew `llvm@22` (LLVM/MLIR 22.1.7), with `melior 0.27.4` /
+`mlir-sys 220.0.2` and `MLIR_SYS_220_PREFIX`:
 
-1. JIT a constant function and invoke it via **`ExecutionEngine::lookup`** (native
-   function pointer, not `invoke_packed`).
-2. Compile a mutable loop using **entry-block `llvm.alloca` + explicit `mem2reg` + `cf`
-   block structure**, and confirm promotion happened.
-3. **Load through a real `llvm.ptr`** (exercise the semantic pointer ops of §8b).
-4. Call **one registered Rust extern** through the Phase-3 storage-pointer ABI
-   (`register_symbol` + the by-pointer signature).
-5. **Verify the module before and after lowering** (§3 structural lifecycle).
+1. ✅ JIT a function and call it via **`ExecutionEngine::lookup`** — the native function
+   pointer, cast to `extern "C" fn(...)` and called directly (the Phase-3 ABI, **not**
+   `invoke_packed`). Confirms §7.
+2. ✅ A mutable loop from **entry-block `llvm.alloca` + load/store + `cf` blocks** JITs
+   and runs correctly (`sum_to(5) == 10`). Promotion is done by **LLVM's own mem2reg at
+   `ExecutionEngine` opt level 2** — see the finding below.
+3. ✅ **Load through a real `llvm.ptr`** (`deref(&42) == 42`).
+4. ✅ Call a **registered Rust `extern "C"`** through a pointer arg (`register_symbol` +
+   `call_read(&41) == 41`).
+5. ✅ **Module verified before and after lowering** (`create_to_llvm`).
 
-If those four work, the `dyn Backend` + `ValueId` direction is sound. The variable
-concern has a practical answer (§5); the greater architectural risks are pointer
-representation (§8b) and the corrected packed-vs-native ABI (§7) — this spike targets
-exactly those.
+**Findings that update this plan:**
+- The known-good pipeline is `Module::parse` → verify → `PassManager` with
+  `pass::conversion::create_to_llvm()` → verify → `ExecutionEngine::new(&m, 2, &[],
+  false, false)` → `lookup(name)`. `register_all_llvm_translations(&context)` is
+  required at context setup.
+- **`mlir-sys 220` exposes no `mlirCreateTransformsMem2Reg`** (and melior's
+  `pass::transform` has no mem2reg constructor). So §5's "explicit `mem2reg`" is not
+  available through these bindings today: either rely on LLVM's opt-level mem2reg (which
+  works — check 2 proves it), or wrap a raw pass via `melior::pass::Pass::from_raw_fn`
+  once/if a symbol exists. Adjust §5's "run mem2reg explicitly" accordingly.
+- The spike builds IR from **textual MLIR** (`Module::parse`) on purpose — it de-risks
+  the JIT/ABI/lowering pipeline (the real risk), not melior's alpha op-builder helpers
+  (Phase 1's job).
+
+Verdict: the `dyn Backend` + `ValueId` direction is sound, and the two architectural
+risks (pointer representation §8b, and the corrected native-vs-packed ABI §7) are
+cleared. Proceed to Phase 0.
 
 **Phase 0 — introduce the seam, Cranelift-only (pure refactor, tests stay green).**
 Define `Backend`/`Module`/`Executable` traits + `ValueId`/`VarHandle`/`BlockHandle` +

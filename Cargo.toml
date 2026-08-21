@@ -1,5 +1,9 @@
 [workspace]
 members = ["rust-lms", "rust-lms-derive", "rust-lms-std", "arrow-lms", "sql-gen"]
+# `mlir-spike` is the Phase -1 MLIR de-risking spike (docs/llvm.md). It depends on
+# melior, which needs a system LLVM/MLIR 22 install, so it is kept OUT of the default
+# workspace build — build it explicitly, see mlir-spike/README.md.
+exclude = ["mlir-spike"]
 resolver = "2"
 
 [workspace.dependencies]
