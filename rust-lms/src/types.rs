@@ -9,6 +9,63 @@ use cranelift_codegen::ir::{types, InstBuilder, Value};
 use cranelift_frontend::FunctionBuilder;
 
 // =============================================================================
+// Backend-neutral scalar type (Phase 0 of docs/llvm.md)
+// =============================================================================
+
+/// Backend-neutral IR type representation.
+///
+/// This is the abstraction a future non-Cranelift backend (LLVM/MLIR) selects its
+/// own type from — the source of truth that replaces raw `cranelift ... Type` in the
+/// staged type system. During Phase 0 it is derived from the existing
+/// [`StagedType::cranelift_type`]; later, `cranelift_type` becomes the derived one.
+///
+/// Note `Bool` and `Ptr` are distinct from `I8`/`I64` even though both *currently*
+/// lower to the same Cranelift type: an MLIR backend needs `Bool`→`i1` at
+/// comparisons/branches and `Ptr`→`llvm.ptr` (see docs/llvm.md §8b/§8c).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ScalarType {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    Ptr,
+}
+
+impl ScalarType {
+    /// Lower to the Cranelift IR type. `Bool` and `Ptr` fold onto `I8`/`I64` — the
+    /// Cranelift representation makes no such distinction.
+    pub fn to_cranelift(self) -> cranelift_codegen::ir::Type {
+        match self {
+            ScalarType::Bool | ScalarType::I8 => types::I8,
+            ScalarType::I16 => types::I16,
+            ScalarType::I32 => types::I32,
+            ScalarType::F32 => types::F32,
+            ScalarType::I64 | ScalarType::Ptr => types::I64,
+            ScalarType::F64 => types::F64,
+        }
+    }
+
+    /// Recover a `ScalarType` from a Cranelift type. Lossy where Cranelift folds
+    /// distinct neutral types together: `I8` cannot be told apart from `Bool`, and
+    /// `I64` from `Ptr`, so an impl that needs the distinction overrides
+    /// [`StagedType::scalar_type`] directly.
+    pub fn from_cranelift(ty: cranelift_codegen::ir::Type) -> ScalarType {
+        match ty {
+            types::I8 => ScalarType::I8,
+            types::I16 => ScalarType::I16,
+            types::I32 => ScalarType::I32,
+            types::F32 => ScalarType::F32,
+            types::I64 => ScalarType::I64,
+            types::F64 => ScalarType::F64,
+            _ => ScalarType::Ptr,
+        }
+    }
+}
+
+// =============================================================================
 // Core Traits
 // =============================================================================
 
@@ -55,6 +112,14 @@ pub unsafe trait StagedType {
     /// For primitives, this is the actual type (I64, F64, etc.)
     /// For structs, this is I64 (pointer to stack slot)
     fn cranelift_type() -> cranelift_codegen::ir::Type;
+
+    /// The backend-neutral scalar representation of this type (Phase 0 of
+    /// docs/llvm.md). Defaults to deriving from [`Self::cranelift_type`]; impls that
+    /// need the `Bool`/`Ptr` distinction Cranelift folds away (booleans, pointers,
+    /// slice/struct handles) override this directly.
+    fn scalar_type() -> ScalarType {
+        ScalarType::from_cranelift(Self::cranelift_type())
+    }
 
     /// Size of this type in bytes (for struct layout calculations)
     fn size_of() -> usize {
@@ -341,6 +406,10 @@ unsafe impl StagedType for bool {
 
     fn cranelift_type() -> cranelift_codegen::ir::Type {
         types::I8
+    }
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::Bool
     }
 
     fn size_of() -> usize {
