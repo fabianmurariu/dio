@@ -31,9 +31,12 @@ heavyweight system LLVM dependency).**
   (`llvm-config` / `MLIR_SYS_220_PREFIX`), versus Cranelift's pure-Rust build. This
   reshapes the build, CI, and contributor onboarding. Put the whole thing behind a
   `--features llvm` gate.
-- **Payoff:** LLVM's optimizer (far better generated code, autovectorization, more
-  mature targets) at the cost of much slower compile/JIT times. Cranelift stays the
-  fast-compile default.
+- **Payoff (hypothesis, to be measured):** LLVM's optimizer *may* produce better code
+  (autovectorization, stronger opts) and covers more targets, likely at the cost of
+  slower compile/JIT. This is **not** a proven claim — SQL kernels dominated by extern
+  calls, storage-pointer ABI slots, and weak alias info may give LLVM little to work
+  with. Benchmark before treating it as the rationale. Cranelift stays the fast-compile
+  default.
 
 ## 1. What is coupled to Cranelift today (measured)
 
@@ -80,7 +83,7 @@ From an inventory of `rust-lms/src`:
 | Control flow | blocks + `brif`/`jump` + block params | `cf` dialect: `cf.br`/`cf.cond_br` + block arguments (direct analogue); or `scf` structured |
 | Types | `types::I64/I8/...` | `IntegerType`, `FloatType`, `llvm.ptr` (via `arith`/`llvm` dialects) |
 | Aggregate copy | `emit_small_memory_copy` | `llvm.intr.memcpy` / explicit loads+stores |
-| JIT | `JITModule` → `get_finalized_function` → `*const u8` | `ExecutionEngine::new(module, opt, libs, …)` → `invoke_packed(name, &mut [*mut ()])` |
+| JIT | `JITModule` → `get_finalized_function` → `*const u8` | `ExecutionEngine::new(module, opt, libs, …)` → **`lookup(name)` → native fn ptr** (not `invoke_packed`; §7) |
 | Build | pure Rust | **system LLVM/MLIR 22** (`llvm-config` / `MLIR_SYS_220_PREFIX`) |
 
 The **value-lifetime** row is the one that dictates the whole design.
@@ -122,6 +125,28 @@ This indirection is the keystone. It makes the AST backend-agnostic and dissolve
 melior lifetime infection at one well-defined boundary. `VarHandle`, `BlockHandle`,
 `FuncHandle` get the same treatment (opaque `u32` ids into backend arenas).
 
+**But "the `Context` outlives the handles" is not the only validity invariant.** melior
+explicitly warns that references can be invalidated when operations move ownership, are
+erased, or when **passes rewrite the module**. A raw `MlirValue` captured during
+emission may dangle after `mem2reg`/lowering runs. So the lifecycle must be
+**structural**, not just lifetime-scoped:
+
+```
+MlirEmitter (owns the ValueId/VarHandle/BlockHandle arenas)
+  → emit all functions        (handles valid here, and ONLY here)
+  → finish()                  → drops every arena; no handle survives
+  → verify module
+  → run passes (mem2reg, lowering, reconcile-unrealized-casts)
+  → verify module
+  → build ExecutionEngine
+```
+
+**No `ValueId`/handle may outlive `finish()`.** Everything the runtime needs afterward
+(the entry point, extern registrations) is keyed by *name/`FuncHandle` metadata*, not by
+IR-value handles. This makes the raw-handle window a closed emission phase rather than a
+standing invariant — the safe way to keep the handles lifetime-free without pretending
+they are eternally valid.
+
 ## 4. Generic (`B: Backend`) vs trait object (`dyn Backend`)?
 
 Both are technically open now that we know `dyn Staged` is unused. They trade off:
@@ -159,27 +184,39 @@ back.
 
 **MLIR has no `Variable` and no sealing.** Two ways to bridge:
 
-- **(a) `llvm.alloca` + load/store + `mem2reg` (recommended).** Map the Backend
-  variable API onto memory: `declare_var` → `llvm.alloca`; `def_var` → `llvm.store`;
-  `use_var` → `llvm.load`; **`seal_block` → no-op**. Then rely on LLVM's `mem2reg`/SROA
-  (which the ExecutionEngine's optimization level runs) to promote every alloca to real
-  SSA registers with correct phis — *exactly* how Clang lowers C locals. This makes the
-  entire imperative-variable and loop-phi story disappear on the MLIR side with no
-  hand-threaded phis and no sealing protocol. `IfThenElse`'s merge value can also be an
-  alloca (store in each arm, load after) and get promoted, so even the one explicit phi
-  becomes uniform.
-- **(b) Hand-built block-argument phis.** MLIR `cf` blocks take arguments (true phis),
-  so in principle we could thread loop-carried values as block args. This is a much
-  larger rewrite (every mutated variable must be discovered and threaded through every
-  branch) and essentially re-implements Cranelift's SSA construction by hand. Reject it
-  for variables; optionally use `cf` block args only for the `IfThenElse` merge if we
-  want tighter pre-optimization IR.
+- **(a) `llvm.alloca` + load/store + explicit `mem2reg` (recommended).** Map the
+  Backend variable API onto memory: `declare_var` → `llvm.alloca`; `def_var` →
+  `llvm.store`; `use_var` → `llvm.load`; **`seal_block` → no-op**. `llvm.alloca`
+  implements MLIR's `PromotableAllocationOpInterface`, and the `-mem2reg` pass promotes
+  it to SSA, inserting block-argument phis where needed. This makes the imperative-
+  variable and loop-phi story disappear with no hand-threaded phis and no sealing.
+  Strict rules that make it actually work:
+  - **`declare_var` inserts the `alloca` in the function *entry block*, always** —
+    never at the current position. rust-lms declares variables lazily (on first
+    assignment), which can be *inside a loop*; an alloca emitted there would allocate
+    every iteration and typically block promotion. Entry-block placement is mandatory.
+  - **Run `mem2reg` explicitly** as a pass, not by trusting the ExecutionEngine's
+    optimization level (which may be `O0`). melior lacks a high-level constructor for
+    it, but `mlir-sys 220` exposes `mlirCreateTransformsMem2Reg`, wrappable via
+    `Pass::from_raw`.
+  - **Keep ABI/output stack slots distinct from variable slots.** ABI slots hold the
+    storage pointers that escape to calls and normally *cannot* be promoted; only the
+    variable slots should be fed to `mem2reg`.
+- **(b) Hand-built block-argument phis for *variables* — rejected.** Threading every
+  mutated variable through every branch as `cf` block args re-implements Cranelift's SSA
+  construction by hand; too large. Use (a) for variables.
+
+**Keep `IfThenElse`'s explicit block-argument phi as-is — do not turn it into memory.**
+MLIR `cf` blocks natively support block arguments (true phis), which is a direct
+analogue of Cranelift's merge block param. The existing explicit phi is already optimal
+IR; routing it through an alloca would only create work for `mem2reg` to undo. So:
+variables → alloca+`mem2reg`; the `IfThenElse` merge → native block argument.
 
 **Net:** the Backend trait keeps Cranelift's variable vocabulary
-(`declare_var`/`def_var`/`use_var`/`seal_block`) as the common denominator. The
-Cranelift impl forwards to native calls; the MLIR impl implements them as
-alloca/store/load with a no-op seal. Control-flow blocks + branches map to `cf` dialect
-directly (MLIR blocks natively support the block-parameter phi that `IfThenElse` uses).
+(`declare_var`/`def_var`/`use_var`/`seal_block`) as the common denominator. Cranelift
+forwards to native calls; MLIR implements them as entry-block alloca / store / load with
+a no-op seal and an explicit `mem2reg` pass. Control-flow blocks + branches map to `cf`
+directly, and `IfThenElse` uses real `cf` block arguments.
 
 ## 6. The `Backend` trait (sketch)
 
@@ -222,6 +259,12 @@ pub trait Backend {
     fn stack_alloc(&mut self, size: u32, align: u8) -> ValueId;     // stack_addr / llvm.alloca
     fn memcpy(&mut self, dst: ValueId, src: ValueId, size: u32, align: u8);
 
+    // ---- pointers (semantic; NOT raw iadd — see §8b) ----
+    fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId; // gep / iadd
+    fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId;
+    fn ptr_to_addr(&mut self, ptr: ValueId) -> ValueId;   // ptrtoint / no-op
+    fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId;  // inttoptr / no-op
+
     // ---- variables (see §5) ----
     fn declare_var(&mut self, ty: TypeId) -> VarHandle;
     fn def_var(&mut self, v: VarHandle, val: ValueId);
@@ -243,13 +286,20 @@ pub trait Backend {
     fn ret(&mut self, v: Option<ValueId>);
 }
 
-// A separate object for the compile lifecycle (declare/define/finalize/JIT):
+// Module lifecycle, kept SEPARATE from per-function emission because Cranelift's
+// FunctionBuilder and MLIR's block/region builder have different ownership rules.
+// Written to be object-safe: `body` is a boxed FnOnce (not `impl FnOnce`, which would
+// make the method generic), and `finalize` takes `self: Box<Self>` (not `self` by
+// value, which cannot be called through `dyn Module`).
 pub trait Module {
     fn declare_function(&mut self, name: &str, sig: &SigSpec, linkage: Linkage) -> FuncHandle;
-    fn define_function(&mut self, f: FuncHandle, body: impl FnOnce(&mut dyn Backend));
+    fn define_function(&mut self, f: FuncHandle, body: Box<dyn FnOnce(&mut dyn Backend)>);
     fn register_extern(&mut self, name: &str, ptr: *const u8);
-    fn finalize(self) -> Box<dyn Compiled>;    // owns exec memory; frees on Drop
+    fn finalize(self: Box<Self>) -> Result<Box<dyn Executable>, CompileError>;
 }
+// `Executable` owns the JIT resources (Cranelift JITModule, or MLIR
+// ExecutionEngine+Context+Module) and frees them on Drop. NOTE: the MLIR
+// ExecutionEngine is `!Send + !Sync` (§9), so the LLVM `Executable` is thread-affine.
 ```
 
 `CompilationContext` keeps its backend-neutral maps (`var_map: HashMap<usize,
@@ -258,45 +308,106 @@ holds a `&mut dyn Backend`. The ~hundreds of `Staged::codegen` bodies change onl
 mechanically (`ctx.builder.ins().iadd(a,b)` → `ctx.backend.iadd(a, b)`); the `Num`/
 `StagedType` trait methods absorb the signed/unsigned/float selection they already do.
 
-## 7. ABI & JIT — the favorable part
+## 7. ABI & JIT — use `lookup()`, not `invoke_packed`
 
-rust-lms's Phase-3 ABI is **one uniform convention: N storage pointers + one output
-pointer, void return.** MLIR's JIT entry point is
-`ExecutionEngine::invoke_packed(name, &mut [*mut ()])`, whose "arguments" are *pointers
-to arguments and results*. **These are the same convention.** So the MLIR backend:
+rust-lms's Phase-3 ABI is one uniform convention: **N storage pointers + one output
+pointer, void return**, and `CompiledFn`/`as_fn_unchecked` already `transmute` the JIT
+entry to `unsafe extern "C" fn(*const u8, …, *mut u8)` and call it directly
+(`func.rs:1584`).
 
-1. Emits each JIT function as an `llvm.func` taking `llvm.ptr` params + an output
-   `llvm.ptr`, returning void — mirroring the existing signature builder.
-2. Lowers to the LLVM dialect with a `PassManager` (`convert-scf-to-cf` if used,
-   `convert-cf-to-llvm`, `convert-arith-to-llvm`, `convert-func-to-llvm`,
-   `finalize-memref-to-llvm`, plus `mem2reg`/canonicalize for §5), then
-   `register_all_llvm_translations`.
-3. Builds `ExecutionEngine::new(&module, opt_level, &[], false, false)`, registers each
+**Correction to an earlier draft:** MLIR's `invoke_packed(name, &mut [*mut ()])` is
+**not** this convention. `invoke_packed` calls a generated `void(void**)` trampoline
+that `llvm.emit_c_interface` emits, whose slots are *pointers to* the argument storage.
+Since our arguments are *already* pointers, that adds a **second** level of indirection
+and requires the `emit_c_interface` attribute — a different (and slower) calling path.
+
+The right move preserves the Phase-3 ABI and all of `Compiled`/`CompiledFn` unchanged:
+
+1. Emit each JIT function with the existing storage-pointer signature (`llvm.func`
+   taking `llvm.ptr` params + an output `llvm.ptr`, `void` return).
+2. Verify the module, lower to the LLVM dialect and translate (§ pass pipeline below).
+3. Build `ExecutionEngine::new(&module, opt_level, &[], false, false)`, register each
    host extern with `engine.register_symbol(name, ptr)` (the analogue of
-   `JITBuilder::symbol`), and invokes via `invoke_packed` with a `[*mut ()]` slice
-   built from the same storage pointers `Compiled::run`/`CompiledFn::call` already
-   marshal.
-4. `Compiled` for MLIR owns the `ExecutionEngine` (+ `Context`/`Module`) and drops
-   them together — the same "owns executable memory, frees on Drop" contract as the
-   Cranelift `JITModule`.
+   `JITBuilder::symbol`).
+4. Get the **native function pointer** via `ExecutionEngine::lookup(name)` and
+   `transmute` it to the same `extern "C" fn(*const u8, …, *mut u8)` that
+   `as_fn_unchecked` already uses. **No packed wrapper, no extra indirection, ABI
+   identical to Cranelift.** Reserve `invoke_packed` only for tests or an explicit
+   adapter.
+5. The MLIR `Compiled` owns the `ExecutionEngine` (+ `Context`/`Module`) and drops them
+   together — the same "owns executable memory, frees on `Drop`" contract as the
+   Cranelift `JITModule`. **Caveat (§9): melior's `ExecutionEngine` is `!Send + !Sync`**,
+   so the LLVM `Compiled`/`CompiledFn` are thread-affine — an auto-trait change from the
+   Cranelift path that the ownership design must account for.
 
-Because `as_fn_unchecked`'s by-pointer signature is exactly this shape, most of
-`func.rs`'s `Compiled`/`CompiledFn` glue is backend-neutral already; only the module
-finalize + entry-lookup differ.
+Because the entry point is a plain function pointer with the by-pointer signature,
+`Compiled`/`CompiledFn` glue stays backend-neutral; only module finalize +
+`lookup` differ.
 
-## 8. Type mapping
+**Pass pipeline (corrected — pick one source level).** The earlier draft mixed
+"emit `llvm.func`" *and* `convert-func-to-llvm`, which is contradictory. Choose:
+either (a) emit `func.func` + `arith` + `cf` + LLVM memory ops, then convert *all*
+remaining dialects; **or (b, recommended) emit `llvm.func` directly and only convert
+nested `arith`/`cf`.** We use `llvm.alloca`, not `memref`, so
+`finalize-memref-to-llvm` is unnecessary. Run **`mem2reg` explicitly** (§5) rather
+than trusting the engine's opt level, and add **`reconcile-unrealized-casts`** after
+progressive conversion (per the LLVM lowering docs). Then
+`register_all_llvm_translations` before building the `ExecutionEngine`.
 
-| rust-lms | Cranelift | MLIR |
+## 8. Types, pointers, and booleans
+
+### 8a. A backend-neutral type is needed (coupling is broader than `codegen`)
+
+Cranelift types leak through more than `Staged::codegen`. `StagedType::cranelift_type`
+(`types.rs:27`), `ConstantType::codegen_constant`, and `TypeInfo::value_type`
+(`func_impl.rs:20`) all name Cranelift types, and there is a **downstream `Staged` impl
+in `arrow-lms/src/array.rs:264`** returning a Cranelift value. All of these must move to
+a backend-neutral representation. Introduce:
+
+```rust
+pub enum ScalarType { Bool, I8, I16, I32, I64, F32, F64, Ptr }
+```
+
+`TypeInfo` should carry **representation + layout (size/align)**, not a backend
+`TypeId`; each backend maps `ScalarType` → its own type at emit time.
+
+| `ScalarType` | Cranelift | MLIR |
 |---|---|---|
-| `I8` (bool, unit) | `types::I8` | `IntegerType::new(ctx, 8)` |
-| `I16/I32/I64` | `types::I16/I32/I64` | `IntegerType::new(ctx, 16/32/64)` |
-| `F32/F64` | `types::F32/F64` | `FloatType` (`Float32Type`/`Float64Type`) |
-| pointer / slice ptr / struct handle (all `I64`) | `types::I64` | `llvm.ptr` (opaque pointer) — or keep `i64` and `inttoptr` at loads |
+| `I8/I16/I32/I64` | `types::I8/…/I64` | `IntegerType::new(ctx, 8/…/64)` |
+| `F32/F64` | `types::F32/F64` | `Float32Type`/`Float64Type` |
+| `Bool` | `types::I8` | **`i1`** internally, `i8` at storage (§8c) |
+| `Ptr` (all pointers/slices/struct handles) | `types::I64` | `llvm.ptr` |
 
-Decision to make in Phase 1: keep pointers as `i64` end-to-end (closest to today, one
-`inttoptr` per memory op) **or** adopt `llvm.ptr` (more idiomatic, better alias info).
-Recommend `llvm.ptr` for loads/stores/calls and `i64` only where an address is
-arithmetic — but this is a local choice inside the MLIR backend, invisible to the AST.
+### 8b. Pointers need *semantic* ops — this is **not** local to the AST
+
+The earlier draft claimed the `i64`-vs-`llvm.ptr` choice was invisible to the AST. It
+is not: pointer arithmetic today lowers to integer `iadd` (e.g. `refer.rs:454`), and an
+`llvm.ptr` **cannot** be an operand to `llvm.add`. So the `Backend` trait must expose
+*semantic* pointer operations, and the AST must call them instead of `iadd`:
+
+```rust
+fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId;
+fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId;
+fn ptr_to_addr(&mut self, ptr: ValueId) -> ValueId;   // ptrtoint
+fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId;  // inttoptr
+```
+
+Cranelift implements these with integer arithmetic (as today); MLIR uses
+`llvm.getelementptr` + explicit `ptrtoint`/`inttoptr` casts. This means `refer.rs`'s
+`ptr_offset`/`array_index` codegen must be rewritten from raw `iadd` to these semantic
+methods — a real (if small) change on the Cranelift side too. Note also that `llvm.ptr`
+**does not by itself** give better alias information; that needs `noalias`, alias
+scopes, and alignment metadata/attributes, which are out of scope for a first cut.
+
+### 8c. Boolean representation needs an explicit policy
+
+rust-lms stores `bool` as `I8`, but MLIR comparisons (`arith.cmpi`) produce `i1` and
+conditional branches/`select` consume `i1`. Policy: **`Bool` is logical internally**,
+lowered to Cranelift `I8` and MLIR `i1`, with **explicit `i1`↔`i8` conversion at
+storage boundaries** — loads, stores, calls, block arguments, and any place a bool is
+materialized into memory or an ABI slot. The `Backend` trait hides this: `icmp` returns
+a `Bool` value, `brif`/`select` take one, and load/store of a `Bool` field insert the
+`zext`/`trunc` on the MLIR side (no-op on Cranelift).
 
 ## 9. Implications (the honest list)
 
@@ -306,10 +417,25 @@ arithmetic — but this is a local choice inside the MLIR backend, invisible to 
   runners, and a real onboarding cost. **Mitigation:** gate the entire MLIR backend
   behind `--features llvm` (off by default). The pure-Rust Cranelift build stays the
   default; `cargo build`/`test` are unaffected unless you opt in.
-- **Compile/JIT time.** LLVM produces much better code but JITs far slower than
-  Cranelift (seconds vs milliseconds for large kernels). This flips rust-lms's "fast
-  staging" value prop, so LLVM is the "optimize hard, run many times" mode, Cranelift
-  the "compile fast" default. Worth exposing the choice per-`Compiler`, not globally.
+- **Compile/JIT time (hypothesis).** LLVM is expected to JIT slower than Cranelift and
+  to optimize harder, positioning LLVM as the "optimize hard, run many times" mode and
+  Cranelift as the "compile fast" default — but the magnitude ("seconds vs
+  milliseconds") is a guess until measured on real kernels. Expose the choice
+  per-`Compiler`, not globally, and benchmark both compile latency and steady-state
+  execution before publishing any performance rationale.
+- **`ExecutionEngine` is `!Send + !Sync`.** melior documents this. An LLVM `Compiled`/
+  `CompiledFn` that owns the engine therefore loses the `Send`/`Sync` the Cranelift
+  path may have. Decide deliberately: either LLVM-compiled functions are thread-affine
+  (document it), or the engine is isolated behind a different ownership design. This is
+  an auto-trait change on a public type and must be a conscious decision, not a
+  surprise.
+- **Backend edge-case semantics are not automatically shared.** Division by zero,
+  oversized/negative shifts, signed-division overflow, and float NaN handling differ:
+  LLVM may produce **poison** where Cranelift **traps** or defines a result, and shift
+  semantics differ past the bit width. rust-lms already treats slice/pointer ops as
+  unchecked (author's contract), but the arithmetic edge cases need a **defined,
+  backend-independent policy** and **differential tests that include them** — not only
+  successful SQL workloads.
 - **`unsafe` containment.** Because `MlirValue` carries no lifetime, the
   `ValueId`→raw-`MlirValue` arena is an ordinary (safe) `Vec`; the only obligation is
   the runtime invariant "the backend's `Context` outlives its handles," which the
@@ -334,13 +460,40 @@ arithmetic — but this is a local choice inside the MLIR backend, invisible to 
 
 ## 10. Phased plan
 
+**Phase -1 — MLIR spike (do this BEFORE the wide Cranelift refactor).** A throwaway
+standalone binary that proves the four load-bearing MLIR mechanics work end to end,
+so we don't commit to the `dyn Backend` + `ValueId` refactor on faith. Prove:
+
+1. JIT a constant function and invoke it via **`ExecutionEngine::lookup`** (native
+   function pointer, not `invoke_packed`).
+2. Compile a mutable loop using **entry-block `llvm.alloca` + explicit `mem2reg` + `cf`
+   block structure**, and confirm promotion happened.
+3. **Load through a real `llvm.ptr`** (exercise the semantic pointer ops of §8b).
+4. Call **one registered Rust extern** through the Phase-3 storage-pointer ABI
+   (`register_symbol` + the by-pointer signature).
+5. **Verify the module before and after lowering** (§3 structural lifecycle).
+
+If those four work, the `dyn Backend` + `ValueId` direction is sound. The variable
+concern has a practical answer (§5); the greater architectural risks are pointer
+representation (§8b) and the corrected packed-vs-native ABI (§7) — this spike targets
+exactly those.
+
 **Phase 0 — introduce the seam, Cranelift-only (pure refactor, tests stay green).**
-Define `Backend`/`Module`/`Compiled` traits + `ValueId`/`VarHandle`/`BlockHandle`.
-Implement them as a thin `CraneliftBackend` wrapping today's code. Change
-`Staged::codegen -> ValueId` and rewrite the 142 sites to `ctx.backend.*`. No behavior
-change; the whole suite must stay green. **This is the bulk of the work and it is
-backend-count-independent — worth doing even if LLVM never ships**, because it also
-makes the codegen unit-testable and documents the real backend contract.
+Define `Backend`/`Module`/`Executable` traits + `ValueId`/`VarHandle`/`BlockHandle` +
+the `ScalarType` enum (§8a). Implement them as a thin `CraneliftBackend` wrapping
+today's code. This is broader than `Staged::codegen`:
+
+- Change `Staged::codegen -> ValueId` and rewrite the ~142 `.ins()` sites to
+  `ctx.backend.*`.
+- Move `StagedType::cranelift_type`, `ConstantType::codegen_constant`, and
+  `TypeInfo::value_type` (`func_impl.rs`) onto `ScalarType` + layout; fix the downstream
+  Cranelift-returning `Staged` impl in `arrow-lms/src/array.rs:264`.
+- Rewrite pointer arithmetic (`refer.rs` `ptr_offset`/`array_index`) from raw `iadd` to
+  the **semantic pointer ops** of §8b.
+
+No behavior change; the whole suite must stay green. **This is the bulk of the work and
+it is backend-count-independent — worth doing even if LLVM never ships**, because it
+also makes the codegen unit-testable and documents the real backend contract.
 
 **Phase 1 — MLIR backend skeleton behind `--features llvm`.** Context/Module setup,
 type mapping (§8), constants, arithmetic/bitwise/compare/select/casts, memory
@@ -367,28 +520,58 @@ weeks each for someone comfortable with MLIR. Phase 0 delivers standalone value
 
 ## 11. Open questions / risks
 
-- **`mem2reg` reliability.** The whole variable story bets on LLVM promoting our allocas.
-  It will for straight-line and structured loops (Clang relies on it), but pathological
-  IR could leave stack traffic. Verify with `-O2` on the benches early in Phase 2.
-- **`llvm.ptr` vs `i64` pointers** (§8) — pick once, early; affects every memory op in
-  the MLIR backend (but not the AST).
-- **melior/MLIR version churn.** melior tracks LLVM major versions aggressively (0.27 =
-  LLVM 22). Pin it; expect periodic bumps.
-- **Two-backend maintenance tax.** Every new staged op now needs a method on `Backend`
-  and two impls. The differential test suite is what keeps them honest.
-- **Is it worth it?** If the goal is *faster* compilation or more portability with a
-  pure-Rust build, Cranelift already wins and this is not worth it. If the goal is
-  *maximum generated-code quality* (vectorization, LLVM's optimizer) or reusing the MLIR
-  ecosystem (custom dialects, GPU/accelerator lowering), the LLVM backend is the way,
-  and Phase 0 is a good investment regardless.
+Ranked — the two biggest are *not* the mutable-variable model (which has a practical
+answer, §5) but pointer representation and getting the JIT ABI right:
+
+- **(greatest) Pointer representation is a cross-cutting decision, not a local one**
+  (§8b). It changes the `Backend` trait surface and forces rewriting `refer.rs`'s
+  pointer arithmetic on *both* backends. Settle the semantic pointer ops in Phase 0 and
+  validate `llvm.ptr` loads in the Phase -1 spike. Note `llvm.ptr` alone does not
+  improve alias analysis.
+- **(corrected) JIT ABI — use `lookup()`, not `invoke_packed`** (§7). The earlier
+  "same convention" claim was wrong; `invoke_packed` adds a wrapper + indirection.
+  Lock this down in the Phase -1 spike by calling the native pointer directly.
+- **`mem2reg` reliability + placement.** The variable story bets on promotion. It holds
+  for entry-block allocas over straight-line/structured loops (Clang relies on it), but
+  **allocas must be entry-block** (§5) and `mem2reg` must be run **explicitly**
+  (`mlirCreateTransformsMem2Reg` via `Pass::from_raw`). Verify promotion on the benches
+  early in Phase 2 (check no residual stack traffic).
+- **Handle invalidation** (§3). Raw `MlirValue` handles die when passes rewrite the
+  module; enforce the structural lifecycle (no `ValueId` survives `finish()`).
+- **melior is alpha & incomplete.** 0.27.4 still describes itself as API-unstable —
+  **pin it exactly**, not with a semver range. `dialect::llvm` exposes only a subset of
+  LLVM ops; some calls, indirect calls, address ops, and intrinsics will need
+  `OperationBuilder` or the generated ODS APIs rather than a helper function.
+- **Backend edge-case semantics** (§9) — define and differential-test div-by-zero,
+  shift overflow, signed-division overflow, NaN, and pointer offsets; don't assume the
+  backends agree.
+- **`!Send`/`!Sync`** (§9) — decide the thread-affinity policy for the LLVM `Executable`.
+- **Two-backend maintenance tax.** Every new staged op needs a `Backend` method and two
+  impls; the differential suite keeps them honest.
+- **Is it worth it?** If the goal is *faster* compilation or a pure-Rust build,
+  Cranelift already wins and this is not worth it. If the goal is *maximum
+  generated-code quality* or reusing the MLIR ecosystem (custom dialects,
+  GPU/accelerator lowering), the LLVM backend is the way — and Phase 0 (+ the Phase -1
+  spike) is a good investment regardless.
 
 ## Sources
 
 - melior crate docs — <https://mlir-rs.github.io/melior/melior/> (`Value<'c,'a>`,
-  `ExecutionEngine::{new, register_symbol, invoke_packed}`, dialects `arith/func/llvm/
-  scf/cf/memref/index`, "no Cranelift-style variable abstraction").
-- mlir-sys / LLVM requirement — <https://github.com/mlir-rs/mlir-sys>,
-  <https://crates.io/crates/mlir-sys> (LLVM/MLIR 22, `llvm-config` / `MLIR_SYS_220_PREFIX`).
+  dialects `arith/func/llvm/scf/cf/memref/index`, "no Cranelift-style variable
+  abstraction", reference-invalidation safety notes, alpha/API-unstable).
+- melior `ExecutionEngine` — <https://mlir-rs.github.io/melior/melior/struct.ExecutionEngine.html>
+  (`new`, `register_symbol`, `lookup`, `invoke_packed`, `!Send`/`!Sync`).
+- MLIR `ExecutionEngine` / packed invocation & `emit_c_interface` —
+  <https://mlir.llvm.org/doxygen/classmlir_1_1ExecutionEngine.html>.
+- LLVM dialect (`llvm.alloca` `PromotableAllocationOpInterface`, `llvm.ptr`, `getelementptr`)
+  — <https://mlir.llvm.org/docs/Dialects/LLVM/>; `mem2reg` pass —
+  <https://mlir.llvm.org/docs/Passes/#mem2reg>; LLVM lowering &
+  `reconcile-unrealized-casts` — <https://mlir.llvm.org/docs/TargetLLVMIR/>.
+- mlir-sys (raw C API incl. `mlirCreateTransformsMem2Reg`, lifetime-free `MlirValue`) /
+  LLVM requirement — <https://mlir-rs.github.io/melior/mlir_sys/index.html>,
+  <https://github.com/mlir-rs/mlir-sys>, <https://crates.io/crates/mlir-sys>
+  (LLVM/MLIR 22, `llvm-config` / `MLIR_SYS_220_PREFIX`).
 - Internal inventory of `rust-lms/src` (this study): 16 Cranelift files, 142 `.ins()`
   sites, 39 ops; `Staged::codegen -> cranelift ... Value`; `CompilationContext`
-  fields; Phase-3 storage-pointer ABI.
+  fields; type coupling in `types.rs`/`func_impl.rs` + `arrow-lms/src/array.rs:264`;
+  pointer arithmetic in `refer.rs`; Phase-3 storage-pointer ABI (`func.rs:1584`).
