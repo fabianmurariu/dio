@@ -12,9 +12,8 @@
 //! control-flow combinators (`if_then`, `if_then_else`) rather than arithmetic.
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{InstBuilder, Value};
-use cranelift_frontend::FunctionBuilder;
 
+use crate::staged::{CompilationContext, ValueId};
 use crate::types::{ConstantType, CopyType, StagedType};
 
 // =============================================================================
@@ -30,25 +29,25 @@ mod sealed {
 /// This trait is sealed because its methods return raw IR values whose type is
 /// trusted by every arithmetic expression.
 pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
-    fn codegen_add(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_sub(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_mul(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_div(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_lt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_gt(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_eq(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_add(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_sub(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_mul(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_div(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_lt(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_gt(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_eq(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
 }
 
 /// Integer-typed numbers — additionally support remainder (modulo).
 pub trait IntNum: Num {
     const SIGNED: bool;
 
-    fn codegen_rem(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_bitand(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_bitor(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_bitxor(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_shl(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
-    fn codegen_shr(left: Value, right: Value, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_rem(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
+    fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
 }
 
 /// Floating-point numbers — marker; reserved for future float-only ops.
@@ -62,96 +61,96 @@ macro_rules! impl_int_num {
     ($ty:ty, signed) => {
         impl sealed::Sealed for $ty {}
         impl Num for $ty {
-            fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().iadd(l, r)
+            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.iadd(l, r)
             }
-            fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().isub(l, r)
+            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.isub(l, r)
             }
-            fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().imul(l, r)
+            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.imul(l, r)
             }
-            fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().sdiv(l, r)
+            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.sdiv(l, r)
             }
-            fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::SignedLessThan, l, r)
+            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::SignedLessThan, l, r)
             }
-            fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::SignedGreaterThan, l, r)
+            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::SignedGreaterThan, l, r)
             }
-            fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::Equal, l, r)
+            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::Equal, l, r)
             }
         }
         impl IntNum for $ty {
             const SIGNED: bool = true;
 
-            fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().srem(l, r)
+            fn codegen_rem(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.srem(l, r)
             }
-            fn codegen_bitand(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().band(l, r)
+            fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.band(l, r)
             }
-            fn codegen_bitor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().bor(l, r)
+            fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.bor(l, r)
             }
-            fn codegen_bitxor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().bxor(l, r)
+            fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.bxor(l, r)
             }
-            fn codegen_shl(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().ishl(l, r)
+            fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.ishl(l, r)
             }
-            fn codegen_shr(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().sshr(l, r)
+            fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.sshr(l, r)
             }
         }
     };
     ($ty:ty, unsigned) => {
         impl sealed::Sealed for $ty {}
         impl Num for $ty {
-            fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().iadd(l, r)
+            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.iadd(l, r)
             }
-            fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().isub(l, r)
+            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.isub(l, r)
             }
-            fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().imul(l, r)
+            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.imul(l, r)
             }
-            fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().udiv(l, r)
+            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.udiv(l, r)
             }
-            fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::UnsignedLessThan, l, r)
+            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::UnsignedLessThan, l, r)
             }
-            fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::UnsignedGreaterThan, l, r)
+            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::UnsignedGreaterThan, l, r)
             }
-            fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().icmp(IntCC::Equal, l, r)
+            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.icmp(IntCC::Equal, l, r)
             }
         }
         impl IntNum for $ty {
             const SIGNED: bool = false;
 
-            fn codegen_rem(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().urem(l, r)
+            fn codegen_rem(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.urem(l, r)
             }
-            fn codegen_bitand(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().band(l, r)
+            fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.band(l, r)
             }
-            fn codegen_bitor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().bor(l, r)
+            fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.bor(l, r)
             }
-            fn codegen_bitxor(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().bxor(l, r)
+            fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.bxor(l, r)
             }
-            fn codegen_shl(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().ishl(l, r)
+            fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.ishl(l, r)
             }
-            fn codegen_shr(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-                b.ins().ushr(l, r)
+            fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.ushr(l, r)
             }
         }
     };
@@ -170,56 +169,35 @@ impl_int_num!(u32, unsigned);
 // Floating point
 // =============================================================================
 
-impl sealed::Sealed for f64 {}
-impl Num for f64 {
-    fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fadd(l, r)
-    }
-    fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fsub(l, r)
-    }
-    fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fmul(l, r)
-    }
-    fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fdiv(l, r)
-    }
-    fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::LessThan, l, r)
-    }
-    fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::GreaterThan, l, r)
-    }
-    fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::Equal, l, r)
-    }
+macro_rules! impl_float_num {
+    ($ty:ty) => {
+        impl sealed::Sealed for $ty {}
+        impl Num for $ty {
+            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fadd(l, r)
+            }
+            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fsub(l, r)
+            }
+            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fmul(l, r)
+            }
+            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fdiv(l, r)
+            }
+            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fcmp(FloatCC::LessThan, l, r)
+            }
+            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fcmp(FloatCC::GreaterThan, l, r)
+            }
+            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.fcmp(FloatCC::Equal, l, r)
+            }
+        }
+        impl FloatNum for $ty {}
+    };
 }
 
-impl FloatNum for f64 {}
-
-impl sealed::Sealed for f32 {}
-impl Num for f32 {
-    fn codegen_add(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fadd(l, r)
-    }
-    fn codegen_sub(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fsub(l, r)
-    }
-    fn codegen_mul(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fmul(l, r)
-    }
-    fn codegen_div(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fdiv(l, r)
-    }
-    fn codegen_lt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::LessThan, l, r)
-    }
-    fn codegen_gt(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::GreaterThan, l, r)
-    }
-    fn codegen_eq(l: Value, r: Value, b: &mut FunctionBuilder) -> Value {
-        b.ins().fcmp(FloatCC::Equal, l, r)
-    }
-}
-
-impl FloatNum for f32 {}
+impl_float_num!(f64);
+impl_float_num!(f32);

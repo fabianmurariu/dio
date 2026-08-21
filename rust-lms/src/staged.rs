@@ -5,15 +5,24 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, Value};
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, StackSlot, Value};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::Module;
 use std::collections::HashMap;
 
-use crate::types::{ConstantType, CopyType, StagedType};
+use crate::types::{ConstantType, CopyType, ScalarType, StagedType};
 use cranelift_codegen::ir::types;
+
+/// An opaque handle to a value produced during codegen.
+///
+/// Phase 0 of docs/llvm.md: the AST-facing value handle. During the Cranelift-only
+/// refactor this is a transparent alias for `cranelift ... Value`; a later sub-phase
+/// (0e) flips it to an opaque arena index so a second backend (LLVM/MLIR) can supply
+/// its own value type without the AST ever naming a backend value.
+pub type ValueId = Value;
 
 /// Emit an exact copy between non-overlapping, equally aligned runtime slots.
 pub(crate) fn emit_copy_nonoverlapping(
@@ -86,6 +95,139 @@ pub struct CompilationContext<'a, 'b> {
 }
 
 impl<'a, 'b> CompilationContext<'a, 'b> {
+    // =========================================================================
+    // Value-producing op methods (Phase 0b of docs/llvm.md).
+    //
+    // These are the single funnel through which staged constructs emit IR:
+    // `ctx.iadd(a, b)` instead of `ctx.builder.ins().iadd(a, b)`. Once every site
+    // routes through here, the bodies are extracted into a `Backend` trait (0d) so
+    // a second backend can implement them. They hide Cranelift-only details
+    // (`MemFlags`, and `types::*` behind `ScalarType`) from the call sites.
+    // =========================================================================
+
+    // ---- constants ----
+    pub(crate) fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
+        self.builder.ins().iconst(ty.to_cranelift(), imm)
+    }
+    pub(crate) fn f64const(&mut self, v: f64) -> ValueId {
+        self.builder.ins().f64const(v)
+    }
+    pub(crate) fn f32const(&mut self, v: f32) -> ValueId {
+        self.builder.ins().f32const(v)
+    }
+
+    // ---- integer arithmetic ----
+    pub(crate) fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().iadd(a, b)
+    }
+    pub(crate) fn iadd_imm(&mut self, a: ValueId, imm: i64) -> ValueId {
+        self.builder.ins().iadd_imm(a, imm)
+    }
+    pub(crate) fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().isub(a, b)
+    }
+    pub(crate) fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().imul(a, b)
+    }
+    pub(crate) fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().sdiv(a, b)
+    }
+    pub(crate) fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().udiv(a, b)
+    }
+    pub(crate) fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().srem(a, b)
+    }
+    pub(crate) fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().urem(a, b)
+    }
+
+    // ---- float arithmetic ----
+    pub(crate) fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().fadd(a, b)
+    }
+    pub(crate) fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().fsub(a, b)
+    }
+    pub(crate) fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().fmul(a, b)
+    }
+    pub(crate) fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().fdiv(a, b)
+    }
+
+    // ---- bitwise / shift ----
+    pub(crate) fn band(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().band(a, b)
+    }
+    pub(crate) fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().bor(a, b)
+    }
+    pub(crate) fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().bxor(a, b)
+    }
+    pub(crate) fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().ishl(a, b)
+    }
+    pub(crate) fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().sshr(a, b)
+    }
+    pub(crate) fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().ushr(a, b)
+    }
+
+    // ---- compare / select ----
+    pub(crate) fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().icmp(cc, a, b)
+    }
+    pub(crate) fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId {
+        self.builder.ins().icmp_imm(cc, a, imm)
+    }
+    pub(crate) fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().fcmp(cc, a, b)
+    }
+    pub(crate) fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
+        self.builder.ins().select(cond, a, b)
+    }
+
+    // ---- casts ----
+    pub(crate) fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        self.builder.ins().sextend(to.to_cranelift(), v)
+    }
+    pub(crate) fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        self.builder.ins().uextend(to.to_cranelift(), v)
+    }
+    pub(crate) fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        self.builder.ins().ireduce(to.to_cranelift(), v)
+    }
+    pub(crate) fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        self.builder.ins().fcvt_from_sint(to.to_cranelift(), v)
+    }
+    pub(crate) fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        self.builder.ins().fcvt_from_uint(to.to_cranelift(), v)
+    }
+    pub(crate) fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        // Reinterpret bits (no MemFlags meaning for a value bitcast).
+        self.builder
+            .ins()
+            .bitcast(to.to_cranelift(), MemFlags::new(), v)
+    }
+
+    // ---- memory ----
+    pub(crate) fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+        self.builder
+            .ins()
+            .load(ty.to_cranelift(), MemFlags::trusted(), ptr, offset)
+    }
+    pub(crate) fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
+        self.builder
+            .ins()
+            .store(MemFlags::trusted(), val, ptr, offset);
+    }
+    pub(crate) fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId {
+        self.builder.ins().stack_addr(types::I64, slot, offset)
+    }
+
     /// Get or create a FuncRef for an external function.
     ///
     /// FuncRefs are per-function, so we cache them in extern_func_refs.

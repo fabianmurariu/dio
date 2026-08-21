@@ -501,21 +501,57 @@ risks (pointer representation §8b, and the corrected native-vs-packed ABI §7) 
 cleared. Proceed to Phase 0.
 
 **Phase 0 — introduce the seam, Cranelift-only (pure refactor, tests stay green).**
-Define `Backend`/`Module`/`Executable` traits + `ValueId`/`VarHandle`/`BlockHandle` +
-the `ScalarType` enum (§8a). Implement them as a thin `CraneliftBackend` wrapping
-today's code. This is broader than `Staged::codegen`:
+The bulk of the whole effort, and **backend-count-independent — worth doing even if
+LLVM never ships** (it gives the codegen a documented, unit-testable boundary with no
+Cranelift types leaking into the AST). The art is keeping the suite green at *every*
+step. Two linchpins make that possible:
 
-- Change `Staged::codegen -> ValueId` and rewrite the ~142 `.ins()` sites to
-  `ctx.backend.*`.
-- Move `StagedType::cranelift_type`, `ConstantType::codegen_constant`, and
-  `TypeInfo::value_type` (`func_impl.rs`) onto `ScalarType` + layout; fix the downstream
-  Cranelift-returning `Staged` impl in `arrow-lms/src/array.rs:264`.
-- Rewrite pointer arithmetic (`refer.rs` `ptr_offset`/`array_index`) from raw `iadd` to
-  the **semantic pointer ops** of §8b.
+1. **Transparent `ValueId` alias until the very end.** `pub type ValueId =
+   cranelift_codegen::ir::Value;` (likewise `VarHandle = Variable`, `BlockHandle =
+   Block`). While it's an alias every rewrite is behavior-identical and compiles. Only
+   the last sub-phase flips it to an opaque `struct ValueId(u32)` arena index — and
+   since the AST only *names* `ValueId`, that flip touches only the backend internals,
+   not the ~142 call sites.
+2. **Inherent op-methods on `CompilationContext` first; extract the trait later.** Don't
+   move `builder` out on day one (that breaks all 142 sites at once). First add thin
+   `ctx.iadd(a,b)` wrappers over `self.builder.ins()`, migrate the sites onto them, and
+   only then extract the wrappers into the `Backend` trait.
 
-No behavior change; the whole suite must stay green. **This is the bulk of the work and
-it is backend-count-independent — worth doing even if LLVM never ships**, because it
-also makes the codegen unit-testable and documents the real backend contract.
+Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each file in
+0b/0c, full `--workspace --all-targets` at every boundary, clippy at 0f):
+
+- **0a — Backend-neutral types. DONE (scaffolding) ✅.** Added `ScalarType { Bool, I8,
+  I16, I32, I64, F32, F64, Ptr }` with `to_cranelift()`/`from_cranelift()`
+  (`types.rs`), and a *provided* `StagedType::scalar_type()` defaulting to
+  `from_cranelift(cranelift_type())` (backward-compatible — downstream impls unchanged),
+  with a precise `bool → Bool` override. Exported from the prelude. Full workspace green
+  (343/0/2). **Deferred to 0b (deliberately, so each is consumer-driven and testable):**
+  the precise per-impl overrides (`Ptr` for the pointer/handle markers in
+  `refer.rs`/`option.rs`/`slice.rs`/`ffi.rs`/`opaque.rs` + the derive), and folding
+  `TypeInfo` (`func_impl.rs`) and `ConstantType::codegen_constant` onto `ScalarType` —
+  these all touch builder/ABI code the 0b op-sweep already rewrites, so they land there
+  where a real backend method reads the value.
+- **0b — Op-method sweep (biggest, mechanical).** Add inherent methods on
+  `CompilationContext` for the 39 ops wrapping `self.builder.ins()`; rewrite the ~142
+  sites to `ctx.<op>(…)` file by file (`num/traits.rs`, `num/ops.rs`, `control.rs`,
+  `slice.rs`, `option.rs`, `refer.rs`, `struct.rs`, `staged.rs`, `func_impl.rs`,
+  `ffi.rs`, `iter/*`, and `arrow-lms/src/array.rs`). *Green: pure rename, same IR.*
+- **0c — Semantic pointer ops + control-flow/var methods.** Add
+  `ptr_offset_bytes/_const`, `ptr_to_addr`, `addr_to_ptr` and rewrite `refer.rs` off raw
+  `iadd` (§8b); add `create_block`/`switch_to`/`seal_block`/`brif`/`jump`/`block_param`
+  and `declare_var`/`def_var`/`use_var`, routing `control.rs` + `func.rs` loops through
+  them. *Green: Cranelift forwards natively.*
+- **0d — Extract `Backend` trait + `CraneliftBackend` (riskiest; ownership reshuffle).**
+  Promote the inherent methods into an object-safe `Backend` trait; `CraneliftBackend`
+  now owns the `FunctionBuilder`/module/maps; `CompilationContext` holds `&mut dyn
+  Backend` and delegates. Rename `Staged::codegen -> ValueId`. Wrap declare/define/
+  finalize/JIT behind object-safe `Module`/`Executable` (`Box<dyn FnOnce>` body,
+  `finalize(self: Box<Self>)`). Sites don't move; only builder ownership changes.
+- **0e — Flip `ValueId` to opaque** (`struct ValueId(u32)` + arenas in
+  `CraneliftBackend`); AST unchanged. *Green: backend-internal.*
+- **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks
+  outside the backend module; keep the `compile_fail` doctests guarding `ctx.builder`;
+  full workspace + clippy (same 13-lint baseline).
 
 **Phase 1 — MLIR backend skeleton behind `--features llvm`.** Context/Module setup,
 type mapping (§8), constants, arithmetic/bitwise/compare/select/casts, memory
