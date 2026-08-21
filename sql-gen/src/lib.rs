@@ -22,6 +22,7 @@ pub mod run;
 pub mod runtime;
 pub mod scan;
 pub mod sql;
+pub mod status;
 pub mod value;
 
 pub use catalog::Catalog;

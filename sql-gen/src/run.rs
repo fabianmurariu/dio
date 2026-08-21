@@ -2,6 +2,7 @@
 //! `RecordBatch`. The single entry point for running queries.
 
 use std::collections::HashMap;
+use std::cell::Cell;
 use std::rc::Rc;
 use std::sync::Arc;
 
@@ -179,6 +180,7 @@ fn build_join_index(js: &mut JoinState, rel_schema: &SchemaRef, key_col: usize) 
         group: None,
         out: Rc::new(OutputHandle { cols: Vec::new() }),
         join: Some(handle),
+        poison: Rc::new(Cell::new(None)),
     };
     let rel_schema = rel_schema.clone();
     let f = compiler.fun0("build_index", move |ctx| {
@@ -226,6 +228,7 @@ fn build_join_materialized(
         group: None,
         out: Rc::new(out.handle()),
         join: Some(handle),
+        poison: Rc::new(Cell::new(None)),
     };
     let build_c = build.clone();
     let key_expr = key_expr.clone();
@@ -321,6 +324,7 @@ fn run_kernel(
         group,
         out: Rc::new(out.handle()),
         join,
+        poison: Rc::new(Cell::new(None)),
     };
 
     let f = compiler.fun1("query", move |ctx, in_v: Var<SRefMut<Opaque<Inputs>>>| {
@@ -331,6 +335,12 @@ fn run_kernel(
 
     let n = compiled.call(inputs);
     inputs.take_error()?;
+    // Surface any error a fallible `group_upsert*` recorded during the fold (e.g. a
+    // group count exceeding `u32`). `DataFusionError` stays Rust-side; only a null
+    // sentinel crossed the ABI.
+    if let Some(gs) = group_state.as_mut() {
+        gs.check()?;
+    }
     let result = out.into_record_batch(n as usize);
     // Keep the interned-literal bytes and group state alive across the run (the
     // kernel holds pointers into them).
