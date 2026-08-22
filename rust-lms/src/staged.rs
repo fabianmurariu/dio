@@ -76,6 +76,19 @@ impl StackSlotId {
     }
 }
 
+// The LLVM/MLIR backend interprets a `ValueId` as an index into its own
+// `Vec<MlirValue>` arena (docs/llvm.md §9) — the same "u32 the active backend
+// interprets" contract the Cranelift path uses, just a different encoding.
+#[cfg(feature = "llvm")]
+impl ValueId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+
 /// Emit an exact copy between non-overlapping, equally aligned runtime slots.
 pub(crate) fn emit_copy_nonoverlapping(
     builder: &mut FunctionBuilder<'_>,

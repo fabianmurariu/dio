@@ -677,10 +677,22 @@ returning a constant JITs and runs via `ExecutionEngine`.
     `mlir_sys::MlirValue`, reachable via the **public** `ValueLike::to_raw` and
     reconstructable via `Value::from_raw`, so a `Vec<MlirValue>` is the MLIR analogue of
     Cranelift's entity arena. It lands with the multi-value op layer next.
-  - **Next:** the `ScalarType`→MLIR type map (§8), the raw-value arena, and the
-    arithmetic/compare/cast/memory value ops as an inherent `MlirBackend` API (not yet the
-    shared `Backend` trait — that unification waits on the calls/signatures neutralization,
-    Phase 3/4).
+- **Milestone 2 — DONE.** The value-op layer: `scalar_to_mlir` (the `ScalarType`→MLIR
+  type map, §8 — `Bool`→`i1`, `Ptr`→`llvm.ptr`), the `ValueId`→`Vec<MlirValue>` arena
+  (§9 confirmed — `Value` is `#[repr(transparent)]` over a lifetime-free `MlirValue` via
+  the public `ValueLike::to_raw`, so the arena is a plain safe `Vec`; `mlir-sys` added as
+  an optional dep for the raw type), and `MlirBackend` with constants, integer/float
+  arithmetic, bitwise, shifts, `IntCmp`/`FloatCmp` compares, branchless `select`,
+  sign/zero-extend + truncate + int→float casts, and `alloca`/`load`/`store`. Driven by
+  `jit_run_i64_unary`; 5 feature-gated tests pass (arithmetic, branchless abs via
+  cmp+select, alloca/store/load roundtrip, narrow→widen cast), default build still 366 /
+  clippy 28. `MlirBackend` stays an **inherent** API (not the shared `Backend` trait) —
+  the trait's opaque handles line up, but its calls/signatures cluster is still
+  Cranelift-typed, so unification waits on Phase 3/4.
+  - **Next:** variables + control flow (Phase 2, §5) — entry-block `alloca` + load/store
+    for `declare/def/use_var`, `cf` blocks/`brif`/`jump` with block-arg phis, `seal_block`
+    as a no-op, and the `mem2reg`-via-opt-level promotion; then differential-test loops
+    against Cranelift.
 
 **Phase 2 — variables & control flow (§5).** `declare/def/use_var` as alloca+load/store,
 `seal_block` no-op, blocks/`brif`/`jump`/block-params via `cf`, plus the lowering

@@ -2853,6 +2853,7 @@ dependencies = [
  "criterion",
  "either",
  "melior",
+ "mlir-sys",
  "mlua",
  "rand 0.8.5",
  "rhai",
