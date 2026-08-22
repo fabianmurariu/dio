@@ -865,7 +865,7 @@ where
         let new_len = ctx.isub(end, start);
 
         // Materialize the new (ptr, len) pair on a 16-byte stack slot.
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             16, // size
             3,  // align_shift = log2(8) = 3

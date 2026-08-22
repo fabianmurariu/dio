@@ -17,7 +17,7 @@
 //! Rust-facing wrappers preserve value semantics without exposing platform
 //! aggregate classification to Cranelift.
 
-use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, Staged, Var};
+use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, Staged, Var};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
@@ -321,10 +321,7 @@ impl Ctx {
             let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
                 ctx, next_ref, args,
             );
-            let tag = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
+            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
             // Single source of truth for the COption payload offset (see
             // COptionType::payload_offset); do not re-derive align_up(8, align) here.
             let payload_offset =
@@ -400,10 +397,10 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let call_conv = ctx.module.isa().default_call_conv();
+            let call_conv = ctx.default_call_conv();
 
             // One per-level slot, reserved once in the frame and reused.
-            let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            let slot = ctx.create_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 slot_size,
                 slot_align_shift,
@@ -417,20 +414,20 @@ impl Ctx {
             let mut next_sig = Signature::new(call_conv);
             next_sig.params.push(AbiParam::new(types::I64)); // data slot
             next_sig.params.push(AbiParam::new(types::I64)); // output slot
-            let next_sigref = ctx.builder.import_signature(next_sig);
+            let next_sigref = ctx.import_signature(next_sig);
 
             let mut drop_sig = Signature::new(call_conv);
             drop_sig.params.push(AbiParam::new(types::I64));
             drop_sig.params.push(AbiParam::new(types::I64));
-            let drop_sigref = ctx.builder.import_signature(drop_sig);
+            let drop_sigref = ctx.import_signature(drop_sig);
 
-            let data_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            let data_slot = ctx.create_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 8,
                 3,
             ));
             let data_ptr = ctx.stack_addr(data_slot, 0);
-            let option_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+            let option_slot = ctx.create_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 crate::option::COptionType::<Item>::size_of() as u32,
                 crate::option::COptionType::<Item>::align_of().trailing_zeros() as u8,
@@ -444,18 +441,12 @@ impl Ctx {
 
             // header: load data + next ptr, call it, branch on the tag register.
             ctx.switch_to_block(header);
-            let data = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
+            let data = ctx.load(ScalarType::I64, slot_ptr, data_off);
             let next_fn =
                 ctx.load(ScalarType::I64, slot_ptr, next_off);
             ctx.store(data, data_ptr, 0);
             ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
-            let tag = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
+            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
             // Single source of truth for the COption payload offset (see
             // COptionType::payload_offset); do not re-derive align_up(8, align) here.
             let payload_offset =
@@ -481,10 +472,7 @@ impl Ctx {
             // exit: drop the iterator (frees only if it was heap-boxed).
             ctx.switch_to_block(exit);
             ctx.seal_block(exit);
-            let data2 = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
+            let data2 = ctx.load(ScalarType::I64, slot_ptr, data_off);
             let drop_fn =
                 ctx.load(ScalarType::I64, slot_ptr, drop_off);
             ctx.store(data2, data_ptr, 0);
@@ -1229,9 +1217,12 @@ impl<'a> Compiler<'a> {
                     // Generate the body code
                     let result = {
                         let mut extern_func_refs = HashMap::new();
-                        let mut ctx = CompilationContext {
+                        let mut backend = CraneliftBackend {
                             builder: &mut builder,
                             module: &mut module,
+                        };
+                        let mut ctx = CompilationContext {
+                            backend: &mut backend,
                             var_map: &mut var_map,
                             func_map: &func_map,
                             extern_func_refs: &mut extern_func_refs,
@@ -1296,9 +1287,12 @@ impl<'a> Compiler<'a> {
                 let result = {
                     let mut extern_func_refs = HashMap::new();
                     let mut slice_vars = HashMap::new();
-                    let mut ctx = CompilationContext {
+                    let mut backend = CraneliftBackend {
                         builder: &mut builder,
                         module: &mut module,
+                    };
+                    let mut ctx = CompilationContext {
+                        backend: &mut backend,
                         var_map: &mut var_map,
                         func_map: &func_map,
                         extern_func_refs: &mut extern_func_refs,

@@ -253,7 +253,7 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         // Allocate stack slot for COption<T>
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             size,
             alignment.trailing_zeros() as u8,
@@ -300,7 +300,7 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             size,
             alignment.trailing_zeros() as u8,

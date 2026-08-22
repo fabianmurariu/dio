@@ -6,9 +6,8 @@
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::StagedType;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
-use cranelift_module::Module;
+use crate::types::{ScalarType, StagedType};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -87,9 +86,7 @@ pub fn codegen_call(
         .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
 
     // Declare the function for calling
-    let func_ref = ctx
-        .module
-        .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
+    let func_ref = ctx.declare_func_in_func(*cranelift_func_id);
 
     // The private JIT ABI passes one storage pointer per logical argument.
     let mut call_args: Vec<Value> = Vec::with_capacity(arg_values.len() + 1);
@@ -98,7 +95,7 @@ pub fn codegen_call(
         if param_info.is_aggregate {
             call_args.push(*arg_value);
         } else {
-            let stack_slot = ctx.builder.create_sized_stack_slot(param_info.stack_slot());
+            let stack_slot = ctx.create_stack_slot(param_info.stack_slot());
             let slot_ptr = ctx.stack_addr(stack_slot, 0);
             if param_info.size != 0 {
                 ctx.store(*arg_value, slot_ptr, 0);
@@ -107,9 +104,7 @@ pub fn codegen_call(
         }
     }
 
-    let result_slot = ctx
-        .builder
-        .create_sized_stack_slot(return_info.stack_slot());
+    let result_slot = ctx.create_stack_slot(return_info.stack_slot());
     let result_ptr = ctx.stack_addr(result_slot, 0);
     call_args.push(result_ptr);
 
@@ -121,9 +116,11 @@ pub fn codegen_call(
     } else if return_info.size == 0 {
         ctx.get_unit_value()
     } else {
-        ctx.builder
-            .ins()
-            .load(return_info.value_type, MemFlags::trusted(), result_ptr, 0)
+        ctx.load(
+            ScalarType::from_cranelift(return_info.value_type),
+            result_ptr,
+            0,
+        )
     }
 }
 
@@ -134,9 +131,7 @@ pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> Value 
         .get(&func_id)
         .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
 
-    let func_ref = ctx
-        .module
-        .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
+    let func_ref = ctx.declare_func_in_func(*cranelift_func_id);
     ctx.func_addr(func_ref)
 }
 

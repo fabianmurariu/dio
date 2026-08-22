@@ -5,16 +5,19 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{Block, BlockArg, FuncRef, InstBuilder, MemFlags, SigRef, StackSlot, Value};
-use cranelift_codegen::isa::TargetFrontendConfig;
+use cranelift_codegen::ir::{
+    condcodes::{FloatCC, IntCC},
+    types, Block, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, SigRef, StackSlot,
+    StackSlotData, Value,
+};
+use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
-use cranelift_module::Module;
+use cranelift_module::{FuncId, Module};
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
 use crate::types::{ConstantType, CopyType, ScalarType, StagedType};
-use cranelift_codegen::ir::types;
 
 /// An opaque handle to a value produced during codegen.
 ///
@@ -75,205 +78,277 @@ pub(crate) struct SliceVars {
 /// ```compile_fail
 /// use rust_lms::prelude::CompilationContext;
 ///
-/// fn cannot_mutate_the_backend(ctx: &mut CompilationContext<'_, '_>) {
-///     let _ = &mut ctx.builder;
+/// fn cannot_mutate_the_backend(ctx: &mut CompilationContext<'_>) {
+///     let _ = &mut ctx.backend;
 /// }
 /// ```
-pub struct CompilationContext<'a, 'b> {
-    /// The function builder for the current function
-    pub(crate) builder: &'b mut FunctionBuilder<'a>,
-    /// The JIT module for creating new functions
-    pub(crate) module: &'b mut JITModule,
-    /// Mapping from our variable IDs to Cranelift Variables
-    pub(crate) var_map: &'b mut HashMap<usize, Variable>,
+pub struct CompilationContext<'c> {
+    /// The IR backend (Cranelift today; a second impl — LLVM/MLIR — plugs in here).
+    /// `CompilationContext` derefs to this, so `ctx.<op>()` routes to the backend.
+    pub(crate) backend: &'c mut dyn Backend,
+    /// Mapping from our variable IDs to backend variable handles.
+    pub(crate) var_map: &'c mut HashMap<usize, VarHandle>,
     /// Mapping from our function IDs to Cranelift FuncIds
-    pub(crate) func_map: &'b HashMap<usize, cranelift_module::FuncId>,
+    pub(crate) func_map: &'c HashMap<usize, FuncId>,
     /// Mapping from extern function IDs to Cranelift FuncRefs (per-function)
-    pub(crate) extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
+    pub(crate) extern_func_refs: &'c mut HashMap<usize, FuncRef>,
     /// Mapping from extern function IDs to module FuncIds
-    pub(crate) extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
+    pub(crate) extern_func_ids: &'c HashMap<usize, FuncId>,
     /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
     /// For slice parameters, this allows direct register access instead of stack loads
-    pub(crate) slice_vars: &'b mut HashMap<usize, SliceVars>,
+    pub(crate) slice_vars: &'c mut HashMap<usize, SliceVars>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
-    pub(crate) unit_value: Option<Value>,
+    pub(crate) unit_value: Option<ValueId>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
     /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
-    pub(crate) loop_exit_stack: Vec<Block>,
+    pub(crate) loop_exit_stack: Vec<BlockHandle>,
 }
 
-impl<'a, 'b> CompilationContext<'a, 'b> {
-    // =========================================================================
-    // Value-producing op methods (Phase 0b of docs/llvm.md).
-    //
-    // These are the single funnel through which staged constructs emit IR:
-    // `ctx.iadd(a, b)` instead of `ctx.builder.ins().iadd(a, b)`. Once every site
-    // routes through here, the bodies are extracted into a `Backend` trait (0d) so
-    // a second backend can implement them. They hide Cranelift-only details
-    // (`MemFlags`, and `types::*` behind `ScalarType`) from the call sites.
-    // =========================================================================
+/// The IR-emission backend: the single interface a code generator implements.
+///
+/// Phase 0d of docs/llvm.md. Cranelift is the only impl today ([`CraneliftBackend`]);
+/// an LLVM/MLIR impl slots in behind the same trait. `CompilationContext` owns the
+/// codegen bookkeeping (var/slice maps, loop-exit stack) and derefs to a `dyn Backend`
+/// for the primitive ops. Object-safe (all methods take concrete handles).
+///
+/// `pub` + `#[doc(hidden)]` only because `CompilationContext` (a public type) derefs
+/// to `dyn Backend`; it is an internal, unstable contract, not a public API — its
+/// signatures still expose Cranelift types (0f will narrow this).
+#[doc(hidden)]
+pub trait Backend {
+    // constants
+    fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId;
+    fn f64const(&mut self, v: f64) -> ValueId;
+    fn f32const(&mut self, v: f32) -> ValueId;
+    // integer arithmetic
+    fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // float arithmetic
+    fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // bitwise / shift
+    fn band(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // compare / select
+    fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId;
+    fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId;
+    fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId;
+    fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId;
+    // casts
+    fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    // memory
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId;
+    fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
+    fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId;
+    fn create_stack_slot(&mut self, data: StackSlotData) -> StackSlot;
+    fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize);
+    // pointers (semantic; §8b)
+    fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId;
+    fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId;
+    fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId;
+    // blocks & control flow
+    fn create_block(&mut self) -> BlockHandle;
+    fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId;
+    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId;
+    fn switch_to_block(&mut self, block: BlockHandle);
+    fn seal_block(&mut self, block: BlockHandle);
+    fn jump(&mut self, target: BlockHandle, args: &[ValueId]);
+    fn brif(
+        &mut self,
+        cond: ValueId,
+        then_block: BlockHandle,
+        then_args: &[ValueId],
+        else_block: BlockHandle,
+        else_args: &[ValueId],
+    );
+    // variables
+    fn declare_var(&mut self, ty: ScalarType) -> VarHandle;
+    fn def_var(&mut self, var: VarHandle, val: ValueId);
+    fn use_var(&mut self, var: VarHandle) -> ValueId;
+    // calls & signatures
+    fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId>;
+    fn call_indirect(&mut self, sig: SigRef, callee: ValueId, args: &[ValueId]) -> Option<ValueId>;
+    fn func_addr(&mut self, func: FuncRef) -> ValueId;
+    fn import_signature(&mut self, sig: Signature) -> SigRef;
+    fn declare_func_in_func(&mut self, func_id: FuncId) -> FuncRef;
+    // target queries
+    fn default_call_conv(&self) -> CallConv;
+}
 
+/// The Cranelift implementation of [`Backend`]: owns the per-function
+/// `FunctionBuilder` plus the JIT module.
+pub(crate) struct CraneliftBackend<'a, 'b> {
+    pub(crate) builder: &'b mut FunctionBuilder<'a>,
+    pub(crate) module: &'b mut JITModule,
+}
+
+impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     // ---- constants ----
-    pub(crate) fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
+    fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
         self.builder.ins().iconst(ty.to_cranelift(), imm)
     }
-    pub(crate) fn f64const(&mut self, v: f64) -> ValueId {
+    fn f64const(&mut self, v: f64) -> ValueId {
         self.builder.ins().f64const(v)
     }
-    pub(crate) fn f32const(&mut self, v: f32) -> ValueId {
+    fn f32const(&mut self, v: f32) -> ValueId {
         self.builder.ins().f32const(v)
     }
-
     // ---- integer arithmetic ----
-    pub(crate) fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().iadd(a, b)
     }
-    pub(crate) fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().isub(a, b)
     }
-    pub(crate) fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().imul(a, b)
     }
-    pub(crate) fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().sdiv(a, b)
     }
-    pub(crate) fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().udiv(a, b)
     }
-    pub(crate) fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().srem(a, b)
     }
-    pub(crate) fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().urem(a, b)
     }
-
     // ---- float arithmetic ----
-    pub(crate) fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().fadd(a, b)
     }
-    pub(crate) fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().fsub(a, b)
     }
-    pub(crate) fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().fmul(a, b)
     }
-    pub(crate) fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().fdiv(a, b)
     }
-
     // ---- bitwise / shift ----
-    pub(crate) fn band(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn band(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().band(a, b)
     }
-    pub(crate) fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().bor(a, b)
     }
-    pub(crate) fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().bxor(a, b)
     }
-    pub(crate) fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().ishl(a, b)
     }
-    pub(crate) fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().sshr(a, b)
     }
-    pub(crate) fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+    fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().ushr(a, b)
     }
-
     // ---- compare / select ----
-    pub(crate) fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId {
+    fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().icmp(cc, a, b)
     }
-    pub(crate) fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId {
+    fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId {
         self.builder.ins().icmp_imm(cc, a, imm)
     }
-    pub(crate) fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId {
+    fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().fcmp(cc, a, b)
     }
-    pub(crate) fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
+    fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().select(cond, a, b)
     }
-
     // ---- casts ----
-    pub(crate) fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+    fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder.ins().sextend(to.to_cranelift(), v)
     }
-    pub(crate) fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+    fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder.ins().uextend(to.to_cranelift(), v)
     }
-    pub(crate) fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+    fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder.ins().ireduce(to.to_cranelift(), v)
     }
-    pub(crate) fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+    fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder.ins().fcvt_from_sint(to.to_cranelift(), v)
     }
-    pub(crate) fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+    fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder.ins().fcvt_from_uint(to.to_cranelift(), v)
     }
-    pub(crate) fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        // Reinterpret bits (no MemFlags meaning for a value bitcast).
+    fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         self.builder
             .ins()
             .bitcast(to.to_cranelift(), MemFlags::new(), v)
     }
-
     // ---- memory ----
-    pub(crate) fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
         self.builder
             .ins()
             .load(ty.to_cranelift(), MemFlags::trusted(), ptr, offset)
     }
-    pub(crate) fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
+    fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
         self.builder
             .ins()
             .store(MemFlags::trusted(), val, ptr, offset);
     }
-    pub(crate) fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId {
+    fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId {
         self.builder.ins().stack_addr(types::I64, slot, offset)
     }
-
-    // ---- pointers (Phase 0c: semantic ops, docs/llvm.md §8b) ----
-    // A pointer is not an integer to every backend. Cranelift represents pointers
-    // as `i64` so these are `iadd`/no-ops today, but an MLIR/LLVM backend needs
-    // `getelementptr` / `inttoptr` / `ptrtoint` here — so pointer arithmetic goes
-    // through these instead of raw `iadd` on a pointer value.
-    /// Offset a pointer by a runtime byte count.
-    pub(crate) fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
+    fn create_stack_slot(&mut self, data: StackSlotData) -> StackSlot {
+        self.builder.create_sized_stack_slot(data)
+    }
+    fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize) {
+        let config = self.module.isa().frontend_config();
+        emit_copy_nonoverlapping(self.builder, config, dst, src, size, align);
+    }
+    // ---- pointers (semantic; §8b) ----
+    fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
         self.builder.ins().iadd(ptr, offset)
     }
-    /// Offset a pointer by a constant byte count.
-    pub(crate) fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
+    fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
         self.builder.ins().iadd_imm(ptr, bytes)
     }
-    /// Reinterpret an integer address as a pointer (Cranelift: no-op; MLIR: inttoptr).
-    pub(crate) fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
+    fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
         addr
     }
-
-    // ---- blocks & control flow (Phase 0c) ----
-    pub(crate) fn create_block(&mut self) -> BlockHandle {
+    // ---- blocks & control flow ----
+    fn create_block(&mut self) -> BlockHandle {
         self.builder.create_block()
     }
-    /// Append a phi-style block parameter of type `ty`, returning its value.
-    pub(crate) fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId {
+    fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId {
         self.builder.append_block_param(block, ty.to_cranelift())
     }
-    /// Read the `idx`-th parameter of `block` (its phi value).
-    pub(crate) fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId {
+    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId {
         self.builder.block_params(block)[idx]
     }
-    pub(crate) fn switch_to_block(&mut self, block: BlockHandle) {
+    fn switch_to_block(&mut self, block: BlockHandle) {
         self.builder.switch_to_block(block);
     }
-    pub(crate) fn seal_block(&mut self, block: BlockHandle) {
+    fn seal_block(&mut self, block: BlockHandle) {
         self.builder.seal_block(block);
     }
-    pub(crate) fn jump(&mut self, target: BlockHandle, args: &[ValueId]) {
+    fn jump(&mut self, target: BlockHandle, args: &[ValueId]) {
         let block_args: Vec<BlockArg> = args.iter().map(|&v| BlockArg::Value(v)).collect();
         self.builder.ins().jump(target, &block_args);
     }
-    pub(crate) fn brif(
+    fn brif(
         &mut self,
         cond: ValueId,
         then_block: BlockHandle,
@@ -283,57 +358,73 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     ) {
         let ta: Vec<BlockArg> = then_args.iter().map(|&v| BlockArg::Value(v)).collect();
         let ea: Vec<BlockArg> = else_args.iter().map(|&v| BlockArg::Value(v)).collect();
-        self.builder.ins().brif(cond, then_block, &ta, else_block, &ea);
+        self.builder
+            .ins()
+            .brif(cond, then_block, &ta, else_block, &ea);
     }
-    // ---- variables (Phase 0c) ----
-    pub(crate) fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
+    // ---- variables ----
+    fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
         self.builder.declare_var(ty.to_cranelift())
     }
-    pub(crate) fn def_var(&mut self, var: VarHandle, val: ValueId) {
+    fn def_var(&mut self, var: VarHandle, val: ValueId) {
         self.builder.def_var(var, val);
     }
-    pub(crate) fn use_var(&mut self, var: VarHandle) -> ValueId {
+    fn use_var(&mut self, var: VarHandle) -> ValueId {
         self.builder.use_var(var)
     }
-
-    // ---- calls (Phase 0c) ----
-    /// Direct call; returns the first result (or `None` for a void callee).
-    pub(crate) fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId> {
+    // ---- calls & signatures ----
+    fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId> {
         let inst = self.builder.ins().call(func, args);
         self.builder.inst_results(inst).first().copied()
     }
-    pub(crate) fn call_indirect(
-        &mut self,
-        sig: SigRef,
-        callee: ValueId,
-        args: &[ValueId],
-    ) -> Option<ValueId> {
+    fn call_indirect(&mut self, sig: SigRef, callee: ValueId, args: &[ValueId]) -> Option<ValueId> {
         let inst = self.builder.ins().call_indirect(sig, callee, args);
         self.builder.inst_results(inst).first().copied()
     }
-    pub(crate) fn func_addr(&mut self, func: FuncRef) -> ValueId {
+    fn func_addr(&mut self, func: FuncRef) -> ValueId {
         self.builder.ins().func_addr(types::I64, func)
     }
+    fn import_signature(&mut self, sig: Signature) -> SigRef {
+        self.builder.import_signature(sig)
+    }
+    fn declare_func_in_func(&mut self, func_id: FuncId) -> FuncRef {
+        self.module.declare_func_in_func(func_id, self.builder.func)
+    }
+    // ---- target queries ----
+    fn default_call_conv(&self) -> CallConv {
+        self.module.isa().default_call_conv()
+    }
+}
 
+// `CompilationContext` derefs to its backend so `ctx.<op>()` routes there with no
+// per-op delegators. Its own inherent methods (below) and fields take precedence.
+impl<'c> Deref for CompilationContext<'c> {
+    type Target = dyn Backend + 'c;
+    fn deref(&self) -> &Self::Target {
+        &*self.backend
+    }
+}
+impl<'c> DerefMut for CompilationContext<'c> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.backend
+    }
+}
+
+impl<'c> CompilationContext<'c> {
     /// Get or create a FuncRef for an external function.
     ///
     /// FuncRefs are per-function, so we cache them in extern_func_refs.
-    pub(crate) fn get_extern_func_ref(
-        &mut self,
-        extern_id: usize,
-    ) -> cranelift_codegen::ir::FuncRef {
+    pub(crate) fn get_extern_func_ref(&mut self, extern_id: usize) -> FuncRef {
         if let Some(&func_ref) = self.extern_func_refs.get(&extern_id) {
             return func_ref;
         }
 
-        let func_id = self
+        let func_id = *self
             .extern_func_ids
             .get(&extern_id)
             .expect(&format!("Extern function {} not found", extern_id));
 
-        let func_ref = self
-            .module
-            .declare_func_in_func(*func_id, self.builder.func);
+        let func_ref = self.declare_func_in_func(func_id);
         self.extern_func_refs.insert(extern_id, func_ref);
         func_ref
     }
@@ -342,7 +433,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     ///
     /// This avoids creating duplicate dead values when sequencing side-effecting
     /// operations like `Assign` and `InitVar`.
-    pub(crate) fn get_unit_value(&mut self) -> Value {
+    pub(crate) fn get_unit_value(&mut self) -> ValueId {
         if let Some(val) = self.unit_value {
             val
         } else {
@@ -350,21 +441,6 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             self.unit_value = Some(val);
             val
         }
-    }
-
-    /// Copy one runtime value between non-overlapping, equally aligned slots.
-    ///
-    /// Unlike the former aggregate ABI loops, this copies exactly `size`
-    /// bytes and therefore never widens a partial trailing word.
-    pub(crate) fn copy_nonoverlapping(
-        &mut self,
-        destination: Value,
-        source: Value,
-        size: usize,
-        alignment: usize,
-    ) {
-        let config = self.module.isa().frontend_config();
-        emit_copy_nonoverlapping(self.builder, config, destination, source, size, alignment);
     }
 
     /// Resolve the data pointer (`*T`) of a slice operand.
@@ -452,7 +528,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
 ///
 ///     fn codegen(
 ///         &self,
-///         _ctx: &mut CompilationContext<'_, '_>,
+///         _ctx: &mut CompilationContext<'_>,
 ///     ) -> cranelift_codegen::ir::Value {
 ///         unimplemented!()
 ///     }

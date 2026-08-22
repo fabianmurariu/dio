@@ -600,6 +600,24 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   Rename `Staged::codegen -> ValueId`. **Do this as a fresh, focused effort** — it is a
   lifetime-sensitive change that should not be rushed; verify with the full suite at each
   bounded move (backend struct → delegation → module.isa methods → compile()/Module).
+
+  **Ownership reshuffle DONE ✅.** `Backend` trait (the ~50 primitive ops incl.
+  `create_stack_slot`/`import_signature`/`declare_func_in_func`/`copy_nonoverlapping`/
+  `default_call_conv`) + `CraneliftBackend { builder, module }` implementing it;
+  `CompilationContext` collapsed to a single lifetime `<'c>`, holds `backend: &'c mut
+  dyn Backend` + the neutral bookkeeping maps, and **`Deref`/`DerefMut` to `dyn
+  Backend`** so `ctx.<op>()` routes to the backend with zero per-op delegators. All
+  coupled call sites (`create_sized_stack_slot`→`create_stack_slot`, `import_signature`,
+  `declare_func_in_func`, `module.isa().default_call_conv()`) migrated; `zip`'s manual
+  memcpy now `ctx.copy_nonoverlapping`; `func_impl`'s ABI return load bridges
+  `TypeInfo.value_type` via `ScalarType::from_cranelift`. `compile()` builds a scoped
+  `CraneliftBackend` per function. `Backend` is `pub #[doc(hidden)]` (only because the
+  public `CompilationContext` derefs to it). Full workspace green (343/0/2); clippy
+  unchanged at the 13-lint baseline; no `ctx.builder`/`ctx.module` leaks remain.
+  **0d part 2 (deferred):** `compile()`'s bare-`builder` ABI machinery (entry block,
+  `append_block_params_for_function_params`, param loading, `return_`, `finalize`,
+  `symbol`) + the `Module`/`Executable` lifecycle traits + `TypeInfo.value_type →
+  ScalarType`; and the `Staged::codegen -> ValueId` rename.
 - **0e — Flip `ValueId` to opaque** (`struct ValueId(u32)` + arenas in
   `CraneliftBackend`); AST unchanged. *Green: backend-internal.*
 - **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks

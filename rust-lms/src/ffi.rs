@@ -27,8 +27,8 @@ use std::slice;
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind, Value};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -300,7 +300,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             16,
             3,
@@ -357,7 +357,7 @@ unsafe impl Staged for StackBytes {
         // Round the slot up to a whole number of 8-byte words (min one word, so a
         // zero-length literal still has a valid, non-empty slot to address).
         let slot_len = ((n + 7) & !7).max(8);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             slot_len as u32,
             3,
@@ -371,10 +371,7 @@ unsafe impl Staged for StackBytes {
                     *w = self.bytes[off + j];
                 }
             }
-            let v = ctx
-                .builder
-                .ins()
-                .iconst(types::I64, u64::from_le_bytes(word) as i64);
+            let v = ctx.iconst(ScalarType::I64, u64::from_le_bytes(word) as i64);
             ctx.store(v, addr, off as i32);
             off += 8;
         }
@@ -412,7 +409,7 @@ unsafe impl Staged for StackAlloc {
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Round up to a whole number of 8-byte words (min one word).
         let slot_len = ((self.size + 7) & !7).max(8);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             slot_len as u32,
             3, // align_shift = 3 → 8-byte aligned
@@ -957,7 +954,7 @@ pub(crate) fn push_extern_value<T: StagedType>(
     if T::is_copy_struct() {
         args.push(value);
     } else {
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
             StackSlotKind::ExplicitSlot,
             (T::size_of() as u32).max(1),
             T::align_of().trailing_zeros() as u8,
@@ -976,7 +973,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     func_ref: cranelift_codegen::ir::FuncRef,
     mut args: Vec<Value>,
 ) -> Value {
-    let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
+    let stack_slot = ctx.create_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (Ret::size_of() as u32).max(1),
         Ret::align_of().trailing_zeros() as u8,
