@@ -9,7 +9,7 @@ use rust_lms_derive::StagedType;
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::r#struct::{load_field_unchecked, Field, LoadField};
-use crate::staged::{CompilationContext, Staged, Var};
+use crate::staged::{ValueId, CompilationContext, Staged, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
@@ -135,7 +135,7 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let left = self.left.codegen(ctx);
         let right = self.right.codegen(ctx);
         let left_is_shorter = ctx.icmp(IntCC::UnsignedLessThan, left, right);
@@ -179,7 +179,7 @@ where
 {
     type Out = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // SAFETY: `ZipGetAt` is only constructed by a bounded zip loop or by
         // `IndexedSource::get_at`, whose caller supplies the same bound.
         let first = unsafe { IndexedSource::get_at(self.iter.clone(), self.index) }.codegen(ctx);

@@ -23,9 +23,9 @@
 
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
+use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var};
 use crate::types::{ScalarType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -246,7 +246,7 @@ pub struct CSome<T: StagedType, E> {
 unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Get the inner value
         let value = self.value.codegen(ctx);
 
@@ -297,7 +297,7 @@ pub struct CNone<T: StagedType> {
 unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
         let stack_slot = ctx.create_stack_slot(StackSlotData::new(
@@ -337,7 +337,7 @@ pub struct OptRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // The reference is the pointer - just pass it through
         self.reference.codegen(ctx)
     }
@@ -362,7 +362,7 @@ pub struct OptRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // None is represented as null pointer
         ctx.iconst(ScalarType::I64, 0)
     }
@@ -384,7 +384,7 @@ pub struct OptMutRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.reference.codegen(ctx)
     }
 }
@@ -408,7 +408,7 @@ pub struct OptMutRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         ctx.iconst(ScalarType::I64, 0)
     }
 }
@@ -433,7 +433,7 @@ pub struct IsSome<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
         // Load discriminant from offset 0
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
@@ -460,7 +460,7 @@ pub struct IsNone<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant == 0
@@ -490,7 +490,7 @@ pub struct IsRefSome<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
@@ -513,7 +513,7 @@ pub struct IsRefNone<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
@@ -539,7 +539,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
     }
@@ -562,7 +562,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
     }
@@ -591,7 +591,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         
 
         let opt_ptr = self.opt.codegen(ctx);
@@ -680,7 +680,7 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         
 
         let opt_ptr = self.opt.codegen(ctx);
@@ -807,7 +807,7 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         
 
         let ptr = self.opt.codegen(ctx);
@@ -900,7 +900,7 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         
 
         let ptr = self.opt.codegen(ctx);

@@ -59,7 +59,7 @@
 use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
+use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{ScalarType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
     condcodes::IntCC, types, StackSlotData, StackSlotKind, Value,
@@ -165,7 +165,7 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -219,7 +219,7 @@ where
 {
     type Out = SRef<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -326,7 +326,7 @@ where
 {
     type Out = SRefMut<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -535,7 +535,7 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         ctx.slice_len(&self.slice)
     }
 }
@@ -558,7 +558,7 @@ where
 {
     type Out = <S::Out as SliceType>::DataPtr;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         ctx.slice_data_ptr(&self.slice)
     }
 }
@@ -583,7 +583,7 @@ where
 {
     type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         element_addr::<S>(ctx, data_ptr, index)
@@ -605,7 +605,7 @@ where
 {
     type Out = SPtr<ElemOf<S>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         element_addr::<S>(ctx, data_ptr, index)
@@ -666,7 +666,7 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
         let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
@@ -711,7 +711,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
         let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
@@ -750,7 +750,7 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
@@ -780,7 +780,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
@@ -813,7 +813,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let i = self.i.codegen(ctx);
         let j = self.j.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
@@ -855,7 +855,7 @@ where
 {
     type Out = S::Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);

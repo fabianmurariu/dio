@@ -26,7 +26,7 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
+use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
 
@@ -297,7 +297,7 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
         let slot = ctx.create_stack_slot(StackSlotData::new(
@@ -352,7 +352,7 @@ pub struct StackBytes {
 unsafe impl Staged for StackBytes {
     type Out = SPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let n = self.bytes.len();
         // Round the slot up to a whole number of 8-byte words (min one word, so a
         // zero-length literal still has a valid, non-empty slot to address).
@@ -406,7 +406,7 @@ pub struct StackAlloc {
 unsafe impl Staged for StackAlloc {
     type Out = SMutPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Round up to a whole number of 8-byte words (min one word).
         let slot_len = ((self.size + 7) & !7).max(8);
         let slot = ctx.create_stack_slot(StackSlotData::new(
@@ -559,7 +559,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.arg.codegen(ctx)
     }
 
@@ -685,7 +685,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
         emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
@@ -721,7 +721,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
 
         let mut args = Vec::new();
@@ -860,7 +860,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
 
         let mut args = Vec::new();
@@ -972,7 +972,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
     func_ref: cranelift_codegen::ir::FuncRef,
     mut args: Vec<Value>,
-) -> Value {
+) -> ValueId {
     let stack_slot = ctx.create_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,
         (Ret::size_of() as u32).max(1),
@@ -1014,7 +1014,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
 
         let mut args = Vec::new();
@@ -1111,7 +1111,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
 
         let mut args = Vec::new();

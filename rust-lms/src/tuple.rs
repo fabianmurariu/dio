@@ -18,9 +18,8 @@
 //! );
 //! ```
 
-use crate::staged::{CompilationContext, Staged};
+use crate::staged::{ValueId, CompilationContext, Staged};
 use crate::types::StagedType;
-use cranelift_codegen::ir::Value;
 
 // Macro to generate Staged implementations for tuples of various sizes
 macro_rules! tuple_impls {
@@ -36,7 +35,7 @@ macro_rules! tuple_impls {
             {
                 type Out = OUT;
 
-                fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+                fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                     // Execute all elements except the last for side effects
                     $(let _ = self.$idx.codegen(ctx);)*
                     // Return the last element's value

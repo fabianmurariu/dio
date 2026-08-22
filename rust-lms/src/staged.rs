@@ -456,7 +456,7 @@ impl<'c> CompilationContext<'c> {
     /// This pair of helpers ([`Self::slice_data_ptr`] / [`Self::slice_len`]) is
     /// the single place that knows about slice layout; slice ops call into it
     /// rather than re-deriving the pointer themselves.
-    pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> ValueId {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
                 return self.use_var(sv.ptr_var);
@@ -471,7 +471,7 @@ impl<'c> CompilationContext<'c> {
     ///
     /// See [`Self::slice_data_ptr`] for the two encodings; `len` is the second
     /// register variable, or offset 8 of the `(ptr, len)` pair.
-    pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> ValueId {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
                 return self.use_var(sv.len_var);
@@ -529,7 +529,7 @@ impl<'c> CompilationContext<'c> {
 ///     fn codegen(
 ///         &self,
 ///         _ctx: &mut CompilationContext<'_>,
-///     ) -> cranelift_codegen::ir::Value {
+///     ) -> ValueId {
 ///         unimplemented!()
 ///     }
 /// }
@@ -539,7 +539,7 @@ pub unsafe trait Staged {
     type Out: StagedType;
 
     /// Generate Cranelift IR code for this computation
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value;
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId;
 
     /// Return the variable ID if this is a direct Var reference.
     /// Used for optimized slice access to bypass stack loads.
@@ -620,7 +620,7 @@ impl<T: StagedType> Var<T> {
 unsafe impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Look up our ID in the var_map to get the Cranelift Variable
         let var = *ctx
             .var_map
@@ -637,7 +637,7 @@ unsafe impl<T: StagedType> Staged for Var<T> {
 unsafe impl<T: StagedType> Staged for VarUse<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let var = *ctx
             .var_map
             .get(&self.id)
@@ -687,7 +687,7 @@ impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
 unsafe impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         T::codegen_constant(&self.value, ctx)
     }
 }
@@ -927,7 +927,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate code for the value expression
         let value = self.expr.codegen(ctx);
 
@@ -1035,7 +1035,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate code for the initialization value
         let value = self.init.codegen(ctx);
 

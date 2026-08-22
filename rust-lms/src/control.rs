@@ -7,9 +7,8 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-use cranelift_codegen::ir::Value;
 
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
 
 // =============================================================================
@@ -41,7 +40,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate condition code in current block
         let cond_val = self.condition.codegen(ctx);
 
@@ -127,7 +126,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate condition code in current block
         let cond_val = self.condition.codegen(ctx);
 
@@ -209,7 +208,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Create the blocks for the loop structure
         let loop_header = ctx.create_block();
         let loop_body = ctx.create_block();
@@ -276,7 +275,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let v = self.cond.codegen(ctx);
         // bool is an i8 in {0, 1}; `v == 0` is its negation.
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, v, 0)

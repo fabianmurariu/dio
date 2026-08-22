@@ -1202,13 +1202,13 @@ impl<'a> Compiler<'a> {
                                 builder.ins().iconst(types::I8, 0)
                             } else {
                                 builder.ins().load(
-                                    param_info.value_type,
+                                    param_info.repr.to_cranelift(),
                                     MemFlags::trusted(),
                                     storage_ptr,
                                     0,
                                 )
                             };
-                            let param_var = builder.declare_var(param_info.value_type);
+                            let param_var = builder.declare_var(param_info.repr.to_cranelift());
                             builder.def_var(param_var, param_value);
                             var_map.insert(var_id, param_var);
                         }

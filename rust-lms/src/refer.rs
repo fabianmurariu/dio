@@ -10,7 +10,7 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{CompilationContext, Staged, Var, VarUse};
+use crate::staged::{ValueId, CompilationContext, Staged, Var, VarUse};
 use crate::types::{ScalarType, CopyType, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::types;
 use std::marker::PhantomData;
@@ -182,7 +182,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         ctx.load(T::scalar_type(), ptr_val, 0)
     }
@@ -222,7 +222,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         ctx.load(T::scalar_type(), ptr_val, 0)
     }
@@ -263,7 +263,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         ctx.load(T::scalar_type(), ptr_val, 0)
     }
@@ -328,7 +328,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         ctx.load(T::scalar_type(), ptr_val, 0)
     }
@@ -367,7 +367,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
@@ -405,7 +405,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
         ctx.store(value, ptr_val, 0);
@@ -447,7 +447,7 @@ where
 {
     type Out = SPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
@@ -489,7 +489,7 @@ where
 {
     type Out = SMutPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
@@ -534,7 +534,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
@@ -589,7 +589,7 @@ impl<S> Copy for ConstPtr<S> {}
 
 unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // A baked host address becomes a staged pointer (Cranelift: the i64 itself;
         // MLIR: inttoptr).
         let addr = ctx.iconst(ScalarType::I64, self.addr as i64);
@@ -666,7 +666,7 @@ impl<P: Copy, S> Copy for PtrCast<P, S> {}
 
 unsafe impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // A cast is a no-op on the address value; only the static type changes.
         self.ptr.codegen(ctx)
     }
@@ -794,7 +794,7 @@ where
     P::Out: RawPointer,
 {
     type Out = bool;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let p = self.ptr.codegen(ctx);
         ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
     }

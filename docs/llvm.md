@@ -614,10 +614,20 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   `CraneliftBackend` per function. `Backend` is `pub #[doc(hidden)]` (only because the
   public `CompilationContext` derefs to it). Full workspace green (343/0/2); clippy
   unchanged at the 13-lint baseline; no `ctx.builder`/`ctx.module` leaks remain.
-  **0d part 2 (deferred):** `compile()`'s bare-`builder` ABI machinery (entry block,
+  **0d part 2 — DONE ✅ (the AST-facing items):** `TypeInfo.value_type` (a Cranelift
+  `Type`) → `TypeInfo.repr: ScalarType` (compile()'s Cranelift driver calls
+  `.to_cranelift()` at its two bare-builder param-load sites); and `Staged::codegen`
+  renamed to return **`ValueId`** — every `Staged` impl across the crate now returns the
+  neutral handle, and the AST modules import `crate::staged::ValueId` instead of
+  `cranelift ... Value`. Full workspace green (343/0/2); clippy at the 13-lint baseline.
+  **Deferred to the LLVM-backend phase (not Phase 0):** the `Module`/`Executable`
+  lifecycle traits abstracting `compile()`'s driver (entry block,
   `append_block_params_for_function_params`, param loading, `return_`, `finalize`,
-  `symbol`) + the `Module`/`Executable` lifecycle traits + `TypeInfo.value_type →
-  ScalarType`; and the `Staged::codegen -> ValueId` rename.
+  `symbol`). Rationale — that abstraction can only be designed correctly against a
+  *second* lifecycle (MLIR's `ExecutionEngine::{new,lookup}`, which the Phase -1 spike
+  showed is nothing like Cranelift's declare/define/finalize); building it now with only
+  Cranelift in hand would be a speculative guess. `compile()` is the backend driver and
+  is legitimately Cranelift-specific for a Cranelift-only refactor.
 - **0e — Flip `ValueId` to opaque** (`struct ValueId(u32)` + arenas in
   `CraneliftBackend`); AST unchanged. *Green: backend-internal.*
 - **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks

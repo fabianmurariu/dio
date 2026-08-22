@@ -5,7 +5,7 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{CompilationContext, IntoStaged, Staged};
+use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged};
 use crate::types::{ScalarType, StagedType};
 use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
@@ -19,8 +19,9 @@ use std::marker::PhantomData;
 /// This captures the layout needed to marshal a value through canonical storage.
 #[derive(Clone, Debug)]
 pub struct TypeInfo {
-    /// Cranelift value type used after loading a scalar from its ABI slot.
-    pub value_type: cranelift_codegen::ir::Type,
+    /// Backend-neutral scalar representation used after loading a scalar from its
+    /// ABI slot.
+    pub repr: ScalarType,
     /// Exact runtime size in bytes.
     pub size: u32,
     /// Exact runtime alignment in bytes.
@@ -35,7 +36,7 @@ impl TypeInfo {
     /// Create TypeInfo from a StagedType
     pub fn from_staged_type<T: StagedType>() -> Self {
         TypeInfo {
-            value_type: T::cranelift_type(),
+            repr: T::scalar_type(),
             size: T::size_of() as u32,
             alignment: T::align_of() as u32,
             is_aggregate: T::is_copy_struct(),
@@ -70,7 +71,7 @@ pub fn codegen_call(
     param_infos: &[TypeInfo],
     return_info: &TypeInfo,
     arg_values: &[Value],
-) -> Value {
+) -> ValueId {
     assert_eq!(
         arg_values.len(),
         param_infos.len(),
@@ -116,16 +117,12 @@ pub fn codegen_call(
     } else if return_info.size == 0 {
         ctx.get_unit_value()
     } else {
-        ctx.load(
-            ScalarType::from_cranelift(return_info.value_type),
-            result_ptr,
-            0,
-        )
+        ctx.load(return_info.repr, result_ptr, 0)
     }
 }
 
 /// Generate code to get a function's address (for returning function pointers)
-pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> Value {
+pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> ValueId {
     let cranelift_func_id = ctx
         .func_map
         .get(&func_id)
@@ -192,7 +189,7 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $FunRef<OUT> {
             type Out = $FunType<OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 codegen_func_addr(ctx, self.id)
             }
         }
@@ -206,7 +203,7 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $Call<OUT> {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 let return_info = TypeInfo::from_staged_type::<OUT>();
                 codegen_call(ctx, self.func.id, &[], &return_info, &[])
             }
@@ -265,7 +262,7 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
             type Out = $FunType<$($T,)+ OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 codegen_func_addr(ctx, self.id)
             }
         }
@@ -283,7 +280,7 @@ macro_rules! impl_fun_n {
         {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 // Build type info from type parameters
                 let param_infos = [$(TypeInfo::from_staged_type::<$T>()),+];
                 let return_info = TypeInfo::from_staged_type::<OUT>();
