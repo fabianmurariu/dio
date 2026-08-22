@@ -62,7 +62,7 @@ use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{ScalarType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
-    condcodes::IntCC, types, StackSlotData, StackSlotKind, Value,
+    condcodes::IntCC, types, StackSlotData, StackSlotKind,
 };
 use std::marker::PhantomData;
 
@@ -507,7 +507,7 @@ impl<'a, T: StagedType> slice_type_sealed::MutableSealed for SRefMut<'a, Slice<T
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
 
 /// Emit `data_ptr + index * sizeof(Elem)`, the address of element `index`.
-fn element_addr<S>(ctx: &mut CompilationContext, data_ptr: Value, index: Value) -> Value
+fn element_addr<S>(ctx: &mut CompilationContext, data_ptr: ValueId, index: ValueId) -> ValueId
 where
     S: Staged,
     S::Out: SliceType,

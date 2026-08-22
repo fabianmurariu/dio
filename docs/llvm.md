@@ -628,8 +628,13 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   showed is nothing like Cranelift's declare/define/finalize); building it now with only
   Cranelift in hand would be a speculative guess. `compile()` is the backend driver and
   is legitimately Cranelift-specific for a Cranelift-only refactor.
-- **0e — Flip `ValueId` to opaque** (`struct ValueId(u32)` + arenas in
-  `CraneliftBackend`); AST unchanged. *Green: backend-internal.*
+- **0e — Flip `ValueId` to opaque** — **DONE.** `ValueId`/`BlockHandle`/`VarHandle` are
+  now opaque `struct _(u32)` newtypes; the AST never names a Cranelift value type. The
+  `u32` is the Cranelift entity's own `as_u32()` index, so `CraneliftBackend` needs **no
+  arena** — conversion is stateless (`from_cranelift`/`cranelift` via `as_u32`/`from_u32`);
+  MLIR later reuses the same `u32` as an index into its own value `Vec`. Downstream `Staged`
+  impls (arrow-lms `ValidityIsValid`, test_slices) and the prelude export were updated.
+  *Green: full workspace, no new clippy lints.*
 - **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks
   outside the backend module; keep the `compile_fail` doctests guarding `ctx.builder`;
   full workspace + clippy (same 13-lint baseline).

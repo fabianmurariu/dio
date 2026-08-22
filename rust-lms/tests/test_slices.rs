@@ -17,7 +17,7 @@ where
 {
     type Out = SRef<'a, Slice<i64>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::ValueId {
         CHECKED_GET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
         self.inner.codegen(ctx)
     }
@@ -33,7 +33,7 @@ where
 {
     type Out = SRefMut<'a, Slice<i64>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::ValueId {
         CHECKED_SET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
         self.inner.codegen(ctx)
     }

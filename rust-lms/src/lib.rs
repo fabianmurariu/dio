@@ -134,7 +134,7 @@ pub mod prelude {
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
-        Var,
+        ValueId, Var,
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::types::{

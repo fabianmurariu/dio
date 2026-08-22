@@ -17,13 +17,13 @@
 //! Rust-facing wrappers preserve value semantics without exposing platform
 //! aggregate classification to Cranelift.
 
-use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, Staged, Var};
+use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, Staged, Var, VarHandle, ValueId};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
+    types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind,
 };
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
@@ -40,7 +40,7 @@ pub use crate::func_impl::*;
 pub(crate) struct FunDef {
     pub name: String,
     /// The body expression, type-erased but we know its signature
-    pub body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
+    pub body: Box<dyn FnOnce(&mut CompilationContext) -> ValueId>,
     /// Type info for each parameter (supports 0..N parameters)
     pub param_infos: Vec<TypeInfo>,
     /// Return type info
@@ -93,7 +93,7 @@ impl Ctx {
     pub(crate) fn into_body<Ret>(
         self,
         ret: Ret,
-    ) -> Box<dyn FnOnce(&mut CompilationContext) -> Value>
+    ) -> Box<dyn FnOnce(&mut CompilationContext) -> ValueId>
     where
         Ret: Staged + 'static,
     {
@@ -384,7 +384,7 @@ impl Ctx {
         consumer: F,
     ) where
         Item: StagedType + 'static,
-        InitFn: FnOnce(&mut CompilationContext, Value) + 'static,
+        InitFn: FnOnce(&mut CompilationContext, ValueId) + 'static,
         F: FnOnce(&mut Ctx, Var<Item>) + 'static,
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
@@ -1160,7 +1160,7 @@ impl<'a> Compiler<'a> {
                     builder.seal_block(entry_block);
 
                     // Create var_map for this function
-                    let mut var_map: HashMap<usize, Variable> = HashMap::new();
+                    let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
                     // Optimized slice storage: var_id -> (ptr_var, len_var)
                     let mut slice_vars = HashMap::new();
 
@@ -1189,14 +1189,14 @@ impl<'a> Compiler<'a> {
                                 builder.def_var(ptr_var, ptr_value);
                                 builder.def_var(len_var, len_value);
                                 slice_vars
-                                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+                                    .insert(var_id, crate::staged::SliceVars { ptr_var: VarHandle::from_cranelift(ptr_var), len_var: VarHandle::from_cranelift(len_var) });
                             }
 
                             // Aggregate expressions are represented by a pointer to
                             // their complete runtime storage.
                             let param_var = builder.declare_var(types::I64);
                             builder.def_var(param_var, storage_ptr);
-                            var_map.insert(var_id, param_var);
+                            var_map.insert(var_id, VarHandle::from_cranelift(param_var));
                         } else {
                             let param_value = if param_info.size == 0 {
                                 builder.ins().iconst(types::I8, 0)
@@ -1210,7 +1210,7 @@ impl<'a> Compiler<'a> {
                             };
                             let param_var = builder.declare_var(param_info.repr.to_cranelift());
                             builder.def_var(param_var, param_value);
-                            var_map.insert(var_id, param_var);
+                            var_map.insert(var_id, VarHandle::from_cranelift(param_var));
                         }
                     }
 
@@ -1241,14 +1241,14 @@ impl<'a> Compiler<'a> {
                             &mut builder,
                             config,
                             output_ptr,
-                            result,
+                            result.cranelift(),
                             func_def.return_info.size as usize,
                             func_def.return_info.alignment as usize,
                         );
                     } else if func_def.return_info.size != 0 {
                         builder
                             .ins()
-                            .store(MemFlags::trusted(), result, output_ptr, 0);
+                            .store(MemFlags::trusted(), result.cranelift(), output_ptr, 0);
                     }
                     builder.ins().return_(&[]);
 
@@ -1282,7 +1282,7 @@ impl<'a> Compiler<'a> {
                 builder.switch_to_block(entry_block);
                 builder.seal_block(entry_block);
 
-                let mut var_map: HashMap<usize, Variable> = HashMap::new();
+                let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
 
                 let result = {
                     let mut extern_func_refs = HashMap::new();
@@ -1311,14 +1311,14 @@ impl<'a> Compiler<'a> {
                         &mut builder,
                         config,
                         output_ptr,
-                        result,
+                        result.cranelift(),
                         S::Out::size_of(),
                         S::Out::align_of(),
                     );
                 } else if S::Out::size_of() != 0 {
                     builder
                         .ins()
-                        .store(MemFlags::trusted(), result, output_ptr, 0);
+                        .store(MemFlags::trusted(), result.cranelift(), output_ptr, 0);
                 }
                 builder.ins().return_(&[]);
 

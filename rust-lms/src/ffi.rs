@@ -28,7 +28,7 @@ use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
 use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -936,7 +936,7 @@ where
 }
 
 /// Append a pointer to `arg`'s canonical ABI storage to `args`.
-fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<Value>, arg: &A)
+fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<ValueId>, arg: &A)
 where
     A: Staged,
     A::Out: UncheckedExternArg<AType>,
@@ -948,8 +948,8 @@ where
 
 pub(crate) fn push_extern_value<T: StagedType>(
     ctx: &mut CompilationContext,
-    args: &mut Vec<Value>,
-    value: Value,
+    args: &mut Vec<ValueId>,
+    value: ValueId,
 ) {
     if T::is_copy_struct() {
         args.push(value);
@@ -971,7 +971,7 @@ pub(crate) fn push_extern_value<T: StagedType>(
 pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
     func_ref: cranelift_codegen::ir::FuncRef,
-    mut args: Vec<Value>,
+    mut args: Vec<ValueId>,
 ) -> ValueId {
     let stack_slot = ctx.create_stack_slot(StackSlotData::new(
         StackSlotKind::ExplicitSlot,

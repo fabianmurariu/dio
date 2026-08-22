@@ -7,7 +7,7 @@
 
 use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged};
 use crate::types::{ScalarType, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -70,7 +70,7 @@ pub fn codegen_call(
     func_id: usize,
     param_infos: &[TypeInfo],
     return_info: &TypeInfo,
-    arg_values: &[Value],
+    arg_values: &[ValueId],
 ) -> ValueId {
     assert_eq!(
         arg_values.len(),
@@ -90,7 +90,7 @@ pub fn codegen_call(
     let func_ref = ctx.declare_func_in_func(*cranelift_func_id);
 
     // The private JIT ABI passes one storage pointer per logical argument.
-    let mut call_args: Vec<Value> = Vec::with_capacity(arg_values.len() + 1);
+    let mut call_args: Vec<ValueId> = Vec::with_capacity(arg_values.len() + 1);
 
     for (arg_value, param_info) in arg_values.iter().zip(param_infos.iter()) {
         if param_info.is_aggregate {

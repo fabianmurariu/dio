@@ -1,7 +1,7 @@
 //! Zip combinator — pairs elements from two sources at the same index.
 
 use cranelift_codegen::ir::{
-    condcodes::IntCC, StackSlotData, StackSlotKind, Value,
+    condcodes::IntCC, StackSlotData, StackSlotKind,
 };
 
 use rust_lms_derive::StagedType;
@@ -217,7 +217,7 @@ where
     }
 }
 
-fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: Value, ptr: Value, offset: i32) {
+fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: ValueId, ptr: ValueId, offset: i32) {
     if T::is_copy_struct() {
         let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
         ctx.copy_nonoverlapping(destination, value, T::size_of(), T::align_of());

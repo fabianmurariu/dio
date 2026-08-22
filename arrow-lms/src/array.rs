@@ -268,7 +268,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::ValueId {
         let view = ValidityView {
             validity: self.validity.clone(),
         };
