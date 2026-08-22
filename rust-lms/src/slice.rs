@@ -59,10 +59,9 @@
 use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{ScalarType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{
-    condcodes::IntCC, types, StackSlotData, StackSlotKind,
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::types::{
+    CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
 use std::marker::PhantomData;
 
@@ -339,9 +338,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     /// Runtime type is `&[T::RuntimeValue]`
     type RuntimeValue = &'a [T::RuntimeValue];
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        // Internally represented as pointer to (ptr, len) pair
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -387,8 +385,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     /// Runtime type is `&mut [T::RuntimeValue]`
     type RuntimeValue = &'a mut [T::RuntimeValue];
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -669,7 +667,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
 
         let get_block = ctx.create_block();
         let default_block = ctx.create_block();
@@ -680,7 +678,7 @@ where
         ctx.switch_to_block(get_block);
         ctx.seal_block(get_block);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0,);
+        let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0);
         ctx.jump(merge_block, &[value]);
 
         ctx.switch_to_block(default_block);
@@ -714,7 +712,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
 
         let set_block = ctx.create_block();
         let out_of_bounds_block = ctx.create_block();
@@ -754,7 +752,7 @@ where
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0,)
+        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0)
     }
 }
 
@@ -865,11 +863,7 @@ where
         let new_len = ctx.isub(end, start);
 
         // Materialize the new (ptr, len) pair on a 16-byte stack slot.
-        let slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16, // size
-            3,  // align_shift = log2(8) = 3
-        ));
+        let slot = ctx.alloc_stack_slot(16, 3);
         let slot_ptr = ctx.stack_addr(slot, 0);
         ctx.store(new_ptr, slot_ptr, 0);
         ctx.store(new_len, slot_ptr, 8);

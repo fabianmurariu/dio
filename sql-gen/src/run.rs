@@ -1,8 +1,8 @@
 //! One-call JIT execution: a SQL string over one `RecordBatch` → a result
 //! `RecordBatch`. The single entry point for running queries.
 
-use std::collections::HashMap;
 use std::cell::Cell;
+use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 

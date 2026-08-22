@@ -316,9 +316,9 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 #(#layout_checks)*
             };
 
-            fn cranelift_type() -> ::cranelift_codegen::ir::Type {
-                // Internally we use I64 (pointer to stack slot)
-                ::cranelift_codegen::ir::types::I64
+            fn scalar_type() -> ::rust_lms::types::ScalarType {
+                // A derived staged struct is a pointer to its stack slot.
+                ::rust_lms::types::ScalarType::Ptr
             }
 
             fn size_of() -> usize {

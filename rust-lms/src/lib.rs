@@ -138,7 +138,8 @@ pub mod prelude {
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::types::{
-        ConstantType, CopyType, DirectValue, RuntimeParam, RuntimeResult, ScalarType, StagedType,
+        ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, RuntimeParam, RuntimeResult,
+        ScalarType, StagedType,
     };
     // Re-export derive macro
     #[cfg(feature = "derive")]

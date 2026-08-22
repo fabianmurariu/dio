@@ -6,9 +6,8 @@
 //! - `Const<T>`: Typed constants (Copy-able)
 
 use cranelift_codegen::ir::{
-    condcodes::{FloatCC, IntCC},
-    types, Block, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, SigRef, StackSlot,
-    StackSlotData, Value,
+    types, Block, BlockArg, FuncRef, InstBuilder, MemFlags, SigRef, Signature, StackSlot,
+    StackSlotData, StackSlotKind, Value,
 };
 use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
 use cranelift_frontend::{FunctionBuilder, Variable};
@@ -17,7 +16,7 @@ use cranelift_module::{FuncId, Module};
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-use crate::types::{ConstantType, CopyType, ScalarType, StagedType};
+use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedType};
 
 /// An opaque handle to a value produced during codegen.
 ///
@@ -36,6 +35,10 @@ pub struct BlockHandle(u32);
 /// Opaque handle to a mutable variable during codegen (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct VarHandle(u32);
+
+/// Opaque handle to a stack allocation during codegen (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct StackSlotId(u32);
 
 // Backend/driver-only conversions between the opaque handles and Cranelift entities.
 // Not visible to the AST (its `.0` is private), so the AST cannot fabricate a handle
@@ -62,6 +65,14 @@ impl VarHandle {
     }
     pub(crate) fn cranelift(self) -> Variable {
         Variable::from_u32(self.0)
+    }
+}
+impl StackSlotId {
+    pub(crate) fn from_cranelift(s: StackSlot) -> Self {
+        Self(s.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> StackSlot {
+        StackSlot::from_u32(self.0)
     }
 }
 
@@ -142,8 +153,15 @@ pub struct CompilationContext<'c> {
 /// for the primitive ops. Object-safe (all methods take concrete handles).
 ///
 /// `pub` + `#[doc(hidden)]` only because `CompilationContext` (a public type) derefs
-/// to `dyn Backend`; it is an internal, unstable contract, not a public API — its
-/// signatures still expose Cranelift types (0f will narrow this).
+/// to `dyn Backend`; it is an internal, unstable contract, not a public API.
+///
+/// Phase 0f narrowed the surface: constants, arithmetic, comparison
+/// ([`IntCmp`]/[`FloatCmp`]), casts, memory, pointers, blocks/control flow,
+/// variables, and stack slots are all backend-neutral now. The only Cranelift types
+/// left in these signatures are the **calls & signatures** cluster (`FuncRef`,
+/// `SigRef`, `Signature`, `FuncId`, `CallConv`) — the JIT function-reference/symbol
+/// machinery, which shares the boundary deferred with `Module`/`Executable` (it needs
+/// a second backend's call/symbol model — MLIR's `ExecutionEngine` — to design against).
 #[doc(hidden)]
 pub trait Backend {
     // constants
@@ -171,9 +189,9 @@ pub trait Backend {
     fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId;
     // compare / select
-    fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId;
-    fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId;
-    fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId;
+    fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId;
+    fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId;
+    fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId;
     fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId;
     // casts
     fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
@@ -185,8 +203,9 @@ pub trait Backend {
     // memory
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId;
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
-    fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId;
-    fn create_stack_slot(&mut self, data: StackSlotData) -> StackSlot;
+    fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId;
+    /// Allocate an explicit stack slot of `size` bytes with alignment `1 << align_shift`.
+    fn alloc_stack_slot(&mut self, size: u32, align_shift: u8) -> StackSlotId;
     fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize);
     // pointers (semantic; §8b)
     fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId;
@@ -230,7 +249,9 @@ pub(crate) struct CraneliftBackend<'a, 'b> {
 
 /// Encode a `Vec<BlockArg>` from opaque `ValueId`s for a branch/jump.
 fn block_args(args: &[ValueId]) -> Vec<BlockArg> {
-    args.iter().map(|&v| BlockArg::Value(v.cranelift())).collect()
+    args.iter()
+        .map(|&v| BlockArg::Value(v.cranelift()))
+        .collect()
 }
 
 impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
@@ -299,14 +320,26 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ValueId::from_cranelift(self.builder.ins().ushr(a.cranelift(), b.cranelift()))
     }
     // ---- compare / select ----
-    fn icmp(&mut self, cc: IntCC, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().icmp(cc, a.cranelift(), b.cranelift()))
+    fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().icmp(
+            cc.to_cranelift(),
+            a.cranelift(),
+            b.cranelift(),
+        ))
     }
-    fn icmp_imm(&mut self, cc: IntCC, a: ValueId, imm: i64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().icmp_imm(cc, a.cranelift(), imm))
+    fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId {
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .icmp_imm(cc.to_cranelift(), a.cranelift(), imm),
+        )
     }
-    fn fcmp(&mut self, cc: FloatCC, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fcmp(cc, a.cranelift(), b.cranelift()))
+    fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().fcmp(
+            cc.to_cranelift(),
+            a.cranelift(),
+            b.cranelift(),
+        ))
     }
     fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
         ValueId::from_cranelift(self.builder.ins().select(
@@ -326,17 +359,31 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ValueId::from_cranelift(self.builder.ins().ireduce(to.to_cranelift(), v.cranelift()))
     }
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fcvt_from_sint(to.to_cranelift(), v.cranelift()))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .fcvt_from_sint(to.to_cranelift(), v.cranelift()),
+        )
     }
     fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fcvt_from_uint(to.to_cranelift(), v.cranelift()))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .fcvt_from_uint(to.to_cranelift(), v.cranelift()),
+        )
     }
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().bitcast(
-            to.to_cranelift(),
-            MemFlags::new(),
-            v.cranelift(),
-        ))
+        let to_ty = to.to_cranelift();
+        // Neutral types that differ (e.g. `Ptr` vs `I64`) can still lower to the
+        // same Cranelift type; a same-type `bitcast` is invalid IR, so no-op it.
+        if self.builder.func.dfg.value_type(v.cranelift()) == to_ty {
+            return v;
+        }
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .bitcast(to_ty, MemFlags::new(), v.cranelift()),
+        )
     }
     // ---- memory ----
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
@@ -348,19 +395,38 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ))
     }
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
-        self.builder
-            .ins()
-            .store(MemFlags::trusted(), val.cranelift(), ptr.cranelift(), offset);
+        self.builder.ins().store(
+            MemFlags::trusted(),
+            val.cranelift(),
+            ptr.cranelift(),
+            offset,
+        );
     }
-    fn stack_addr(&mut self, slot: StackSlot, offset: i32) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().stack_addr(types::I64, slot, offset))
+    fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId {
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .stack_addr(types::I64, slot.cranelift(), offset),
+        )
     }
-    fn create_stack_slot(&mut self, data: StackSlotData) -> StackSlot {
-        self.builder.create_sized_stack_slot(data)
+    fn alloc_stack_slot(&mut self, size: u32, align_shift: u8) -> StackSlotId {
+        let slot = self.builder.create_sized_stack_slot(StackSlotData::new(
+            StackSlotKind::ExplicitSlot,
+            size,
+            align_shift,
+        ));
+        StackSlotId::from_cranelift(slot)
     }
     fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize) {
         let config = self.module.isa().frontend_config();
-        emit_copy_nonoverlapping(self.builder, config, dst.cranelift(), src.cranelift(), size, align);
+        emit_copy_nonoverlapping(
+            self.builder,
+            config,
+            dst.cranelift(),
+            src.cranelift(),
+            size,
+            align,
+        );
     }
     // ---- pointers (semantic; §8b) ----
     fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
@@ -435,7 +501,10 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     }
     fn call_indirect(&mut self, sig: SigRef, callee: ValueId, args: &[ValueId]) -> Option<ValueId> {
         let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
-        let inst = self.builder.ins().call_indirect(sig, callee.cranelift(), &cargs);
+        let inst = self
+            .builder
+            .ins()
+            .call_indirect(sig, callee.cranelift(), &cargs);
         self.builder
             .inst_results(inst)
             .first()

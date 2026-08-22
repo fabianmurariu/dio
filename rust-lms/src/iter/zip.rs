@@ -1,15 +1,12 @@
 //! Zip combinator — pairs elements from two sources at the same index.
 
-use cranelift_codegen::ir::{
-    condcodes::IntCC, StackSlotData, StackSlotKind,
-};
-
+use crate::types::IntCmp;
 use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::r#struct::{load_field_unchecked, Field, LoadField};
-use crate::staged::{ValueId, CompilationContext, Staged, Var};
+use crate::staged::{CompilationContext, Staged, ValueId, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
@@ -138,7 +135,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let left = self.left.codegen(ctx);
         let right = self.right.codegen(ctx);
-        let left_is_shorter = ctx.icmp(IntCC::UnsignedLessThan, left, right);
+        let left_is_shorter = ctx.icmp(IntCmp::Ult, left, right);
         ctx.select(left_is_shorter, left, right)
     }
 }
@@ -187,11 +184,7 @@ where
         let second = unsafe { IndexedSource::get_at(self.other.clone(), self.index) }.codegen(ctx);
 
         let align_shift = Self::Out::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            Self::Out::size_of() as u32,
-            align_shift,
-        ));
+        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
         let slot_ptr = ctx.stack_addr(stack_slot, 0);
 
         store_value::<<I as IndexedSource>::Item>(
@@ -217,7 +210,12 @@ where
     }
 }
 
-fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: ValueId, ptr: ValueId, offset: i32) {
+fn store_value<T: StagedType>(
+    ctx: &mut CompilationContext,
+    value: ValueId,
+    ptr: ValueId,
+    offset: i32,
+) {
     if T::is_copy_struct() {
         let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
         ctx.copy_nonoverlapping(destination, value, T::size_of(), T::align_of());

@@ -5,9 +5,8 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged};
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
 use crate::types::{ScalarType, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -44,12 +43,10 @@ impl TypeInfo {
         }
     }
 
-    fn stack_slot(&self) -> StackSlotData {
-        StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            self.size.max(1),
-            self.alignment.trailing_zeros() as u8,
-        )
+    /// Storage-slot dimensions `(size_bytes, align_shift)` for this value's ABI
+    /// slot, ready to pass to [`crate::staged::Backend::alloc_stack_slot`].
+    fn slot_dims(&self) -> (u32, u8) {
+        (self.size.max(1), self.alignment.trailing_zeros() as u8)
     }
 }
 
@@ -96,7 +93,8 @@ pub fn codegen_call(
         if param_info.is_aggregate {
             call_args.push(*arg_value);
         } else {
-            let stack_slot = ctx.create_stack_slot(param_info.stack_slot());
+            let (size, align_shift) = param_info.slot_dims();
+            let stack_slot = ctx.alloc_stack_slot(size, align_shift);
             let slot_ptr = ctx.stack_addr(stack_slot, 0);
             if param_info.size != 0 {
                 ctx.store(*arg_value, slot_ptr, 0);
@@ -105,7 +103,8 @@ pub fn codegen_call(
         }
     }
 
-    let result_slot = ctx.create_stack_slot(return_info.stack_slot());
+    let (ret_size, ret_align_shift) = return_info.slot_dims();
+    let result_slot = ctx.alloc_stack_slot(ret_size, ret_align_shift);
     let result_ptr = ctx.stack_addr(result_slot, 0);
     call_args.push(result_ptr);
 
@@ -155,9 +154,9 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> StagedType for $FunType<OUT> {
             type RuntimeValue = extern "C" fn() -> OUT::RuntimeValue;
 
-            fn cranelift_type() -> cranelift_codegen::ir::Type {
-                types::I64
-            }
+            fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
         }
 
         /// Type-safe function reference for 0-ary functions
@@ -228,9 +227,9 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
             type RuntimeValue = extern "C" fn($($T::RuntimeValue,)+) -> OUT::RuntimeValue;
 
-            fn cranelift_type() -> cranelift_codegen::ir::Type {
-                types::I64
-            }
+            fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
         }
 
         /// Type-safe function reference (Copy, stores just ID)

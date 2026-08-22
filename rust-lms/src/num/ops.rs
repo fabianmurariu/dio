@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use crate::staged::{ValueId, CompilationContext, Const, IntoStaged, Staged, Var};
+use crate::staged::{CompilationContext, Const, IntoStaged, Staged, ValueId, Var};
 use crate::types::StagedType;
 
 use super::traits::{FloatNum, IntNum, Num};
@@ -553,9 +553,7 @@ where
             "bitcast between different-sized types",
         );
         let value = self.expr.codegen(ctx);
-        let from_ty = FROM::cranelift_type();
-        let to_ty = TO::cranelift_type();
-        if from_ty == to_ty {
+        if FROM::scalar_type() == TO::scalar_type() {
             value
         } else {
             ctx.bitcast(TO::scalar_type(), value)

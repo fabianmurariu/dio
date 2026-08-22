@@ -23,9 +23,8 @@
 
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var};
-use crate::types::{ScalarType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var};
+use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -111,8 +110,8 @@ pub struct COptionType<T: StagedType> {
 unsafe impl<T: StagedType> StagedType for COptionType<T> {
     type RuntimeValue = COption<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer to stack slot
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn is_copy_struct() -> bool {
@@ -167,8 +166,8 @@ pub struct OptRefType<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
     type RuntimeValue = Option<&'a T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Single pointer, null = None
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -211,8 +210,8 @@ pub struct OptMutRefType<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
     type RuntimeValue = Option<&'a mut T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Single pointer, null = None
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -253,11 +252,7 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         // Allocate stack slot for COption<T>
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size,
-            alignment.trailing_zeros() as u8,
-        ));
+        let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
 
         let ptr = ctx.stack_addr(stack_slot, 0);
 
@@ -300,11 +295,7 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size,
-            alignment.trailing_zeros() as u8,
-        ));
+        let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
 
         let ptr = ctx.stack_addr(stack_slot, 0);
 
@@ -438,11 +429,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E>
         // Load discriminant from offset 0
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant != 0
-        ctx.icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-            discriminant,
-            0,
-        )
+        ctx.icmp_imm(IntCmp::Ne, discriminant, 0)
     }
 }
 
@@ -464,11 +451,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E>
         let opt_ptr = self.opt.codegen(ctx);
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant == 0
-        ctx.icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            discriminant,
-            0,
-        )
+        ctx.icmp_imm(IntCmp::Eq, discriminant, 0)
     }
 }
 
@@ -493,7 +476,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
     }
 }
 
@@ -516,7 +499,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
     }
 }
 
@@ -541,7 +524,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
     }
 }
 
@@ -564,7 +547,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
     }
 }
 
@@ -592,8 +575,6 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        
-
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
@@ -681,8 +662,6 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        
-
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
@@ -808,8 +787,6 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        
-
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
@@ -901,8 +878,6 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        
-
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
@@ -978,8 +953,8 @@ mod tests {
     unsafe impl StagedType for AlignedPayload {
         type RuntimeValue = Self;
 
-        fn cranelift_type() -> cranelift_codegen::ir::Type {
-            types::I64
+        fn scalar_type() -> ScalarType {
+            ScalarType::Ptr
         }
 
         fn size_of() -> usize {

@@ -11,10 +11,8 @@
 //! `bool` deliberately does not implement `Num` — boolean values use the
 //! control-flow combinators (`if_then`, `if_then_else`) rather than arithmetic.
 
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-
 use crate::staged::{CompilationContext, ValueId};
-use crate::types::{ConstantType, CopyType, StagedType};
+use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, StagedType};
 
 // =============================================================================
 // Trait hierarchy
@@ -74,13 +72,13 @@ macro_rules! impl_int_num {
                 ctx.sdiv(l, r)
             }
             fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::SignedLessThan, l, r)
+                ctx.icmp(IntCmp::Slt, l, r)
             }
             fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::SignedGreaterThan, l, r)
+                ctx.icmp(IntCmp::Sgt, l, r)
             }
             fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::Equal, l, r)
+                ctx.icmp(IntCmp::Eq, l, r)
             }
         }
         impl IntNum for $ty {
@@ -122,13 +120,13 @@ macro_rules! impl_int_num {
                 ctx.udiv(l, r)
             }
             fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::UnsignedLessThan, l, r)
+                ctx.icmp(IntCmp::Ult, l, r)
             }
             fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::UnsignedGreaterThan, l, r)
+                ctx.icmp(IntCmp::Ugt, l, r)
             }
             fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCC::Equal, l, r)
+                ctx.icmp(IntCmp::Eq, l, r)
             }
         }
         impl IntNum for $ty {
@@ -186,13 +184,13 @@ macro_rules! impl_float_num {
                 ctx.fdiv(l, r)
             }
             fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCC::LessThan, l, r)
+                ctx.fcmp(FloatCmp::Lt, l, r)
             }
             fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCC::GreaterThan, l, r)
+                ctx.fcmp(FloatCmp::Gt, l, r)
             }
             fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCC::Equal, l, r)
+                ctx.fcmp(FloatCmp::Eq, l, r)
             }
         }
         impl FloatNum for $ty {}

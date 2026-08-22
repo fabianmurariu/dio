@@ -26,9 +26,8 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
-use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged, Var, VarUse};
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
-use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -196,9 +195,8 @@ impl<T> Copy for FatSliceType<T> {}
 unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     type RuntimeValue = FatSlice<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        // FatSlice is 16 bytes (ptr + len), represented as pointer to stack slot
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -239,8 +237,8 @@ pub type FfiSliceMutType<T> = FatSliceMutType<T>;
 unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     type RuntimeValue = FatSliceMut<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -300,11 +298,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
-        let slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16,
-            3,
-        ));
+        let slot = ctx.alloc_stack_slot(16, 3);
         let slot_ptr = ctx.stack_addr(slot, 0);
         ctx.store(ptr, slot_ptr, 0);
         ctx.store(len, slot_ptr, 8);
@@ -357,11 +351,7 @@ unsafe impl Staged for StackBytes {
         // Round the slot up to a whole number of 8-byte words (min one word, so a
         // zero-length literal still has a valid, non-empty slot to address).
         let slot_len = ((n + 7) & !7).max(8);
-        let slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            slot_len as u32,
-            3,
-        ));
+        let slot = ctx.alloc_stack_slot(slot_len as u32, 3);
         let addr = ctx.stack_addr(slot, 0);
         let mut off = 0;
         while off < slot_len {
@@ -409,11 +399,8 @@ unsafe impl Staged for StackAlloc {
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Round up to a whole number of 8-byte words (min one word).
         let slot_len = ((self.size + 7) & !7).max(8);
-        let slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            slot_len as u32,
-            3, // align_shift = 3 → 8-byte aligned
-        ));
+        // align_shift = 3 → 8-byte aligned
+        let slot = ctx.alloc_stack_slot(slot_len as u32, 3);
         ctx.stack_addr(slot, 0)
     }
 }
@@ -954,11 +941,10 @@ pub(crate) fn push_extern_value<T: StagedType>(
     if T::is_copy_struct() {
         args.push(value);
     } else {
-        let stack_slot = ctx.create_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
+        let stack_slot = ctx.alloc_stack_slot(
             (T::size_of() as u32).max(1),
             T::align_of().trailing_zeros() as u8,
-        ));
+        );
         let slot_ptr = ctx.stack_addr(stack_slot, 0);
         if T::size_of() != 0 {
             ctx.store(value, slot_ptr, 0);
@@ -973,11 +959,10 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     func_ref: cranelift_codegen::ir::FuncRef,
     mut args: Vec<ValueId>,
 ) -> ValueId {
-    let stack_slot = ctx.create_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
+    let stack_slot = ctx.alloc_stack_slot(
         (Ret::size_of() as u32).max(1),
         Ret::align_of().trailing_zeros() as u8,
-    ));
+    );
     let output_ptr = ctx.stack_addr(stack_slot, 0);
     args.push(output_ptr);
     ctx.call(func_ref, &args);

@@ -18,7 +18,7 @@
 //! );
 //! ```
 
-use crate::staged::{ValueId, CompilationContext, Staged};
+use crate::staged::{CompilationContext, Staged, ValueId};
 use crate::types::StagedType;
 
 // Macro to generate Staged implementations for tuples of various sizes

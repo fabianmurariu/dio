@@ -25,7 +25,7 @@ use crate::func::{Compiler, Ctx};
 use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
 use crate::refer::SMutPtr;
-use crate::staged::{Staged, Var, ValueId};
+use crate::staged::{Staged, ValueId, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::StagedIterator;

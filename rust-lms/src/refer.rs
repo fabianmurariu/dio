@@ -10,9 +10,8 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{ValueId, CompilationContext, Staged, Var, VarUse};
-use crate::types::{ScalarType, CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::types;
+use crate::staged::{CompilationContext, Staged, ValueId, Var, VarUse};
+use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -41,8 +40,8 @@ impl<'a, T> Copy for SRef<'a, T> {}
 unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
     type RuntimeValue = &'a T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer-sized
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -77,8 +76,8 @@ pub struct SRefMut<'a, T> {
 unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T> {
     type RuntimeValue = &'a mut T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer-sized
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -119,8 +118,8 @@ impl<T> Copy for SPtr<T> {}
 unsafe impl<T: StagedType> StagedType for SPtr<T> {
     type RuntimeValue = *const T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -141,8 +140,8 @@ impl<T> Copy for SMutPtr<T> {}
 unsafe impl<T: StagedType> StagedType for SMutPtr<T> {
     type RuntimeValue = *mut T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -796,7 +795,7 @@ where
     type Out = bool;
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let p = self.ptr.codegen(ctx);
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
+        ctx.icmp_imm(IntCmp::Eq, p, 0)
     }
 }
 

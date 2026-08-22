@@ -7,9 +7,8 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-
-use crate::staged::{ValueId, CompilationContext, IntoStaged, Staged};
-use crate::types::StagedType;
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
+use crate::types::{IntCmp, StagedType};
 
 // =============================================================================
 // IfThenElse<COND, THEN, ELSE> - Conditional Expression
@@ -278,7 +277,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let v = self.cond.codegen(ctx);
         // bool is an i8 in {0, 1}; `v == 0` is its negation.
-        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, v, 0)
+        ctx.icmp_imm(IntCmp::Eq, v, 0)
     }
 }
 
