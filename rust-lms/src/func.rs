@@ -18,7 +18,7 @@
 //! aggregate classification to Cranelift.
 
 use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, Staged, Var};
-use crate::types::{RuntimeParam, RuntimeResult, StagedType};
+use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{
     types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
 };
@@ -136,14 +136,14 @@ impl Ctx {
     {
         let init_staged = init.into_staged();
         let v = self.alloc::<T>();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         let init_for_action = init_staged.clone();
         self.actions.push(Box::new(move |ctx| {
             let value = init_for_action.codegen(ctx);
-            let cv = ctx.builder.declare_var(ctype);
+            let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         crate::staged::LetVar::new(v, init_staged)
     }
@@ -159,13 +159,13 @@ impl Ctx {
     {
         let v = self.alloc::<T>();
         let init_staged = init.into_staged();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = init_staged.codegen(ctx);
-            let cv = ctx.builder.declare_var(ctype);
+            let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         v
     }
@@ -178,18 +178,18 @@ impl Ctx {
         E: Staged<Out = T> + 'static,
     {
         let v = self.alloc::<T>();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
             let cv = if let Some(&existing) = ctx.var_map.get(&id) {
                 existing
             } else {
-                let cv = ctx.builder.declare_var(ctype);
+                let cv = ctx.declare_var(ctype);
                 ctx.var_map.insert(id, cv);
                 cv
             };
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         v
     }
@@ -235,20 +235,18 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let loop_header = ctx.builder.create_block();
-            let loop_body = ctx.builder.create_block();
-            let loop_exit = ctx.builder.create_block();
+            let loop_header = ctx.create_block();
+            let loop_body = ctx.create_block();
+            let loop_exit = ctx.create_block();
 
-            ctx.builder.ins().jump(loop_header, &[]);
+            ctx.jump(loop_header, &[]);
 
-            ctx.builder.switch_to_block(loop_header);
+            ctx.switch_to_block(loop_header);
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, loop_body, &[], loop_exit, &[]);
+            ctx.brif(cond_val, loop_body, &[], loop_exit, &[]);
 
-            ctx.builder.switch_to_block(loop_body);
-            ctx.builder.seal_block(loop_body);
+            ctx.switch_to_block(loop_body);
+            ctx.seal_block(loop_body);
             // Expose this loop's exit block so `break_loop` inside the body can
             // jump to it; pop once the body is fully emitted.
             ctx.loop_exit_stack.push(loop_exit);
@@ -256,11 +254,11 @@ impl Ctx {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(loop_header, &[]);
-            ctx.builder.seal_block(loop_header);
+            ctx.jump(loop_header, &[]);
+            ctx.seal_block(loop_header);
 
-            ctx.builder.switch_to_block(loop_exit);
-            ctx.builder.seal_block(loop_exit);
+            ctx.switch_to_block(loop_exit);
+            ctx.seal_block(loop_exit);
         }));
     }
 
@@ -298,7 +296,7 @@ impl Ctx {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
         let handle_id = handle.id;
-        let item_cty = Item::cranelift_type();
+        let item_cty = Item::scalar_type();
 
         // Build the body into a child Ctx (same shape as `while_loop`).
         let mut child = Ctx::new(self.next_var_id);
@@ -307,16 +305,16 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let header = ctx.builder.create_block();
-            let body = ctx.builder.create_block();
-            let exit = ctx.builder.create_block();
+            let header = ctx.create_block();
+            let body = ctx.create_block();
+            let exit = ctx.create_block();
 
-            ctx.builder.ins().jump(header, &[]);
+            ctx.jump(header, &[]);
 
             // header: call the canonical thunk and branch on the stored tag.
-            ctx.builder.switch_to_block(header);
+            ctx.switch_to_block(header);
             let it = ctx.var_map[&handle_id];
-            let it_val = ctx.builder.use_var(it);
+            let it_val = ctx.use_var(it);
             let next_ref = ctx.get_extern_func_ref(next_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
@@ -332,31 +330,29 @@ impl Ctx {
             let payload_offset =
                 crate::option::COptionType::<Item>::payload_offset() as i32;
             let val =
-                ctx.builder
-                    .ins()
-                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
-            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+                ctx.load(item_cty, option_ptr, payload_offset);
+            ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register (already the element's ABI type,
             // since COption<Item> returns [tag, ...Item's abi...]), replay
             // consumer, loop.
-            ctx.builder.switch_to_block(body);
-            ctx.builder.seal_block(body);
-            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.switch_to_block(body);
+            ctx.seal_block(body);
+            let elem_cv = ctx.declare_var(item_cty);
             ctx.var_map.insert(elem_id, elem_cv);
-            ctx.builder.def_var(elem_cv, val);
+            ctx.def_var(elem_cv, val);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(header, &[]);
-            ctx.builder.seal_block(header);
+            ctx.jump(header, &[]);
+            ctx.seal_block(header);
 
             // exit: free the iterator (reached by None and by break_loop).
-            ctx.builder.switch_to_block(exit);
-            ctx.builder.seal_block(exit);
-            let it_val2 = ctx.builder.use_var(it);
+            ctx.switch_to_block(exit);
+            ctx.seal_block(exit);
+            let it_val2 = ctx.use_var(it);
             let drop_ref = ctx.get_extern_func_ref(drop_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
@@ -396,7 +392,7 @@ impl Ctx {
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
-        let item_cty = Item::cranelift_type();
+        let item_cty = Item::scalar_type();
 
         let mut child = Ctx::new(self.next_var_id);
         consumer(&mut child, elem);
@@ -412,7 +408,7 @@ impl Ctx {
                 slot_size,
                 slot_align_shift,
             ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+            let slot_ptr = ctx.stack_addr(slot, 0);
 
             // Producer builds the iterator into the slot (fills the mini-vtable).
             init_call(ctx, slot_ptr);
@@ -433,35 +429,29 @@ impl Ctx {
                 8,
                 3,
             ));
-            let data_ptr = ctx.builder.ins().stack_addr(types::I64, data_slot, 0);
+            let data_ptr = ctx.stack_addr(data_slot, 0);
             let option_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
                 StackSlotKind::ExplicitSlot,
                 crate::option::COptionType::<Item>::size_of() as u32,
                 crate::option::COptionType::<Item>::align_of().trailing_zeros() as u8,
             ));
-            let option_ptr = ctx.builder.ins().stack_addr(types::I64, option_slot, 0);
+            let option_ptr = ctx.stack_addr(option_slot, 0);
 
-            let header = ctx.builder.create_block();
-            let body = ctx.builder.create_block();
-            let exit = ctx.builder.create_block();
-            ctx.builder.ins().jump(header, &[]);
+            let header = ctx.create_block();
+            let body = ctx.create_block();
+            let exit = ctx.create_block();
+            ctx.jump(header, &[]);
 
             // header: load data + next ptr, call it, branch on the tag register.
-            ctx.builder.switch_to_block(header);
+            ctx.switch_to_block(header);
             let data = ctx
                 .builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
             let next_fn =
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slot_ptr, next_off);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), data, data_ptr, 0);
-            ctx.builder
-                .ins()
-                .call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
+                ctx.load(ScalarType::I64, slot_ptr, next_off);
+            ctx.store(data, data_ptr, 0);
+            ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
             let tag = ctx
                 .builder
                 .ins()
@@ -471,42 +461,34 @@ impl Ctx {
             let payload_offset =
                 crate::option::COptionType::<Item>::payload_offset() as i32;
             let val =
-                ctx.builder
-                    .ins()
-                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
-            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+                ctx.load(item_cty, option_ptr, payload_offset);
+            ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register, replay consumer, loop.
-            ctx.builder.switch_to_block(body);
-            ctx.builder.seal_block(body);
-            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.switch_to_block(body);
+            ctx.seal_block(body);
+            let elem_cv = ctx.declare_var(item_cty);
             ctx.var_map.insert(elem_id, elem_cv);
-            ctx.builder.def_var(elem_cv, val);
+            ctx.def_var(elem_cv, val);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(header, &[]);
-            ctx.builder.seal_block(header);
+            ctx.jump(header, &[]);
+            ctx.seal_block(header);
 
             // exit: drop the iterator (frees only if it was heap-boxed).
-            ctx.builder.switch_to_block(exit);
-            ctx.builder.seal_block(exit);
+            ctx.switch_to_block(exit);
+            ctx.seal_block(exit);
             let data2 = ctx
                 .builder
                 .ins()
                 .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
             let drop_fn =
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slot_ptr, drop_off);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), data2, data_ptr, 0);
-            ctx.builder
-                .ins()
-                .call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
+                ctx.load(ScalarType::I64, slot_ptr, drop_off);
+            ctx.store(data2, data_ptr, 0);
+            ctx.call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
         }));
     }
 
@@ -516,12 +498,12 @@ impl Ctx {
                 .loop_exit_stack
                 .last()
                 .expect("break_loop called outside of a loop");
-            ctx.builder.ins().jump(exit, &[]);
+            ctx.jump(exit, &[]);
             // The current block is now terminated; switch to a fresh (dead)
             // block so any following emitted instructions remain well-formed.
-            let dead = ctx.builder.create_block();
-            ctx.builder.switch_to_block(dead);
-            ctx.builder.seal_block(dead);
+            let dead = ctx.create_block();
+            ctx.switch_to_block(dead);
+            ctx.seal_block(dead);
         }));
     }
 
@@ -537,23 +519,21 @@ impl Ctx {
         let then_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let then_block = ctx.builder.create_block();
-            let merge_block = ctx.builder.create_block();
+            let then_block = ctx.create_block();
+            let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, then_block, &[], merge_block, &[]);
+            ctx.brif(cond_val, then_block, &[], merge_block, &[]);
 
-            ctx.builder.switch_to_block(then_block);
-            ctx.builder.seal_block(then_block);
+            ctx.switch_to_block(then_block);
+            ctx.seal_block(then_block);
             for action in then_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(merge_block);
-            ctx.builder.seal_block(merge_block);
+            ctx.switch_to_block(merge_block);
+            ctx.seal_block(merge_block);
         }));
     }
 
@@ -578,31 +558,29 @@ impl Ctx {
         let else_actions = else_child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let then_block = ctx.builder.create_block();
-            let else_block = ctx.builder.create_block();
-            let merge_block = ctx.builder.create_block();
+            let then_block = ctx.create_block();
+            let else_block = ctx.create_block();
+            let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, then_block, &[], else_block, &[]);
+            ctx.brif(cond_val, then_block, &[], else_block, &[]);
 
-            ctx.builder.switch_to_block(then_block);
-            ctx.builder.seal_block(then_block);
+            ctx.switch_to_block(then_block);
+            ctx.seal_block(then_block);
             for action in then_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(else_block);
-            ctx.builder.seal_block(else_block);
+            ctx.switch_to_block(else_block);
+            ctx.seal_block(else_block);
             for action in else_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(merge_block);
-            ctx.builder.seal_block(merge_block);
+            ctx.switch_to_block(merge_block);
+            ctx.seal_block(merge_block);
         }));
     }
 }

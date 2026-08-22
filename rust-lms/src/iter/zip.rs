@@ -220,7 +220,7 @@ where
 
 fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: Value, ptr: Value, offset: i32) {
     if T::is_copy_struct() {
-        let destination = ctx.iadd_imm(ptr, i64::from(offset));
+        let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
         let config = ctx.module.isa().frontend_config();
         emit_copy_nonoverlapping(
             ctx.builder,

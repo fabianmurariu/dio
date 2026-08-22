@@ -7,7 +7,7 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-use cranelift_codegen::ir::{BlockArg, InstBuilder, Value};
+use cranelift_codegen::ir::Value;
 
 use crate::staged::{CompilationContext, IntoStaged, Staged};
 use crate::types::StagedType;
@@ -46,41 +46,34 @@ where
         let cond_val = self.condition.codegen(ctx);
 
         // Create the three blocks we need
-        let then_block = ctx.builder.create_block();
-        let else_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let then_block = ctx.create_block();
+        let else_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
         // Add block parameter to merge_block to receive the result (phi node)
-        let result_type = T::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        ctx.append_block_param(merge_block, T::scalar_type());
 
         // Branch based on condition
-        ctx.builder
-            .ins()
-            .brif(cond_val, then_block, &[], else_block, &[]);
+        ctx.brif(cond_val, then_block, &[], else_block, &[]);
 
         // Generate then branch
-        ctx.builder.switch_to_block(then_block);
-        ctx.builder.seal_block(then_block); // Single predecessor (entry block)
+        ctx.switch_to_block(then_block);
+        ctx.seal_block(then_block); // Single predecessor (entry block)
         let then_val = self.then_branch.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(then_val)]);
+        ctx.jump(merge_block, &[then_val]);
 
         // Generate else branch
-        ctx.builder.switch_to_block(else_block);
-        ctx.builder.seal_block(else_block); // Single predecessor (entry block)
+        ctx.switch_to_block(else_block);
+        ctx.seal_block(else_block); // Single predecessor (entry block)
         let else_val = self.else_branch.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(else_val)]);
+        ctx.jump(merge_block, &[else_val]);
 
         // Continue in merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block); // Two predecessors now known
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block); // Two predecessors now known
 
         // Return the block parameter (the merged value)
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -139,23 +132,21 @@ where
         let cond_val = self.condition.codegen(ctx);
 
         // Create the two blocks we need
-        let then_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let then_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
         // Branch: if true go to then_block, else skip to merge_block
-        ctx.builder
-            .ins()
-            .brif(cond_val, then_block, &[], merge_block, &[]);
+        ctx.brif(cond_val, then_block, &[], merge_block, &[]);
 
         // Generate then branch (body)
-        ctx.builder.switch_to_block(then_block);
-        ctx.builder.seal_block(then_block); // Single predecessor
+        ctx.switch_to_block(then_block);
+        ctx.seal_block(then_block); // Single predecessor
         let _ = self.body.codegen(ctx); // Execute for side effects
-        ctx.builder.ins().jump(merge_block, &[]);
+        ctx.jump(merge_block, &[]);
 
         // Continue in merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block); // Two predecessors now known
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block); // Two predecessors now known
 
         // Return unit value
         ctx.get_unit_value()
@@ -220,35 +211,33 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Create the blocks for the loop structure
-        let loop_header = ctx.builder.create_block();
-        let loop_body = ctx.builder.create_block();
-        let loop_exit = ctx.builder.create_block();
+        let loop_header = ctx.create_block();
+        let loop_body = ctx.create_block();
+        let loop_exit = ctx.create_block();
 
         // Jump from current block to loop header
-        ctx.builder.ins().jump(loop_header, &[]);
+        ctx.jump(loop_header, &[]);
 
         // Loop header: evaluate condition and branch
-        ctx.builder.switch_to_block(loop_header);
+        ctx.switch_to_block(loop_header);
         // DON'T seal loop_header yet - it has two predecessors (entry and loop_body)
         // We'll seal it after generating the back-edge from loop_body
 
         let cond_val = self.condition.codegen(ctx);
-        ctx.builder
-            .ins()
-            .brif(cond_val, loop_body, &[], loop_exit, &[]);
+        ctx.brif(cond_val, loop_body, &[], loop_exit, &[]);
 
         // Loop body: execute body and jump back to header
-        ctx.builder.switch_to_block(loop_body);
-        ctx.builder.seal_block(loop_body); // Single predecessor (loop_header)
+        ctx.switch_to_block(loop_body);
+        ctx.seal_block(loop_body); // Single predecessor (loop_header)
         let _ = self.body.codegen(ctx);
-        ctx.builder.ins().jump(loop_header, &[]);
+        ctx.jump(loop_header, &[]);
 
         // Now we can seal loop_header - both predecessors are known
-        ctx.builder.seal_block(loop_header);
+        ctx.seal_block(loop_header);
 
         // Loop exit
-        ctx.builder.switch_to_block(loop_exit);
-        ctx.builder.seal_block(loop_exit); // Single predecessor (loop_header)
+        ctx.switch_to_block(loop_exit);
+        ctx.seal_block(loop_exit); // Single predecessor (loop_header)
 
         // Return unit value
         ctx.get_unit_value()
@@ -290,9 +279,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let v = self.cond.codegen(ctx);
         // bool is an i8 in {0, 1}; `v == 0` is its negation.
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, v, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, v, 0)
     }
 }
 

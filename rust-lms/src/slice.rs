@@ -62,7 +62,7 @@ use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{ScalarType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
-    condcodes::IntCC, types, BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value,
+    condcodes::IntCC, types, StackSlotData, StackSlotKind, Value,
 };
 use std::marker::PhantomData;
 
@@ -515,7 +515,7 @@ where
     let element_size = ElemOf::<S>::size_of() as i64;
     let scale = ctx.iconst(ScalarType::I64, element_size);
     let byte_offset = ctx.imul(index, scale);
-    ctx.iadd(data_ptr, byte_offset)
+    ctx.ptr_offset_bytes(data_ptr, byte_offset)
 }
 
 // =============================================================================
@@ -671,33 +671,26 @@ where
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
         let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
 
-        let get_block = ctx.builder.create_block();
-        let default_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
-        ctx.builder
-            .append_block_param(merge_block, ElemOf::<S>::cranelift_type());
-        ctx.builder
-            .ins()
-            .brif(in_bounds, get_block, &[], default_block, &[]);
+        let get_block = ctx.create_block();
+        let default_block = ctx.create_block();
+        let merge_block = ctx.create_block();
+        ctx.append_block_param(merge_block, ElemOf::<S>::scalar_type());
+        ctx.brif(in_bounds, get_block, &[], default_block, &[]);
 
-        ctx.builder.switch_to_block(get_block);
-        ctx.builder.seal_block(get_block);
+        ctx.switch_to_block(get_block);
+        ctx.seal_block(get_block);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
         let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0,);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(value)]);
+        ctx.jump(merge_block, &[value]);
 
-        ctx.builder.switch_to_block(default_block);
-        ctx.builder.seal_block(default_block);
+        ctx.switch_to_block(default_block);
+        ctx.seal_block(default_block);
         let default = self.default.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(default)]);
+        ctx.jump(merge_block, &[default]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
-        ctx.builder.block_params(merge_block)[0]
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -723,34 +716,28 @@ where
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
         let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
 
-        let set_block = ctx.builder.create_block();
-        let out_of_bounds_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
-        ctx.builder.append_block_param(merge_block, types::I8);
-        ctx.builder
-            .ins()
-            .brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
+        let set_block = ctx.create_block();
+        let out_of_bounds_block = ctx.create_block();
+        let merge_block = ctx.create_block();
+        ctx.append_block_param(merge_block, ScalarType::I8);
+        ctx.brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
 
-        ctx.builder.switch_to_block(set_block);
-        ctx.builder.seal_block(set_block);
+        ctx.switch_to_block(set_block);
+        ctx.seal_block(set_block);
         let value = self.value.codegen(ctx);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
         ctx.store(value, element_ptr, 0);
         let written = ctx.iconst(ScalarType::I8, 1);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(written)]);
+        ctx.jump(merge_block, &[written]);
 
-        ctx.builder.switch_to_block(out_of_bounds_block);
-        ctx.builder.seal_block(out_of_bounds_block);
+        ctx.switch_to_block(out_of_bounds_block);
+        ctx.seal_block(out_of_bounds_block);
         let not_written = ctx.iconst(ScalarType::I8, 0);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(not_written)]);
+        ctx.jump(merge_block, &[not_written]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
-        ctx.builder.block_params(merge_block)[0]
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
+        ctx.block_param(merge_block, 0)
     }
 }
 

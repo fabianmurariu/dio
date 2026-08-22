@@ -101,9 +101,7 @@ pub fn codegen_call(
             let stack_slot = ctx.builder.create_sized_stack_slot(param_info.stack_slot());
             let slot_ptr = ctx.stack_addr(stack_slot, 0);
             if param_info.size != 0 {
-                ctx.builder
-                    .ins()
-                    .store(MemFlags::trusted(), *arg_value, slot_ptr, 0);
+                ctx.store(*arg_value, slot_ptr, 0);
             }
             call_args.push(slot_ptr);
         }
@@ -116,7 +114,7 @@ pub fn codegen_call(
     call_args.push(result_ptr);
 
     // Generate the call
-    ctx.builder.ins().call(func_ref, &call_args);
+    ctx.call(func_ref, &call_args);
 
     if return_info.is_aggregate {
         result_ptr
@@ -139,7 +137,7 @@ pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> Value 
     let func_ref = ctx
         .module
         .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
-    ctx.builder.ins().func_addr(types::I64, func_ref)
+    ctx.func_addr(func_ref)
 }
 
 // =============================================================================

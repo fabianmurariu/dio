@@ -25,7 +25,7 @@ use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
 use crate::types::{ScalarType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -266,7 +266,7 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         ctx.store(one, ptr, 0);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
-        let payload_ptr = ctx.iadd_imm(ptr, payload_offset);
+        let payload_ptr = ctx.ptr_offset_const(ptr, payload_offset);
 
         // Store the payload at its actual aligned offset.
         if T::is_copy_struct() {
@@ -493,9 +493,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
     }
 }
 
@@ -518,9 +516,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
     }
 }
 
@@ -545,9 +541,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
     }
 }
 
@@ -570,9 +564,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
     }
 }
 
@@ -600,7 +592,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
+        
 
         let opt_ptr = self.opt.codegen(ctx);
 
@@ -608,47 +600,41 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks for if-then-else
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
         // Add block parameter for the result
-        let result_type = T::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = T::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch: if discriminant != 0, go to some_block, else none_block
-        ctx.builder
-            .ins()
-            .brif(discriminant, some_block, &[], none_block, &[]);
+        ctx.brif(discriminant, some_block, &[], none_block, &[]);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
         // Some block: load the aligned payload.
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
         let some_val = if T::is_copy_struct() {
-            ctx.iadd_imm(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.iadd_imm(opt_ptr, payload_offset);
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
             ctx.load(T::scalar_type(), payload_ptr, 0)
         };
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_val)]);
+        ctx.jump(merge_block, &[some_val]);
 
         // None block: use default
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let default_val = self.default.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(default_val)]);
+        ctx.jump(merge_block, &[default_val]);
 
         // Merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -695,7 +681,7 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
+        
 
         let opt_ptr = self.opt.codegen(ctx);
 
@@ -703,55 +689,49 @@ where
         let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch based on discriminant
-        ctx.builder
-            .ins()
-            .brif(discriminant, some_block, &[], none_block, &[]);
+        ctx.brif(discriminant, some_block, &[], none_block, &[]);
 
         // Some block: bind value and execute some_body
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
         // Load the value and bind it to the variable.
         let bound_val = if T::is_copy_struct() {
-            ctx.iadd_imm(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.iadd_imm(opt_ptr, payload_offset);
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
             ctx.load(T::scalar_type(), payload_ptr, 0)
         };
 
         // Declare and define the bound variable
-        let bound_var = ctx.builder.declare_var(T::cranelift_type());
-        ctx.builder.def_var(bound_var, bound_val);
+        let bound_var = ctx.declare_var(T::scalar_type());
+        ctx.def_var(bound_var, bound_val);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
         // None block: execute none_body
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
         // Merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -828,49 +808,43 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
+        
 
         let ptr = self.opt.codegen(ctx);
 
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch: if ptr != null, it's Some
-        ctx.builder
-            .ins()
-            .brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr, some_block, &[], none_block, &[]);
 
         // Some block: ptr IS the reference
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
         // Bind the pointer as SRef<T>
-        let bound_var = ctx.builder.declare_var(types::I64);
-        ctx.builder.def_var(bound_var, ptr);
+        let bound_var = ctx.declare_var(ScalarType::I64);
+        ctx.def_var(bound_var, ptr);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
         // None block
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
         // Merge
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -927,44 +901,38 @@ where
     type Out = OUT;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
+        
 
         let ptr = self.opt.codegen(ctx);
 
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
-        ctx.builder
-            .ins()
-            .brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr, some_block, &[], none_block, &[]);
 
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
-        let bound_var = ctx.builder.declare_var(types::I64);
-        ctx.builder.def_var(bound_var, ptr);
+        let bound_var = ctx.declare_var(ScalarType::I64);
+        ctx.def_var(bound_var, ptr);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 

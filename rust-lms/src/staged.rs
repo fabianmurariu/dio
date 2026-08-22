@@ -6,7 +6,7 @@
 //! - `Const<T>`: Typed constants (Copy-able)
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, StackSlot, Value};
+use cranelift_codegen::ir::{Block, BlockArg, FuncRef, InstBuilder, MemFlags, SigRef, StackSlot, Value};
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
@@ -23,6 +23,14 @@ use cranelift_codegen::ir::types;
 /// (0e) flips it to an opaque arena index so a second backend (LLVM/MLIR) can supply
 /// its own value type without the AST ever naming a backend value.
 pub type ValueId = Value;
+
+/// Opaque handle to a basic block during codegen (Phase 0). Alias for Cranelift's
+/// `Block` today; flips to an opaque backend handle in 0e.
+pub type BlockHandle = Block;
+
+/// Opaque handle to a mutable variable during codegen (Phase 0). Alias for
+/// Cranelift's `Variable` today; flips to an opaque backend handle in 0e.
+pub type VarHandle = Variable;
 
 /// Emit an exact copy between non-overlapping, equally aligned runtime slots.
 pub(crate) fn emit_copy_nonoverlapping(
@@ -119,9 +127,6 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     // ---- integer arithmetic ----
     pub(crate) fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().iadd(a, b)
-    }
-    pub(crate) fn iadd_imm(&mut self, a: ValueId, imm: i64) -> ValueId {
-        self.builder.ins().iadd_imm(a, imm)
     }
     pub(crate) fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
         self.builder.ins().isub(a, b)
@@ -228,6 +233,88 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
         self.builder.ins().stack_addr(types::I64, slot, offset)
     }
 
+    // ---- pointers (Phase 0c: semantic ops, docs/llvm.md §8b) ----
+    // A pointer is not an integer to every backend. Cranelift represents pointers
+    // as `i64` so these are `iadd`/no-ops today, but an MLIR/LLVM backend needs
+    // `getelementptr` / `inttoptr` / `ptrtoint` here — so pointer arithmetic goes
+    // through these instead of raw `iadd` on a pointer value.
+    /// Offset a pointer by a runtime byte count.
+    pub(crate) fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
+        self.builder.ins().iadd(ptr, offset)
+    }
+    /// Offset a pointer by a constant byte count.
+    pub(crate) fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
+        self.builder.ins().iadd_imm(ptr, bytes)
+    }
+    /// Reinterpret an integer address as a pointer (Cranelift: no-op; MLIR: inttoptr).
+    pub(crate) fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
+        addr
+    }
+
+    // ---- blocks & control flow (Phase 0c) ----
+    pub(crate) fn create_block(&mut self) -> BlockHandle {
+        self.builder.create_block()
+    }
+    /// Append a phi-style block parameter of type `ty`, returning its value.
+    pub(crate) fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId {
+        self.builder.append_block_param(block, ty.to_cranelift())
+    }
+    /// Read the `idx`-th parameter of `block` (its phi value).
+    pub(crate) fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId {
+        self.builder.block_params(block)[idx]
+    }
+    pub(crate) fn switch_to_block(&mut self, block: BlockHandle) {
+        self.builder.switch_to_block(block);
+    }
+    pub(crate) fn seal_block(&mut self, block: BlockHandle) {
+        self.builder.seal_block(block);
+    }
+    pub(crate) fn jump(&mut self, target: BlockHandle, args: &[ValueId]) {
+        let block_args: Vec<BlockArg> = args.iter().map(|&v| BlockArg::Value(v)).collect();
+        self.builder.ins().jump(target, &block_args);
+    }
+    pub(crate) fn brif(
+        &mut self,
+        cond: ValueId,
+        then_block: BlockHandle,
+        then_args: &[ValueId],
+        else_block: BlockHandle,
+        else_args: &[ValueId],
+    ) {
+        let ta: Vec<BlockArg> = then_args.iter().map(|&v| BlockArg::Value(v)).collect();
+        let ea: Vec<BlockArg> = else_args.iter().map(|&v| BlockArg::Value(v)).collect();
+        self.builder.ins().brif(cond, then_block, &ta, else_block, &ea);
+    }
+    // ---- variables (Phase 0c) ----
+    pub(crate) fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
+        self.builder.declare_var(ty.to_cranelift())
+    }
+    pub(crate) fn def_var(&mut self, var: VarHandle, val: ValueId) {
+        self.builder.def_var(var, val);
+    }
+    pub(crate) fn use_var(&mut self, var: VarHandle) -> ValueId {
+        self.builder.use_var(var)
+    }
+
+    // ---- calls (Phase 0c) ----
+    /// Direct call; returns the first result (or `None` for a void callee).
+    pub(crate) fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId> {
+        let inst = self.builder.ins().call(func, args);
+        self.builder.inst_results(inst).first().copied()
+    }
+    pub(crate) fn call_indirect(
+        &mut self,
+        sig: SigRef,
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Option<ValueId> {
+        let inst = self.builder.ins().call_indirect(sig, callee, args);
+        self.builder.inst_results(inst).first().copied()
+    }
+    pub(crate) fn func_addr(&mut self, func: FuncRef) -> ValueId {
+        self.builder.ins().func_addr(types::I64, func)
+    }
+
     /// Get or create a FuncRef for an external function.
     ///
     /// FuncRefs are per-function, so we cache them in extern_func_refs.
@@ -296,7 +383,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return self.builder.use_var(sv.ptr_var);
+                return self.use_var(sv.ptr_var);
             }
         }
         // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair.
@@ -311,7 +398,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> Value {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return self.builder.use_var(sv.len_var);
+                return self.use_var(sv.len_var);
             }
         }
         let slice_ptr = slice.codegen(self);
@@ -323,10 +410,9 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     pub(crate) fn slice_parts(&mut self, slice: &impl Staged) -> (Value, Value) {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return (
-                    self.builder.use_var(sv.ptr_var),
-                    self.builder.use_var(sv.len_var),
-                );
+                let ptr = self.use_var(sv.ptr_var);
+                let len = self.use_var(sv.len_var);
+                return (ptr, len);
             }
         }
 
@@ -460,11 +546,11 @@ unsafe impl<T: StagedType> Staged for Var<T> {
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Look up our ID in the var_map to get the Cranelift Variable
-        let var = ctx
+        let var = *ctx
             .var_map
             .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
-        ctx.builder.use_var(*var)
+        ctx.use_var(var)
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -476,11 +562,11 @@ unsafe impl<T: StagedType> Staged for VarUse<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let var = ctx
+        let var = *ctx
             .var_map
             .get(&self.id)
             .unwrap_or_else(|| panic!("Variable {} not found in var_map", self.id));
-        ctx.builder.use_var(*var)
+        ctx.use_var(var)
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -774,12 +860,12 @@ where
             var
         } else {
             // First assignment to this variable - declare it
-            let var = ctx.builder.declare_var(T::cranelift_type());
+            let var = ctx.declare_var(T::scalar_type());
             ctx.var_map.insert(self.var.id, var);
             var
         };
 
-        ctx.builder.def_var(var, value);
+        ctx.def_var(var, value);
 
         // Return cached unit value
         ctx.get_unit_value()
@@ -882,12 +968,12 @@ where
             var
         } else {
             // First assignment to this variable - declare it
-            let var = ctx.builder.declare_var(T::cranelift_type());
+            let var = ctx.declare_var(T::scalar_type());
             ctx.var_map.insert(self.var.id, var);
             var
         };
 
-        ctx.builder.def_var(var, value);
+        ctx.def_var(var, value);
 
         // Return cached unit value
         ctx.get_unit_value()

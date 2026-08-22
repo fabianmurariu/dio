@@ -983,7 +983,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     ));
     let output_ptr = ctx.stack_addr(stack_slot, 0);
     args.push(output_ptr);
-    ctx.builder.ins().call(func_ref, &args);
+    ctx.call(func_ref, &args);
 
     if Ret::is_copy_struct() {
         output_ptr

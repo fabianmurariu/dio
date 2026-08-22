@@ -12,7 +12,7 @@
 
 use crate::staged::{CompilationContext, Staged, Var, VarUse};
 use crate::types::{ScalarType, CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder};
+use cranelift_codegen::ir::types;
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -455,7 +455,7 @@ where
         let scale = ctx.iconst(ScalarType::I64, element_size);
         let byte_offset = ctx.imul(idx, scale);
 
-        ctx.iadd(ptr, byte_offset)
+        ctx.ptr_offset_bytes(ptr, byte_offset)
     }
 }
 
@@ -497,7 +497,7 @@ where
         let scale = ctx.iconst(ScalarType::I64, element_size);
         let byte_offset = ctx.imul(idx, scale);
 
-        ctx.iadd(ptr, byte_offset)
+        ctx.ptr_offset_bytes(ptr, byte_offset)
     }
 }
 
@@ -542,7 +542,7 @@ where
         let scale = ctx.iconst(ScalarType::I64, element_size);
         let byte_offset = ctx.imul(idx, scale);
 
-        let offset_ptr = ctx.iadd(ptr, byte_offset);
+        let offset_ptr = ctx.ptr_offset_bytes(ptr, byte_offset);
 
         ctx.load(T::scalar_type(), offset_ptr, 0)
     }
@@ -590,7 +590,10 @@ impl<S> Copy for ConstPtr<S> {}
 unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        ctx.iconst(ScalarType::I64, self.addr as i64)
+        // A baked host address becomes a staged pointer (Cranelift: the i64 itself;
+        // MLIR: inttoptr).
+        let addr = ctx.iconst(ScalarType::I64, self.addr as i64);
+        ctx.addr_to_ptr(addr)
     }
 }
 
@@ -793,9 +796,7 @@ where
     type Out = bool;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let p = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
+        ctx.icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
     }
 }
 

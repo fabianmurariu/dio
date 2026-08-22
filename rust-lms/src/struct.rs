@@ -228,7 +228,7 @@ where
         let offset = F::OFFSET as i32;
         if F::Out::is_copy_struct() {
             let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
-            ctx.iadd(base_ptr, offset)
+            ctx.ptr_offset_bytes(base_ptr, offset)
         } else {
             ctx.load(F::Out::scalar_type(), base_ptr, offset,)
         }
@@ -296,7 +296,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.base.codegen(ctx);
         let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
-        ctx.iadd(base_ptr, offset)
+        ctx.ptr_offset_bytes(base_ptr, offset)
     }
 }
 
@@ -503,7 +503,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
         let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
-        ctx.iadd(base_ptr, offset)
+        ctx.ptr_offset_bytes(base_ptr, offset)
     }
 }
 

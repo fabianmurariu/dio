@@ -547,17 +547,59 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   *holistically* in 0c/0d rather than piecemeal in the crate's most delicate file.
   Control-flow (`jump`/`brif`/`return_`), calls (`call`/`func_addr`), and vars
   (`declare_var`/`def_var`/`use_var`) across all files remain for 0c/0d.
-- **0c — Semantic pointer ops + control-flow/var methods.** Add
-  `ptr_offset_bytes/_const`, `ptr_to_addr`, `addr_to_ptr` and rewrite `refer.rs` off raw
-  `iadd` (§8b); add `create_block`/`switch_to`/`seal_block`/`brif`/`jump`/`block_param`
-  and `declare_var`/`def_var`/`use_var`, routing `control.rs` + `func.rs` loops through
-  them. *Green: Cranelift forwards natively.*
+- **0c — Control-flow, vars, calls, pointer ops. DONE ✅.** Added the rest of the
+  funnel: blocks (`create_block`/`append_block_param`/`block_param`/`switch_to_block`/
+  `seal_block`), terminators (`jump`/`brif` — taking `&[ValueId]`, wrapping `BlockArg`
+  internally), variables (`declare_var(ScalarType)`/`def_var`/`use_var`), calls
+  (`call`/`call_indirect`/`func_addr`, returning `Option<ValueId>`), and the semantic
+  pointer ops (`ptr_offset_bytes`/`ptr_offset_const`/`addr_to_ptr`, §8b — Cranelift
+  no-ops today, `getelementptr`/`inttoptr` under MLIR). Migrated `control.rs`
+  (`if_then_else` block-param phi, `while`, `if_then`, `not`), `func.rs` (the delicate
+  opaque-iterator SSA loops + `let_var`/`assign` — renaming only, so the `seal_block`
+  ordering is preserved), and the block/var/call sites in `option.rs`/`slice.rs`/
+  `refer.rs`/`ffi.rs`/`func_impl.rs`/`staged.rs`. Pointer arithmetic (`refer.rs`
+  `element_addr`, `struct` field offsets, `COption` payload, fat-slice writes) now goes
+  through the semantic ptr ops, not raw `iadd` on a pointer value. Full workspace green
+  (343/0/2); clippy unchanged at the 13-lint baseline; unused imports cleaned.
+  **Everything AST-facing now routes through the funnel.** The only remaining
+  `ctx.builder`/`builder` access is the funnel's own wrapper bodies (extracted in 0d)
+  and the `compile()`/ABI/`Module` machinery: `create_sized_stack_slot` (×13),
+  `import_signature`/`declare_func_in_func`, `append_block_params_for_function_params`,
+  the entry-block param loading, `return_`, `finalize`, `symbol`, `emit_small_memory_copy`
+  — all 0d.
 - **0d — Extract `Backend` trait + `CraneliftBackend` (riskiest; ownership reshuffle).**
-  Promote the inherent methods into an object-safe `Backend` trait; `CraneliftBackend`
-  now owns the `FunctionBuilder`/module/maps; `CompilationContext` holds `&mut dyn
-  Backend` and delegates. Rename `Staged::codegen -> ValueId`. Wrap declare/define/
-  finalize/JIT behind object-safe `Module`/`Executable` (`Box<dyn FnOnce>` body,
-  `finalize(self: Box<Self>)`). Sites don't move; only builder ownership changes.
+  Promote the funnel methods into an object-safe `Backend` trait; `CraneliftBackend`
+  owns `&mut FunctionBuilder` + `&mut JITModule`; `CompilationContext` holds `&mut dyn
+  Backend` and delegates. Sites don't move; only builder ownership changes.
+
+  **Concrete design (mapped from the field/access audit — ready to execute):**
+  - **Moves into the backend:** only `builder` + `module`. Everything else in
+    `CompilationContext` is neutral our-id→handle bookkeeping and **stays**: `var_map`
+    (`usize→VarHandle`), `slice_vars`, `loop_exit_stack` (`Vec<BlockHandle>`),
+    `unit_value` (`Option<ValueId>`), `func_map`, `extern_func_ids/refs`. (These are
+    accessed *outside* `staged.rs` — `func.rs` break-loop + var binding, `option.rs` var
+    binding — so they must remain on `CompilationContext`.)
+  - **`Backend` trait surface:** the ~30 funnel ops already defined (value/ptr/control/
+    var/call/memory/`stack_addr`), plus the builder/module-coupled ones that are still
+    direct today — `create_stack_slot(size, align)` (wrapping `StackSlotData`),
+    `import_signature`, `declare_func_in_func(FuncId)->FuncRef`, `memcpy`
+    (`emit_small_memory_copy`), and `target_frontend_config()`/`default_call_conv()` for
+    the two external `ctx.module.isa()` uses (`func.rs:403`, `iter/zip.rs:224`).
+  - **`CompilationContext` inherent methods stay** (`get_extern_func_ref`,
+    `get_unit_value`, `slice_data_ptr/len/parts`) but compose `self.backend.<op>` + the
+    kept maps.
+  - **Lifetimes:** `CompilationContext<'a,'b>` gets `backend: &'b mut (dyn Backend +
+    'a)`; `CraneliftBackend<'a,'b>` coerces in. This is the one fiddly bit.
+  - **`compile()` + `Module`/`Executable`:** the entry-block setup,
+    `append_block_params_for_function_params`, param loading (`declare_var`/`def_var`/
+    `block_params`), `return_`, ABI stack slots, `finalize`, `symbol`, and the
+    `TypeInfo.value_type`→`ScalarType` fold move behind object-safe `Module`/`Executable`
+    traits (`Box<dyn FnOnce>` body, `finalize(self: Box<Self>)`). This is the second half
+    of 0d and where `func.rs`'s deferred bare-`builder` code lands.
+
+  Rename `Staged::codegen -> ValueId`. **Do this as a fresh, focused effort** — it is a
+  lifetime-sensitive change that should not be rushed; verify with the full suite at each
+  bounded move (backend struct → delegation → module.isa methods → compile()/Module).
 - **0e — Flip `ValueId` to opaque** (`struct ValueId(u32)` + arenas in
   `CraneliftBackend`); AST unchanged. *Green: backend-internal.*
 - **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks
