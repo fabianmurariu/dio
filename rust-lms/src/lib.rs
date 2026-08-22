@@ -58,6 +58,9 @@ pub mod func;
 pub(crate) mod func_def;
 pub(crate) mod func_impl;
 pub mod iter;
+/// LLVM/MLIR backend (docs/llvm.md, Phase 1+). Compiled only with `--features llvm`.
+#[cfg(feature = "llvm")]
+pub mod llvm;
 pub mod num;
 pub mod opaque;
 pub mod option;

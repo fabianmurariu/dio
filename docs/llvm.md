@@ -635,14 +635,52 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   MLIR later reuses the same `u32` as an index into its own value `Vec`. Downstream `Staged`
   impls (arrow-lms `ValidityIsValid`, test_slices) and the prelude export were updated.
   *Green: full workspace, no new clippy lints.*
-- **0f — Cleanup + boundary.** Delete `cranelift_type()`; assert no `cranelift::*` leaks
-  outside the backend module; keep the `compile_fail` doctests guarding `ctx.builder`;
-  full workspace + clippy (same 13-lint baseline).
+- **0f — Cleanup + boundary — DONE.** `cranelift_type()` is deleted; `scalar_type()` is
+  the required source of truth on `StagedType` (each impl states its `ScalarType`
+  directly — pointers/handles are `Ptr`, `size_of`'s default reads
+  `ScalarType::size_bytes()`). Also neutralized the last two Cranelift *types* the AST
+  named in op calls, both universal (not speculative second-backend design):
+  - **comparison predicates** → `IntCmp`/`FloatCmp` enums with `to_cranelift()`
+    (replacing `IntCC`/`FloatCC` at ~20 call sites in num/control/option/refer/slice/zip);
+  - **stack slots** → opaque `StackSlotId` handle + neutral
+    `Backend::alloc_stack_slot(size, align_shift)` (replacing `StackSlotData`/
+    `StackSlotKind`/`StackSlot` at every AST site; `TypeInfo::slot_dims()` owns the dims).
 
-**Phase 1 — MLIR backend skeleton behind `--features llvm`.** Context/Module setup,
-type mapping (§8), constants, arithmetic/bitwise/compare/select/casts, memory
-(alloca/load/store), and the arena/`ValueId` plumbing. Prove a nullary `fun0`
+  Result: **no `cranelift::*` type appears in any AST module.** The sole remaining
+  Cranelift reference outside the backend/driver modules is `func_ref: FuncRef` on the
+  `emit_extern_call` helper in `ffi.rs`. The `Backend` trait's only non-neutral surface
+  is the **calls & signatures** cluster (`FuncRef`/`SigRef`/`Signature`/`FuncId`/
+  `CallConv`) — the JIT function-reference/symbol machinery, deliberately left with
+  `Module`/`Executable` because neutralizing it needs a second backend's call/symbol
+  model (MLIR's `ExecutionEngine`) to design against. `compile_fail` doctests still guard
+  `ctx.builder`; full workspace green (366 passed / 25 ignored), clippy unchanged.
+
+**Phase 1 — MLIR backend skeleton behind `--features llvm` — IN PROGRESS.**
+Context/Module setup, type mapping (§8), constants, arithmetic/bitwise/compare/select/casts,
+memory (alloca/load/store), and the arena/`ValueId` plumbing. Prove a nullary `fun0`
 returning a constant JITs and runs via `ExecutionEngine`.
+
+- **Milestone 1 — DONE.** `rust-lms/src/llvm/mod.rs` (feature-gated), `melior 0.27`
+  wired as an optional dep behind `llvm = ["dep:melior"]` (default build unaffected —
+  366 tests / clippy baseline unchanged, no melior pulled). `make_context` (from the
+  spike) + `jit_return_i64_const` build a nullary `() -> i64` `func.func`
+  **programmatically** through melior's op builders (`arith.constant` + `func.return`) —
+  the alpha-API risk the spike skipped — verify, lower via `create_to_llvm`, JIT, and run
+  the native `ExecutionEngine::lookup` pointer. Feature-gated test passes against Homebrew
+  `llvm@22`.
+  - **Build env (gotcha):** the `llvm` feature needs `MLIR_SYS_220_PREFIX`,
+    `LLVM_SYS_220_PREFIX`, `DYLD_LIBRARY_PATH=$P/lib`, **and `PATH="$P/bin:$PATH"`** — the
+    last is required because melior-macro's `tblgen` build script shells out to
+    `llvm-config`, which must be on `PATH` (not just discoverable via the `*_PREFIX` vars).
+  - **Arena finding:** the `ValueId(u32)` → MLIR-value mapping is confirmed viable exactly
+    as §9 predicted — melior's `Value<'c,'a>` is `#[repr(transparent)]` over a lifetime-free
+    `mlir_sys::MlirValue`, reachable via the **public** `ValueLike::to_raw` and
+    reconstructable via `Value::from_raw`, so a `Vec<MlirValue>` is the MLIR analogue of
+    Cranelift's entity arena. It lands with the multi-value op layer next.
+  - **Next:** the `ScalarType`→MLIR type map (§8), the raw-value arena, and the
+    arithmetic/compare/cast/memory value ops as an inherent `MlirBackend` API (not yet the
+    shared `Backend` trait — that unification waits on the calls/signatures neutralization,
+    Phase 3/4).
 
 **Phase 2 — variables & control flow (§5).** `declare/def/use_var` as alloca+load/store,
 `seal_block` no-op, blocks/`brif`/`jump`/block-params via `cf`, plus the lowering

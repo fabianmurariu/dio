@@ -10,6 +10,10 @@ cranelift-jit.workspace = true
 cranelift-module.workspace = true
 cranelift-native.workspace = true
 rust-lms-derive = { path = "../rust-lms-derive", optional = true }
+# LLVM/MLIR backend (docs/llvm.md, Phase 1+). Optional: needs a system LLVM/MLIR 22
+# install via melior/mlir-sys, so it stays OFF by default — the pure-Rust Cranelift
+# build is unaffected unless you opt in with `--features llvm`.
+melior = { version = "0.27", optional = true }
 # Optional benchmark dependencies (enable via features)
 mlua = { version = "0.9", features = ["luajit"], optional = true }
 wasmtime = { version = "25", optional = true }
@@ -18,6 +22,7 @@ rhai = { version = "1.19", optional = true }
 [features]
 default = ["derive"]
 derive = ["rust-lms-derive"]
+llvm = ["dep:melior"]
 bench-luajit = ["mlua"]
 bench-wasm = ["wasmtime"]
 bench-rhai = ["rhai"]
