@@ -531,11 +531,22 @@ Sub-phases (each a green, committable unit; `cargo test -p rust-lms` after each 
   `TypeInfo` (`func_impl.rs`) and `ConstantType::codegen_constant` onto `ScalarType` —
   these all touch builder/ABI code the 0b op-sweep already rewrites, so they land there
   where a real backend method reads the value.
-- **0b — Op-method sweep (biggest, mechanical).** Add inherent methods on
-  `CompilationContext` for the 39 ops wrapping `self.builder.ins()`; rewrite the ~142
-  sites to `ctx.<op>(…)` file by file (`num/traits.rs`, `num/ops.rs`, `control.rs`,
-  `slice.rs`, `option.rs`, `refer.rs`, `struct.rs`, `staged.rs`, `func_impl.rs`,
-  `ffi.rs`, `iter/*`, and `arrow-lms/src/array.rs`). *Green: pure rename, same IR.*
+- **0b — Op-method sweep. Value-ops DONE ✅ (except `func.rs`).** Added the inherent
+  `CompilationContext` funnel (`iconst`/`f64const`/`f32const`, all int/float arithmetic,
+  bitwise/shift, `icmp`/`icmp_imm`/`fcmp`/`select`, casts, `load`/`store`/`stack_addr`),
+  `ValueId`/`ScalarType` in the signatures, `MemFlags` hidden. Migrated every value-op
+  site through it in `num/traits.rs` (threaded `&mut CompilationContext` through the
+  `Num`/`IntNum` methods), `num/ops.rs`, `types.rs` (`codegen_constant` too),
+  `struct.rs`, `refer.rs`, `slice.rs`, `option.rs`, `ffi.rs`, `iter/zip.rs`, and
+  `staged.rs` (`Const`/slice-helpers). Full workspace green (343/0/2); clippy unchanged
+  at the 13-lint baseline; unused Cranelift imports cleaned. The staged.rs funnel
+  wrapper *bodies* still call `self.builder.ins()` by design (extracted in 0d).
+  **Deferred:** `func.rs`'s 7 remaining value-op sites (`stack_addr`/`load`/`iconst`) are
+  interleaved with control-flow, the `item_cty`/`declare_var` var machinery, and the
+  `compile()`/ABI code that uses a bare `builder` — so `func.rs` is migrated
+  *holistically* in 0c/0d rather than piecemeal in the crate's most delicate file.
+  Control-flow (`jump`/`brif`/`return_`), calls (`call`/`func_addr`), and vars
+  (`declare_var`/`def_var`/`use_var`) across all files remain for 0c/0d.
 - **0c — Semantic pointer ops + control-flow/var methods.** Add
   `ptr_offset_bytes/_const`, `ptr_to_addr`, `addr_to_ptr` and rewrite `refer.rs` off raw
   `iadd` (§8b); add `create_block`/`switch_to`/`seal_block`/`brif`/`jump`/`block_param`

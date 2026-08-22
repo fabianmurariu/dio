@@ -259,7 +259,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
         if let Some(val) = self.unit_value {
             val
         } else {
-            let val = self.builder.ins().iconst(types::I8, 0);
+            let val = self.iconst(ScalarType::I8, 0);
             self.unit_value = Some(val);
             val
         }
@@ -301,9 +301,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
         }
         // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair.
         let slice_ptr = slice.codegen(self);
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        self.load(ScalarType::I64, slice_ptr, 0)
     }
 
     /// Resolve the length (`usize`) of a slice operand.
@@ -317,9 +315,7 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
             }
         }
         let slice_ptr = slice.codegen(self);
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        self.load(ScalarType::I64, slice_ptr, 8)
     }
 
     /// Resolve both parts of a slice while evaluating a memory-resolved slice
@@ -335,14 +331,8 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
         }
 
         let slice_ptr = slice.codegen(self);
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
-        let len = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8);
+        let data_ptr = self.load(ScalarType::I64, slice_ptr, 0);
+        let len = self.load(ScalarType::I64, slice_ptr, 8);
         (data_ptr, len)
     }
 }
@@ -536,7 +526,7 @@ unsafe impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        T::codegen_constant(&self.value, ctx.builder)
+        T::codegen_constant(&self.value, ctx)
     }
 }
 

@@ -5,8 +5,9 @@
 //! - `ConstantType`: Trait for types that can be compile-time constants
 //! - Concrete type markers: `i64`, `u64`, `bool`, etc.
 
-use cranelift_codegen::ir::{types, InstBuilder, Value};
-use cranelift_frontend::FunctionBuilder;
+use cranelift_codegen::ir::types;
+
+use crate::staged::{CompilationContext, ValueId};
 
 // =============================================================================
 // Backend-neutral scalar type (Phase 0 of docs/llvm.md)
@@ -163,7 +164,7 @@ pub unsafe trait StagedType {
 /// representation declared by [`StagedType`] and must represent `value`.
 pub unsafe trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_, '_>) -> ValueId;
 }
 
 /// Marker trait for types that are Copy at the semantic level.
@@ -267,8 +268,8 @@ macro_rules! impl_int_staged_type {
         }
 
         unsafe impl ConstantType for $ty {
-            fn codegen_constant(value: &$ty, builder: &mut FunctionBuilder) -> Value {
-                builder.ins().iconst($ir_ty, *value as i64)
+            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+                ctx.iconst(Self::scalar_type(), *value as i64)
             }
         }
 
@@ -298,8 +299,8 @@ unsafe impl StagedType for i64 {
 }
 
 unsafe impl ConstantType for i64 {
-    fn codegen_constant(value: &i64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I64, *value)
+    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value)
     }
 }
 
@@ -322,8 +323,8 @@ unsafe impl StagedType for u64 {
 }
 
 unsafe impl ConstantType for u64 {
-    fn codegen_constant(value: &u64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I64, *value as i64)
+    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -346,8 +347,8 @@ unsafe impl StagedType for i32 {
 }
 
 unsafe impl ConstantType for i32 {
-    fn codegen_constant(value: &i32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I32, *value as i64)
+    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -370,8 +371,8 @@ unsafe impl StagedType for u32 {
 }
 
 unsafe impl ConstantType for u32 {
-    fn codegen_constant(value: &u32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I32, *value as i64)
+    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -394,8 +395,8 @@ unsafe impl StagedType for f32 {
 }
 
 unsafe impl ConstantType for f32 {
-    fn codegen_constant(value: &f32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().f32const(*value)
+    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.f32const(*value)
     }
 }
 
@@ -422,8 +423,8 @@ unsafe impl StagedType for bool {
 }
 
 unsafe impl ConstantType for bool {
-    fn codegen_constant(value: &bool, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I8, if *value { 1 } else { 0 })
+    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 })
     }
 }
 
@@ -446,8 +447,8 @@ unsafe impl StagedType for f64 {
 }
 
 unsafe impl ConstantType for f64 {
-    fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().f64const(*value)
+    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.f64const(*value)
     }
 }
 
@@ -470,8 +471,8 @@ unsafe impl StagedType for () {
 }
 
 unsafe impl ConstantType for () {
-    fn codegen_constant(_value: &(), builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I8, 0)
+    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_, '_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), 0)
     }
 }
 
