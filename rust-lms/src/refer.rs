@@ -11,8 +11,8 @@
 //! and aliasing guarantees; raw pointers do not.
 
 use crate::staged::{CompilationContext, Staged, Var, VarUse};
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use crate::types::{ScalarType, CopyType, RuntimeParam, RuntimeResult, StagedType};
+use cranelift_codegen::ir::{types, InstBuilder};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -184,9 +184,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -226,9 +224,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -269,9 +265,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -336,9 +330,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -379,9 +371,7 @@ where
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, ptr_val, 0);
+        ctx.store(value, ptr_val, 0);
 
         ctx.get_unit_value()
     }
@@ -418,9 +408,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, ptr_val, 0);
+        ctx.store(value, ptr_val, 0);
         ctx.get_unit_value()
     }
 }
@@ -464,10 +452,10 @@ where
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        ctx.builder.ins().iadd(ptr, byte_offset)
+        ctx.iadd(ptr, byte_offset)
     }
 }
 
@@ -506,10 +494,10 @@ where
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        ctx.builder.ins().iadd(ptr, byte_offset)
+        ctx.iadd(ptr, byte_offset)
     }
 }
 
@@ -551,14 +539,12 @@ where
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        let offset_ptr = ctx.builder.ins().iadd(ptr, byte_offset);
+        let offset_ptr = ctx.iadd(ptr, byte_offset);
 
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), offset_ptr, 0)
+        ctx.load(T::scalar_type(), offset_ptr, 0)
     }
 }
 
@@ -604,7 +590,7 @@ impl<S> Copy for ConstPtr<S> {}
 unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        ctx.builder.ins().iconst(types::I64, self.addr as i64)
+        ctx.iconst(ScalarType::I64, self.addr as i64)
     }
 }
 

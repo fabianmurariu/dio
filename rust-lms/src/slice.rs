@@ -60,9 +60,9 @@ use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
+use crate::types::{ScalarType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
 use cranelift_codegen::ir::{
-    condcodes::IntCC, types, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+    condcodes::IntCC, types, BlockArg, InstBuilder, StackSlotData, StackSlotKind, Value,
 };
 use std::marker::PhantomData;
 
@@ -513,9 +513,9 @@ where
     S::Out: SliceType,
 {
     let element_size = ElemOf::<S>::size_of() as i64;
-    let scale = ctx.builder.ins().iconst(types::I64, element_size);
-    let byte_offset = ctx.builder.ins().imul(index, scale);
-    ctx.builder.ins().iadd(data_ptr, byte_offset)
+    let scale = ctx.iconst(ScalarType::I64, element_size);
+    let byte_offset = ctx.imul(index, scale);
+    ctx.iadd(data_ptr, byte_offset)
 }
 
 // =============================================================================
@@ -669,7 +669,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
 
         let get_block = ctx.builder.create_block();
         let default_block = ctx.builder.create_block();
@@ -683,12 +683,7 @@ where
         ctx.builder.switch_to_block(get_block);
         ctx.builder.seal_block(get_block);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        let value = ctx.builder.ins().load(
-            ElemOf::<S>::cranelift_type(),
-            MemFlags::trusted(),
-            element_ptr,
-            0,
-        );
+        let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0,);
         ctx.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(value)]);
@@ -726,7 +721,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCC::UnsignedLessThan, index, len);
 
         let set_block = ctx.builder.create_block();
         let out_of_bounds_block = ctx.builder.create_block();
@@ -740,17 +735,15 @@ where
         ctx.builder.seal_block(set_block);
         let value = self.value.codegen(ctx);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, element_ptr, 0);
-        let written = ctx.builder.ins().iconst(types::I8, 1);
+        ctx.store(value, element_ptr, 0);
+        let written = ctx.iconst(ScalarType::I8, 1);
         ctx.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(written)]);
 
         ctx.builder.switch_to_block(out_of_bounds_block);
         ctx.builder.seal_block(out_of_bounds_block);
-        let not_written = ctx.builder.ins().iconst(types::I8, 0);
+        let not_written = ctx.iconst(ScalarType::I8, 0);
         ctx.builder
             .ins()
             .jump(merge_block, &[BlockArg::Value(not_written)]);
@@ -774,12 +767,7 @@ where
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder.ins().load(
-            ElemOf::<S>::cranelift_type(),
-            MemFlags::trusted(),
-            element_ptr,
-            0,
-        )
+        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0,)
     }
 }
 
@@ -810,9 +798,7 @@ where
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, element_ptr, 0);
+        ctx.store(value, element_ptr, 0);
         ctx.get_unit_value()
     }
 }
@@ -847,11 +833,11 @@ where
         let addr_i = element_addr::<S>(ctx, data_ptr, i);
         let addr_j = element_addr::<S>(ctx, data_ptr, j);
 
-        let ty = ElemOf::<S>::cranelift_type();
-        let vi = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_i, 0);
-        let vj = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_j, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), vj, addr_i, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), vi, addr_j, 0);
+        let ty = ElemOf::<S>::scalar_type();
+        let vi = ctx.load(ty, addr_i, 0);
+        let vj = ctx.load(ty, addr_j, 0);
+        ctx.store(vj, addr_i, 0);
+        ctx.store(vi, addr_j, 0);
         ctx.get_unit_value()
     }
 }
@@ -889,7 +875,7 @@ where
 
         // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
         let new_ptr = element_addr::<S>(ctx, data_ptr, start);
-        let new_len = ctx.builder.ins().isub(end, start);
+        let new_len = ctx.isub(end, start);
 
         // Materialize the new (ptr, len) pair on a 16-byte stack slot.
         let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
@@ -897,13 +883,9 @@ where
             16, // size
             3,  // align_shift = log2(8) = 3
         ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_len, slot_ptr, 8);
+        let slot_ptr = ctx.stack_addr(slot, 0);
+        ctx.store(new_ptr, slot_ptr, 0);
+        ctx.store(new_len, slot_ptr, 8);
         slot_ptr
     }
 }

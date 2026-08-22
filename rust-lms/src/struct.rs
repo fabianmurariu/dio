@@ -17,8 +17,7 @@
 
 use crate::refer::{store_ref, SMutPtr, SPtr, SRef, SRefMut, StoreRef};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use crate::types::{ScalarType, CopyType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -228,15 +227,10 @@ where
         let base_ptr = self.ptr.codegen(ctx);
         let offset = F::OFFSET as i32;
         if F::Out::is_copy_struct() {
-            let offset = ctx.builder.ins().iconst(types::I64, F::OFFSET as i64);
-            ctx.builder.ins().iadd(base_ptr, offset)
+            let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
+            ctx.iadd(base_ptr, offset)
         } else {
-            ctx.builder.ins().load(
-                F::Out::cranelift_type(),
-                MemFlags::trusted(),
-                base_ptr,
-                offset,
-            )
+            ctx.load(F::Out::scalar_type(), base_ptr, offset,)
         }
     }
 }
@@ -301,8 +295,8 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.base.codegen(ctx);
-        let offset = ctx.builder.ins().iconst(types::I64, F::OFFSET as i64);
-        ctx.builder.ins().iadd(base_ptr, offset)
+        let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
+        ctx.iadd(base_ptr, offset)
     }
 }
 
@@ -508,8 +502,8 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
         let base_ptr = self.ptr.codegen(ctx);
-        let offset = ctx.builder.ins().iconst(types::I64, F::OFFSET as i64);
-        ctx.builder.ins().iadd(base_ptr, offset)
+        let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
+        ctx.iadd(base_ptr, offset)
     }
 }
 

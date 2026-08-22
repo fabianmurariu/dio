@@ -1,7 +1,7 @@
 //! Zip combinator — pairs elements from two sources at the same index.
 
 use cranelift_codegen::ir::{
-    condcodes::IntCC, types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+    condcodes::IntCC, StackSlotData, StackSlotKind, Value,
 };
 use cranelift_module::Module;
 
@@ -139,8 +139,8 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let left = self.left.codegen(ctx);
         let right = self.right.codegen(ctx);
-        let left_is_shorter = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, left, right);
-        ctx.builder.ins().select(left_is_shorter, left, right)
+        let left_is_shorter = ctx.icmp(IntCC::UnsignedLessThan, left, right);
+        ctx.select(left_is_shorter, left, right)
     }
 }
 
@@ -193,7 +193,7 @@ where
             Self::Out::size_of() as u32,
             align_shift,
         ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let slot_ptr = ctx.stack_addr(stack_slot, 0);
 
         store_value::<<I as IndexedSource>::Item>(
             ctx,
@@ -220,7 +220,7 @@ where
 
 fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: Value, ptr: Value, offset: i32) {
     if T::is_copy_struct() {
-        let destination = ctx.builder.ins().iadd_imm(ptr, i64::from(offset));
+        let destination = ctx.iadd_imm(ptr, i64::from(offset));
         let config = ctx.module.isa().frontend_config();
         emit_copy_nonoverlapping(
             ctx.builder,
@@ -231,9 +231,7 @@ fn store_value<T: StagedType>(ctx: &mut CompilationContext, value: Value, ptr: V
             T::align_of(),
         );
     } else {
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, ptr, offset);
+        ctx.store(value, ptr, offset);
     }
 }
 

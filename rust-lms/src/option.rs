@@ -24,8 +24,8 @@
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
-use crate::types::{RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use crate::types::{ScalarType, RuntimeParam, RuntimeResult, StagedType};
+use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind, Value};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -259,23 +259,21 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
             alignment.trailing_zeros() as u8,
         ));
 
-        let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let ptr = ctx.stack_addr(stack_slot, 0);
 
         // Store discriminant = 1 (Some)
-        let one = ctx.builder.ins().iconst(types::I64, 1);
-        ctx.builder.ins().store(MemFlags::trusted(), one, ptr, 0);
+        let one = ctx.iconst(ScalarType::I64, 1);
+        ctx.store(one, ptr, 0);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
-        let payload_ptr = ctx.builder.ins().iadd_imm(ptr, payload_offset);
+        let payload_ptr = ctx.iadd_imm(ptr, payload_offset);
 
         // Store the payload at its actual aligned offset.
         if T::is_copy_struct() {
             // Aggregate staged values are addresses of their storage.
             ctx.copy_nonoverlapping(payload_ptr, value, T::size_of(), T::align_of());
         } else {
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), value, payload_ptr, 0);
+            ctx.store(value, payload_ptr, 0);
         }
 
         ptr
@@ -308,11 +306,11 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
             alignment.trailing_zeros() as u8,
         ));
 
-        let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let ptr = ctx.stack_addr(stack_slot, 0);
 
         // Store discriminant = 0 (None)
-        let zero = ctx.builder.ins().iconst(types::I64, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), zero, ptr, 0);
+        let zero = ctx.iconst(ScalarType::I64, 0);
+        ctx.store(zero, ptr, 0);
 
         ptr
     }
@@ -366,7 +364,7 @@ unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // None is represented as null pointer
-        ctx.builder.ins().iconst(types::I64, 0)
+        ctx.iconst(ScalarType::I64, 0)
     }
 }
 
@@ -411,7 +409,7 @@ unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        ctx.builder.ins().iconst(types::I64, 0)
+        ctx.iconst(ScalarType::I64, 0)
     }
 }
 
@@ -438,12 +436,9 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E>
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
         // Load discriminant from offset 0
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant != 0
-        ctx.builder.ins().icmp_imm(
+        ctx.icmp_imm(
             cranelift_codegen::ir::condcodes::IntCC::NotEqual,
             discriminant,
             0,
@@ -467,12 +462,9 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E>
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant == 0
-        ctx.builder.ins().icmp_imm(
+        ctx.icmp_imm(
             cranelift_codegen::ir::condcodes::IntCC::Equal,
             discriminant,
             0,
@@ -613,10 +605,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks for if-then-else
         let some_block = ctx.builder.create_block();
@@ -638,12 +627,10 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         ctx.builder.switch_to_block(some_block);
         ctx.builder.seal_block(some_block);
         let some_val = if T::is_copy_struct() {
-            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
+            ctx.iadd_imm(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
-            ctx.builder
-                .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
+            let payload_ptr = ctx.iadd_imm(opt_ptr, payload_offset);
+            ctx.load(T::scalar_type(), payload_ptr, 0)
         };
         ctx.builder
             .ins()
@@ -713,10 +700,7 @@ where
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks
         let some_block = ctx.builder.create_block();
@@ -739,12 +723,10 @@ where
 
         // Load the value and bind it to the variable.
         let bound_val = if T::is_copy_struct() {
-            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
+            ctx.iadd_imm(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
-            ctx.builder
-                .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
+            let payload_ptr = ctx.iadd_imm(opt_ptr, payload_offset);
+            ctx.load(T::scalar_type(), payload_ptr, 0)
         };
 
         // Declare and define the bound variable

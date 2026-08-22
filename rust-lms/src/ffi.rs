@@ -28,7 +28,7 @@ use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
 use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use cranelift_codegen::ir::{types, InstBuilder, StackSlotData, StackSlotKind, Value};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -305,13 +305,9 @@ where
             16,
             3,
         ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), ptr, slot_ptr, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), len, slot_ptr, 8);
+        let slot_ptr = ctx.stack_addr(slot, 0);
+        ctx.store(ptr, slot_ptr, 0);
+        ctx.store(len, slot_ptr, 8);
         slot_ptr
     }
 }
@@ -366,7 +362,7 @@ unsafe impl Staged for StackBytes {
             slot_len as u32,
             3,
         ));
-        let addr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+        let addr = ctx.stack_addr(slot, 0);
         let mut off = 0;
         while off < slot_len {
             let mut word = [0u8; 8];
@@ -379,9 +375,7 @@ unsafe impl Staged for StackBytes {
                 .builder
                 .ins()
                 .iconst(types::I64, u64::from_le_bytes(word) as i64);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), v, addr, off as i32);
+            ctx.store(v, addr, off as i32);
             off += 8;
         }
         addr
@@ -423,7 +417,7 @@ unsafe impl Staged for StackAlloc {
             slot_len as u32,
             3, // align_shift = 3 → 8-byte aligned
         ));
-        ctx.builder.ins().stack_addr(types::I64, slot, 0)
+        ctx.stack_addr(slot, 0)
     }
 }
 
@@ -968,11 +962,9 @@ pub(crate) fn push_extern_value<T: StagedType>(
             (T::size_of() as u32).max(1),
             T::align_of().trailing_zeros() as u8,
         ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let slot_ptr = ctx.stack_addr(stack_slot, 0);
         if T::size_of() != 0 {
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), value, slot_ptr, 0);
+            ctx.store(value, slot_ptr, 0);
         }
         args.push(slot_ptr);
     }
@@ -989,7 +981,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
         (Ret::size_of() as u32).max(1),
         Ret::align_of().trailing_zeros() as u8,
     ));
-    let output_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+    let output_ptr = ctx.stack_addr(stack_slot, 0);
     args.push(output_ptr);
     ctx.builder.ins().call(func_ref, &args);
 
@@ -998,9 +990,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     } else if Ret::size_of() == 0 {
         ctx.get_unit_value()
     } else {
-        ctx.builder
-            .ins()
-            .load(Ret::cranelift_type(), MemFlags::trusted(), output_ptr, 0)
+        ctx.load(Ret::scalar_type(), output_ptr, 0)
     }
 }
 

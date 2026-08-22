@@ -99,7 +99,7 @@ pub fn codegen_call(
             call_args.push(*arg_value);
         } else {
             let stack_slot = ctx.builder.create_sized_stack_slot(param_info.stack_slot());
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+            let slot_ptr = ctx.stack_addr(stack_slot, 0);
             if param_info.size != 0 {
                 ctx.builder
                     .ins()
@@ -112,7 +112,7 @@ pub fn codegen_call(
     let result_slot = ctx
         .builder
         .create_sized_stack_slot(return_info.stack_slot());
-    let result_ptr = ctx.builder.ins().stack_addr(types::I64, result_slot, 0);
+    let result_ptr = ctx.stack_addr(result_slot, 0);
     call_args.push(result_ptr);
 
     // Generate the call
