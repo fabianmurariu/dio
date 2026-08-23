@@ -689,15 +689,27 @@ returning a constant JITs and runs via `ExecutionEngine`.
   clippy 28. `MlirBackend` stays an **inherent** API (not the shared `Backend` trait) —
   the trait's opaque handles line up, but its calls/signatures cluster is still
   Cranelift-typed, so unification waits on Phase 3/4.
-  - **Next:** variables + control flow (Phase 2, §5) — entry-block `alloca` + load/store
-    for `declare/def/use_var`, `cf` blocks/`brif`/`jump` with block-arg phis, `seal_block`
-    as a no-op, and the `mem2reg`-via-opt-level promotion; then differential-test loops
-    against Cranelift.
+**Phase 2 — variables & control flow (§5) — MLIR PRIMITIVES DONE (in `MlirBackend`).**
+`declare_var`/`def_var`/`use_var` lower to entry-block `llvm.alloca` + `store`/`load`;
+`seal_block` is a no-op; `create_block`/`append_block_param`/`switch_to_block`/`jump`/
+`brif` build `cf` blocks with block-argument phis. Block model: a dedicated **entry block**
+holds the params + *all* allocas and is terminated (branch to body block 0) at
+`into_module`, so lazily-declared variables always precede the entry terminator — the
+"entry-block alloca" rule §5 requires for `mem2reg`. Promotion is LLVM's own `mem2reg` at
+`ExecutionEngine` opt level 2 (no MLIR-level pass; §5). 7 feature-gated tests pass, incl. a
+**mutable `sum_to` loop** (two alloca vars mutated across a `cf` back-edge, promoted to SSA)
+and an **if/else merged through a real `cf` block-argument phi**; default build still 366 /
+clippy 28.
+- **Remaining for Phase 2:** these are backend *primitives*; the AST constructs
+  `if_then_else`/`while_loop`/`break_loop` route through them only once `MlirBackend`
+  implements the shared `Backend` trait, and the differential test against Cranelift on
+  `tests/{programs,p99,euler}.rs` likewise needs that wiring — both gated on the
+  calls/signatures neutralization (Phase 3/4). Until then, correctness is checked against
+  scalar oracles in the feature-gated tests.
 
-**Phase 2 — variables & control flow (§5).** `declare/def/use_var` as alloca+load/store,
-`seal_block` no-op, blocks/`brif`/`jump`/block-params via `cf`, plus the lowering
-passes incl. `mem2reg`. Land `if_then_else`, `while_loop`, `break_loop`. Differential
-test against Cranelift on `tests/programs.rs`, `p99.rs`, `euler.rs`.
+**Phase 3 — calls, externs, ABI, JIT.** `call`/`call_indirect`/`func_addr`, extern
+symbol registration, the storage-pointer signatures, and `invoke_packed`. Land
+`test_extern_fn.rs`, `test_abi.rs` across both backends.
 
 **Phase 3 — calls, externs, ABI, JIT.** `call`/`call_indirect`/`func_addr`, extern
 symbol registration, the storage-pointer signatures, and `invoke_packed`. Land

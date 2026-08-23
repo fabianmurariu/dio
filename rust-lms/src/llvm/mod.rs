@@ -6,24 +6,27 @@
 //! when the `llvm` feature is on — the default pure-Rust Cranelift build never pulls
 //! melior in.
 //!
-//! ## Where Phase 1 is
+//! ## Where this is (Phases 1–2)
 //!
 //! Phase -1 (the `mlir-spike/` crate) proved the JIT/ABI/lowering pipeline against
-//! *textual* MLIR. Phase 1 proves the same pipeline built **programmatically** through
+//! *textual* MLIR. Phases 1–2 prove the same pipeline built **programmatically** through
 //! melior's op builders — the alpha-API risk the spike deliberately skipped:
 //!
 //! - [`make_context`] — the known-good context/dialect/translation setup (from the spike).
 //! - [`jit_return_i64_const`] — the nullary-constant milestone: a `() -> i64` `func.func`
 //!   returning `arith.constant`, verified, lowered, JIT-run via the **native**
 //!   `ExecutionEngine::lookup` pointer.
-//! - [`MlirBackend`] — the value-op layer: constants, integer/float arithmetic, bitwise,
-//!   shifts, `IntCmp`/`FloatCmp` compares, branchless `select`, sign/zero casts, and
-//!   `alloca`/`load`/`store`, each built through melior op builders and addressed by opaque
-//!   [`crate::staged::ValueId`]s. The MLIR analogue of `CraneliftBackend`, though still an
-//!   inherent API (not yet the shared [`crate::staged::Backend`] trait — that waits on the
-//!   calls/signatures neutralization, Phase 3/4).
-//! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end: build a `(i64) -> i64` body,
-//!   lower, JIT, run.
+//! - [`MlirBackend`] — the MLIR analogue of `CraneliftBackend`, addressed by opaque
+//!   [`crate::staged::ValueId`]/[`crate::staged::BlockHandle`]/[`crate::staged::VarHandle`]s:
+//!   - *values (Phase 1):* constants, integer/float arithmetic, bitwise, shifts,
+//!     `IntCmp`/`FloatCmp` compares, branchless `select`, sign/zero casts, `alloca`/`load`/`store`;
+//!   - *variables & control flow (Phase 2, §5):* `declare_var`/`def_var`/`use_var` as
+//!     entry-block `alloca` + `store`/`load`, `create_block`/`append_block_param`/
+//!     `switch_to_block`/`jump`/`brif` over `cf`, and a no-op `seal_block`.
+//!   Still an inherent API (not yet the shared [`crate::staged::Backend`] trait — that
+//!   waits on the calls/signatures neutralization, Phase 3/4).
+//! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end: build a `(i64) -> i64` body
+//!   (straight-line *or* with loops/branches), lower, JIT, run.
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
@@ -37,7 +40,7 @@
 
 use melior::dialect::arith::{self, CmpfPredicate, CmpiPredicate};
 use melior::dialect::llvm::{self, AllocaOptions, LoadStoreOptions};
-use melior::dialect::{func, DialectRegistry};
+use melior::dialect::{cf, func, DialectRegistry};
 use melior::ir::attribute::{IntegerAttribute, StringAttribute, TypeAttribute};
 use melior::ir::block::BlockLike;
 use melior::ir::operation::{Operation, OperationLike};
@@ -48,7 +51,7 @@ use melior::utility::{register_all_dialects, register_all_llvm_translations};
 use melior::{Context, ExecutionEngine};
 use mlir_sys::MlirValue;
 
-use crate::staged::ValueId;
+use crate::staged::{BlockHandle, ValueId, VarHandle};
 use crate::types::{FloatCmp, IntCmp, ScalarType};
 
 /// The optimization level passed to `ExecutionEngine`. Must be ≥ 2 so LLVM's own
@@ -173,41 +176,63 @@ fn float_predicate(cc: FloatCmp) -> CmpfPredicate {
     }
 }
 
-/// The MLIR code generator: builds one function body into an entry [`Block`], mapping
-/// opaque [`ValueId`]s to MLIR values through a `Vec<MlirValue>` arena (docs/llvm.md §9).
+/// The MLIR code generator: builds one function body across `cf` blocks, mapping opaque
+/// [`ValueId`]/[`BlockHandle`]/[`VarHandle`]s to MLIR entities through `Vec` arenas
+/// (docs/llvm.md §5, §9). The MLIR analogue of `CraneliftBackend`.
 ///
-/// This is the MLIR analogue of `CraneliftBackend`. It is an **inherent** value-op API
-/// for now, not yet an impl of the shared [`crate::staged::Backend`] trait — that
-/// unification waits on neutralizing the trait's calls/signatures cluster (Phase 3/4).
-/// Each op appends to the entry block and stashes its result as a lifetime-free raw
-/// `MlirValue`, so the borrow of the block ends immediately and the arena is a plain
-/// safe `Vec`.
+/// **Block model (§5).** There is a dedicated `entry` block holding the function
+/// parameters and *all* variable `llvm.alloca`s — the mandatory "entry-block alloca"
+/// placement that lets LLVM's `mem2reg` promote them to SSA. It ends with an
+/// unconditional branch to body block 0 (the "start" block), appended at
+/// [`into_module`](Self::into_module) so allocas declared lazily mid-codegen still land
+/// before the entry terminator. All user ops go into the body blocks (`blocks`), indexed
+/// by [`BlockHandle`]; `current` is the cursor `switch_to_block` moves.
+///
+/// **Variables (§5).** `declare_var` → entry `llvm.alloca`; `def_var` → `llvm.store`;
+/// `use_var` → `llvm.load`; `seal_block` is a no-op (MLIR block args are explicit).
+///
+/// Still an **inherent** API, not yet the shared [`crate::staged::Backend`] trait — that
+/// waits on neutralizing the trait's calls/signatures cluster (Phase 3/4). Each op stashes
+/// its result as a lifetime-free raw `MlirValue`, so the block borrow ends immediately and
+/// the arenas are plain safe `Vec`s.
 pub struct MlirBackend<'c> {
     context: &'c Context,
     location: Location<'c>,
-    block: Block<'c>,
     param_types: Vec<Type<'c>>,
+    /// Function parameters (as block args) + all variable allocas; branches to `blocks[0]`.
+    entry: Block<'c>,
+    /// Body blocks; `blocks[0]` is the "start" block. Indexed by [`BlockHandle`].
+    blocks: Vec<Block<'c>>,
+    /// Index into `blocks` of the block ops currently append to.
+    current: usize,
+    /// `ValueId` → MLIR value arena.
     values: Vec<MlirValue>,
+    /// `VarHandle` → (alloca `llvm.ptr`, element type).
+    vars: Vec<(MlirValue, ScalarType)>,
 }
 
 impl<'c> MlirBackend<'c> {
     /// Begin a function body whose entry block takes `param_types`. The parameters are
-    /// interned as the first `ValueId`s, reachable via [`MlirBackend::param`].
+    /// interned as the first `ValueId`s, reachable via [`MlirBackend::param`]. Codegen
+    /// starts in body block 0.
     pub fn new(context: &'c Context, param_types: Vec<Type<'c>>) -> Self {
         let location = Location::unknown(context);
         let block_args: Vec<_> = param_types.iter().map(|t| (*t, location)).collect();
-        let block = Block::new(&block_args);
+        let entry = Block::new(&block_args);
         let mut values = Vec::with_capacity(param_types.len());
         for index in 0..param_types.len() {
-            let argument = block.argument(index).expect("entry block argument exists");
+            let argument = entry.argument(index).expect("entry block argument exists");
             values.push(argument.to_raw());
         }
         Self {
             context,
             location,
-            block,
             param_types,
+            entry,
+            blocks: vec![Block::new(&[])],
+            current: 0,
             values,
+            vars: Vec::new(),
         }
     }
 
@@ -223,14 +248,13 @@ impl<'c> MlirBackend<'c> {
     }
 
     fn get(&self, id: ValueId) -> Value<'c, '_> {
-        // SAFETY: every raw came from a `Value` produced into `self.block` (alive for the
-        // backend's whole lifetime), and ids are only minted by `intern`/`new`.
+        // SAFETY: every raw came from a `Value` produced into a block owned by `self`
+        // (alive for the backend's whole lifetime), and ids are only minted by `intern`/`new`.
         unsafe { Value::from_raw(self.values[id.as_u32() as usize]) }
     }
 
     fn emit_value(&mut self, operation: Operation<'c>) -> ValueId {
-        let raw = self
-            .block
+        let raw = self.blocks[self.current]
             .append_operation(operation)
             .result(0)
             .expect("operation produces one result")
@@ -239,7 +263,7 @@ impl<'c> MlirBackend<'c> {
     }
 
     fn emit(&mut self, operation: Operation<'c>) {
-        self.block.append_operation(operation);
+        self.blocks[self.current].append_operation(operation);
     }
 
     // ---- constants ----
@@ -414,25 +438,186 @@ impl<'c> MlirBackend<'c> {
         ))
     }
 
+    // ---- variables (§5: entry-block alloca + load/store) ----
+    /// Declare a mutable variable: an `llvm.alloca` of `ty` placed in the **entry block**
+    /// (never at the current position), so `mem2reg` can promote it to SSA.
+    pub fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
+        let elem_ty = scalar_to_mlir(self.context, ty);
+        let i64_ty = scalar_to_mlir(self.context, ScalarType::I64);
+        // Size and alloca both go in the entry block (which has no terminator until
+        // `into_module`), so lazily-declared variables still precede the entry branch.
+        let size_raw = self
+            .entry
+            .append_operation(arith::constant(
+                self.context,
+                IntegerAttribute::new(i64_ty, 1).into(),
+                self.location,
+            ))
+            .result(0)
+            .expect("constant result")
+            .to_raw();
+        // SAFETY: `size_raw` is a value in `self.entry`, alive for the backend's lifetime.
+        let size = unsafe { Value::from_raw(size_raw) };
+        let ptr_ty = llvm::r#type::pointer(self.context, 0);
+        let options = AllocaOptions::new().elem_type(Some(TypeAttribute::new(elem_ty)));
+        let ptr_raw = self
+            .entry
+            .append_operation(llvm::alloca(
+                self.context,
+                size,
+                ptr_ty,
+                self.location,
+                options,
+            ))
+            .result(0)
+            .expect("alloca result")
+            .to_raw();
+        let handle = VarHandle::from_u32(self.vars.len() as u32);
+        self.vars.push((ptr_raw, ty));
+        handle
+    }
+
+    /// Store `value` into variable `var` (`llvm.store` in the current block).
+    pub fn def_var(&mut self, var: VarHandle, value: ValueId) {
+        let (ptr_raw, _) = self.vars[var.as_u32() as usize];
+        // SAFETY: `ptr_raw` is the alloca value in `self.entry`, alive for the lifetime.
+        let ptr = unsafe { Value::from_raw(ptr_raw) };
+        let value = self.get(value);
+        self.blocks[self.current].append_operation(llvm::store(
+            self.context,
+            value,
+            ptr,
+            self.location,
+            LoadStoreOptions::new(),
+        ));
+    }
+
+    /// Load variable `var` (`llvm.load` in the current block).
+    pub fn use_var(&mut self, var: VarHandle) -> ValueId {
+        let (ptr_raw, ty) = self.vars[var.as_u32() as usize];
+        // SAFETY: as in `def_var`.
+        let ptr = unsafe { Value::from_raw(ptr_raw) };
+        let mlir_ty = scalar_to_mlir(self.context, ty);
+        let raw = self.blocks[self.current]
+            .append_operation(llvm::load(
+                self.context,
+                ptr,
+                mlir_ty,
+                self.location,
+                LoadStoreOptions::new(),
+            ))
+            .result(0)
+            .expect("load result")
+            .to_raw();
+        self.intern(raw)
+    }
+
+    // ---- blocks & control flow ----
+    /// Create a fresh (empty, argument-less) body block and return its handle.
+    pub fn create_block(&mut self) -> BlockHandle {
+        let handle = BlockHandle::from_u32(self.blocks.len() as u32);
+        self.blocks.push(Block::new(&[]));
+        handle
+    }
+
+    /// Append a block-argument (phi) of `ty` to `block`; returns its value.
+    pub fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId {
+        let mlir_ty = scalar_to_mlir(self.context, ty);
+        let raw = self.blocks[block.as_u32() as usize]
+            .add_argument(mlir_ty, self.location)
+            .to_raw();
+        self.intern(raw)
+    }
+
+    /// The `index`-th argument (phi) of `block`.
+    pub fn block_param(&mut self, block: BlockHandle, index: usize) -> ValueId {
+        let raw = self.blocks[block.as_u32() as usize]
+            .argument(index)
+            .expect("block argument exists")
+            .to_raw();
+        self.intern(raw)
+    }
+
+    /// Point subsequent ops at `block`.
+    pub fn switch_to_block(&mut self, block: BlockHandle) {
+        self.current = block.as_u32() as usize;
+    }
+
+    /// Seal a block. No-op on MLIR (block arguments are explicit — see §5).
+    pub fn seal_block(&mut self, _block: BlockHandle) {}
+
+    /// Unconditional branch to `target`, passing `args` as its block arguments.
+    pub fn jump(&mut self, target: BlockHandle, args: &[ValueId]) {
+        let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
+        let successor = &self.blocks[target.as_u32() as usize];
+        let operation = cf::br(successor, &operands, self.location);
+        self.blocks[self.current].append_operation(operation);
+    }
+
+    /// Conditional branch on `cond` (an `i1`): to `then_block`/`else_block`, each with its
+    /// own block-argument operands.
+    pub fn brif(
+        &mut self,
+        cond: ValueId,
+        then_block: BlockHandle,
+        then_args: &[ValueId],
+        else_block: BlockHandle,
+        else_args: &[ValueId],
+    ) {
+        let cond = self.get(cond);
+        let then_ops: Vec<Value> = then_args.iter().map(|id| self.get(*id)).collect();
+        let else_ops: Vec<Value> = else_args.iter().map(|id| self.get(*id)).collect();
+        let then_succ = &self.blocks[then_block.as_u32() as usize];
+        let else_succ = &self.blocks[else_block.as_u32() as usize];
+        let operation = cf::cond_br(
+            self.context,
+            cond,
+            then_succ,
+            else_succ,
+            &then_ops,
+            &else_ops,
+            self.location,
+        );
+        self.blocks[self.current].append_operation(operation);
+    }
+
     // ---- return ----
     pub fn ret(&mut self, value: Option<ValueId>) {
         let operands: Vec<Value> = value.map(|v| self.get(v)).into_iter().collect();
         self.emit(func::r#return(&operands, self.location));
     }
 
-    /// Consume the backend and wrap its block in a `func.func @name` inside a fresh
+    /// Consume the backend and wrap its blocks in a `func.func @name` inside a fresh
     /// module. `result_types` are the function's return types (must match the `ret`).
+    ///
+    /// The entry block is terminated here — after all variable allocas have been declared
+    /// into it — with an unconditional branch to body block 0, then the entry and body
+    /// blocks are appended to the function region in order.
     pub fn into_module(self, name: &str, result_types: &[ScalarType]) -> Module<'c> {
-        let context = self.context;
-        let location = self.location;
+        let MlirBackend {
+            context,
+            location,
+            param_types,
+            entry,
+            blocks,
+            ..
+        } = self;
+
         let results: Vec<Type> = result_types
             .iter()
             .map(|t| scalar_to_mlir(context, *t))
             .collect();
-        let function_type = FunctionType::new(context, &self.param_types, &results);
+        let function_type = FunctionType::new(context, &param_types, &results);
+
+        // Terminate the entry block (alloca-only) with a branch to the start block.
+        entry.append_operation(cf::br(&blocks[0], &[], location));
 
         let region = Region::new();
-        region.append_block(self.block);
+        region.append_block(entry);
+        for block in blocks {
+            region.append_block(block);
+        }
+
         let function = func::func(
             context,
             StringAttribute::new(context, name),
@@ -570,5 +755,80 @@ mod tests {
         // A value with nonzero high bits truncates to its low 32 bits (sign-extended).
         let x = 0x1_2345_6789i64;
         assert_eq!(jit_run_i64_unary(f, x), i64::from(x as i32));
+    }
+
+    #[test]
+    fn mutable_loop_with_alloca_vars() {
+        // sum_to(n) = 0 + 1 + ... + (n-1), via two entry-block alloca variables mutated
+        // across a `cf` back-edge (promoted to SSA by mem2reg). Exercises declare/def/use_var,
+        // create_block, switch_to_block, jump, and brif.
+        let sum_to = |b: &mut MlirBackend, n: ValueId| {
+            let acc = b.declare_var(ScalarType::I64);
+            let iv = b.declare_var(ScalarType::I64);
+            let zero = b.iconst(ScalarType::I64, 0);
+            b.def_var(acc, zero);
+            b.def_var(iv, zero);
+
+            let header = b.create_block();
+            let body = b.create_block();
+            let exit = b.create_block();
+            b.jump(header, &[]);
+
+            b.switch_to_block(header);
+            let i = b.use_var(iv);
+            let cond = b.icmp(IntCmp::Slt, i, n);
+            b.brif(cond, body, &[], exit, &[]);
+
+            b.switch_to_block(body);
+            let a = b.use_var(acc);
+            let i2 = b.use_var(iv);
+            let a2 = b.iadd(a, i2);
+            b.def_var(acc, a2);
+            let one = b.iconst(ScalarType::I64, 1);
+            let i3 = b.iadd(i2, one);
+            b.def_var(iv, i3);
+            b.jump(header, &[]);
+
+            b.switch_to_block(exit);
+            b.use_var(acc)
+        };
+        for n in [0i64, 1, 5, 10, 100] {
+            let expected = (0..n).sum::<i64>();
+            assert_eq!(jit_run_i64_unary(sum_to, n), expected);
+        }
+    }
+
+    #[test]
+    fn if_then_else_with_block_argument_phi() {
+        // f(x) = if x < 10 { x * 2 } else { x + 100 }, merged through a real `cf` block
+        // argument (the phi) rather than a variable — the analogue of Cranelift's merge
+        // block param.
+        let f = |b: &mut MlirBackend, x: ValueId| {
+            let ten = b.iconst(ScalarType::I64, 10);
+            let cond = b.icmp(IntCmp::Slt, x, ten);
+
+            let then_block = b.create_block();
+            let else_block = b.create_block();
+            let merge = b.create_block();
+            let phi = b.append_block_param(merge, ScalarType::I64);
+            b.brif(cond, then_block, &[], else_block, &[]);
+
+            b.switch_to_block(then_block);
+            let two = b.iconst(ScalarType::I64, 2);
+            let doubled = b.imul(x, two);
+            b.jump(merge, &[doubled]);
+
+            b.switch_to_block(else_block);
+            let hundred = b.iconst(ScalarType::I64, 100);
+            let bumped = b.iadd(x, hundred);
+            b.jump(merge, &[bumped]);
+
+            b.switch_to_block(merge);
+            phi
+        };
+        for x in [-5i64, 0, 9, 10, 11, 50] {
+            let expected = if x < 10 { x * 2 } else { x + 100 };
+            assert_eq!(jit_run_i64_unary(f, x), expected);
+        }
     }
 }

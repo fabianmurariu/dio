@@ -76,11 +76,30 @@ impl StackSlotId {
     }
 }
 
-// The LLVM/MLIR backend interprets a `ValueId` as an index into its own
-// `Vec<MlirValue>` arena (docs/llvm.md §9) — the same "u32 the active backend
-// interprets" contract the Cranelift path uses, just a different encoding.
+// The LLVM/MLIR backend interprets these handles as indices into its own arenas
+// (docs/llvm.md §9) — the same "u32 the active backend interprets" contract the
+// Cranelift path uses, just a different encoding: `ValueId` → value arena slot,
+// `BlockHandle` → body-block index, `VarHandle` → variable (alloca) index.
 #[cfg(feature = "llvm")]
 impl ValueId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl BlockHandle {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl VarHandle {
     pub(crate) fn from_u32(index: u32) -> Self {
         Self(index)
     }
