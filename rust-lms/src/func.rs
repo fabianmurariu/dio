@@ -18,11 +18,11 @@
 //! aggregate classification to Cranelift.
 
 use crate::staged::{
-    assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, Staged, ValueId, Var,
-    VarHandle,
+    assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, SigSpec, Staged,
+    ValueId, Var, VarHandle,
 };
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags, Signature};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -316,7 +316,7 @@ impl Ctx {
             ctx.switch_to_block(header);
             let it = ctx.var_map[&handle_id];
             let it_val = ctx.use_var(it);
-            let next_ref = ctx.get_extern_func_ref(next_id);
+            let next_ref = ctx.declare_extern_func(next_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
             let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
@@ -349,7 +349,7 @@ impl Ctx {
             ctx.switch_to_block(exit);
             ctx.seal_block(exit);
             let it_val2 = ctx.use_var(it);
-            let drop_ref = ctx.get_extern_func_ref(drop_id);
+            let drop_ref = ctx.declare_extern_func(drop_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
             crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
@@ -396,8 +396,6 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let call_conv = ctx.default_call_conv();
-
             // One per-level slot, reserved once in the frame and reused.
             let slot = ctx.alloc_stack_slot(slot_size, slot_align_shift);
             let slot_ptr = ctx.stack_addr(slot, 0);
@@ -405,16 +403,14 @@ impl Ctx {
             // Producer builds the iterator into the slot (fills the mini-vtable).
             init_call(ctx, slot_ptr);
 
-            // Canonical storage-pointer signatures for indirect next/drop.
-            let mut next_sig = Signature::new(call_conv);
-            next_sig.params.push(AbiParam::new(types::I64)); // data slot
-            next_sig.params.push(AbiParam::new(types::I64)); // output slot
-            let next_sigref = ctx.import_signature(next_sig);
-
-            let mut drop_sig = Signature::new(call_conv);
-            drop_sig.params.push(AbiParam::new(types::I64));
-            drop_sig.params.push(AbiParam::new(types::I64));
-            let drop_sigref = ctx.import_signature(drop_sig);
+            // Canonical storage-pointer signatures for indirect next/drop:
+            // (data slot ptr, output slot ptr) -> void.
+            let storage_ptr_sig = SigSpec {
+                params: vec![ScalarType::Ptr, ScalarType::Ptr],
+                ret: None,
+            };
+            let next_sigref = ctx.import_signature(&storage_ptr_sig);
+            let drop_sigref = ctx.import_signature(&storage_ptr_sig);
 
             let data_slot = ctx.alloc_stack_slot(8, 3);
             let data_ptr = ctx.stack_addr(data_slot, 0);
@@ -1207,17 +1203,17 @@ impl<'a> Compiler<'a> {
 
                     // Generate the body code
                     let result = {
-                        let mut extern_func_refs = HashMap::new();
                         let mut backend = CraneliftBackend {
                             builder: &mut builder,
                             module: &mut module,
+                            func_ids: &func_map,
+                            extern_func_ids: &extern_func_ids,
+                            func_ref_cache: HashMap::new(),
+                            extern_ref_cache: HashMap::new(),
                         };
                         let mut ctx = CompilationContext {
                             backend: &mut backend,
                             var_map: &mut var_map,
-                            func_map: &func_map,
-                            extern_func_refs: &mut extern_func_refs,
-                            extern_func_ids: &extern_func_ids,
                             slice_vars: &mut slice_vars,
                             unit_value: None,
                             loop_exit_stack: Vec::new(),
@@ -1276,18 +1272,18 @@ impl<'a> Compiler<'a> {
                 let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
 
                 let result = {
-                    let mut extern_func_refs = HashMap::new();
                     let mut slice_vars = HashMap::new();
                     let mut backend = CraneliftBackend {
                         builder: &mut builder,
                         module: &mut module,
+                        func_ids: &func_map,
+                        extern_func_ids: &extern_func_ids,
+                        func_ref_cache: HashMap::new(),
+                        extern_ref_cache: HashMap::new(),
                     };
                     let mut ctx = CompilationContext {
                         backend: &mut backend,
                         var_map: &mut var_map,
-                        func_map: &func_map,
-                        extern_func_refs: &mut extern_func_refs,
-                        extern_func_ids: &extern_func_ids,
                         slice_vars: &mut slice_vars,
                         unit_value: None,
                         loop_exit_stack: Vec::new(),

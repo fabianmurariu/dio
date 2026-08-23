@@ -721,13 +721,23 @@ shape, now proven *programmatically* (the spike proved it with textual MLIR). Na
   `test_extern_fn.rs`/`test_abi.rs` across both backends needs the AST routed through
   `MlirBackend`, which is the neutralization step below.
 
-**Next up — the calls/signatures neutralization + shared-trait unification.** `MlirBackend`
-now covers the *entire* op surface (values, control flow, calls) as inherent methods, so we
-finally have the second backend to design the deferred piece against: replace the `Backend`
-trait's Cranelift-typed calls/signatures cluster (`FuncRef`/`SigRef`/`Signature`/`FuncId`/
-`CallConv`) + `CompilationContext`'s `func_map`/`extern_func_*` maps + the `Module`/
-`Executable` lifecycle with neutral handles, then `impl Backend for MlirBackend` and route
-`compile()` through a chosen backend. That unlocks Phase 4 (differential-test the real
+**Calls/signatures neutralization — DONE.** The `Backend` trait is now **fully
+backend-neutral: no Cranelift type appears in any method signature.** The calls & signatures
+cluster was replaced with opaque handles [`FuncRefId`]/[`SigRefId`] and the neutral `SigSpec`
+(params + optional result); `call`/`call_indirect`/`func_addr`/`import_signature` take those,
+and `declare_func`/`declare_extern_func` resolve *our* `usize` ids — the `usize → Cranelift
+FuncId` maps and the per-function `FuncRef` caches moved out of `CompilationContext` into
+`CraneliftBackend`, so the neutral context no longer names a Cranelift type either.
+`default_call_conv` was dropped (the backend picks its own when lowering a `SigSpec`).
+Net effect: **the AST is now 100% cranelift-free** (the last leak, `emit_extern_call`'s
+`FuncRef` param in `ffi.rs`, is gone), and only the `compile()` driver + the not-yet-abstracted
+`Module`/`Executable` lifecycle remain Cranelift-specific. Behavior-preserving: 366 tests
+green, clippy 27 (one fewer — dropped a `format!`-in-`expect`), 9 LLVM tests still green.
+
+**Next up — shared-trait unification.** With the trait neutral, `impl Backend for MlirBackend`
+is now unblocked (its inherent ops already match the trait shape; the calls cluster maps to
+symbol-name resolution). Then abstract the `Module`/`Executable` lifecycle and route
+`compile()` through a chosen backend — unlocking Phase 4 (differential-test the real
 `tests/{programs,p99,euler,extern_fn,abi}.rs` on both backends; `Compiler::with_backend`).
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose

@@ -77,14 +77,8 @@ pub fn codegen_call(
         arg_values.len()
     );
 
-    // Look up the function ID in our map
-    let cranelift_func_id = ctx
-        .func_map
-        .get(&func_id)
-        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
-
-    // Declare the function for calling
-    let func_ref = ctx.declare_func_in_func(*cranelift_func_id);
+    // Declare the callee for calling (resolves our function id inside the backend).
+    let func_ref = ctx.declare_func(func_id);
 
     // The private JIT ABI passes one storage pointer per logical argument.
     let mut call_args: Vec<ValueId> = Vec::with_capacity(arg_values.len() + 1);
@@ -122,12 +116,7 @@ pub fn codegen_call(
 
 /// Generate code to get a function's address (for returning function pointers)
 pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> ValueId {
-    let cranelift_func_id = ctx
-        .func_map
-        .get(&func_id)
-        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
-
-    let func_ref = ctx.declare_func_in_func(*cranelift_func_id);
+    let func_ref = ctx.declare_func(func_id);
     ctx.func_addr(func_ref)
 }
 

@@ -688,7 +688,7 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
             move |cctx, slot_ptr| {
                 let mut a = (args)(cctx);
                 crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
-                let init_ref = cctx.get_extern_func_ref(init_id);
+                let init_ref = cctx.declare_extern_func(init_id);
                 crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
             },
             consumer,

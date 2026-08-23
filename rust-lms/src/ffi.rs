@@ -26,7 +26,7 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::staged::{CompilationContext, FuncRefId, IntoStaged, Staged, ValueId, Var, VarUse};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 
 // =============================================================================
@@ -673,7 +673,7 @@ where
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
         emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
 }
@@ -709,7 +709,7 @@ where
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
@@ -848,7 +848,7 @@ where
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
@@ -956,7 +956,7 @@ pub(crate) fn push_extern_value<T: StagedType>(
 /// Call a Rust-generated thunk through the canonical storage-pointer ABI.
 pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
-    func_ref: cranelift_codegen::ir::FuncRef,
+    func_ref: FuncRefId,
     mut args: Vec<ValueId>,
 ) -> ValueId {
     let stack_slot = ctx.alloc_stack_slot(
@@ -1000,7 +1000,7 @@ where
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
@@ -1097,7 +1097,7 @@ where
     type Out = S::Ret;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);

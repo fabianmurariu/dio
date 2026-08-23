@@ -6,10 +6,10 @@
 //! - `Const<T>`: Typed constants (Copy-able)
 
 use cranelift_codegen::ir::{
-    types, Block, BlockArg, FuncRef, InstBuilder, MemFlags, SigRef, Signature, StackSlot,
+    types, AbiParam, Block, BlockArg, FuncRef, InstBuilder, MemFlags, SigRef, Signature, StackSlot,
     StackSlotData, StackSlotKind, Value,
 };
-use cranelift_codegen::isa::{CallConv, TargetFrontendConfig};
+use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::{FunctionBuilder, Variable};
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
@@ -39,6 +39,23 @@ pub struct VarHandle(u32);
 /// Opaque handle to a stack allocation during codegen (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct StackSlotId(u32);
+
+/// Opaque handle to a function reference usable by `call`/`func_addr` in the function
+/// currently being built (see [`ValueId`]). Cranelift interprets it as a `FuncRef` index;
+/// an MLIR backend as an index into its own symbol table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FuncRefId(u32);
+
+/// Opaque handle to a signature imported for `call_indirect` (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SigRefId(u32);
+
+/// A backend-neutral function signature: parameter types and an optional single result.
+/// Backends lower it to their own signature (Cranelift `Signature`, MLIR function type).
+pub struct SigSpec {
+    pub params: Vec<ScalarType>,
+    pub ret: Option<ScalarType>,
+}
 
 // Backend/driver-only conversions between the opaque handles and Cranelift entities.
 // Not visible to the AST (its `.0` is private), so the AST cannot fabricate a handle
@@ -73,6 +90,22 @@ impl StackSlotId {
     }
     pub(crate) fn cranelift(self) -> StackSlot {
         StackSlot::from_u32(self.0)
+    }
+}
+impl FuncRefId {
+    pub(crate) fn from_cranelift(f: FuncRef) -> Self {
+        Self(f.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> FuncRef {
+        FuncRef::from_u32(self.0)
+    }
+}
+impl SigRefId {
+    pub(crate) fn from_cranelift(s: SigRef) -> Self {
+        Self(s.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> SigRef {
+        SigRef::from_u32(self.0)
     }
 }
 
@@ -161,12 +194,6 @@ pub struct CompilationContext<'c> {
     pub(crate) backend: &'c mut dyn Backend,
     /// Mapping from our variable IDs to backend variable handles.
     pub(crate) var_map: &'c mut HashMap<usize, VarHandle>,
-    /// Mapping from our function IDs to Cranelift FuncIds
-    pub(crate) func_map: &'c HashMap<usize, FuncId>,
-    /// Mapping from extern function IDs to Cranelift FuncRefs (per-function)
-    pub(crate) extern_func_refs: &'c mut HashMap<usize, FuncRef>,
-    /// Mapping from extern function IDs to module FuncIds
-    pub(crate) extern_func_ids: &'c HashMap<usize, FuncId>,
     /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
     /// For slice parameters, this allows direct register access instead of stack loads
     pub(crate) slice_vars: &'c mut HashMap<usize, SliceVars>,
@@ -187,13 +214,15 @@ pub struct CompilationContext<'c> {
 /// `pub` + `#[doc(hidden)]` only because `CompilationContext` (a public type) derefs
 /// to `dyn Backend`; it is an internal, unstable contract, not a public API.
 ///
-/// Phase 0f narrowed the surface: constants, arithmetic, comparison
-/// ([`IntCmp`]/[`FloatCmp`]), casts, memory, pointers, blocks/control flow,
-/// variables, and stack slots are all backend-neutral now. The only Cranelift types
-/// left in these signatures are the **calls & signatures** cluster (`FuncRef`,
-/// `SigRef`, `Signature`, `FuncId`, `CallConv`) — the JIT function-reference/symbol
-/// machinery, which shares the boundary deferred with `Module`/`Executable` (it needs
-/// a second backend's call/symbol model — MLIR's `ExecutionEngine` — to design against).
+/// **The trait is now fully backend-neutral: no Cranelift type appears in any method
+/// signature.** Phase 0f neutralized the value/control-flow surface (constants, arithmetic,
+/// comparison via [`IntCmp`]/[`FloatCmp`], casts, memory, pointers, blocks, variables, stack
+/// slots); the calls & signatures cluster followed once the MLIR backend gave a second
+/// call/symbol model to design against — functions and signatures are named by the opaque
+/// [`FuncRefId`]/[`SigRefId`] handles and the neutral [`SigSpec`], and `declare_func`/
+/// `declare_extern_func` resolve *our* ids (the backend owns the id→native-function map).
+/// What remains Cranelift-specific is the `compile()` driver and the not-yet-abstracted
+/// `Module`/`Executable` lifecycle — not this trait.
 #[doc(hidden)]
 pub trait Backend {
     // constants
@@ -263,13 +292,19 @@ pub trait Backend {
     fn def_var(&mut self, var: VarHandle, val: ValueId);
     fn use_var(&mut self, var: VarHandle) -> ValueId;
     // calls & signatures
-    fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId>;
-    fn call_indirect(&mut self, sig: SigRef, callee: ValueId, args: &[ValueId]) -> Option<ValueId>;
-    fn func_addr(&mut self, func: FuncRef) -> ValueId;
-    fn import_signature(&mut self, sig: Signature) -> SigRef;
-    fn declare_func_in_func(&mut self, func_id: FuncId) -> FuncRef;
-    // target queries
-    fn default_call_conv(&self) -> CallConv;
+    fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId>;
+    fn call_indirect(
+        &mut self,
+        sig: SigRefId,
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Option<ValueId>;
+    fn func_addr(&mut self, func: FuncRefId) -> ValueId;
+    fn import_signature(&mut self, sig: &SigSpec) -> SigRefId;
+    /// Get a callable reference to an internal (JIT-defined) function by our function id.
+    fn declare_func(&mut self, func_id: usize) -> FuncRefId;
+    /// Get a callable reference to a registered extern function by our extern id.
+    fn declare_extern_func(&mut self, extern_id: usize) -> FuncRefId;
 }
 
 /// The Cranelift implementation of [`Backend`]: owns the per-function
@@ -277,6 +312,12 @@ pub trait Backend {
 pub(crate) struct CraneliftBackend<'a, 'b> {
     pub(crate) builder: &'b mut FunctionBuilder<'a>,
     pub(crate) module: &'b mut JITModule,
+    /// Module-level maps (our id → Cranelift `FuncId`), shared across all functions.
+    pub(crate) func_ids: &'b HashMap<usize, FuncId>,
+    pub(crate) extern_func_ids: &'b HashMap<usize, FuncId>,
+    /// Per-function caches of imported `FuncRef`s (a fresh backend is built per function).
+    pub(crate) func_ref_cache: HashMap<usize, FuncRef>,
+    pub(crate) extern_ref_cache: HashMap<usize, FuncRef>,
 }
 
 /// Encode a `Vec<BlockArg>` from opaque `ValueId`s for a branch/jump.
@@ -522,39 +563,72 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ValueId::from_cranelift(self.builder.use_var(var.cranelift()))
     }
     // ---- calls & signatures ----
-    fn call(&mut self, func: FuncRef, args: &[ValueId]) -> Option<ValueId> {
+    fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId> {
         let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
-        let inst = self.builder.ins().call(func, &cargs);
+        let inst = self.builder.ins().call(func.cranelift(), &cargs);
         self.builder
             .inst_results(inst)
             .first()
             .copied()
             .map(ValueId::from_cranelift)
     }
-    fn call_indirect(&mut self, sig: SigRef, callee: ValueId, args: &[ValueId]) -> Option<ValueId> {
+    fn call_indirect(
+        &mut self,
+        sig: SigRefId,
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Option<ValueId> {
         let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
         let inst = self
             .builder
             .ins()
-            .call_indirect(sig, callee.cranelift(), &cargs);
+            .call_indirect(sig.cranelift(), callee.cranelift(), &cargs);
         self.builder
             .inst_results(inst)
             .first()
             .copied()
             .map(ValueId::from_cranelift)
     }
-    fn func_addr(&mut self, func: FuncRef) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().func_addr(types::I64, func))
+    fn func_addr(&mut self, func: FuncRefId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().func_addr(types::I64, func.cranelift()))
     }
-    fn import_signature(&mut self, sig: Signature) -> SigRef {
-        self.builder.import_signature(sig)
+    fn import_signature(&mut self, sig: &SigSpec) -> SigRefId {
+        let mut signature = Signature::new(self.module.isa().default_call_conv());
+        for param in &sig.params {
+            signature.params.push(AbiParam::new(param.to_cranelift()));
+        }
+        if let Some(ret) = sig.ret {
+            signature.returns.push(AbiParam::new(ret.to_cranelift()));
+        }
+        SigRefId::from_cranelift(self.builder.import_signature(signature))
     }
-    fn declare_func_in_func(&mut self, func_id: FuncId) -> FuncRef {
-        self.module.declare_func_in_func(func_id, self.builder.func)
+    fn declare_func(&mut self, func_id: usize) -> FuncRefId {
+        if let Some(&func_ref) = self.func_ref_cache.get(&func_id) {
+            return FuncRefId::from_cranelift(func_ref);
+        }
+        let cranelift_id = *self
+            .func_ids
+            .get(&func_id)
+            .unwrap_or_else(|| panic!("Function {func_id} not found in func map"));
+        let func_ref = self
+            .module
+            .declare_func_in_func(cranelift_id, self.builder.func);
+        self.func_ref_cache.insert(func_id, func_ref);
+        FuncRefId::from_cranelift(func_ref)
     }
-    // ---- target queries ----
-    fn default_call_conv(&self) -> CallConv {
-        self.module.isa().default_call_conv()
+    fn declare_extern_func(&mut self, extern_id: usize) -> FuncRefId {
+        if let Some(&func_ref) = self.extern_ref_cache.get(&extern_id) {
+            return FuncRefId::from_cranelift(func_ref);
+        }
+        let cranelift_id = *self
+            .extern_func_ids
+            .get(&extern_id)
+            .unwrap_or_else(|| panic!("Extern function {extern_id} not found"));
+        let func_ref = self
+            .module
+            .declare_func_in_func(cranelift_id, self.builder.func);
+        self.extern_ref_cache.insert(extern_id, func_ref);
+        FuncRefId::from_cranelift(func_ref)
     }
 }
 
@@ -573,24 +647,6 @@ impl<'c> DerefMut for CompilationContext<'c> {
 }
 
 impl<'c> CompilationContext<'c> {
-    /// Get or create a FuncRef for an external function.
-    ///
-    /// FuncRefs are per-function, so we cache them in extern_func_refs.
-    pub(crate) fn get_extern_func_ref(&mut self, extern_id: usize) -> FuncRef {
-        if let Some(&func_ref) = self.extern_func_refs.get(&extern_id) {
-            return func_ref;
-        }
-
-        let func_id = *self
-            .extern_func_ids
-            .get(&extern_id)
-            .expect(&format!("Extern function {} not found", extern_id));
-
-        let func_ref = self.declare_func_in_func(func_id);
-        self.extern_func_refs.insert(extern_id, func_ref);
-        func_ref
-    }
-
     /// Get or create the cached unit value (iconst.i8 0).
     ///
     /// This avoids creating duplicate dead values when sequencing side-effecting
