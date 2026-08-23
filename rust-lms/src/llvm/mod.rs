@@ -6,10 +6,10 @@
 //! when the `llvm` feature is on — the default pure-Rust Cranelift build never pulls
 //! melior in.
 //!
-//! ## Where this is (Phases 1–2)
+//! ## Where this is (Phases 1–3)
 //!
 //! Phase -1 (the `mlir-spike/` crate) proved the JIT/ABI/lowering pipeline against
-//! *textual* MLIR. Phases 1–2 prove the same pipeline built **programmatically** through
+//! *textual* MLIR. Phases 1–3 prove the same pipeline built **programmatically** through
 //! melior's op builders — the alpha-API risk the spike deliberately skipped:
 //!
 //! - [`make_context`] — the known-good context/dialect/translation setup (from the spike).
@@ -22,9 +22,12 @@
 //!     `IntCmp`/`FloatCmp` compares, branchless `select`, sign/zero casts, `alloca`/`load`/`store`;
 //!   - *variables & control flow (Phase 2, §5):* `declare_var`/`def_var`/`use_var` as
 //!     entry-block `alloca` + `store`/`load`, `create_block`/`append_block_param`/
-//!     `switch_to_block`/`jump`/`brif` over `cf`, and a no-op `seal_block`.
+//!     `switch_to_block`/`jump`/`brif` over `cf`, and a no-op `seal_block`;
+//!   - *calls & externs (Phase 3):* `declare_extern` emits a module-level `func.func
+//!     private` declaration, `call` a `func.call` (value or void); the driver binds each
+//!     extern to its host address with `ExecutionEngine::register_symbol`.
 //!   Still an inherent API (not yet the shared [`crate::staged::Backend`] trait — that
-//!   waits on the calls/signatures neutralization, Phase 3/4).
+//!   waits on the calls/signatures neutralization, next).
 //! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end: build a `(i64) -> i64` body
 //!   (straight-line *or* with loops/branches), lower, JIT, run.
 //!
@@ -41,11 +44,13 @@
 use melior::dialect::arith::{self, CmpfPredicate, CmpiPredicate};
 use melior::dialect::llvm::{self, AllocaOptions, LoadStoreOptions};
 use melior::dialect::{cf, func, DialectRegistry};
-use melior::ir::attribute::{IntegerAttribute, StringAttribute, TypeAttribute};
+use melior::ir::attribute::{
+    FlatSymbolRefAttribute, IntegerAttribute, StringAttribute, TypeAttribute,
+};
 use melior::ir::block::BlockLike;
 use melior::ir::operation::{Operation, OperationLike};
 use melior::ir::r#type::{FunctionType, IntegerType};
-use melior::ir::{Block, Location, Module, Region, RegionLike, Type, Value, ValueLike};
+use melior::ir::{Block, Identifier, Location, Module, Region, RegionLike, Type, Value, ValueLike};
 use melior::pass::{self, PassManager};
 use melior::utility::{register_all_dialects, register_all_llvm_translations};
 use melior::{Context, ExecutionEngine};
@@ -209,6 +214,18 @@ pub struct MlirBackend<'c> {
     values: Vec<MlirValue>,
     /// `VarHandle` → (alloca `llvm.ptr`, element type).
     vars: Vec<(MlirValue, ScalarType)>,
+    /// External functions referenced by `call`, emitted as module-level `func.func
+    /// private` declarations at [`into_module`](Self::into_module).
+    externs: Vec<ExternDecl>,
+}
+
+/// An external function referenced by [`MlirBackend::call`]: its symbol name, parameter
+/// types, and optional result type. Emitted as a `func.func private` declaration and bound
+/// to a host address by the driver's `ExecutionEngine::register_symbol`.
+struct ExternDecl {
+    name: String,
+    params: Vec<ScalarType>,
+    ret: Option<ScalarType>,
 }
 
 impl<'c> MlirBackend<'c> {
@@ -233,6 +250,7 @@ impl<'c> MlirBackend<'c> {
             current: 0,
             values,
             vars: Vec::new(),
+            externs: Vec::new(),
         }
     }
 
@@ -581,6 +599,53 @@ impl<'c> MlirBackend<'c> {
         self.blocks[self.current].append_operation(operation);
     }
 
+    // ---- calls & externs ----
+    /// Record an external function `name(params) -> ret`, callable via [`call`](Self::call).
+    /// Emitted as a module-level `func.func private` declaration at [`into_module`], and
+    /// bound to a host address by the driver's `ExecutionEngine::register_symbol`.
+    pub fn declare_extern(&mut self, name: &str, params: &[ScalarType], ret: Option<ScalarType>) {
+        self.externs.push(ExternDecl {
+            name: name.to_string(),
+            params: params.to_vec(),
+            ret,
+        });
+    }
+
+    /// Emit a direct call to function `name` (an extern or another defined function) with
+    /// `args`, in the current block. Returns the result `ValueId` when `ret` is `Some`.
+    pub fn call(
+        &mut self,
+        name: &str,
+        args: &[ValueId],
+        ret: Option<ScalarType>,
+    ) -> Option<ValueId> {
+        let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
+        let result_types: Vec<Type> = ret
+            .iter()
+            .map(|t| scalar_to_mlir(self.context, *t))
+            .collect();
+        let callee = FlatSymbolRefAttribute::new(self.context, name);
+        let operation = func::call(
+            self.context,
+            callee,
+            &operands,
+            &result_types,
+            self.location,
+        );
+        // Confine the block borrow to this scope: extract the raw result (if any) before
+        // `intern` takes `&mut self`. A void call still appends its operation here.
+        let raw = {
+            let call_ref = self.blocks[self.current].append_operation(operation);
+            ret.map(|_| {
+                call_ref
+                    .result(0)
+                    .expect("call produces one result")
+                    .to_raw()
+            })
+        };
+        raw.map(|raw| self.intern(raw))
+    }
+
     // ---- return ----
     pub fn ret(&mut self, value: Option<ValueId>) {
         let operands: Vec<Value> = value.map(|v| self.get(v)).into_iter().collect();
@@ -600,8 +665,30 @@ impl<'c> MlirBackend<'c> {
             param_types,
             entry,
             blocks,
+            externs,
             ..
         } = self;
+
+        let module = Module::new(location);
+
+        // Module-level `func.func private` declarations for every referenced extern.
+        for ExternDecl { name, params, ret } in &externs {
+            let params: Vec<Type> = params.iter().map(|t| scalar_to_mlir(context, *t)).collect();
+            let results: Vec<Type> = ret.iter().map(|t| scalar_to_mlir(context, *t)).collect();
+            let signature = FunctionType::new(context, &params, &results);
+            let declaration = func::func(
+                context,
+                StringAttribute::new(context, name),
+                TypeAttribute::new(signature.into()),
+                Region::new(), // empty region => external declaration
+                &[(
+                    Identifier::new(context, "sym_visibility"),
+                    StringAttribute::new(context, "private").into(),
+                )],
+                location,
+            );
+            module.body().append_operation(declaration);
+        }
 
         let results: Vec<Type> = result_types
             .iter()
@@ -626,18 +713,23 @@ impl<'c> MlirBackend<'c> {
             &[],
             location,
         );
-
-        let module = Module::new(location);
         module.body().append_operation(function);
         module
     }
 }
 
-/// Lower, verify, JIT, and look up `module`'s function `name` as a native pointer.
+/// Lower, verify, JIT, register host `symbols`, and look up `module`'s function `name`
+/// as a native pointer.
 ///
 /// Shared tail of the JIT drivers: verify → `create_to_llvm` → verify → `ExecutionEngine`
-/// → `lookup`. Returns the raw pointer; the caller transmutes to the concrete ABI.
-fn jit_lookup(context: &Context, mut module: Module, name: &str) -> (ExecutionEngine, *mut ()) {
+/// → `register_symbol` (bind each extern to its host address) → `lookup`. Returns the raw
+/// pointer; the caller transmutes to the concrete ABI.
+fn jit_lookup(
+    context: &Context,
+    mut module: Module,
+    name: &str,
+    symbols: &[(&str, *const u8)],
+) -> (ExecutionEngine, *mut ()) {
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification before lowering"
@@ -653,6 +745,13 @@ fn jit_lookup(context: &Context, mut module: Module, name: &str) -> (ExecutionEn
     );
 
     let engine = ExecutionEngine::new(&module, JIT_OPT_LEVEL, &[], false, false);
+    for (symbol, address) in symbols {
+        // SAFETY: each `address` is a real `extern "C"` fn pointer supplied by the caller,
+        // matching the declared signature of the extern named `symbol`.
+        unsafe {
+            engine.register_symbol(symbol, *address as *mut ());
+        }
+    }
     let pointer = engine.lookup(name);
     assert!(
         !pointer.is_null(),
@@ -678,7 +777,7 @@ pub fn jit_run_i64_unary(
     backend.ret(Some(result));
     let module = backend.into_module("kernel", &[ScalarType::I64]);
 
-    let (engine, pointer) = jit_lookup(&context, module, "kernel");
+    let (engine, pointer) = jit_lookup(&context, module, "kernel", &[]);
     // SAFETY: emitted with the `(i64) -> i64` signature; `engine` owns the executable
     // memory and outlives the call below.
     let kernel: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(pointer) };
@@ -830,5 +929,73 @@ mod tests {
             let expected = if x < 10 { x * 2 } else { x + 100 };
             assert_eq!(jit_run_i64_unary(f, x), expected);
         }
+    }
+
+    // Host externs for the call tests, both shaped like the Phase-3 storage-pointer ABI
+    // (values reached through pointers).
+    extern "C" fn host_read_i64(p: *const i64) -> i64 {
+        // SAFETY: the kernel passes a valid `*const i64` argument through.
+        unsafe { *p }
+    }
+    extern "C" fn host_write_i64(p: *mut i64, value: i64) {
+        // SAFETY: the kernel passes a valid `*mut i64` argument through.
+        unsafe { *p = value }
+    }
+
+    #[test]
+    fn calls_registered_extern_returning_i64() {
+        // kernel(p: ptr) -> i64 { func.call @host_read_i64(p) }
+        let context = make_context();
+        let mut backend =
+            MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::Ptr)]);
+        backend.declare_extern("host_read_i64", &[ScalarType::Ptr], Some(ScalarType::I64));
+        let p = backend.param(0);
+        let result = backend
+            .call("host_read_i64", &[p], Some(ScalarType::I64))
+            .expect("i64 result");
+        backend.ret(Some(result));
+        let module = backend.into_module("kernel", &[ScalarType::I64]);
+
+        let (engine, pointer) = jit_lookup(
+            &context,
+            module,
+            "kernel",
+            &[("host_read_i64", host_read_i64 as *const u8)],
+        );
+        let kernel: extern "C" fn(*const i64) -> i64 = unsafe { std::mem::transmute(pointer) };
+        let value: i64 = 0x0BAD_F00D;
+        assert_eq!(kernel(&value as *const i64), 0x0BAD_F00D);
+        drop(engine);
+    }
+
+    #[test]
+    fn calls_registered_void_extern_with_two_args() {
+        // kernel(out: ptr, x: i64) { func.call @host_write_i64(out, x); return }
+        let context = make_context();
+        let mut backend = MlirBackend::new(
+            &context,
+            vec![
+                scalar_to_mlir(&context, ScalarType::Ptr),
+                scalar_to_mlir(&context, ScalarType::I64),
+            ],
+        );
+        backend.declare_extern("host_write_i64", &[ScalarType::Ptr, ScalarType::I64], None);
+        let out = backend.param(0);
+        let x = backend.param(1);
+        assert!(backend.call("host_write_i64", &[out, x], None).is_none());
+        backend.ret(None);
+        let module = backend.into_module("kernel", &[]);
+
+        let (engine, pointer) = jit_lookup(
+            &context,
+            module,
+            "kernel",
+            &[("host_write_i64", host_write_i64 as *const u8)],
+        );
+        let kernel: extern "C" fn(*mut i64, i64) = unsafe { std::mem::transmute(pointer) };
+        let mut slot: i64 = 0;
+        kernel(&mut slot as *mut i64, 987_654);
+        assert_eq!(slot, 987_654);
+        drop(engine);
     }
 }

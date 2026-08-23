@@ -707,13 +707,28 @@ clippy 28.
   calls/signatures neutralization (Phase 3/4). Until then, correctness is checked against
   scalar oracles in the feature-gated tests.
 
-**Phase 3 — calls, externs, ABI, JIT.** `call`/`call_indirect`/`func_addr`, extern
-symbol registration, the storage-pointer signatures, and `invoke_packed`. Land
-`test_extern_fn.rs`, `test_abi.rs` across both backends.
+**Phase 3 — calls, externs, ABI, JIT — MLIR PRIMITIVES DONE (in `MlirBackend`).**
+`declare_extern` records an external function and emits it as a module-level `func.func
+private` declaration at `into_module`; `call` emits a `func.call` (returning a value, or
+void); the driver binds each extern to its host address via
+`ExecutionEngine::register_symbol` before `lookup`. 9 feature-gated tests pass, incl.
+**calling a registered Rust `extern "C"` returning i64 through a `*const i64`** and a
+**void two-arg extern writing through a `*mut i64`** — the Phase-3 storage-pointer ABI
+shape, now proven *programmatically* (the spike proved it with textual MLIR). Native
+`lookup` path, no `invoke_packed`. Default build still 366 / clippy 28.
+- **Remaining for Phase 3:** `call_indirect`/`func_addr` (function-pointer values) and the
+  full storage-pointer signature ABI arrive with the shared-trait wiring; landing
+  `test_extern_fn.rs`/`test_abi.rs` across both backends needs the AST routed through
+  `MlirBackend`, which is the neutralization step below.
 
-**Phase 3 — calls, externs, ABI, JIT.** `call`/`call_indirect`/`func_addr`, extern
-symbol registration, the storage-pointer signatures, and `invoke_packed`. Land
-`test_extern_fn.rs`, `test_abi.rs` across both backends.
+**Next up — the calls/signatures neutralization + shared-trait unification.** `MlirBackend`
+now covers the *entire* op surface (values, control flow, calls) as inherent methods, so we
+finally have the second backend to design the deferred piece against: replace the `Backend`
+trait's Cranelift-typed calls/signatures cluster (`FuncRef`/`SigRef`/`Signature`/`FuncId`/
+`CallConv`) + `CompilationContext`'s `func_map`/`extern_func_*` maps + the `Module`/
+`Executable` lifecycle with neutral handles, then `impl Backend for MlirBackend` and route
+`compile()` through a chosen backend. That unlocks Phase 4 (differential-test the real
+`tests/{programs,p99,euler,extern_fn,abi}.rs` on both backends; `Compiler::with_backend`).
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
