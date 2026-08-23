@@ -136,6 +136,33 @@ impl VarHandle {
         self.0
     }
 }
+#[cfg(feature = "llvm")]
+impl StackSlotId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl FuncRefId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl SigRefId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
 
 // =============================================================================
 // Compilation Context

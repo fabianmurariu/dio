@@ -214,6 +214,7 @@ pub fn jit_run_i64_unary(
 #[cfg(test)]
 mod tests {
     use super::*;
+    use crate::staged::Backend;
     use crate::types::IntCmp;
 
     #[test]
@@ -253,17 +254,52 @@ mod tests {
     }
 
     #[test]
-    fn memory_roundtrip_through_alloca() {
-        // f(x) = { p = alloca i64; store x + 1, p; load p }
+    fn memory_roundtrip_through_stack_slot() {
+        // f(x) = { s = alloc 16B; store x@0; store x+1 @8; load @8 } — exercises the
+        // StackSlotId model plus a non-zero byte offset (GEP-based load/store).
         let f = |b: &mut MlirBackend, x: ValueId| {
             let one = b.iconst(ScalarType::I64, 1);
             let incremented = b.iadd(x, one);
-            let slot = b.alloca(ScalarType::I64);
-            b.store(incremented, slot);
-            b.load(ScalarType::I64, slot)
+            let slot = b.alloc_stack_slot(16, 3);
+            let base = b.stack_addr(slot, 0);
+            b.store(x, base, 0);
+            b.store(incremented, base, 8);
+            b.load(ScalarType::I64, base, 8)
         };
         for x in [-1i64, 0, 41, 99] {
             assert_eq!(jit_run_i64_unary(f, x), x + 1);
+        }
+    }
+
+    #[test]
+    fn float_constants_arithmetic_and_bitcast() {
+        // f(_) = bitcast_i64(f64const(2.5) + f64const(1.5))  ==  (4.0f64).to_bits()
+        let f = |b: &mut MlirBackend, _x: ValueId| {
+            let a = b.f64const(2.5);
+            let c = b.f64const(1.5);
+            let sum = b.fadd(a, c);
+            b.bitcast(ScalarType::I64, sum)
+        };
+        let expected = 4.0f64.to_bits() as i64;
+        assert_eq!(jit_run_i64_unary(f, 0), expected);
+    }
+
+    #[test]
+    fn copy_nonoverlapping_between_slots() {
+        // f(x) = { src=16B; dst=16B; store x@src+8; memcpy(dst,src,16); load dst+8 } == x
+        let f = |b: &mut MlirBackend, x: ValueId| {
+            let src = b.alloc_stack_slot(16, 3);
+            let dst = b.alloc_stack_slot(16, 3);
+            let src_ptr = b.stack_addr(src, 0);
+            let dst_ptr = b.stack_addr(dst, 0);
+            let zero = b.iconst(ScalarType::I64, 0);
+            b.store(zero, src_ptr, 0);
+            b.store(x, src_ptr, 8);
+            b.copy_nonoverlapping(dst_ptr, src_ptr, 16, 8);
+            b.load(ScalarType::I64, dst_ptr, 8)
+        };
+        for x in [-3i64, 0, 7, 12345] {
+            assert_eq!(jit_run_i64_unary(f, x), x);
         }
     }
 
@@ -374,11 +410,11 @@ mod tests {
         let context = make_context();
         let mut backend =
             MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::Ptr)]);
-        backend.declare_extern("host_read_i64", &[ScalarType::Ptr], Some(ScalarType::I64));
+        let extern_id =
+            backend.declare_extern("host_read_i64", &[ScalarType::Ptr], Some(ScalarType::I64));
+        let func = backend.declare_extern_func(extern_id);
         let p = backend.param(0);
-        let result = backend
-            .call("host_read_i64", &[p], Some(ScalarType::I64))
-            .expect("i64 result");
+        let result = backend.call(func, &[p]).expect("i64 result");
         backend.ret(Some(result));
         let module = backend.into_module("kernel", &[ScalarType::I64]);
 
@@ -405,10 +441,12 @@ mod tests {
                 scalar_to_mlir(&context, ScalarType::I64),
             ],
         );
-        backend.declare_extern("host_write_i64", &[ScalarType::Ptr, ScalarType::I64], None);
+        let extern_id =
+            backend.declare_extern("host_write_i64", &[ScalarType::Ptr, ScalarType::I64], None);
+        let func = backend.declare_extern_func(extern_id);
         let out = backend.param(0);
         let x = backend.param(1);
-        assert!(backend.call("host_write_i64", &[out, x], None).is_none());
+        assert!(backend.call(func, &[out, x]).is_none());
         backend.ret(None);
         let module = backend.into_module("kernel", &[]);
 

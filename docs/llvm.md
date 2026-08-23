@@ -743,11 +743,26 @@ private field), `SigSpec`, `CompilationContext`, the `Backend` trait, and the AS
 — and no longer contains any backend `impl`. The `compile()` driver in `func.rs` remains the
 Cranelift-specific module/JIT lifecycle (the `Module`/`Executable` boundary).
 
-**Next up — shared-trait unification.** With the trait neutral, `impl Backend for MlirBackend`
-is now unblocked (its inherent ops already match the trait shape; the calls cluster maps to
-symbol-name resolution). Then abstract the `Module`/`Executable` lifecycle and route
-`compile()` through a chosen backend — unlocking Phase 4 (differential-test the real
-`tests/{programs,p99,euler,extern_fn,abi}.rs` on both backends; `Compiler::with_backend`).
+**`impl Backend for MlirBackend` — DONE.** `MlirBackend` now implements the *entire* neutral
+`Backend` trait (the previously-inherent ops became the trait impl, and the missing ones were
+filled): `f64const`/`f32const`, `icmp_imm`, `bitcast` (`arith.bitcast`), the `StackSlotId`
+memory model (`alloc_stack_slot` → aligned entry-block `llvm.alloca` of `size × i8`;
+`stack_addr` + offset-carrying `load`/`store` via byte-indexed `llvm.getelementptr`),
+`copy_nonoverlapping` (unrolled byte copy), the pointer ops (`ptr_offset_bytes`/`_const` via
+GEP, `addr_to_ptr` via a raw `llvm.inttoptr`), and the id-based calls
+(`declare_func`/`declare_extern_func` resolve `usize` ids against inherent
+`declare_internal_func`/`declare_extern` setup into a `FuncRefId` table; `call`/`func_addr`/
+`call_indirect`/`import_signature` use it). 11 feature-gated tests pass, incl. new coverage for
+f64 arithmetic + bitcast, a stack slot with a non-zero byte offset, and `copy_nonoverlapping`
+between slots; default build still 366 / clippy 27. The internal-function-call path
+(`declare_func`/`func_addr` + multi-function module assembly) is implemented but only exercised
+once the driver below populates `internal_funcs` — no test drives JIT-to-JIT calls yet.
+
+**Next up — the MLIR `compile()` driver + `Module`/`Executable` abstraction.** The one thing
+still keeping the AST on Cranelift: `func::compile()` hard-codes `JITModule`/`FunctionBuilder`.
+Abstract the module/JIT lifecycle (build function bodies via a `&mut dyn Backend`, register
+externs, finalize → an `Executable` that owns the JIT memory) so `compile()` can drive either
+backend, then route it — unlocking Phase 4.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
