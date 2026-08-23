@@ -17,10 +17,8 @@
 //! Rust-facing wrappers preserve value semantics without exposing platform
 //! aggregate classification to Cranelift.
 
-use crate::staged::{
-    assign, emit_copy_nonoverlapping, CompilationContext, CraneliftBackend, SigSpec, Staged,
-    ValueId, Var, VarHandle,
-};
+use crate::cranelift::{emit_copy_nonoverlapping, CraneliftBackend};
+use crate::staged::{assign, CompilationContext, SigSpec, Staged, ValueId, Var, VarHandle};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags};
 use cranelift_codegen::settings::{self, Configurable};

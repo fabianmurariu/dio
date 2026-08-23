@@ -53,6 +53,8 @@
 extern crate self as rust_lms;
 
 pub mod control;
+/// Cranelift backend: the default code generator (`impl Backend`), behind `func::compile`.
+pub(crate) mod cranelift;
 pub mod ffi;
 pub mod func;
 pub(crate) mod func_def;

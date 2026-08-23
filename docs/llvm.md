@@ -734,6 +734,15 @@ Net effect: **the AST is now 100% cranelift-free** (the last leak, `emit_extern_
 `Module`/`Executable` lifecycle remain Cranelift-specific. Behavior-preserving: 366 tests
 green, clippy 27 (one fewer — dropped a `format!`-in-`expect`), 9 LLVM tests still green.
 
+**Module layout (post-neutralization).** With the trait neutral, the two backends are now
+symmetric sibling modules: `cranelift/mod.rs` holds `CraneliftBackend` (the default `impl
+Backend`) + the memcpy helper; `llvm/mod.rs` holds the MLIR context/JIT drivers with
+`llvm/backend.rs` holding `MlirBackend`. `staged.rs` is the neutral core — handle types (with
+their `pub(crate)` Cranelift/`llvm` conversions, kept there because they touch the handles'
+private field), `SigSpec`, `CompilationContext`, the `Backend` trait, and the AST value types
+— and no longer contains any backend `impl`. The `compile()` driver in `func.rs` remains the
+Cranelift-specific module/JIT lifecycle (the `Module`/`Executable` boundary).
+
 **Next up — shared-trait unification.** With the trait neutral, `impl Backend for MlirBackend`
 is now unblocked (its inherent ops already match the trait shape; the calls cluster maps to
 symbol-name resolution). Then abstract the `Module`/`Executable` lifecycle and route
