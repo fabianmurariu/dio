@@ -787,17 +787,25 @@ arguments for a pure expression, a polynomial, and a `while` loop whose **trip c
 runtime argument** (data-dependent control flow). 14 feature-gated tests green; default 366 /
 clippy 27.
 
-**Next up — fold the MLIR path into `compile()` itself (`Module`/`Executable` + `with_backend`).**
-The neutral AST is now differential-proven on MLIR for nullary expressions, imperative loops,
-*and* parameterized scalar functions — via bespoke `jit_eval_*` drivers that reproduce
-`compile()`'s per-function setup. The remaining work makes this first-class rather than
-test-only: abstract `func::compile()`'s `JITModule`/`FunctionBuilder` lifecycle + the
-storage-pointer parameter ABI (raw `builder.ins()` param-unpacking) into a `Module`/`Executable`
-pair driven by `&mut dyn Backend` (the uniform storage-pointer ABI — all params/output are
-pointers + loads/stores — is expressible via the neutral trait), generalize past scalars
-(slices/aggregates/multi-arg), then expose `Compiler::with_backend(Cranelift | Llvm)`. That
-turns the bespoke drivers into one code path and extends differential coverage to the full
-`tests/{programs,p99,euler,extern_fn,abi}.rs` — Phase 4.
+**Step 1 — `compile()`'s per-function assembly is now backend-neutral — DONE.** Extracted
+`emit_function_body(ctx, params, param_infos, param_var_ids, body, return_info)` in `func.rs`:
+it unpacks each storage-pointer argument into a variable (slices into their `slice_vars` pair),
+runs the body, and writes the result back through the output pointer — entirely through neutral
+`Backend` ops on `ctx` (zero `builder`/`.ins()`/cranelift references in its body). Both the
+per-function loop *and* `__main__` (a zero-arg function under the same ABI) now route through it;
+only the Cranelift-specific *shell* remains inline in `compile()` — module creation, per-function
+`FunctionBuilder` entry setup, the terminating `return`, finalize, and extern registration. This
+is a behavior-preserving refactor gated by the full 366-test suite (still green, clippy 27); it's
+the seam the MLIR module lifecycle plugs into.
+
+**Next up — the module/JIT lifecycle (`Module`/`Executable`) + `with_backend`.** What's left is
+the Cranelift-specific shell: turn "create module → for each function: begin entry (N+1 pointer
+params) → run `emit_function_body` → return/finalize → get fn ptr" into a `Module`/`Executable`
+pair with a Cranelift impl (wraps `JITModule`) and an MLIR impl (`MlirBackend::into_function_op`
+appended to a shared `Module`, then `ExecutionEngine`). Route `compile()` through a chosen backend
+via `Compiler::with_backend(Cranelift | Llvm)`, generalize past scalars (slices/aggregates), and
+the bespoke `jit_eval_*` drivers collapse into one path — extending differential coverage to the
+full `tests/{programs,p99,euler,extern_fn,abi}.rs` (Phase 4).
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI

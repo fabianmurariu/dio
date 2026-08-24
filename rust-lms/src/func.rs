@@ -17,10 +17,10 @@
 //! Rust-facing wrappers preserve value semantics without exposing platform
 //! aggregate classification to Cranelift.
 
-use crate::cranelift::{emit_copy_nonoverlapping, CraneliftBackend};
+use crate::cranelift::CraneliftBackend;
 use crate::staged::{assign, CompilationContext, SigSpec, Staged, ValueId, Var, VarHandle};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder, MemFlags};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
@@ -567,6 +567,70 @@ pub(crate) struct ExternFnDef {
     pub name: String,
     pub num_params: usize,
     pub fn_ptr: *const u8,
+}
+
+/// Emit one function body under the private storage-pointer ABI, **backend-neutrally**.
+///
+/// The ABI is uniform: `params` is one storage pointer per logical argument followed by a
+/// single output pointer, and the function returns `void`. This unpacks each argument from
+/// its storage pointer into a variable (a fat-pointer slice into its `slice_vars` pair),
+/// runs `body` to produce the result, and writes the result back through the output pointer.
+/// Every step goes through the neutral [`Backend`](crate::staged::Backend) ops on `ctx`, so
+/// the same code drives Cranelift and MLIR; the caller supplies the (backend-specific)
+/// function entry and terminating `return`.
+fn emit_function_body(
+    ctx: &mut CompilationContext,
+    params: &[ValueId],
+    param_infos: &[TypeInfo],
+    param_var_ids: &[usize],
+    body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    return_info: &TypeInfo,
+) {
+    for (index, info) in param_infos.iter().enumerate() {
+        let var_id = param_var_ids[index];
+        let storage_ptr = params[index];
+
+        if info.is_aggregate {
+            if info.is_fat_pointer {
+                // A slice arrives as a `(ptr, len)` pair; keep both in register variables.
+                let ptr_value = ctx.load(ScalarType::I64, storage_ptr, 0);
+                let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
+                let ptr_var = ctx.declare_var(ScalarType::I64);
+                let len_var = ctx.declare_var(ScalarType::I64);
+                ctx.def_var(ptr_var, ptr_value);
+                ctx.def_var(len_var, len_value);
+                ctx.slice_vars
+                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+            }
+            // Aggregates are represented by a pointer to their storage.
+            let param_var = ctx.declare_var(ScalarType::I64);
+            ctx.def_var(param_var, storage_ptr);
+            ctx.var_map.insert(var_id, param_var);
+        } else {
+            let param_value = if info.size == 0 {
+                ctx.iconst(ScalarType::I8, 0)
+            } else {
+                ctx.load(info.repr, storage_ptr, 0)
+            };
+            let param_var = ctx.declare_var(info.repr);
+            ctx.def_var(param_var, param_value);
+            ctx.var_map.insert(var_id, param_var);
+        }
+    }
+
+    let result = body(ctx);
+
+    let output_ptr = params[param_infos.len()];
+    if return_info.is_aggregate {
+        ctx.copy_nonoverlapping(
+            output_ptr,
+            result,
+            return_info.size as usize,
+            return_info.alignment as usize,
+        );
+    } else if return_info.size != 0 {
+        ctx.store(result, output_ptr, 0);
+    }
 }
 
 /// The central coordinator for staged computations.
@@ -1144,63 +1208,14 @@ impl<'a> Compiler<'a> {
                     // Optimized slice storage: var_id -> (ptr_var, len_var)
                     let mut slice_vars = HashMap::new();
 
-                    // Handle all parameters
-                    let block_params = builder.block_params(entry_block).to_vec();
-                    for (param_idx, param_info) in func_def.param_infos.iter().enumerate() {
-                        let var_id = func_def.param_var_ids[param_idx];
-                        let storage_ptr = block_params[param_idx];
+                    // Storage pointers (N args + output) as neutral handles.
+                    let params: Vec<ValueId> = builder
+                        .block_params(entry_block)
+                        .iter()
+                        .map(|value| ValueId::from_cranelift(*value))
+                        .collect();
 
-                        if param_info.is_aggregate {
-                            if param_info.is_fat_pointer {
-                                let ptr_value = builder.ins().load(
-                                    types::I64,
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    0,
-                                );
-                                let len_value = builder.ins().load(
-                                    types::I64,
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    8,
-                                );
-                                let ptr_var = builder.declare_var(types::I64);
-                                let len_var = builder.declare_var(types::I64);
-                                builder.def_var(ptr_var, ptr_value);
-                                builder.def_var(len_var, len_value);
-                                slice_vars.insert(
-                                    var_id,
-                                    crate::staged::SliceVars {
-                                        ptr_var: VarHandle::from_cranelift(ptr_var),
-                                        len_var: VarHandle::from_cranelift(len_var),
-                                    },
-                                );
-                            }
-
-                            // Aggregate expressions are represented by a pointer to
-                            // their complete runtime storage.
-                            let param_var = builder.declare_var(types::I64);
-                            builder.def_var(param_var, storage_ptr);
-                            var_map.insert(var_id, VarHandle::from_cranelift(param_var));
-                        } else {
-                            let param_value = if param_info.size == 0 {
-                                builder.ins().iconst(types::I8, 0)
-                            } else {
-                                builder.ins().load(
-                                    param_info.repr.to_cranelift(),
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    0,
-                                )
-                            };
-                            let param_var = builder.declare_var(param_info.repr.to_cranelift());
-                            builder.def_var(param_var, param_value);
-                            var_map.insert(var_id, VarHandle::from_cranelift(param_var));
-                        }
-                    }
-
-                    // Generate the body code
-                    let result = {
+                    {
                         let mut backend = CraneliftBackend {
                             builder: &mut builder,
                             module: &mut module,
@@ -1216,27 +1231,17 @@ impl<'a> Compiler<'a> {
                             unit_value: None,
                             loop_exit_stack: Vec::new(),
                         };
-                        (func_def.body)(&mut ctx)
-                    };
-
-                    let output_ptr = block_params[func_def.param_infos.len()];
-                    if func_def.return_info.is_aggregate {
-                        let config = module.isa().frontend_config();
-                        emit_copy_nonoverlapping(
-                            &mut builder,
-                            config,
-                            output_ptr,
-                            result.cranelift(),
-                            func_def.return_info.size as usize,
-                            func_def.return_info.alignment as usize,
+                        emit_function_body(
+                            &mut ctx,
+                            &params,
+                            &func_def.param_infos,
+                            &func_def.param_var_ids,
+                            func_def.body,
+                            &func_def.return_info,
                         );
-                    } else if func_def.return_info.size != 0 {
-                        builder
-                            .ins()
-                            .store(MemFlags::trusted(), result.cranelift(), output_ptr, 0);
                     }
-                    builder.ins().return_(&[]);
 
+                    builder.ins().return_(&[]);
                     builder.finalize();
                 }
 
@@ -1268,9 +1273,18 @@ impl<'a> Compiler<'a> {
                 builder.seal_block(entry_block);
 
                 let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
+                let mut slice_vars = HashMap::new();
 
-                let result = {
-                    let mut slice_vars = HashMap::new();
+                // `__main__` is a zero-argument function under the storage-pointer ABI: its
+                // one parameter is the output pointer.
+                let params: Vec<ValueId> = builder
+                    .block_params(entry_block)
+                    .iter()
+                    .map(|value| ValueId::from_cranelift(*value))
+                    .collect();
+                let return_info = TypeInfo::from_staged_type::<S::Out>();
+
+                {
                     let mut backend = CraneliftBackend {
                         builder: &mut builder,
                         module: &mut module,
@@ -1286,27 +1300,17 @@ impl<'a> Compiler<'a> {
                         unit_value: None,
                         loop_exit_stack: Vec::new(),
                     };
-                    expr.codegen(&mut ctx)
-                };
-
-                let output_ptr = builder.block_params(entry_block)[0];
-                if S::Out::is_copy_struct() {
-                    let config = module.isa().frontend_config();
-                    emit_copy_nonoverlapping(
-                        &mut builder,
-                        config,
-                        output_ptr,
-                        result.cranelift(),
-                        S::Out::size_of(),
-                        S::Out::align_of(),
+                    emit_function_body(
+                        &mut ctx,
+                        &params,
+                        &[],
+                        &[],
+                        |ctx| expr.codegen(ctx),
+                        &return_info,
                     );
-                } else if S::Out::size_of() != 0 {
-                    builder
-                        .ins()
-                        .store(MemFlags::trusted(), result.cranelift(), output_ptr, 0);
                 }
-                builder.ins().return_(&[]);
 
+                builder.ins().return_(&[]);
                 builder.finalize();
             }
 
