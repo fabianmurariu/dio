@@ -758,11 +758,23 @@ between slots; default build still 366 / clippy 27. The internal-function-call p
 (`declare_func`/`func_addr` + multi-function module assembly) is implemented but only exercised
 once the driver below populates `internal_funcs` — no test drives JIT-to-JIT calls yet.
 
+**First differential proof — DONE.** `jit_eval_nullary_i64` runs the **neutral AST**
+`Staged::codegen` over a `CompilationContext` backed by `MlirBackend` (the identical code path
+Cranelift takes, just a different `dyn Backend`). A differential test compiles the *same*
+nullary `Staged` graph through Cranelift's public `compile().run()` **and** through MLIR and
+asserts equal results — covering arithmetic, comparison, branchless `select`, and `if_then_else`
+(exercising `cf` blocks + a block-argument phi *through the AST*). 12 feature-gated tests green;
+default build still 366 / clippy 27. This is the project's thesis made executable: one neutral
+AST, two backends, identical output.
+
 **Next up — the MLIR `compile()` driver + `Module`/`Executable` abstraction.** The one thing
-still keeping the AST on Cranelift: `func::compile()` hard-codes `JITModule`/`FunctionBuilder`.
-Abstract the module/JIT lifecycle (build function bodies via a `&mut dyn Backend`, register
-externs, finalize → an `Executable` that owns the JIT memory) so `compile()` can drive either
-backend, then route it — unlocking Phase 4.
+still keeping the *parameterized* AST on Cranelift: `func::compile()` hard-codes
+`JITModule`/`FunctionBuilder` and the storage-pointer **parameter** ABI (raw `builder.ins()`
+param-unpacking). Abstract the module/JIT lifecycle (declare/define functions via a
+`&mut dyn Backend`, register externs, finalize → an `Executable` that owns the JIT memory) so
+`compile()` can drive either backend, then route it — extending the differential tests from
+nullary to the full parameterized `tests/{programs,p99,euler,extern_fn,abi}.rs` and unlocking
+Phase 4.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI

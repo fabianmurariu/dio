@@ -6,30 +6,25 @@
 //! when the `llvm` feature is on — the default pure-Rust Cranelift build never pulls
 //! melior in.
 //!
-//! ## Where this is (Phases 1–3)
+//! ## Where this is
 //!
 //! Phase -1 (the `mlir-spike/` crate) proved the JIT/ABI/lowering pipeline against
-//! *textual* MLIR. Phases 1–3 prove the same pipeline built **programmatically** through
+//! *textual* MLIR. This module proves the same pipeline built **programmatically** through
 //! melior's op builders — the alpha-API risk the spike deliberately skipped:
 //!
 //! - [`make_context`] — the known-good context/dialect/translation setup (from the spike).
 //! - [`jit_return_i64_const`] — the nullary-constant milestone: a `() -> i64` `func.func`
 //!   returning `arith.constant`, verified, lowered, JIT-run via the **native**
 //!   `ExecutionEngine::lookup` pointer.
-//! - [`MlirBackend`] — the MLIR analogue of `CraneliftBackend`, addressed by opaque
-//!   [`crate::staged::ValueId`]/[`crate::staged::BlockHandle`]/[`crate::staged::VarHandle`]s:
-//!   - *values (Phase 1):* constants, integer/float arithmetic, bitwise, shifts,
-//!     `IntCmp`/`FloatCmp` compares, branchless `select`, sign/zero casts, `alloca`/`load`/`store`;
-//!   - *variables & control flow (Phase 2, §5):* `declare_var`/`def_var`/`use_var` as
-//!     entry-block `alloca` + `store`/`load`, `create_block`/`append_block_param`/
-//!     `switch_to_block`/`jump`/`brif` over `cf`, and a no-op `seal_block`;
-//!   - *calls & externs (Phase 3):* `declare_extern` emits a module-level `func.func
-//!     private` declaration, `call` a `func.call` (value or void); the driver binds each
-//!     extern to its host address with `ExecutionEngine::register_symbol`.
-//!   Still an inherent API (not yet the shared [`crate::staged::Backend`] trait — that
-//!   waits on the calls/signatures neutralization, next).
-//! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end: build a `(i64) -> i64` body
-//!   (straight-line *or* with loops/branches), lower, JIT, run.
+//! - [`MlirBackend`] (in [`backend`]) — the MLIR implementation of the shared
+//!   [`crate::staged::Backend`] trait: the full op surface (constants, arithmetic, compares,
+//!   `select`, casts, memory with a `StackSlotId` model, pointer ops, variables + `cf`
+//!   control flow, and id-based calls/externs). The MLIR analogue of `CraneliftBackend`.
+//! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end over a `(i64) -> i64` body
+//!   (straight-line *or* with loops/branches).
+//! - [`jit_eval_nullary_i64`] — runs the **neutral AST** `Staged::codegen` over a
+//!   `CompilationContext` backed by `MlirBackend`; the differential test uses it to assert
+//!   the same `Staged` graph produces identical results on Cranelift and MLIR.
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
@@ -55,7 +50,9 @@ use melior::pass::{self, PassManager};
 use melior::utility::{register_all_dialects, register_all_llvm_translations};
 use melior::{Context, ExecutionEngine};
 
-use crate::staged::ValueId;
+use std::collections::HashMap;
+
+use crate::staged::{CompilationContext, Staged, ValueId};
 use crate::types::ScalarType;
 
 /// The optimization level passed to `ExecutionEngine`. Must be ≥ 2 so LLVM's own
@@ -207,6 +204,42 @@ pub fn jit_run_i64_unary(
     // memory and outlives the call below.
     let kernel: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(pointer) };
     let output = kernel(arg);
+    drop(engine);
+    output
+}
+
+/// Compile and run a **nullary** `Staged` expression (`Out = i64`) through the MLIR
+/// backend, by driving the *neutral AST* `Staged::codegen` over a [`CompilationContext`]
+/// backed by [`MlirBackend`] — the same code path the Cranelift backend runs, just with a
+/// different `dyn Backend`. This is the first end-to-end proof that a real AST graph lowers
+/// through MLIR; it powers the differential tests against Cranelift.
+///
+/// Nullary (no parameters) sidesteps the storage-pointer parameter ABI, which still lives in
+/// the Cranelift-specific `compile()` driver (its abstraction is the next step).
+pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
+    let context = make_context();
+    let mut backend = MlirBackend::new(&context, Vec::new());
+
+    let mut var_map = HashMap::new();
+    let mut slice_vars = HashMap::new();
+    let result = {
+        let mut ctx = CompilationContext {
+            backend: &mut backend,
+            var_map: &mut var_map,
+            slice_vars: &mut slice_vars,
+            unit_value: None,
+            loop_exit_stack: Vec::new(),
+        };
+        expr.codegen(&mut ctx)
+    };
+    backend.ret(Some(result));
+    let module = backend.into_module("kernel", &[ScalarType::I64]);
+
+    let (engine, pointer) = jit_lookup(&context, module, "kernel", &[]);
+    // SAFETY: emitted with the `() -> i64` signature; `engine` owns the executable memory
+    // and outlives the call below.
+    let kernel: extern "C" fn() -> i64 = unsafe { std::mem::transmute(pointer) };
+    let output = kernel();
     drop(engine);
     output
 }
@@ -461,5 +494,35 @@ mod tests {
         kernel(&mut slot as *mut i64, 987_654);
         assert_eq!(slot, 987_654);
         drop(engine);
+    }
+
+    #[test]
+    fn differential_nullary_matches_cranelift() {
+        // The payoff: run the *same neutral `Staged` graph* through Cranelift's public
+        // `compile()` and through the MLIR backend, and assert identical results — proving
+        // the AST lowers the same on both. Nullary (no params) for now; the parameter ABI
+        // still lives in the Cranelift-specific `compile()` driver.
+        use crate::control::if_then_else;
+        use crate::func::Compiler;
+        use crate::num::{add, lt, mul, select, sub};
+        use crate::staged::Const;
+
+        fn both<S: Staged<Out = i64> + 'static>(make: impl Fn() -> S) {
+            let cranelift = Compiler::new()
+                .compile(make())
+                .expect("cranelift compile")
+                .run();
+            let mlir = jit_eval_nullary_i64(make());
+            assert_eq!(cranelift, mlir, "Cranelift/MLIR backend divergence");
+        }
+
+        both(|| add(mul(6i64, 7i64), 1i64)); // 43
+        both(|| sub(mul(9i64, 9i64), 1i64)); // 80
+        both(|| select(lt(3i64, 5i64), 100i64, 200i64)); // 100 (branchless)
+        both(|| select(lt(5i64, 3i64), 100i64, 200i64)); // 200
+                                                         // Control flow: `cf` blocks + block-argument phi via the AST's `IfThenElse`.
+        both(|| if_then_else(lt(2i64, 9i64), Const::<i64>::new(1), Const::<i64>::new(2))); // 1
+        both(|| if_then_else(lt(9i64, 2i64), Const::<i64>::new(1), Const::<i64>::new(2)));
+        // 2
     }
 }
