@@ -820,12 +820,24 @@ plain expression, a `call0` helper, a `call1` helper (storage-pointer arg), and 
 `while` loop in a helper. 16 feature-gated tests green; default 366 / clippy 27. **This is the
 project's endgame reached: one neutral AST, two real backends selectable at the public API.**
 
-**Remaining (Phase 4 polish).** Still scalar-only: slice/aggregate *parameters and returns* need
-`Ptr`-typed field loads on MLIR (the ABI unpack currently loads `I64`, fine for Cranelift and scalar
-MLIR). `as_fn().call(x)` for a bare `FunRef` entry uses the `func_addr`/`__main__` trampoline, which
-needs `func_addr` verified on MLIR (the tested path routes calls through `__main__` via `call`, not
-`func_addr`). Then point the existing `tests/{programs,p99,euler,extern_fn,abi}.rs` at both backends
-as a differential oracle, and decide the six-target CI story.
+**`as_fn()` / `func_addr` on MLIR — DONE.** `func_addr` (`func.constant`, a function-typed value)
+now casts to `llvm.ptr` via `builtin.unrealized_conversion_cast`, which the added
+`reconcile-unrealized-casts` pass resolves after `create_to_llvm` lowers `func.constant` to
+`llvm.mlir.addressof` (docs/llvm.md §7). So the `__main__` trampoline works: `compile(fun_ref)
+.as_fn().call(x)` runs on MLIR. A differential test drives the *scalar high-level API* on both
+backends via `as_fn` — `fun1`/`fun2`, and **recursion** (`fun1_rec` factorial: self-`call1` +
+`if_then_else`). 18 feature-gated tests green; default 366 / clippy 27. The scalar surface —
+expressions, operators/casts, `select`, `if_then_else`, `while` loops, internal calls, recursion,
+`run` and `as_fn` — is now proven identical on Cranelift and MLIR through the public API.
+
+**Remaining for full parity.** (1) **Slices/aggregates** as parameters/returns: the ABI unpack in
+`emit_function_body` loads the fat-pointer's data field and the aggregate pointer as `I64` (fine on
+Cranelift; on MLIR they must be `Ptr` so downstream `getelementptr`/loads type-check) — a
+cross-cutting change touching `emit_function_body` + `slice_data_ptr`/`slice_len` (the slice layout
+must agree the data field is `Ptr` everywhere). (2) Externs end-to-end on MLIR (`test_extern_fn`
+shapes). (3) Point the real `tests/{programs,p99,euler,extern_fn,abi}.rs` at *both* backends as a
+differential oracle — the goal being every high-level-API test runs on Cranelift and MLIR. (4) The
+six-target CI story.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI

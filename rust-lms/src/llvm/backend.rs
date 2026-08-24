@@ -762,7 +762,24 @@ impl<'c> Backend for MlirBackend<'c> {
             .collect();
         let fn_ty = FunctionType::new(self.context, &params, &results);
         let callee = FlatSymbolRefAttribute::new(self.context, &name);
-        self.emit_value(func::constant(self.context, callee, fn_ty, self.location))
+        let function_value =
+            self.emit_value(func::constant(self.context, callee, fn_ty, self.location));
+
+        // `func.constant` yields a *function-typed* value; the storage-pointer ABI needs the
+        // function's *address* as an `llvm.ptr`. Bridge with an unrealized conversion cast —
+        // `create_to_llvm` lowers `func.constant` to `llvm.mlir.addressof` (a real `ptr`) and
+        // reconciles the (now ptr→ptr) cast away.
+        let function_value = self.get(function_value);
+        let ptr_ty = llvm::r#type::pointer(self.context, 0);
+        let cast = melior::ir::operation::OperationBuilder::new(
+            "builtin.unrealized_conversion_cast",
+            self.location,
+        )
+        .add_operands(&[function_value])
+        .add_results(&[ptr_ty])
+        .build()
+        .expect("valid unrealized_conversion_cast");
+        self.emit_value(cast)
     }
     fn import_signature(&mut self, sig: &SigSpec) -> SigRefId {
         let id = SigRefId::from_u32(self.sigs.len() as u32);

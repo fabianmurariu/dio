@@ -164,6 +164,9 @@ fn jit_lookup(
     );
     let pass_manager = PassManager::new(context);
     pass_manager.add_pass(pass::conversion::create_to_llvm());
+    // Resolve the `builtin.unrealized_conversion_cast`s that `func_addr` inserts (function
+    // value → `llvm.ptr`) once `func.constant` has become `llvm.mlir.addressof` (docs/llvm.md §7).
+    pass_manager.add_pass(pass::conversion::create_reconcile_unrealized_casts());
     pass_manager
         .run(&mut module)
         .expect("lower to the LLVM dialect");
@@ -958,5 +961,67 @@ mod tests {
             });
             call1(sum, 10i64)
         }); // 45
+    }
+
+    #[test]
+    fn compile_with_llvm_as_fn_entry() {
+        // `as_fn().call(x)` goes through the `func_addr`/`__main__` trampoline: `__main__`
+        // returns the helper's address, which `as_fn` then calls with the storage-pointer ABI.
+        // This checks that `func.constant`/addressof yields a callable native address on MLIR.
+        use crate::func::{Compiler, JitBackend};
+        use crate::num::{add, mul};
+        use crate::staged::Var;
+
+        let mut c = Compiler::new().with_backend(JitBackend::Llvm);
+        let sq = c.fun1("sq", |_ctx, x: Var<i64>| mul(x, x));
+        let compiled = c.compile(sq).expect("llvm compile");
+        let f = compiled.as_fn();
+        assert_eq!(f.call(7), 49);
+        assert_eq!(f.call(-4), 16);
+
+        let mut c = Compiler::new().with_backend(JitBackend::Llvm);
+        let axpy = c.fun2("axpy", |_ctx, a: Var<i64>, b: Var<i64>| add(mul(a, b), b));
+        let compiled = c.compile(axpy).expect("llvm compile");
+        let g = compiled.as_fn();
+        assert_eq!(g.call(3, 5), 20); // 3*5 + 5
+    }
+
+    #[test]
+    fn differential_fun1_via_as_fn() {
+        // The high-level API on both backends: define a `fun1`, `compile().as_fn().call(x)`,
+        // and assert Cranelift == MLIR across arguments. `define` (a `fn`, Copy) runs on each.
+        use crate::control::if_then_else;
+        use crate::func::{call1, Compiler, FunRef1, JitBackend};
+        use crate::num::{lt, mul, sub};
+        use crate::staged::{Const, Var};
+
+        fn both1(define: fn(&mut Compiler) -> FunRef1<i64, i64>, args: &[i64]) {
+            for &x in args {
+                let cranelift = {
+                    let mut c = Compiler::new();
+                    let f = define(&mut c);
+                    c.compile(f).expect("cranelift").as_fn().call(x)
+                };
+                let llvm = {
+                    let mut c = Compiler::new().with_backend(JitBackend::Llvm);
+                    let f = define(&mut c);
+                    c.compile(f).expect("llvm").as_fn().call(x)
+                };
+                assert_eq!(cranelift, llvm, "divergence at x={x}");
+            }
+        }
+
+        both1(|c| c.fun1("sq", |_ctx, x: Var<i64>| mul(x, x)), &[-4, 0, 5, 1000]);
+
+        // Recursion: factorial via `fun1_rec` (self-call through `call1`) + `if_then_else`
+        // — exercises internal calls and control flow together on both backends.
+        both1(
+            |c| {
+                c.fun1_rec("fact", |f, _ctx, n: Var<i64>| {
+                    if_then_else(lt(n, 2), Const::<i64>::new(1), mul(n, call1(f, sub(n, 1i64))))
+                })
+            },
+            &[0, 1, 2, 5, 10],
+        );
     }
 }
