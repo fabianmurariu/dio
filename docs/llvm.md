@@ -770,6 +770,13 @@ block-argument phi *through the AST*). 12 feature-gated tests green; default bui
 clippy 27. This is the project's thesis made executable: one neutral AST, two backends,
 identical output.
 
+**Differential proof extended to imperative bodies + loops — DONE.** `jit_eval_ctx_i64` runs
+a `fun0`-style imperative [`Ctx`] body (via `Ctx::new`/`into_body`) through `MlirBackend`, and a
+second differential test asserts Cranelift == MLIR for bodies using **mutable locals + `while`
+loops** (`sum 0..10 == 45`, `6! == 720`). This exercises the §5 machinery *through the real AST*:
+entry-block `alloca` variables, `cf` loop blocks, and mem2reg promotion — the part the spike
+flagged as the hardest. 13 feature-gated tests green; default 366 / clippy 27.
+
 **Next up — the MLIR `compile()` driver + `Module`/`Executable` abstraction.** The one thing
 still keeping the *parameterized* AST on Cranelift: `func::compile()` hard-codes
 `JITModule`/`FunctionBuilder` and the storage-pointer **parameter** ABI (raw `builder.ins()`

@@ -22,9 +22,11 @@
 //!   control flow, and id-based calls/externs). The MLIR analogue of `CraneliftBackend`.
 //! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end over a `(i64) -> i64` body
 //!   (straight-line *or* with loops/branches).
-//! - [`jit_eval_nullary_i64`] — runs the **neutral AST** `Staged::codegen` over a
-//!   `CompilationContext` backed by `MlirBackend`; the differential test uses it to assert
-//!   the same `Staged` graph produces identical results on Cranelift and MLIR.
+//! - [`jit_eval_nullary_i64`] / [`jit_eval_ctx_i64`] — run the **neutral AST**
+//!   `Staged::codegen` over a `CompilationContext` backed by `MlirBackend`: the first for a
+//!   plain expression, the second for an imperative [`Ctx`] body (mutable locals + `while`
+//!   loops). The differential tests use them to assert the same AST produces identical
+//!   results on Cranelift and MLIR — including the §5 variable/`cf`-loop/mem2reg path.
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
@@ -52,6 +54,7 @@ use melior::{Context, ExecutionEngine};
 
 use std::collections::HashMap;
 
+use crate::func::Ctx;
 use crate::staged::{CompilationContext, Staged, ValueId};
 use crate::types::ScalarType;
 
@@ -217,6 +220,27 @@ pub fn jit_run_i64_unary(
 /// Nullary (no parameters) sidesteps the storage-pointer parameter ABI, which still lives in
 /// the Cranelift-specific `compile()` driver (its abstraction is the next step).
 pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
+    run_kernel_over_mlir(|ctx| expr.codegen(ctx))
+}
+
+/// Compile and run a **nullary imperative `Ctx` body** (`Out = i64`) through the MLIR
+/// backend — the [`Ctx`] form used by `fun0`, exercising `ctx.var`/`store`/`while_loop`/
+/// `if_then` (i.e. the §5 variable + `cf`-loop machinery) *through the real AST* rather than
+/// hand-built `MlirBackend` calls. Var ids start at 0, matching a fresh `Compiler`.
+pub fn jit_eval_ctx_i64<R, F>(build: F) -> i64
+where
+    F: FnOnce(&mut Ctx) -> R,
+    R: Staged<Out = i64> + 'static,
+{
+    let mut builder = Ctx::new(0);
+    let ret = build(&mut builder);
+    let body = builder.into_body(ret);
+    run_kernel_over_mlir(|ctx| body(ctx))
+}
+
+/// Shared tail: build a nullary `() -> i64` kernel whose body is `emit_body` (run against a
+/// [`CompilationContext`] backed by [`MlirBackend`]), JIT it, and run it.
+fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> ValueId) -> i64 {
     let context = make_context();
     let mut backend = MlirBackend::new(&context, Vec::new());
 
@@ -230,7 +254,7 @@ pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
             unit_value: None,
             loop_exit_stack: Vec::new(),
         };
-        expr.codegen(&mut ctx)
+        emit_body(&mut ctx)
     };
     backend.ret(Some(result));
     let module = backend.into_module("kernel", &[ScalarType::I64]);
@@ -554,5 +578,52 @@ mod tests {
         both(|| int_cast::<i64, i32, _>(int_cast::<i32, i64, _>(0x1_0000_0007i64))); // 7
         both(|| int_cast::<i64, i32, _>(int_cast::<i32, i64, _>(0x1_FFFF_FFFFi64)));
         // -1
+    }
+
+    #[test]
+    fn differential_imperative_ctx_matches_cranelift() {
+        // The §5 payoff: imperative `Ctx` bodies — mutable locals + `while` loops — lowered
+        // *through the real AST* to entry-block alloca / `cf` loops / mem2reg on MLIR, and
+        // asserted identical to Cranelift. `fn` bodies (Copy) run on both backends.
+        use crate::func::{call0, Compiler};
+        use crate::num::{add, lt, mul};
+        use crate::staged::Var;
+
+        fn both<R: Staged<Out = i64> + 'static>(build: fn(&mut Ctx) -> R) {
+            let cranelift = {
+                let mut c = Compiler::new();
+                let f = c.fun0("k", build);
+                c.compile(call0(f)).expect("cranelift compile").run()
+            };
+            let mlir = jit_eval_ctx_i64(build);
+            assert_eq!(
+                cranelift, mlir,
+                "Cranelift/MLIR divergence (imperative Ctx)"
+            );
+        }
+
+        // sum 0..10 == 45, via a mutable accumulator + induction var over a `while` loop.
+        fn sum_to_ten(ctx: &mut Ctx) -> Var<i64> {
+            let acc = ctx.var(0i64);
+            let i = ctx.var(0i64);
+            ctx.while_loop(lt(i, 10i64), move |ctx| {
+                ctx.store(acc, add(acc, i));
+                ctx.store(i, add(i, 1i64));
+            });
+            acc
+        }
+        both(sum_to_ten);
+
+        // 6! == 720, a multiply-accumulate loop.
+        fn factorial_six(ctx: &mut Ctx) -> Var<i64> {
+            let acc = ctx.var(1i64);
+            let i = ctx.var(1i64);
+            ctx.while_loop(lt(i, 7i64), move |ctx| {
+                ctx.store(acc, mul(acc, i));
+                ctx.store(i, add(i, 1i64));
+            });
+            acc
+        }
+        both(factorial_six);
     }
 }
