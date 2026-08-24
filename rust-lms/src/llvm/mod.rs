@@ -22,12 +22,14 @@
 //!   control flow, and id-based calls/externs). The MLIR analogue of `CraneliftBackend`.
 //! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end over a `(i64) -> i64` body
 //!   (straight-line *or* with loops/branches).
-//! - [`jit_eval_nullary_i64`] / [`jit_eval_ctx_i64`] / [`jit_eval_ctx_unary_i64`] — run the
-//!   **neutral AST** `Staged::codegen` over a `CompilationContext` backed by `MlirBackend`:
-//!   a plain expression, an imperative [`Ctx`] body (locals + `while` loops), and a
-//!   *parameterized* `fun1` body respectively. The differential tests use them to assert the
-//!   same AST produces identical results on Cranelift and MLIR — expressions, the §5
-//!   variable/`cf`-loop/mem2reg path, and parameterized functions (incl. data-dependent loops).
+//! - [`assemble`] — the MLIR half of `func::compile`: builds `__main__` + the helper functions
+//!   (each via the *shared neutral* `emit_function_body` under the storage-pointer ABI),
+//!   assembles them into one module, JITs, and returns an [`MlirExecutable`] + the `__main__`
+//!   pointer. This is what `Compiler::with_backend(JitBackend::Llvm).compile(..)` routes to —
+//!   the public API running the neutral AST through MLIR, differential-tested against Cranelift.
+//! - [`jit_eval_nullary_i64`] / [`jit_eval_ctx_i64`] / [`jit_eval_ctx_unary_i64`] — earlier
+//!   lower-level drivers that run `Staged::codegen` over an `MlirBackend`-backed context; kept
+//!   as focused differential tests for expressions, the §5 loop/mem2reg path, and `fun1` bodies.
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
@@ -46,7 +48,7 @@ pub use backend::MlirBackend;
 use melior::dialect::{arith, func, DialectRegistry};
 use melior::ir::attribute::{IntegerAttribute, StringAttribute, TypeAttribute};
 use melior::ir::block::BlockLike;
-use melior::ir::operation::OperationLike;
+use melior::ir::operation::{Operation, OperationLike};
 use melior::ir::r#type::{FunctionType, IntegerType};
 use melior::ir::{Block, Location, Module, Region, RegionLike, Type};
 use melior::pass::{self, PassManager};
@@ -55,7 +57,7 @@ use melior::{Context, ExecutionEngine};
 
 use std::collections::HashMap;
 
-use crate::func::Ctx;
+use crate::func::{CompileError, Ctx, ExternFnDef, FunDef, TypeInfo};
 use crate::staged::{Backend, CompilationContext, Staged, ValueId, Var};
 use crate::types::ScalarType;
 
@@ -319,6 +321,146 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
     let output = kernel();
     drop(engine);
     output
+}
+
+/// A JIT-compiled MLIR module and the resources that keep its native code alive: the
+/// `ExecutionEngine` (owns the executable memory) and the `Context` it was built in.
+/// Dropped in declaration order — engine first, then context — when the owning `Compiled`
+/// is dropped. **Thread-affine:** melior's `ExecutionEngine` is `!Send + !Sync` (docs/llvm.md
+/// §9), so an LLVM-compiled `Compiled` is too.
+pub(crate) struct MlirExecutable {
+    _engine: ExecutionEngine,
+    _context: Context,
+}
+
+/// Assemble a whole compilation — the `functions` (helpers) plus `__main__` — into one MLIR
+/// module and JIT it, returning the executable and the native `__main__` pointer.
+///
+/// This is the MLIR counterpart of the Cranelift shell in `func::compile`: each function is
+/// built with the uniform storage-pointer ABI (`N+1` `llvm.ptr` params, `void` return) via
+/// the *shared, neutral* [`crate::func::emit_function_body`], so the AST lowers identically to
+/// the Cranelift path. Internal/extern references resolve through id-aligned symbol tables
+/// pre-registered on each backend; extern host addresses are bound by symbol at JIT time.
+pub(crate) fn assemble(
+    functions: Vec<Option<FunDef>>,
+    externs: &[ExternFnDef],
+    main_return_info: &TypeInfo,
+    main_body: impl FnOnce(&mut CompilationContext) -> ValueId,
+) -> Result<(MlirExecutable, *const u8), CompileError> {
+    let context = make_context();
+
+    // Id-aligned metadata so a body's `declare_func(id)`/`declare_extern_func(id)` resolves to
+    // the right symbol (the storage-pointer ABI: every callee is `(ptr, …) -> void`).
+    let internal_meta: Vec<Option<(String, usize)>> = functions
+        .iter()
+        .map(|f| f.as_ref().map(|d| (d.name.clone(), d.param_infos.len())))
+        .collect();
+    let extern_meta: Vec<(String, usize)> = externs
+        .iter()
+        .map(|e| (e.name.clone(), e.num_params))
+        .collect();
+
+    let mut ops = Vec::new();
+    for def in functions.into_iter().flatten() {
+        let (op, _) = build_function(
+            &context,
+            &def.name,
+            &def.param_infos,
+            &def.param_var_ids,
+            def.body,
+            &def.return_info,
+            &internal_meta,
+            &extern_meta,
+        );
+        ops.push(op);
+    }
+    // `__main__` is a zero-argument function under the same ABI (one output pointer). Every
+    // backend registers all externs, so its declaration set is the full one the module needs.
+    let (main_op, extern_decls) = build_function(
+        &context,
+        "__main__",
+        &[],
+        &[],
+        main_body,
+        main_return_info,
+        &internal_meta,
+        &extern_meta,
+    );
+    ops.push(main_op);
+
+    let module = backend::assemble_module(&context, ops, &extern_decls);
+    let symbols: Vec<(&str, *const u8)> = externs
+        .iter()
+        .map(|e| (e.name.as_str(), e.fn_ptr))
+        .collect();
+    let (engine, pointer) = jit_lookup(&context, module, "__main__", &symbols);
+    Ok((
+        MlirExecutable {
+            _engine: engine,
+            _context: context,
+        },
+        pointer as *const u8,
+    ))
+}
+
+/// Build one function body (`name`) into a `func.func` op under the storage-pointer ABI:
+/// `N+1` `llvm.ptr` params, `void` return, body emitted by the shared neutral
+/// [`crate::func::emit_function_body`]. `internal_meta`/`extern_meta` are pre-registered
+/// id-aligned so the body's calls resolve to symbols.
+#[allow(clippy::too_many_arguments)]
+fn build_function<'c>(
+    context: &'c Context,
+    name: &str,
+    param_infos: &[TypeInfo],
+    param_var_ids: &[usize],
+    body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    return_info: &TypeInfo,
+    internal_meta: &[Option<(String, usize)>],
+    extern_meta: &[(String, usize)],
+) -> (Operation<'c>, Vec<backend::FuncDecl>) {
+    let num_params = param_infos.len();
+    let ptr_ty = scalar_to_mlir(context, ScalarType::Ptr);
+    let mut mlir = MlirBackend::new(context, vec![ptr_ty; num_params + 1]);
+
+    // Register internal functions id-aligned (placeholder for undefined slots) and externs.
+    for meta in internal_meta {
+        match meta {
+            Some((callee_name, callee_params)) => {
+                let sig = vec![ScalarType::Ptr; callee_params + 1];
+                mlir.declare_internal_func(callee_name, &sig, None);
+            }
+            None => {
+                mlir.declare_internal_func("__undefined__", &[], None);
+            }
+        }
+    }
+    for (extern_name, extern_params) in extern_meta {
+        let sig = vec![ScalarType::Ptr; extern_params + 1];
+        mlir.declare_extern(extern_name, &sig, None);
+    }
+
+    let params: Vec<ValueId> = (0..=num_params).map(|i| mlir.param(i)).collect();
+    {
+        let mut var_map = HashMap::new();
+        let mut slice_vars = HashMap::new();
+        let mut ctx = CompilationContext {
+            backend: &mut mlir,
+            var_map: &mut var_map,
+            slice_vars: &mut slice_vars,
+            unit_value: None,
+            loop_exit_stack: Vec::new(),
+        };
+        crate::func::emit_function_body(
+            &mut ctx,
+            &params,
+            param_infos,
+            param_var_ids,
+            body,
+            return_info,
+        );
+    }
+    mlir.ret(None);
+    mlir.into_function_op(name, &[])
 }
 
 #[cfg(test)]
@@ -759,5 +901,62 @@ mod tests {
         assert_eq!(quad(5), 20);
         assert_eq!(quad(-3), -12);
         drop(engine);
+    }
+
+    #[test]
+    fn compile_with_llvm_matches_cranelift() {
+        // The capstone: the *real* public API — `Compiler::with_backend(Llvm).compile(expr)
+        // .run()` — routed through MLIR, differential-tested against Cranelift. `setup`
+        // defines any helper functions on the compiler and returns the top-level expression;
+        // it runs once per backend.
+        use crate::func::{call0, call1, Compiler, JitBackend};
+        use crate::num::{add, lt, mul};
+        use crate::staged::{Const, Var};
+
+        fn both<S: Staged<Out = i64> + 'static>(setup: impl Fn(&mut Compiler) -> S) {
+            let cranelift = {
+                let mut c = Compiler::new();
+                let expr = setup(&mut c);
+                c.compile(expr).expect("cranelift compile").run()
+            };
+            let llvm = {
+                let mut c = Compiler::new().with_backend(JitBackend::Llvm);
+                let expr = setup(&mut c);
+                c.compile(expr).expect("llvm compile").run()
+            };
+            assert_eq!(
+                cranelift, llvm,
+                "Cranelift/MLIR divergence via compile().run()"
+            );
+        }
+
+        // A plain top-level expression (`__main__` only).
+        both(|_c| add(mul(6i64, 7i64), 1i64)); // 43
+
+        // A nullary helper called from `__main__` (internal call).
+        both(|c| {
+            let f = c.fun0("answer", |_ctx| Const::<i64>::new(42));
+            call0(f)
+        });
+
+        // A unary helper (storage-pointer arg + output).
+        both(|c| {
+            let sq = c.fun1("sq", |_ctx, x: Var<i64>| mul(x, x));
+            call1(sq, 7i64)
+        }); // 49
+
+        // A helper containing a data-dependent `while` loop.
+        both(|c| {
+            let sum = c.fun1("sum_to", |ctx, n: Var<i64>| {
+                let acc = ctx.var(0i64);
+                let i = ctx.var(0i64);
+                ctx.while_loop(lt(i, n), move |ctx| {
+                    ctx.store(acc, add(acc, i));
+                    ctx.store(i, add(i, 1i64));
+                });
+                acc
+            });
+            call1(sum, 10i64)
+        }); // 45
     }
 }

@@ -578,7 +578,7 @@ pub(crate) struct ExternFnDef {
 /// Every step goes through the neutral [`Backend`](crate::staged::Backend) ops on `ctx`, so
 /// the same code drives Cranelift and MLIR; the caller supplies the (backend-specific)
 /// function entry and terminating `return`.
-fn emit_function_body(
+pub(crate) fn emit_function_body(
     ctx: &mut CompilationContext,
     params: &[ValueId],
     param_infos: &[TypeInfo],
@@ -638,6 +638,17 @@ fn emit_function_body(
 /// `Compiler` owns all function definitions and variable IDs. It provides
 /// methods to create functions and variables, and to compile expressions
 /// to native code.
+/// Which code-generation backend [`Compiler::compile`] targets.
+///
+/// Cranelift is the default (pure-Rust, fast compile). `Llvm` (behind `--features llvm`)
+/// JITs through MLIR — same neutral AST, harder optimization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JitBackend {
+    Cranelift,
+    #[cfg(feature = "llvm")]
+    Llvm,
+}
+
 pub struct Compiler<'a> {
     /// Function definitions indexed by ID
     functions: Vec<Option<FunDef>>,
@@ -645,6 +656,8 @@ pub struct Compiler<'a> {
     extern_functions: Vec<ExternFnDef>,
     /// Next variable ID to assign
     next_var_id: usize,
+    /// Code-generation backend `compile` targets.
+    backend: JitBackend,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -655,14 +668,21 @@ impl<'a> Default for Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    /// Create a new compiler
+    /// Create a new compiler (targeting the default Cranelift backend).
     pub fn new() -> Self {
         Compiler {
             functions: Vec::new(),
             extern_functions: Vec::new(),
             next_var_id: 0,
+            backend: JitBackend::Cranelift,
             _marker: PhantomData,
         }
+    }
+
+    /// Select the code-generation backend (builder style). See [`JitBackend`].
+    pub fn with_backend(mut self, backend: JitBackend) -> Self {
+        self.backend = backend;
+        self
     }
 
     /// Register an external function and get a handle to call it.
@@ -1093,7 +1113,35 @@ impl<'a> Compiler<'a> {
     /// Generated functions use one storage pointer per logical parameter and
     /// one caller-owned output pointer. This keeps aggregate classification out
     /// of the private JIT ABI.
+    /// Compile the top-level expression to native code via the selected [`JitBackend`].
     pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+        match self.backend {
+            JitBackend::Cranelift => self.compile_cranelift(expr),
+            #[cfg(feature = "llvm")]
+            JitBackend::Llvm => self.compile_llvm(expr),
+        }
+    }
+
+    /// Compile through the MLIR backend: build `__main__` (from `expr`) alongside the
+    /// helper functions and JIT the module. The result reuses the same [`Compiled`]/`run`/
+    /// `as_fn` machinery as Cranelift — only the `Executable` resource differs.
+    #[cfg(feature = "llvm")]
+    fn compile_llvm<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+        let return_info = TypeInfo::from_staged_type::<S::Out>();
+        let (executable, main_ptr) = crate::llvm::assemble(
+            self.functions,
+            &self.extern_functions,
+            &return_info,
+            move |ctx| expr.codegen(ctx),
+        )?;
+        Ok(Compiled {
+            executable: Some(Executable::Mlir(executable)),
+            main_ptr,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -1336,7 +1384,7 @@ impl<'a> Compiler<'a> {
         let main_ptr = module.get_finalized_function(main_func_id);
 
         Ok(Compiled {
-            module: Some(module),
+            executable: Some(Executable::Cranelift(module)),
             main_ptr,
             _phantom: PhantomData,
         })
@@ -1375,18 +1423,29 @@ impl std::error::Error for CompileError {}
 /// methods for a compiled staged function. Executable memory is reclaimed when
 /// this value is dropped.
 pub struct Compiled<'a, T: StagedType> {
-    module: Option<JITModule>,
+    executable: Option<Executable>,
     main_ptr: *const u8,
     _phantom: PhantomData<&'a T>,
 }
 
+/// The backend-specific JIT resource a [`Compiled`] owns and frees on drop. `main_ptr`
+/// points into whichever variant is live; keeping the resource here keeps it valid.
+enum Executable {
+    Cranelift(JITModule),
+    #[cfg(feature = "llvm")]
+    Mlir(crate::llvm::MlirExecutable),
+}
+
 impl<'a, T: StagedType> Drop for Compiled<'a, T> {
     fn drop(&mut self) {
-        if let Some(module) = self.module.take() {
-            // SAFETY: safe entry points borrow this Compiled value, so no safe
-            // callable can remain when Drop obtains exclusive access. Escaped
-            // pointers are governed by `as_fn_unchecked`'s safety contract.
-            unsafe { module.free_memory() };
+        // SAFETY: safe entry points borrow this Compiled value, so no safe callable can
+        // remain when Drop obtains exclusive access. Escaped pointers are governed by
+        // `as_fn_unchecked`'s safety contract.
+        match self.executable.take() {
+            Some(Executable::Cranelift(module)) => unsafe { module.free_memory() },
+            #[cfg(feature = "llvm")]
+            Some(Executable::Mlir(executable)) => drop(executable),
+            None => {}
         }
     }
 }

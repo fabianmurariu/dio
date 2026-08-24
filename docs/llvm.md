@@ -806,17 +806,26 @@ one module and runs `quad` through the JIT. This is the last missing *capability
 `compile()` (whose output is helper functions alongside `__main__`, some calling others). 15
 feature-gated tests green; default 366 / clippy 27.
 
-**Next up — the MLIR assembler + `Compiler::with_backend`.** All the pieces now exist: the neutral
-`emit_function_body` (per-function assembly, reused verbatim), `into_function_op`/`assemble_module`
-(multi-function), `declare_func`/`call` (internal calls), and the storage-pointer ABI expressible
-through the trait. The remaining glue is one function — `crate::llvm::assemble(functions, externs,
-entry) -> Executable`: for each `FunDef` build an `MlirBackend` with `N+1` `llvm.ptr` params, run
-`emit_function_body`, `into_function_op`; `assemble_module`; register extern symbols; lower; JIT;
-resolve the entry by symbol (sidestepping the `func_addr`/`__main__` trampoline). Then make
-`Compiled` backend-neutral (enum over `JITModule` | MLIR engine, the latter `!Send+!Sync`) and add
-`Compiler::with_backend(Cranelift | Llvm)`. That collapses the bespoke `jit_eval_*` drivers into one
-path and extends differential coverage to the full `tests/{programs,p99,euler,extern_fn,abi}.rs`
-(Phase 4); slices/aggregates come after scalars.
+**`Compiler::with_backend(Llvm)` — the real routing — DONE.** `compile()` now dispatches on a
+`JitBackend` selector: the Cranelift shell moved to `compile_cranelift`, and `compile_llvm` builds
+`__main__` (from the top expression) alongside the helper functions and hands them to
+`crate::llvm::assemble`. That assembler builds each function with the storage-pointer ABI (`N+1`
+`llvm.ptr` params, `void` return) through the **shared neutral `emit_function_body`** — the exact
+code the Cranelift path runs — resolving internal/extern calls via id-aligned symbol tables,
+`assemble_module` + `register_symbol` + JIT, and looks up `__main__`. `Compiled` is now backend-
+neutral (`Executable` enum over `JITModule` | `MlirExecutable`; the MLIR one owns engine+context and
+is `!Send+!Sync`, §9). A capstone differential test runs the *public API*
+`Compiler::with_backend(Llvm).compile(expr).run()` against Cranelift and asserts equality for a
+plain expression, a `call0` helper, a `call1` helper (storage-pointer arg), and a data-dependent
+`while` loop in a helper. 16 feature-gated tests green; default 366 / clippy 27. **This is the
+project's endgame reached: one neutral AST, two real backends selectable at the public API.**
+
+**Remaining (Phase 4 polish).** Still scalar-only: slice/aggregate *parameters and returns* need
+`Ptr`-typed field loads on MLIR (the ABI unpack currently loads `I64`, fine for Cranelift and scalar
+MLIR). `as_fn().call(x)` for a bare `FunRef` entry uses the `func_addr`/`__main__` trampoline, which
+needs `func_addr` verified on MLIR (the tested path routes calls through `__main__` via `call`, not
+`func_addr`). Then point the existing `tests/{programs,p99,euler,extern_fn,abi}.rs` at both backends
+as a differential oracle, and decide the six-target CI story.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
