@@ -22,11 +22,12 @@
 //!   control flow, and id-based calls/externs). The MLIR analogue of `CraneliftBackend`.
 //! - [`jit_run_i64_unary`] — drives `MlirBackend` end to end over a `(i64) -> i64` body
 //!   (straight-line *or* with loops/branches).
-//! - [`jit_eval_nullary_i64`] / [`jit_eval_ctx_i64`] — run the **neutral AST**
-//!   `Staged::codegen` over a `CompilationContext` backed by `MlirBackend`: the first for a
-//!   plain expression, the second for an imperative [`Ctx`] body (mutable locals + `while`
-//!   loops). The differential tests use them to assert the same AST produces identical
-//!   results on Cranelift and MLIR — including the §5 variable/`cf`-loop/mem2reg path.
+//! - [`jit_eval_nullary_i64`] / [`jit_eval_ctx_i64`] / [`jit_eval_ctx_unary_i64`] — run the
+//!   **neutral AST** `Staged::codegen` over a `CompilationContext` backed by `MlirBackend`:
+//!   a plain expression, an imperative [`Ctx`] body (locals + `while` loops), and a
+//!   *parameterized* `fun1` body respectively. The differential tests use them to assert the
+//!   same AST produces identical results on Cranelift and MLIR — expressions, the §5
+//!   variable/`cf`-loop/mem2reg path, and parameterized functions (incl. data-dependent loops).
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
@@ -55,7 +56,7 @@ use melior::{Context, ExecutionEngine};
 use std::collections::HashMap;
 
 use crate::func::Ctx;
-use crate::staged::{CompilationContext, Staged, ValueId};
+use crate::staged::{Backend, CompilationContext, Staged, ValueId, Var};
 use crate::types::ScalarType;
 
 /// The optimization level passed to `ExecutionEngine`. Must be ≥ 2 so LLVM's own
@@ -236,6 +237,58 @@ where
     let ret = build(&mut builder);
     let body = builder.into_body(ret);
     run_kernel_over_mlir(|ctx| body(ctx))
+}
+
+/// Compile and run a **unary** `fun1`-style imperative body (`(i64) -> i64`) through the MLIR
+/// backend, and call it with `arg`. Mirrors `make_fun1`'s var-id assignment (param = id 0,
+/// body locals start at id 1) so the body's `Var`s resolve identically to the Cranelift path.
+///
+/// A direct scalar ABI (param passed by value, stored into a variable) — this sidesteps the
+/// full storage-pointer parameter ABI in `compile()` while still exercising the *parameterized*
+/// AST end to end on MLIR. Powers the parameterized differential tests.
+pub fn jit_eval_ctx_unary_i64<R, F>(build: F, arg: i64) -> i64
+where
+    F: FnOnce(&mut Ctx, Var<i64>) -> R,
+    R: Staged<Out = i64> + 'static,
+{
+    // Mirror `make_fun1`: the parameter takes var id 0; body locals start at id 1.
+    let param = Var::<i64>::new(0);
+    let param_id = param.id;
+    let mut builder = Ctx::new(1);
+    let ret = build(&mut builder, param);
+    let body = builder.into_body(ret);
+
+    let context = make_context();
+    let i64_ty = scalar_to_mlir(&context, ScalarType::I64);
+    let mut backend = MlirBackend::new(&context, vec![i64_ty]);
+
+    // Store the incoming argument into the parameter's variable slot, then map its var id.
+    let incoming = backend.param(0);
+    let param_var = backend.declare_var(ScalarType::I64);
+    backend.def_var(param_var, incoming);
+
+    let mut var_map = HashMap::new();
+    var_map.insert(param_id, param_var);
+    let mut slice_vars = HashMap::new();
+    let result = {
+        let mut ctx = CompilationContext {
+            backend: &mut backend,
+            var_map: &mut var_map,
+            slice_vars: &mut slice_vars,
+            unit_value: None,
+            loop_exit_stack: Vec::new(),
+        };
+        body(&mut ctx)
+    };
+    backend.ret(Some(result));
+    let module = backend.into_module("kernel", &[ScalarType::I64]);
+
+    let (engine, pointer) = jit_lookup(&context, module, "kernel", &[]);
+    // SAFETY: emitted with the `(i64) -> i64` signature; `engine` owns the executable memory.
+    let kernel: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(pointer) };
+    let output = kernel(arg);
+    drop(engine);
+    output
 }
 
 /// Shared tail: build a nullary `() -> i64` kernel whose body is `emit_body` (run against a
@@ -625,5 +678,50 @@ mod tests {
             acc
         }
         both(factorial_six);
+    }
+
+    #[test]
+    fn differential_unary_param_matches_cranelift() {
+        // Parameterized functions: the same `fun1` body compiled through Cranelift
+        // (`compile(f).as_fn().call(x)`) and MLIR (`jit_eval_ctx_unary_i64`), asserted equal
+        // across arguments. Covers a pure expression, a polynomial, and a `while` loop whose
+        // bound is the *parameter* (data-dependent iteration count).
+        use crate::func::Compiler;
+        use crate::num::{add, lt, mul};
+        use crate::staged::Var;
+
+        fn both<R: Staged<Out = i64> + 'static>(build: fn(&mut Ctx, Var<i64>) -> R, args: &[i64]) {
+            for &x in args {
+                let cranelift = {
+                    let mut c = Compiler::new();
+                    let f = c.fun1("f", build);
+                    c.compile(f).expect("cranelift compile").as_fn().call(x)
+                };
+                let mlir = jit_eval_ctx_unary_i64(build, x);
+                assert_eq!(cranelift, mlir, "Cranelift/MLIR divergence at x={x}");
+            }
+        }
+
+        fn square(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> {
+            mul(x, x)
+        }
+        both(square, &[-3, 0, 5, 1000]);
+
+        fn poly(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> {
+            add(mul(x, 3i64), 7i64)
+        }
+        both(poly, &[-4, 0, 5, 100]);
+
+        // sum 0..x — the loop trip count is the parameter (data-dependent control flow).
+        fn sum_to_x(ctx: &mut Ctx, x: Var<i64>) -> Var<i64> {
+            let acc = ctx.var(0i64);
+            let i = ctx.var(0i64);
+            ctx.while_loop(lt(i, x), move |ctx| {
+                ctx.store(acc, add(acc, i));
+                ctx.store(i, add(i, 1i64));
+            });
+            acc
+        }
+        both(sum_to_x, &[0, 1, 5, 10, 50]);
     }
 }

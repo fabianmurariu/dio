@@ -777,14 +777,27 @@ loops** (`sum 0..10 == 45`, `6! == 720`). This exercises the §5 machinery *thro
 entry-block `alloca` variables, `cf` loop blocks, and mem2reg promotion — the part the spike
 flagged as the hardest. 13 feature-gated tests green; default 366 / clippy 27.
 
-**Next up — the MLIR `compile()` driver + `Module`/`Executable` abstraction.** The one thing
-still keeping the *parameterized* AST on Cranelift: `func::compile()` hard-codes
-`JITModule`/`FunctionBuilder` and the storage-pointer **parameter** ABI (raw `builder.ins()`
-param-unpacking). Abstract the module/JIT lifecycle (declare/define functions via a
-`&mut dyn Backend`, register externs, finalize → an `Executable` that owns the JIT memory) so
-`compile()` can drive either backend, then route it — extending the differential tests from
-nullary to the full parameterized `tests/{programs,p99,euler,extern_fn,abi}.rs` and unlocking
-Phase 4.
+**Differential proof extended to parameterized functions — DONE.** `jit_eval_ctx_unary_i64`
+runs a `fun1`-style body through MLIR, mirroring `make_fun1`'s var-id assignment (param = id 0,
+locals from id 1) so the body's `Var`s resolve identically to the Cranelift path; the parameter
+arrives as a direct scalar block-arg stored into its variable slot (a direct-scalar ABI that
+sidesteps the storage-pointer *parameter* ABI while still driving the parameterized AST end to
+end). A third differential test asserts Cranelift (`compile(f).as_fn().call(x)`) == MLIR across
+arguments for a pure expression, a polynomial, and a `while` loop whose **trip count is the
+runtime argument** (data-dependent control flow). 14 feature-gated tests green; default 366 /
+clippy 27.
+
+**Next up — fold the MLIR path into `compile()` itself (`Module`/`Executable` + `with_backend`).**
+The neutral AST is now differential-proven on MLIR for nullary expressions, imperative loops,
+*and* parameterized scalar functions — via bespoke `jit_eval_*` drivers that reproduce
+`compile()`'s per-function setup. The remaining work makes this first-class rather than
+test-only: abstract `func::compile()`'s `JITModule`/`FunctionBuilder` lifecycle + the
+storage-pointer parameter ABI (raw `builder.ins()` param-unpacking) into a `Module`/`Executable`
+pair driven by `&mut dyn Backend` (the uniform storage-pointer ABI — all params/output are
+pointers + loads/stores — is expressible via the neutral trait), generalize past scalars
+(slices/aggregates/multi-arg), then expose `Compiler::with_backend(Cranelift | Llvm)`. That
+turns the bespoke drivers into one code path and extends differential coverage to the full
+`tests/{programs,p99,euler,extern_fn,abi}.rs` — Phase 4.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
