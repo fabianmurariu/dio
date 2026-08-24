@@ -798,14 +798,25 @@ only the Cranelift-specific *shell* remains inline in `compile()` — module cre
 is a behavior-preserving refactor gated by the full 366-test suite (still green, clippy 27); it's
 the seam the MLIR module lifecycle plugs into.
 
-**Next up — the module/JIT lifecycle (`Module`/`Executable`) + `with_backend`.** What's left is
-the Cranelift-specific shell: turn "create module → for each function: begin entry (N+1 pointer
-params) → run `emit_function_body` → return/finalize → get fn ptr" into a `Module`/`Executable`
-pair with a Cranelift impl (wraps `JITModule`) and an MLIR impl (`MlirBackend::into_function_op`
-appended to a shared `Module`, then `ExecutionEngine`). Route `compile()` through a chosen backend
-via `Compiler::with_backend(Cranelift | Llvm)`, generalize past scalars (slices/aggregates), and
-the bespoke `jit_eval_*` drivers collapse into one path — extending differential coverage to the
-full `tests/{programs,p99,euler,extern_fn,abi}.rs` (Phase 4).
+**Step 2 — multi-function MLIR modules — DONE.** `MlirBackend::into_function_op` finalizes a
+backend into a single `func.func` op (plus the externs it references), and `assemble_module`
+collects several ops + their extern declarations into one `Module`. A test builds `double(x)=2x`
+and `quad(x)=double(double(x))` — the latter resolving its callee via `declare_func`/`call` — into
+one module and runs `quad` through the JIT. This is the last missing *capability* for routing
+`compile()` (whose output is helper functions alongside `__main__`, some calling others). 15
+feature-gated tests green; default 366 / clippy 27.
+
+**Next up — the MLIR assembler + `Compiler::with_backend`.** All the pieces now exist: the neutral
+`emit_function_body` (per-function assembly, reused verbatim), `into_function_op`/`assemble_module`
+(multi-function), `declare_func`/`call` (internal calls), and the storage-pointer ABI expressible
+through the trait. The remaining glue is one function — `crate::llvm::assemble(functions, externs,
+entry) -> Executable`: for each `FunDef` build an `MlirBackend` with `N+1` `llvm.ptr` params, run
+`emit_function_body`, `into_function_op`; `assemble_module`; register extern symbols; lower; JIT;
+resolve the entry by symbol (sidestepping the `func_addr`/`__main__` trampoline). Then make
+`Compiled` backend-neutral (enum over `JITModule` | MLIR engine, the latter `!Send+!Sync`) and add
+`Compiler::with_backend(Cranelift | Llvm)`. That collapses the bespoke `jit_eval_*` drivers into one
+path and extends differential coverage to the full `tests/{programs,p99,euler,extern_fn,abi}.rs`
+(Phase 4); slices/aggregates come after scalars.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI

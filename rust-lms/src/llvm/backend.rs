@@ -66,7 +66,7 @@ fn float_predicate(cc: FloatCmp) -> CmpfPredicate {
 
 /// A function referenced by symbol name: its parameters and optional result. Used for
 /// externs, internal functions, and the resolved `FuncRefId` table.
-struct FuncDecl {
+pub(super) struct FuncDecl {
     name: String,
     params: Vec<ScalarType>,
     ret: Option<ScalarType>,
@@ -200,6 +200,25 @@ impl<'c> MlirBackend<'c> {
     /// to the function region in order. Referenced externs become `func.func private`
     /// declarations.
     pub fn into_module(self, name: &str, result_types: &[ScalarType]) -> Module<'c> {
+        let context = self.context;
+        let location = self.location;
+        let (function, externs) = self.into_function_op(name, result_types);
+
+        let module = Module::new(location);
+        emit_extern_declarations(context, &module, &externs);
+        module.body().append_operation(function);
+        module
+    }
+
+    /// Finalize this backend into a single `func.func` operation (terminating the entry
+    /// block's branch to the body). Returns the op plus the externs it references (which the
+    /// module assembler emits as `func.func private` declarations). This is the multi-function
+    /// building block: several ops share one [`Module`].
+    pub(super) fn into_function_op(
+        self,
+        name: &str,
+        result_types: &[ScalarType],
+    ) -> (Operation<'c>, Vec<FuncDecl>) {
         let MlirBackend {
             context,
             location,
@@ -209,26 +228,6 @@ impl<'c> MlirBackend<'c> {
             externs,
             ..
         } = self;
-
-        let module = Module::new(location);
-
-        for FuncDecl { name, params, ret } in &externs {
-            let params: Vec<Type> = params.iter().map(|t| scalar_to_mlir(context, *t)).collect();
-            let results: Vec<Type> = ret.iter().map(|t| scalar_to_mlir(context, *t)).collect();
-            let signature = FunctionType::new(context, &params, &results);
-            let declaration = func::func(
-                context,
-                StringAttribute::new(context, name),
-                TypeAttribute::new(signature.into()),
-                Region::new(), // empty region => external declaration
-                &[(
-                    Identifier::new(context, "sym_visibility"),
-                    StringAttribute::new(context, "private").into(),
-                )],
-                location,
-            );
-            module.body().append_operation(declaration);
-        }
 
         let results: Vec<Type> = result_types
             .iter()
@@ -252,8 +251,7 @@ impl<'c> MlirBackend<'c> {
             &[],
             location,
         );
-        module.body().append_operation(function);
-        module
+        (function, externs)
     }
 
     // ---- internal helpers ----
@@ -793,4 +791,48 @@ impl<'c> Backend for MlirBackend<'c> {
         self.func_refs.push(resolved);
         id
     }
+}
+
+/// Emit a module-level `func.func private` declaration for each referenced extern
+/// (deduplicated by name), so `func.call`s to them verify and can be bound by symbol.
+fn emit_extern_declarations(context: &Context, module: &Module, externs: &[FuncDecl]) {
+    let location = Location::unknown(context);
+    let mut seen = std::collections::HashSet::new();
+    for FuncDecl { name, params, ret } in externs {
+        if !seen.insert(name.as_str()) {
+            continue;
+        }
+        let params: Vec<Type> = params.iter().map(|t| scalar_to_mlir(context, *t)).collect();
+        let results: Vec<Type> = ret.iter().map(|t| scalar_to_mlir(context, *t)).collect();
+        let signature = FunctionType::new(context, &params, &results);
+        let declaration = func::func(
+            context,
+            StringAttribute::new(context, name),
+            TypeAttribute::new(signature.into()),
+            Region::new(), // empty region => external declaration
+            &[(
+                Identifier::new(context, "sym_visibility"),
+                StringAttribute::new(context, "private").into(),
+            )],
+            location,
+        );
+        module.body().append_operation(declaration);
+    }
+}
+
+/// Assemble several `func.func` operations (built by [`MlirBackend::into_function_op`]) into
+/// one [`Module`], emitting the union of their extern declarations. This is how a compilation
+/// with helper functions + `__main__` becomes a single JIT-able module.
+pub(super) fn assemble_module<'c>(
+    context: &'c Context,
+    functions: Vec<Operation<'c>>,
+    externs: &[FuncDecl],
+) -> Module<'c> {
+    let location = Location::unknown(context);
+    let module = Module::new(location);
+    emit_extern_declarations(context, &module, externs);
+    for function in functions {
+        module.body().append_operation(function);
+    }
+    module
 }

@@ -724,4 +724,40 @@ mod tests {
         }
         both(sum_to_x, &[0, 1, 5, 10, 50]);
     }
+
+    #[test]
+    fn multi_function_module_with_internal_call() {
+        // Two functions in one MLIR module: `double(x) = 2x` and `quad(x) = double(double(x))`,
+        // the latter resolving its callee via `declare_func`/`call`. This is the multi-function
+        // capability `compile()` needs (helper functions alongside `__main__`).
+        let context = make_context();
+
+        let double_op = {
+            let mut b = MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::I64)]);
+            let x = b.param(0);
+            let two = b.iconst(ScalarType::I64, 2);
+            let doubled = b.imul(x, two);
+            b.ret(Some(doubled));
+            b.into_function_op("double", &[ScalarType::I64]).0
+        };
+
+        let quad_op = {
+            let mut b = MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::I64)]);
+            let double_id =
+                b.declare_internal_func("double", &[ScalarType::I64], Some(ScalarType::I64));
+            let callee = b.declare_func(double_id);
+            let x = b.param(0);
+            let once = b.call(callee, &[x]).expect("i64 result");
+            let twice = b.call(callee, &[once]).expect("i64 result");
+            b.ret(Some(twice));
+            b.into_function_op("quad", &[ScalarType::I64]).0
+        };
+
+        let module = super::backend::assemble_module(&context, vec![double_op, quad_op], &[]);
+        let (engine, pointer) = jit_lookup(&context, module, "quad", &[]);
+        let quad: extern "C" fn(i64) -> i64 = unsafe { std::mem::transmute(pointer) };
+        assert_eq!(quad(5), 20);
+        assert_eq!(quad(-3), -12);
+        drop(engine);
+    }
 }
