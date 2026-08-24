@@ -42,3 +42,7 @@ either = {workspace = true}
 [[bench]]
 name = "filtered_sum_two_slices"
 harness = false
+
+[[bench]]
+name = "backends"
+harness = false

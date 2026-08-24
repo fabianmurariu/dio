@@ -1011,17 +1011,67 @@ mod tests {
             }
         }
 
-        both1(|c| c.fun1("sq", |_ctx, x: Var<i64>| mul(x, x)), &[-4, 0, 5, 1000]);
+        both1(
+            |c| c.fun1("sq", |_ctx, x: Var<i64>| mul(x, x)),
+            &[-4, 0, 5, 1000],
+        );
 
         // Recursion: factorial via `fun1_rec` (self-call through `call1`) + `if_then_else`
         // — exercises internal calls and control flow together on both backends.
         both1(
             |c| {
                 c.fun1_rec("fact", |f, _ctx, n: Var<i64>| {
-                    if_then_else(lt(n, 2), Const::<i64>::new(1), mul(n, call1(f, sub(n, 1i64))))
+                    if_then_else(
+                        lt(n, 2),
+                        Const::<i64>::new(1),
+                        mul(n, call1(f, sub(n, 1i64))),
+                    )
                 })
             },
             &[0, 1, 2, 5, 10],
         );
+    }
+
+    #[test]
+    fn differential_slice_sum() {
+        // A slice *parameter* (fat pointer) summed in a loop — the sql-gen columnar shape.
+        // Exercises the storage-pointer ABI unpacking a `(ptr, len)` and `getelementptr`-based
+        // element access on MLIR. Same kernel, both backends, identical result.
+        use crate::func::{Compiler, JitBackend};
+        use crate::num::{add, lt};
+        use crate::refer::SRef;
+        use crate::slice::{Slice, SliceRefOps};
+        use crate::staged::Var;
+
+        let data = [10i64, 20, 30, 40, 50, -5, 7];
+
+        let cranelift = {
+            let mut c = Compiler::new();
+            let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
+                let i = ctx.var(0u64);
+                let total = ctx.var(0i64);
+                ctx.while_loop(lt(i, arr.len()), move |ctx| {
+                    ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
+                    ctx.store(i, add(i, 1u64));
+                });
+                total
+            });
+            c.compile(sum).expect("cranelift").as_fn().call(&data[..])
+        };
+        let llvm = {
+            let mut c = Compiler::new().with_backend(JitBackend::Llvm);
+            let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
+                let i = ctx.var(0u64);
+                let total = ctx.var(0i64);
+                ctx.while_loop(lt(i, arr.len()), move |ctx| {
+                    ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
+                    ctx.store(i, add(i, 1u64));
+                });
+                total
+            });
+            c.compile(sum).expect("llvm").as_fn().call(&data[..])
+        };
+        assert_eq!(cranelift, 152);
+        assert_eq!(llvm, cranelift, "slice sum: Cranelift/MLIR divergence");
     }
 }

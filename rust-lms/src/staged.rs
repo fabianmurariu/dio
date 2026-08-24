@@ -356,9 +356,10 @@ impl<'c> CompilationContext<'c> {
                 return self.use_var(sv.ptr_var);
             }
         }
-        // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair.
+        // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair. Loaded as `Ptr`
+        // (identical to `I64` on Cranelift; an `llvm.ptr` on MLIR so pointer ops type-check).
         let slice_ptr = slice.codegen(self);
-        self.load(ScalarType::I64, slice_ptr, 0)
+        self.load(ScalarType::Ptr, slice_ptr, 0)
     }
 
     /// Resolve the length (`usize`) of a slice operand.
@@ -387,7 +388,7 @@ impl<'c> CompilationContext<'c> {
         }
 
         let slice_ptr = slice.codegen(self);
-        let data_ptr = self.load(ScalarType::I64, slice_ptr, 0);
+        let data_ptr = self.load(ScalarType::Ptr, slice_ptr, 0);
         let len = self.load(ScalarType::I64, slice_ptr, 8);
         (data_ptr, len)
     }

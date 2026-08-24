@@ -593,9 +593,10 @@ pub(crate) fn emit_function_body(
         if info.is_aggregate {
             if info.is_fat_pointer {
                 // A slice arrives as a `(ptr, len)` pair; keep both in register variables.
-                let ptr_value = ctx.load(ScalarType::I64, storage_ptr, 0);
+                // The data pointer is `Ptr` (an `llvm.ptr` on MLIR); `len` is `I64`.
+                let ptr_value = ctx.load(ScalarType::Ptr, storage_ptr, 0);
                 let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
-                let ptr_var = ctx.declare_var(ScalarType::I64);
+                let ptr_var = ctx.declare_var(ScalarType::Ptr);
                 let len_var = ctx.declare_var(ScalarType::I64);
                 ctx.def_var(ptr_var, ptr_value);
                 ctx.def_var(len_var, len_value);
@@ -603,7 +604,7 @@ pub(crate) fn emit_function_body(
                     .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
             }
             // Aggregates are represented by a pointer to their storage.
-            let param_var = ctx.declare_var(ScalarType::I64);
+            let param_var = ctx.declare_var(ScalarType::Ptr);
             ctx.def_var(param_var, storage_ptr);
             ctx.var_map.insert(var_id, param_var);
         } else {

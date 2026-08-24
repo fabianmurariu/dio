@@ -422,12 +422,25 @@ a `Bool` value, `brif`/`select` take one, and load/store of a `Bool` field inser
   runners, and a real onboarding cost. **Mitigation:** gate the entire MLIR backend
   behind `--features llvm` (off by default). The pure-Rust Cranelift build stays the
   default; `cargo build`/`test` are unaffected unless you opt in.
-- **Compile/JIT time (hypothesis).** LLVM is expected to JIT slower than Cranelift and
-  to optimize harder, positioning LLVM as the "optimize hard, run many times" mode and
-  Cranelift as the "compile fast" default — but the magnitude ("seconds vs
-  milliseconds") is a guess until measured on real kernels. Expose the choice
-  per-`Compiler`, not globally, and benchmark both compile latency and steady-state
-  execution before publishing any performance rationale.
+- **Steady-state execution (MEASURED, `benches/backends.rs`).** On columnar slice kernels
+  (`filtered_sum`, `sum_above_median`, native vs Cranelift-JIT vs LLVM-JIT, arm64, warm):
+
+  | kernel / 1M elems | native | Cranelift | LLVM |
+  |---|---|---|---|
+  | `filtered_sum`      | ~11.3 Gelem/s | ~1.78 Gelem/s | ~11.3 Gelem/s |
+  | `sum_above_median`  | ~5.5 Gelem/s  | ~0.75 Gelem/s | ~5.5 Gelem/s |
+
+  **LLVM matches hand-written native; Cranelift is ~6–7× slower** — it emits scalar loops
+  where LLVM autovectorizes. This confirms the "LLVM = optimize hard, Cranelift = compile
+  fast" thesis with numbers, and it's a strong reason to run perf-critical sql-gen columnar
+  work through the LLVM backend. (Compile *latency* — where Cranelift wins — is not yet
+  measured; add a cold-compile group before publishing that half.)
+- **Bearing on the slice representation.** The same neutral AST and slice representation
+  drive both backends, and **LLVM already reaches native speed with it** — so the
+  register-vs-stack-slot slice encoding is *not* the performance lever; the backend's
+  optimizer is. Any "simplify the slice encoding" change should be judged on API/clarity, not
+  perf: it can't beat what LLVM already does, and the Cranelift gap is its optimizer, not the
+  `(ptr,len)` indirection. Verdict: **keep the current slice design.**
 - **`ExecutionEngine` is `!Send + !Sync`.** melior documents this. An LLVM `Compiled`/
   `CompiledFn` that owns the engine therefore loses the `Send`/`Sync` the Cranelift
   path may have. Decide deliberately: either LLVM-compiled functions are thread-affine
