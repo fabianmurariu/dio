@@ -762,10 +762,13 @@ once the driver below populates `internal_funcs` — no test drives JIT-to-JIT c
 `Staged::codegen` over a `CompilationContext` backed by `MlirBackend` (the identical code path
 Cranelift takes, just a different `dyn Backend`). A differential test compiles the *same*
 nullary `Staged` graph through Cranelift's public `compile().run()` **and** through MLIR and
-asserts equal results — covering arithmetic, comparison, branchless `select`, and `if_then_else`
-(exercising `cf` blocks + a block-argument phi *through the AST*). 12 feature-gated tests green;
-default build still 366 / clippy 27. This is the project's thesis made executable: one neutral
-AST, two backends, identical output.
+asserts equal results. Coverage spans the operator/cast surface where backend semantics could
+silently diverge (the §9 "edge-case semantics" risk): signed div/rem incl. negatives, bitwise,
+`shl`/arithmetic-`shr`, branchless `min`/`max`, `eq`/signed-`gt`, a **signedness discriminator**
+(`u64::MAX > 1` unsigned), truncate→sign-extend `int_cast`, and `if_then_else` (`cf` blocks +
+block-argument phi *through the AST*). 12 feature-gated tests green; default build still 366 /
+clippy 27. This is the project's thesis made executable: one neutral AST, two backends,
+identical output.
 
 **Next up — the MLIR `compile()` driver + `Module`/`Executable` abstraction.** The one thing
 still keeping the *parameterized* AST on Cranelift: `func::compile()` hard-codes

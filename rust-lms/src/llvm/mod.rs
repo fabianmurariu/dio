@@ -504,7 +504,10 @@ mod tests {
         // still lives in the Cranelift-specific `compile()` driver.
         use crate::control::if_then_else;
         use crate::func::Compiler;
-        use crate::num::{add, lt, mul, select, sub};
+        use crate::num::{
+            add, bitand, bitor, bitxor, div, eq, gt, int_cast, lt, max, min, mul, rem, select, shl,
+            shr, sub,
+        };
         use crate::staged::Const;
 
         fn both<S: Staged<Out = i64> + 'static>(make: impl Fn() -> S) {
@@ -522,7 +525,34 @@ mod tests {
         both(|| select(lt(5i64, 3i64), 100i64, 200i64)); // 200
                                                          // Control flow: `cf` blocks + block-argument phi via the AST's `IfThenElse`.
         both(|| if_then_else(lt(2i64, 9i64), Const::<i64>::new(1), Const::<i64>::new(2))); // 1
-        both(|| if_then_else(lt(9i64, 2i64), Const::<i64>::new(1), Const::<i64>::new(2)));
-        // 2
+        both(|| if_then_else(lt(9i64, 2i64), Const::<i64>::new(1), Const::<i64>::new(2))); // 2
+
+        // Signed division/remainder, incl. negative operands (truncated toward zero).
+        both(|| div(20i64, 6i64)); // 3
+        both(|| div(-20i64, 6i64)); // -3
+        both(|| rem(20i64, 6i64)); // 2
+        both(|| rem(-20i64, 6i64)); // -2
+
+        // Bitwise + shifts (arithmetic right shift on a negative operand).
+        both(|| bitand(0b1100i64, 0b1010i64)); // 8
+        both(|| bitor(0b1100i64, 0b1010i64)); // 14
+        both(|| bitxor(0b1100i64, 0b1010i64)); // 6
+        both(|| shl(1i64, 40i64)); // 1 << 40
+        both(|| shr(256i64, 2i64)); // 64
+        both(|| shr(-256i64, 2i64)); // -64 (arithmetic)
+
+        // Branchless min/max, and comparisons surfaced through `select`.
+        both(|| min(3i64, 8i64)); // 3
+        both(|| max(3i64, 8i64)); // 8
+        both(|| select(eq(5i64, 5i64), 1i64, 0i64)); // 1
+        both(|| select(gt(5i64, 3i64), 1i64, 0i64)); // 1
+                                                     // Unsigned comparison: u64::MAX > 1 is true unsigned; it would be false if either
+                                                     // backend wrongly used a *signed* predicate (MAX as i64 == -1), so this discriminates.
+        both(|| select(gt(u64::MAX, 1u64), 1i64, 0i64)); // 1
+
+        // Integer casts: truncate i64->i32 then sign-extend back — positive and negative.
+        both(|| int_cast::<i64, i32, _>(int_cast::<i32, i64, _>(0x1_0000_0007i64))); // 7
+        both(|| int_cast::<i64, i32, _>(int_cast::<i32, i64, _>(0x1_FFFF_FFFFi64)));
+        // -1
     }
 }
