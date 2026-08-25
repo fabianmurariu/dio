@@ -11,6 +11,9 @@
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
 
+mod common;
+use common::{for_each_backend, with_backends};
+
 pub struct Graph {
     nodes: Vec<u64>,
 }
@@ -69,75 +72,79 @@ fn graph(nodes: Vec<u64>) -> Graph {
 
 #[test]
 fn plain_count_via_next_drop() {
-    let mut compiler = Compiler::new();
-    let producer = compiler.extern_fn::<GraphIterNodesExtern>();
-    let nodes = compiler.opaque_iter_fns::<NodesKind>();
+    for_each_backend(|mut compiler| {
+        let producer = compiler.extern_fn::<GraphIterNodesExtern>();
+        let nodes = compiler.opaque_iter_fns::<NodesKind>();
 
-    // fn(&Graph) -> u64 : drive the external iterator and count it.
-    let f = compiler.fun1("count_nodes", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
-        // `NodesKind` supplies that handle's matching operations.
-        unsafe { nodes.iter(handle) }.count(ctx)
+        // fn(&Graph) -> u64 : drive the external iterator and count it.
+        let f = compiler.fun1("count_nodes", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
+            let handle = call_extern1(producer, g);
+            // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+            // `NodesKind` supplies that handle's matching operations.
+            unsafe { nodes.iter(handle) }.count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let kernel = compiled.as_fn();
+
+        let g = graph(vec![10, 20, 30, 40, 50]);
+        assert_eq!(kernel.call(&g), 5);
+        assert_eq!(kernel.call(&graph(vec![])), 0);
     });
-    let compiled = compiler.compile(f).expect("compile");
-    let kernel = compiled.as_fn();
-
-    let g = graph(vec![10, 20, 30, 40, 50]);
-    assert_eq!(kernel.call(&g), 5);
-    assert_eq!(kernel.call(&graph(vec![])), 0);
 }
 
 #[test]
 fn plain_sum_and_filter() {
-    let mut compiler = Compiler::new();
-    let producer = compiler.extern_fn::<GraphIterNodesExtern>();
-    let nodes = compiler.opaque_iter_fns::<NodesKind>();
+    for_each_backend(|mut compiler| {
+        let producer = compiler.extern_fn::<GraphIterNodesExtern>();
+        let nodes = compiler.opaque_iter_fns::<NodesKind>();
 
-    // Sum the node ids > 2, branchlessly.
-    let f = compiler.fun1("sum_big", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
-        // `NodesKind` supplies that handle's matching operations.
-        unsafe { nodes.iter(handle) }
-            .filter(|x| lt(2u64, x))
-            .sum(ctx)
+        // Sum the node ids > 2, branchlessly.
+        let f = compiler.fun1("sum_big", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
+            let handle = call_extern1(producer, g);
+            // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+            // `NodesKind` supplies that handle's matching operations.
+            unsafe { nodes.iter(handle) }
+                .filter(|x| lt(2u64, x))
+                .sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let kernel = compiled.as_fn();
+
+        let g = graph(vec![1, 2, 3, 4, 5]);
+        assert_eq!(kernel.call(&g), 3 + 4 + 5);
     });
-    let compiled = compiler.compile(f).expect("compile");
-    let kernel = compiled.as_fn();
-
-    let g = graph(vec![1, 2, 3, 4, 5]);
-    assert_eq!(kernel.call(&g), 3 + 4 + 5);
 }
 
 #[test]
 fn exact_size_count_is_o1_and_sum_works() {
-    let mut compiler = Compiler::new();
-    let producer = compiler.extern_fn::<GraphIterNodesExtern>();
-    let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
+    with_backends(|make| {
+        let mut compiler = make();
+        let producer = compiler.extern_fn::<GraphIterNodesExtern>();
+        let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
 
-    // count(): O(1), just len(it).
-    let count_fn = compiler.fun1("count_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
-        // `NodesKind` supplies that handle's matching exact-size operations.
-        unsafe { nodes.iter(handle) }.count(ctx)
-    });
-    let compiled = compiler.compile(count_fn).expect("compile");
-    let count = compiled.as_fn();
-    assert_eq!(count.call(&graph(vec![7, 8, 9])), 3);
+        // count(): O(1), just len(it).
+        let count_fn = compiler.fun1("count_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
+            let handle = call_extern1(producer, g);
+            // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+            // `NodesKind` supplies that handle's matching exact-size operations.
+            unsafe { nodes.iter(handle) }.count(ctx)
+        });
+        let compiled = compiler.compile(count_fn).expect("compile");
+        let count = compiled.as_fn();
+        assert_eq!(count.call(&graph(vec![7, 8, 9])), 3);
 
-    // sum() over the counted loop (len + next_value).
-    let mut compiler = Compiler::new();
-    let producer = compiler.extern_fn::<GraphIterNodesExtern>();
-    let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
-    let sum_fn = compiler.fun1("sum_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
-        let handle = call_extern1(producer, g);
-        // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
-        // `NodesKind` supplies that handle's matching exact-size operations.
-        unsafe { nodes.iter(handle) }.sum(ctx)
+        // sum() over the counted loop (len + next_value).
+        let mut compiler = make();
+        let producer = compiler.extern_fn::<GraphIterNodesExtern>();
+        let nodes = compiler.exact_opaque_iter_fns::<NodesKind>();
+        let sum_fn = compiler.fun1("sum_exact", move |ctx, g: Var<SRef<Opaque<Graph>>>| {
+            let handle = call_extern1(producer, g);
+            // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
+            // `NodesKind` supplies that handle's matching exact-size operations.
+            unsafe { nodes.iter(handle) }.sum(ctx)
+        });
+        let compiled = compiler.compile(sum_fn).expect("compile");
+        let sum = compiled.as_fn();
+        assert_eq!(sum.call(&graph(vec![10, 20, 30, 40])), 100);
     });
-    let compiled = compiler.compile(sum_fn).expect("compile");
-    let sum = compiled.as_fn();
-    assert_eq!(sum.call(&graph(vec![10, 20, 30, 40])), 100);
 }

@@ -18,6 +18,7 @@ mod strings;
 
 pub use grouping::{agg_output_types, group_template};
 
+use std::cell::Cell;
 use std::collections::HashMap;
 use std::rc::Rc;
 
@@ -70,6 +71,13 @@ pub struct CodegenCtx {
     /// Baked pointer to the hash-join build state, when the plan has a join. Single
     /// join for now; a `Vec` indexed by plan order generalizes to multiple joins.
     pub join: Option<Rc<JoinHandle>>,
+    /// Kernel-wide "poison" flag: a `Var<bool>` set to `true` when a fallible
+    /// callback returns its error sentinel (see [`crate::status`]). The scan's batch
+    /// loop checks it so a failed run stops pulling work and returns to the driver,
+    /// which then surfaces the recorded `DataFusionError`. Populated once at kernel
+    /// entry ([`gen_collect`]); `None` for helper kernels that never fold fallible
+    /// callbacks. Shared across `clone()` so the setter and checkers agree.
+    pub poison: Rc<Cell<Option<Var<bool>>>>,
 }
 
 /// Typed host pointers into a GROUP BY's Rust-hosted state (see `group::GroupState`),
@@ -215,6 +223,11 @@ pub fn gen_collect<I: InputsSource>(
     cx: &CodegenCtx,
 ) -> Var<u64> {
     let n = ctx.var(0u64);
+    // Kernel-wide error-stop flag: fallible callbacks set it via their sentinel
+    // (see `stop_if_failed`) and the scan batch loop checks it. Created once here so
+    // it dominates every loop in the kernel.
+    let poison = ctx.var(false);
+    cx.poison.set(Some(poison));
     let fields = out_schema.fields().clone();
     let cx_c = cx.clone();
     gen_op(
@@ -389,8 +402,14 @@ fn for_each_batch<I: InputsSource>(
     let ncols = schema.fields().len() as u64;
     let key_dt = schema.field(0).data_type().clone();
     let scan_next = cx.rt.scan_next;
+    let poison = cx.poison.get();
 
     ctx.while_loop(Const::<bool>::new(true), move |ctx| {
+        // Stop pulling batches once a fallible callback has poisoned the run — the
+        // driver will surface the recorded error after we return.
+        if let Some(p) = poison {
+            ctx.if_then(p, |ctx| ctx.break_loop());
+        }
         // Pull the next batch; a null descriptor pointer means the stream is done.
         // SAFETY: the compiled entry point receives exclusive access to live
         // `Inputs`; scan callbacks are sequenced by this outer loop.
@@ -434,6 +453,21 @@ fn gen_scan<I: InputsSource>(
             ctx.store(i, add(i, 1u64));
         });
     });
+}
+
+/// Emit the error-stop check for a fallible pointer-returning callback (the
+/// `group_upsert*` family): if `ptr` is the null error sentinel (see
+/// [`crate::status`]), set the kernel poison flag and break the current loop, so the
+/// caller never dereferences null and the batch loop unwinds to the driver — which
+/// then surfaces the recorded `DataFusionError`. No-op for helper kernels with no
+/// poison flag.
+pub(crate) fn stop_if_null(ctx: &mut Ctx, ptr: Var<SMutPtr<u8>>, cx: &CodegenCtx) {
+    if let Some(p) = cx.poison.get() {
+        ctx.if_then(ptr_is_null(ptr), move |ctx| {
+            ctx.store(p, true);
+            ctx.break_loop();
+        });
+    }
 }
 
 pub(crate) fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {

@@ -8,7 +8,8 @@ use std::sync::Arc;
 use arrow::array::{Array, Float64Array, Int64Array, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
-use sql_gen::exec_jit;
+mod common;
+use common::exec_jit;
 
 fn batch(keys: Vec<i64>, values: Vec<i64>) -> RecordBatch {
     let schema = Arc::new(Schema::new(vec![

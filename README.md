@@ -184,6 +184,62 @@ cargo test -p rust-lms <name>                 # a single test
 RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms test_while_loop_factorial -- --nocapture
 ```
 
+### The LLVM backend (optional, `--features llvm`)
+
+`rust-lms` has a second code-generation backend that lowers the same neutral AST to
+**LLVM via MLIR** (see [`docs/llvm.md`](docs/llvm.md)). It is **off by default** — it links
+a system LLVM/MLIR **22** install through `melior`/`mlir-sys`, whose build scripts shell out
+to `llvm-config`. If `llvm-config` isn't on `PATH` you get:
+
+```
+failed to run `"llvm-config" …`: No such file or directory (os error 2)
+```
+
+That's the whole problem — the feature is fine, the toolchain just isn't visible. Fix it by
+pointing the build at your LLVM 22 prefix. On macOS (Homebrew `llvm@22`, installed at
+`/opt/homebrew/opt/llvm`):
+
+```fish
+# fish (one-off; prepend to a single command)
+env MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+    LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+    PATH="/opt/homebrew/opt/llvm/bin:$PATH" \
+    DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib \
+    cargo test -p rust-lms --features llvm
+```
+
+```bash
+# bash / zsh equivalent
+MLIR_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+LLVM_SYS_220_PREFIX=/opt/homebrew/opt/llvm \
+PATH="/opt/homebrew/opt/llvm/bin:$PATH" \
+DYLD_LIBRARY_PATH=/opt/homebrew/opt/llvm/lib \
+cargo test -p rust-lms --features llvm
+```
+
+Two gotchas your first attempt hit:
+
+- **Scope the feature to the crate.** `cargo test --features llvm` at the workspace root has
+  no package to attach the feature to; use `-p rust-lms --features llvm` (only `rust-lms`
+  defines the `llvm` feature).
+- **Get `llvm-config` on `PATH`** and set the `*_SYS_220_PREFIX` vars so `mlir-sys`/`tblgen`
+  find the headers and libs (`brew --prefix llvm@22` prints the prefix if yours differs).
+
+To make it permanent in fish, export the vars once (adjust the prefix to your install):
+
+```fish
+set -Ux MLIR_SYS_220_PREFIX /opt/homebrew/opt/llvm
+set -Ux LLVM_SYS_220_PREFIX /opt/homebrew/opt/llvm
+fish_add_path /opt/homebrew/opt/llvm/bin
+set -Ux DYLD_LIBRARY_PATH /opt/homebrew/opt/llvm/lib
+# then simply: cargo test -p rust-lms --features llvm
+```
+
+With the feature on, **every high-level-API test runs on *both* Cranelift and LLVM** (the
+`tests/common` harness), so the run is a live differential check that the two backends agree.
+`RUST_LMS_DEBUG_IR=1` additionally dumps the pre-lowering MLIR module. Pick a backend in code
+with `Compiler::new().with_backend(JitBackend::Llvm)`.
+
 ## Documentation
 
 - **[rust-lms/docs/deep_dive.md](rust-lms/docs/deep_dive.md)** — the architecture

@@ -9,7 +9,8 @@ use arrow::array::{Array, Int64Array, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
 use proptest::prelude::*;
-use sql_gen::exec_jit;
+mod common;
+use common::exec_jit;
 
 /// A one-column `name: Utf8View` batch (nullable iff any value is null).
 fn batch(values: &[Option<String>]) -> RecordBatch {

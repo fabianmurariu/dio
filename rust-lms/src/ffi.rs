@@ -26,9 +26,8 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use crate::staged::{CompilationContext, FuncRefId, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -196,9 +195,8 @@ impl<T> Copy for FatSliceType<T> {}
 unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     type RuntimeValue = FatSlice<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        // FatSlice is 16 bytes (ptr + len), represented as pointer to stack slot
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -239,8 +237,8 @@ pub type FfiSliceMutType<T> = FatSliceMutType<T>;
 unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     type RuntimeValue = FatSliceMut<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -297,21 +295,13 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16,
-            3,
-        ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), ptr, slot_ptr, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), len, slot_ptr, 8);
+        let slot = ctx.alloc_stack_slot(16, 3);
+        let slot_ptr = ctx.stack_addr(slot, 0);
+        ctx.store(ptr, slot_ptr, 0);
+        ctx.store(len, slot_ptr, 8);
         slot_ptr
     }
 }
@@ -356,17 +346,13 @@ pub struct StackBytes {
 unsafe impl Staged for StackBytes {
     type Out = SPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let n = self.bytes.len();
         // Round the slot up to a whole number of 8-byte words (min one word, so a
         // zero-length literal still has a valid, non-empty slot to address).
         let slot_len = ((n + 7) & !7).max(8);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            slot_len as u32,
-            3,
-        ));
-        let addr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+        let slot = ctx.alloc_stack_slot(slot_len as u32, 3);
+        let addr = ctx.stack_addr(slot, 0);
         let mut off = 0;
         while off < slot_len {
             let mut word = [0u8; 8];
@@ -375,13 +361,8 @@ unsafe impl Staged for StackBytes {
                     *w = self.bytes[off + j];
                 }
             }
-            let v = ctx
-                .builder
-                .ins()
-                .iconst(types::I64, u64::from_le_bytes(word) as i64);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), v, addr, off as i32);
+            let v = ctx.iconst(ScalarType::I64, u64::from_le_bytes(word) as i64);
+            ctx.store(v, addr, off as i32);
             off += 8;
         }
         addr
@@ -415,15 +396,12 @@ pub struct StackAlloc {
 unsafe impl Staged for StackAlloc {
     type Out = SMutPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Round up to a whole number of 8-byte words (min one word).
         let slot_len = ((self.size + 7) & !7).max(8);
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            slot_len as u32,
-            3, // align_shift = 3 → 8-byte aligned
-        ));
-        ctx.builder.ins().stack_addr(types::I64, slot, 0)
+        // align_shift = 3 → 8-byte aligned
+        let slot = ctx.alloc_stack_slot(slot_len as u32, 3);
+        ctx.stack_addr(slot, 0)
     }
 }
 
@@ -568,7 +546,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.arg.codegen(ctx)
     }
 
@@ -694,8 +672,8 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
         emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
 }
@@ -730,8 +708,8 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
@@ -869,8 +847,8 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
@@ -945,7 +923,7 @@ where
 }
 
 /// Append a pointer to `arg`'s canonical ABI storage to `args`.
-fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<Value>, arg: &A)
+fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<ValueId>, arg: &A)
 where
     A: Staged,
     A::Out: UncheckedExternArg<AType>,
@@ -957,22 +935,19 @@ where
 
 pub(crate) fn push_extern_value<T: StagedType>(
     ctx: &mut CompilationContext,
-    args: &mut Vec<Value>,
-    value: Value,
+    args: &mut Vec<ValueId>,
+    value: ValueId,
 ) {
     if T::is_copy_struct() {
         args.push(value);
     } else {
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
+        let stack_slot = ctx.alloc_stack_slot(
             (T::size_of() as u32).max(1),
             T::align_of().trailing_zeros() as u8,
-        ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        );
+        let slot_ptr = ctx.stack_addr(stack_slot, 0);
         if T::size_of() != 0 {
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), value, slot_ptr, 0);
+            ctx.store(value, slot_ptr, 0);
         }
         args.push(slot_ptr);
     }
@@ -981,26 +956,23 @@ pub(crate) fn push_extern_value<T: StagedType>(
 /// Call a Rust-generated thunk through the canonical storage-pointer ABI.
 pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
-    func_ref: cranelift_codegen::ir::FuncRef,
-    mut args: Vec<Value>,
-) -> Value {
-    let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-        StackSlotKind::ExplicitSlot,
+    func_ref: FuncRefId,
+    mut args: Vec<ValueId>,
+) -> ValueId {
+    let stack_slot = ctx.alloc_stack_slot(
         (Ret::size_of() as u32).max(1),
         Ret::align_of().trailing_zeros() as u8,
-    ));
-    let output_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+    );
+    let output_ptr = ctx.stack_addr(stack_slot, 0);
     args.push(output_ptr);
-    ctx.builder.ins().call(func_ref, &args);
+    ctx.call(func_ref, &args);
 
     if Ret::is_copy_struct() {
         output_ptr
     } else if Ret::size_of() == 0 {
         ctx.get_unit_value()
     } else {
-        ctx.builder
-            .ins()
-            .load(Ret::cranelift_type(), MemFlags::trusted(), output_ptr, 0)
+        ctx.load(Ret::scalar_type(), output_ptr, 0)
     }
 }
 
@@ -1027,8 +999,8 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
@@ -1124,8 +1096,8 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let func_ref = ctx.get_extern_func_ref(self.func.extern_id);
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);

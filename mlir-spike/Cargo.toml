@@ -1,0 +1,10 @@
+[package]
+name = "mlir-spike"
+version = "0.0.0"
+edition = "2021"
+publish = false
+
+# Phase -1 spike for docs/llvm.md. Depends on a system LLVM/MLIR 22 install via melior.
+# Pinned exactly because melior is alpha / API-unstable.
+[dependencies]
+melior = "0.27"

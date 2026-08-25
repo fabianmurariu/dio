@@ -53,11 +53,16 @@
 extern crate self as rust_lms;
 
 pub mod control;
+/// Cranelift backend: the default code generator (`impl Backend`), behind `func::compile`.
+pub(crate) mod cranelift;
 pub mod ffi;
 pub mod func;
 pub(crate) mod func_def;
 pub(crate) mod func_impl;
 pub mod iter;
+/// LLVM/MLIR backend (docs/llvm.md, Phase 1+). Compiled only with `--features llvm`.
+#[cfg(feature = "llvm")]
+pub mod llvm;
 pub mod num;
 pub mod opaque;
 pub mod option;
@@ -92,7 +97,7 @@ pub mod prelude {
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2,
-        FunRef3, FunType0, FunType1, FunType2, FunType3,
+        FunRef3, FunType0, FunType1, FunType2, FunType3, JitBackend,
     };
     pub use crate::iter::{
         box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step, DynExactIter, DynIter,
@@ -134,11 +139,12 @@ pub mod prelude {
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,
-        Var,
+        ValueId, Var,
     };
     pub use crate::staged_opt::{s_none, s_some, SNone, SSome, StagedOpt, ThenSome, When};
     pub use crate::types::{
-        ConstantType, CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType,
+        ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, RuntimeParam, RuntimeResult,
+        ScalarType, StagedType,
     };
     // Re-export derive macro
     #[cfg(feature = "derive")]

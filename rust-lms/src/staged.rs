@@ -5,36 +5,163 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use cranelift_codegen::ir::{Block, InstBuilder, MemFlags, Value};
-use cranelift_codegen::isa::TargetFrontendConfig;
-use cranelift_frontend::{FunctionBuilder, Variable};
-use cranelift_jit::JITModule;
-use cranelift_module::Module;
 use std::collections::HashMap;
+use std::ops::{Deref, DerefMut};
 
-use crate::types::{ConstantType, CopyType, StagedType};
-use cranelift_codegen::ir::types;
+// Entity types named only by the opaque handles' Cranelift conversions below.
+use cranelift_codegen::ir::{Block, FuncRef, SigRef, StackSlot, Value};
+use cranelift_frontend::Variable;
 
-/// Emit an exact copy between non-overlapping, equally aligned runtime slots.
-pub(crate) fn emit_copy_nonoverlapping(
-    builder: &mut FunctionBuilder<'_>,
-    config: TargetFrontendConfig,
-    destination: Value,
-    source: Value,
-    size: usize,
-    alignment: usize,
-) {
-    let alignment = u8::try_from(alignment).expect("runtime alignment exceeds u8");
-    builder.emit_small_memory_copy(
-        config,
-        destination,
-        source,
-        size as u64,
-        alignment,
-        alignment,
-        true,
-        MemFlags::trusted(),
-    );
+use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedType};
+
+/// An opaque handle to a value produced during codegen.
+///
+/// Phase 0e of docs/llvm.md: the AST-facing value handle is now **opaque** — a bare
+/// `u32` the AST cannot inspect. The active backend interprets it: `CraneliftBackend`
+/// treats it as a Cranelift `Value` index (`as_u32`/`from_u32`, stateless — Cranelift
+/// values *are* `u32` entities); an MLIR backend would use the same `u32` as an index
+/// into its own `Vec<MlirValue>`. The AST never names a backend value type.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct ValueId(u32);
+
+/// Opaque handle to a basic block during codegen (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct BlockHandle(u32);
+
+/// Opaque handle to a mutable variable during codegen (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct VarHandle(u32);
+
+/// Opaque handle to a stack allocation during codegen (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct StackSlotId(u32);
+
+/// Opaque handle to a function reference usable by `call`/`func_addr` in the function
+/// currently being built (see [`ValueId`]). Cranelift interprets it as a `FuncRef` index;
+/// an MLIR backend as an index into its own symbol table.
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct FuncRefId(u32);
+
+/// Opaque handle to a signature imported for `call_indirect` (see [`ValueId`]).
+#[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
+pub struct SigRefId(u32);
+
+/// A backend-neutral function signature: parameter types and an optional single result.
+/// Backends lower it to their own signature (Cranelift `Signature`, MLIR function type).
+pub struct SigSpec {
+    pub params: Vec<ScalarType>,
+    pub ret: Option<ScalarType>,
+}
+
+// Backend/driver-only conversions between the opaque handles and Cranelift entities.
+// These stay here (not in the `cranelift` module) because they touch the handles' private
+// `.0` field; that privacy is exactly what stops an AST module from fabricating a handle.
+impl ValueId {
+    pub(crate) fn from_cranelift(v: Value) -> Self {
+        Self(v.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> Value {
+        Value::from_u32(self.0)
+    }
+}
+impl BlockHandle {
+    pub(crate) fn from_cranelift(b: Block) -> Self {
+        Self(b.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> Block {
+        Block::from_u32(self.0)
+    }
+}
+impl VarHandle {
+    pub(crate) fn from_cranelift(v: Variable) -> Self {
+        Self(v.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> Variable {
+        Variable::from_u32(self.0)
+    }
+}
+impl StackSlotId {
+    pub(crate) fn from_cranelift(s: StackSlot) -> Self {
+        Self(s.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> StackSlot {
+        StackSlot::from_u32(self.0)
+    }
+}
+impl FuncRefId {
+    pub(crate) fn from_cranelift(f: FuncRef) -> Self {
+        Self(f.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> FuncRef {
+        FuncRef::from_u32(self.0)
+    }
+}
+impl SigRefId {
+    pub(crate) fn from_cranelift(s: SigRef) -> Self {
+        Self(s.as_u32())
+    }
+    pub(crate) fn cranelift(self) -> SigRef {
+        SigRef::from_u32(self.0)
+    }
+}
+
+// The LLVM/MLIR backend interprets these handles as indices into its own arenas
+// (docs/llvm.md §9) — the same "u32 the active backend interprets" contract the
+// Cranelift path uses, just a different encoding: `ValueId` → value arena slot,
+// `BlockHandle` → body-block index, `VarHandle` → variable (alloca) index.
+#[cfg(feature = "llvm")]
+impl ValueId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl BlockHandle {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl VarHandle {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl StackSlotId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl FuncRefId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
+}
+#[cfg(feature = "llvm")]
+impl SigRefId {
+    pub(crate) fn from_u32(index: u32) -> Self {
+        Self(index)
+    }
+    pub(crate) fn as_u32(self) -> u32 {
+        self.0
+    }
 }
 
 // =============================================================================
@@ -45,8 +172,8 @@ pub(crate) fn emit_copy_nonoverlapping(
 /// This avoids the need for stack slot loads in tight loops.
 #[derive(Clone, Copy)]
 pub(crate) struct SliceVars {
-    pub(crate) ptr_var: Variable,
-    pub(crate) len_var: Variable,
+    pub(crate) ptr_var: VarHandle,
+    pub(crate) len_var: VarHandle,
 }
 
 /// Context provided during code generation.
@@ -58,84 +185,156 @@ pub(crate) struct SliceVars {
 /// ```compile_fail
 /// use rust_lms::prelude::CompilationContext;
 ///
-/// fn cannot_mutate_the_backend(ctx: &mut CompilationContext<'_, '_>) {
-///     let _ = &mut ctx.builder;
+/// fn cannot_mutate_the_backend(ctx: &mut CompilationContext<'_>) {
+///     let _ = &mut ctx.backend;
 /// }
 /// ```
-pub struct CompilationContext<'a, 'b> {
-    /// The function builder for the current function
-    pub(crate) builder: &'b mut FunctionBuilder<'a>,
-    /// The JIT module for creating new functions
-    pub(crate) module: &'b mut JITModule,
-    /// Mapping from our variable IDs to Cranelift Variables
-    pub(crate) var_map: &'b mut HashMap<usize, Variable>,
-    /// Mapping from our function IDs to Cranelift FuncIds
-    pub(crate) func_map: &'b HashMap<usize, cranelift_module::FuncId>,
-    /// Mapping from extern function IDs to Cranelift FuncRefs (per-function)
-    pub(crate) extern_func_refs: &'b mut HashMap<usize, cranelift_codegen::ir::FuncRef>,
-    /// Mapping from extern function IDs to module FuncIds
-    pub(crate) extern_func_ids: &'b HashMap<usize, cranelift_module::FuncId>,
+pub struct CompilationContext<'c> {
+    /// The IR backend (Cranelift today; a second impl — LLVM/MLIR — plugs in here).
+    /// `CompilationContext` derefs to this, so `ctx.<op>()` routes to the backend.
+    pub(crate) backend: &'c mut dyn Backend,
+    /// Mapping from our variable IDs to backend variable handles.
+    pub(crate) var_map: &'c mut HashMap<usize, VarHandle>,
     /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
     /// For slice parameters, this allows direct register access instead of stack loads
-    pub(crate) slice_vars: &'b mut HashMap<usize, SliceVars>,
+    pub(crate) slice_vars: &'c mut HashMap<usize, SliceVars>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
-    pub(crate) unit_value: Option<Value>,
+    pub(crate) unit_value: Option<ValueId>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
     /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
-    pub(crate) loop_exit_stack: Vec<Block>,
+    pub(crate) loop_exit_stack: Vec<BlockHandle>,
 }
 
-impl<'a, 'b> CompilationContext<'a, 'b> {
-    /// Get or create a FuncRef for an external function.
-    ///
-    /// FuncRefs are per-function, so we cache them in extern_func_refs.
-    pub(crate) fn get_extern_func_ref(
+/// The IR-emission backend: the single interface a code generator implements.
+///
+/// Phase 0d of docs/llvm.md. Cranelift is the only impl today (`CraneliftBackend`);
+/// an LLVM/MLIR impl slots in behind the same trait. `CompilationContext` owns the
+/// codegen bookkeeping (var/slice maps, loop-exit stack) and derefs to a `dyn Backend`
+/// for the primitive ops. Object-safe (all methods take concrete handles).
+///
+/// `pub` + `#[doc(hidden)]` only because `CompilationContext` (a public type) derefs
+/// to `dyn Backend`; it is an internal, unstable contract, not a public API.
+///
+/// **The trait is now fully backend-neutral: no Cranelift type appears in any method
+/// signature.** Phase 0f neutralized the value/control-flow surface (constants, arithmetic,
+/// comparison via [`IntCmp`]/[`FloatCmp`], casts, memory, pointers, blocks, variables, stack
+/// slots); the calls & signatures cluster followed once the MLIR backend gave a second
+/// call/symbol model to design against — functions and signatures are named by the opaque
+/// [`FuncRefId`]/[`SigRefId`] handles and the neutral [`SigSpec`], and `declare_func`/
+/// `declare_extern_func` resolve *our* ids (the backend owns the id→native-function map).
+/// What remains Cranelift-specific is the `compile()` driver and the not-yet-abstracted
+/// `Module`/`Executable` lifecycle — not this trait.
+#[doc(hidden)]
+pub trait Backend {
+    // constants
+    fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId;
+    fn f64const(&mut self, v: f64) -> ValueId;
+    fn f32const(&mut self, v: f32) -> ValueId;
+    // integer arithmetic
+    fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // float arithmetic
+    fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // bitwise / shift
+    fn band(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    // compare / select
+    fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId;
+    fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId;
+    fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId;
+    fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId;
+    // casts
+    fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    // memory
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId;
+    fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
+    fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId;
+    /// Allocate an explicit stack slot of `size` bytes with alignment `1 << align_shift`.
+    fn alloc_stack_slot(&mut self, size: u32, align_shift: u8) -> StackSlotId;
+    fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize);
+    // pointers (semantic; §8b)
+    fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId;
+    fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId;
+    fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId;
+    // blocks & control flow
+    fn create_block(&mut self) -> BlockHandle;
+    fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId;
+    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId;
+    fn switch_to_block(&mut self, block: BlockHandle);
+    fn seal_block(&mut self, block: BlockHandle);
+    fn jump(&mut self, target: BlockHandle, args: &[ValueId]);
+    fn brif(
         &mut self,
-        extern_id: usize,
-    ) -> cranelift_codegen::ir::FuncRef {
-        if let Some(&func_ref) = self.extern_func_refs.get(&extern_id) {
-            return func_ref;
-        }
+        cond: ValueId,
+        then_block: BlockHandle,
+        then_args: &[ValueId],
+        else_block: BlockHandle,
+        else_args: &[ValueId],
+    );
+    // variables
+    fn declare_var(&mut self, ty: ScalarType) -> VarHandle;
+    fn def_var(&mut self, var: VarHandle, val: ValueId);
+    fn use_var(&mut self, var: VarHandle) -> ValueId;
+    // calls & signatures
+    fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId>;
+    fn call_indirect(
+        &mut self,
+        sig: SigRefId,
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Option<ValueId>;
+    fn func_addr(&mut self, func: FuncRefId) -> ValueId;
+    fn import_signature(&mut self, sig: &SigSpec) -> SigRefId;
+    /// Get a callable reference to an internal (JIT-defined) function by our function id.
+    fn declare_func(&mut self, func_id: usize) -> FuncRefId;
+    /// Get a callable reference to a registered extern function by our extern id.
+    fn declare_extern_func(&mut self, extern_id: usize) -> FuncRefId;
+}
 
-        let func_id = self
-            .extern_func_ids
-            .get(&extern_id)
-            .expect(&format!("Extern function {} not found", extern_id));
-
-        let func_ref = self
-            .module
-            .declare_func_in_func(*func_id, self.builder.func);
-        self.extern_func_refs.insert(extern_id, func_ref);
-        func_ref
+// `CompilationContext` derefs to its backend so `ctx.<op>()` routes there with no
+// per-op delegators. Its own inherent methods (below) and fields take precedence.
+impl<'c> Deref for CompilationContext<'c> {
+    type Target = dyn Backend + 'c;
+    fn deref(&self) -> &Self::Target {
+        &*self.backend
     }
+}
+impl<'c> DerefMut for CompilationContext<'c> {
+    fn deref_mut(&mut self) -> &mut Self::Target {
+        &mut *self.backend
+    }
+}
 
+impl<'c> CompilationContext<'c> {
     /// Get or create the cached unit value (iconst.i8 0).
     ///
     /// This avoids creating duplicate dead values when sequencing side-effecting
     /// operations like `Assign` and `InitVar`.
-    pub(crate) fn get_unit_value(&mut self) -> Value {
+    pub(crate) fn get_unit_value(&mut self) -> ValueId {
         if let Some(val) = self.unit_value {
             val
         } else {
-            let val = self.builder.ins().iconst(types::I8, 0);
+            let val = self.iconst(ScalarType::I8, 0);
             self.unit_value = Some(val);
             val
         }
-    }
-
-    /// Copy one runtime value between non-overlapping, equally aligned slots.
-    ///
-    /// Unlike the former aggregate ABI loops, this copies exactly `size`
-    /// bytes and therefore never widens a partial trailing word.
-    pub(crate) fn copy_nonoverlapping(
-        &mut self,
-        destination: Value,
-        source: Value,
-        size: usize,
-        alignment: usize,
-    ) {
-        let config = self.module.isa().frontend_config();
-        emit_copy_nonoverlapping(self.builder, config, destination, source, size, alignment);
     }
 
     /// Resolve the data pointer (`*T`) of a slice operand.
@@ -151,56 +350,46 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
     /// This pair of helpers ([`Self::slice_data_ptr`] / [`Self::slice_len`]) is
     /// the single place that knows about slice layout; slice ops call into it
     /// rather than re-deriving the pointer themselves.
-    pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> ValueId {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return self.builder.use_var(sv.ptr_var);
+                return self.use_var(sv.ptr_var);
             }
         }
-        // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair.
+        // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair. Loaded as `Ptr`
+        // (identical to `I64` on Cranelift; an `llvm.ptr` on MLIR so pointer ops type-check).
         let slice_ptr = slice.codegen(self);
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0)
+        self.load(ScalarType::Ptr, slice_ptr, 0)
     }
 
     /// Resolve the length (`usize`) of a slice operand.
     ///
     /// See [`Self::slice_data_ptr`] for the two encodings; `len` is the second
     /// register variable, or offset 8 of the `(ptr, len)` pair.
-    pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> Value {
+    pub(crate) fn slice_len(&mut self, slice: &impl Staged) -> ValueId {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return self.builder.use_var(sv.len_var);
+                return self.use_var(sv.len_var);
             }
         }
         let slice_ptr = slice.codegen(self);
-        self.builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8)
+        self.load(ScalarType::I64, slice_ptr, 8)
     }
 
     /// Resolve both parts of a slice while evaluating a memory-resolved slice
     /// expression only once.
-    pub(crate) fn slice_parts(&mut self, slice: &impl Staged) -> (Value, Value) {
+    pub(crate) fn slice_parts(&mut self, slice: &impl Staged) -> (ValueId, ValueId) {
         if let Some(var_id) = slice.var_id() {
             if let Some(sv) = self.slice_vars.get(&var_id).copied() {
-                return (
-                    self.builder.use_var(sv.ptr_var),
-                    self.builder.use_var(sv.len_var),
-                );
+                let ptr = self.use_var(sv.ptr_var);
+                let len = self.use_var(sv.len_var);
+                return (ptr, len);
             }
         }
 
         let slice_ptr = slice.codegen(self);
-        let data_ptr = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 0);
-        let len = self
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), slice_ptr, 8);
+        let data_ptr = self.load(ScalarType::Ptr, slice_ptr, 0);
+        let len = self.load(ScalarType::I64, slice_ptr, 8);
         (data_ptr, len)
     }
 }
@@ -234,8 +423,8 @@ impl<'a, 'b> CompilationContext<'a, 'b> {
 ///
 ///     fn codegen(
 ///         &self,
-///         _ctx: &mut CompilationContext<'_, '_>,
-///     ) -> cranelift_codegen::ir::Value {
+///         _ctx: &mut CompilationContext<'_>,
+///     ) -> ValueId {
 ///         unimplemented!()
 ///     }
 /// }
@@ -245,7 +434,7 @@ pub unsafe trait Staged {
     type Out: StagedType;
 
     /// Generate Cranelift IR code for this computation
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value;
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId;
 
     /// Return the variable ID if this is a direct Var reference.
     /// Used for optimized slice access to bypass stack loads.
@@ -326,13 +515,13 @@ impl<T: StagedType> Var<T> {
 unsafe impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Look up our ID in the var_map to get the Cranelift Variable
-        let var = ctx
+        let var = *ctx
             .var_map
             .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
-        ctx.builder.use_var(*var)
+        ctx.use_var(var)
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -343,12 +532,12 @@ unsafe impl<T: StagedType> Staged for Var<T> {
 unsafe impl<T: StagedType> Staged for VarUse<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let var = ctx
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        let var = *ctx
             .var_map
             .get(&self.id)
             .unwrap_or_else(|| panic!("Variable {} not found in var_map", self.id));
-        ctx.builder.use_var(*var)
+        ctx.use_var(var)
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -393,8 +582,8 @@ impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
 unsafe impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        T::codegen_constant(&self.value, ctx.builder)
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        T::codegen_constant(&self.value, ctx)
     }
 }
 
@@ -633,7 +822,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate code for the value expression
         let value = self.expr.codegen(ctx);
 
@@ -642,12 +831,12 @@ where
             var
         } else {
             // First assignment to this variable - declare it
-            let var = ctx.builder.declare_var(T::cranelift_type());
+            let var = ctx.declare_var(T::scalar_type());
             ctx.var_map.insert(self.var.id, var);
             var
         };
 
-        ctx.builder.def_var(var, value);
+        ctx.def_var(var, value);
 
         // Return cached unit value
         ctx.get_unit_value()
@@ -741,7 +930,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Generate code for the initialization value
         let value = self.init.codegen(ctx);
 
@@ -750,12 +939,12 @@ where
             var
         } else {
             // First assignment to this variable - declare it
-            let var = ctx.builder.declare_var(T::cranelift_type());
+            let var = ctx.declare_var(T::scalar_type());
             ctx.var_map.insert(self.var.id, var);
             var
         };
 
-        ctx.builder.def_var(var, value);
+        ctx.def_var(var, value);
 
         // Return cached unit value
         ctx.get_unit_value()

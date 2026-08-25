@@ -10,9 +10,8 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{CompilationContext, Staged, Var, VarUse};
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags};
+use crate::staged::{CompilationContext, Staged, ValueId, Var, VarUse};
+use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -41,8 +40,8 @@ impl<'a, T> Copy for SRef<'a, T> {}
 unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
     type RuntimeValue = &'a T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer-sized
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -77,8 +76,8 @@ pub struct SRefMut<'a, T> {
 unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T> {
     type RuntimeValue = &'a mut T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer-sized
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -119,8 +118,8 @@ impl<T> Copy for SPtr<T> {}
 unsafe impl<T: StagedType> StagedType for SPtr<T> {
     type RuntimeValue = *const T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -141,8 +140,8 @@ impl<T> Copy for SMutPtr<T> {}
 unsafe impl<T: StagedType> StagedType for SMutPtr<T> {
     type RuntimeValue = *mut T::RuntimeValue;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -182,11 +181,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -224,11 +221,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -267,11 +262,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -334,11 +327,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), ptr_val, 0)
+        ctx.load(T::scalar_type(), ptr_val, 0)
     }
 }
 
@@ -375,13 +366,11 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, ptr_val, 0);
+        ctx.store(value, ptr_val, 0);
 
         ctx.get_unit_value()
     }
@@ -415,12 +404,10 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, ptr_val, 0);
+        ctx.store(value, ptr_val, 0);
         ctx.get_unit_value()
     }
 }
@@ -459,15 +446,15 @@ where
 {
     type Out = SPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        ctx.builder.ins().iadd(ptr, byte_offset)
+        ctx.ptr_offset_bytes(ptr, byte_offset)
     }
 }
 
@@ -501,15 +488,15 @@ where
 {
     type Out = SMutPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        ctx.builder.ins().iadd(ptr, byte_offset)
+        ctx.ptr_offset_bytes(ptr, byte_offset)
     }
 }
 
@@ -546,19 +533,17 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
-        let scale = ctx.builder.ins().iconst(types::I64, element_size);
-        let byte_offset = ctx.builder.ins().imul(idx, scale);
+        let scale = ctx.iconst(ScalarType::I64, element_size);
+        let byte_offset = ctx.imul(idx, scale);
 
-        let offset_ptr = ctx.builder.ins().iadd(ptr, byte_offset);
+        let offset_ptr = ctx.ptr_offset_bytes(ptr, byte_offset);
 
-        ctx.builder
-            .ins()
-            .load(T::cranelift_type(), MemFlags::trusted(), offset_ptr, 0)
+        ctx.load(T::scalar_type(), offset_ptr, 0)
     }
 }
 
@@ -603,8 +588,11 @@ impl<S> Copy for ConstPtr<S> {}
 
 unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
-        ctx.builder.ins().iconst(types::I64, self.addr as i64)
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        // A baked host address becomes a staged pointer (Cranelift: the i64 itself;
+        // MLIR: inttoptr).
+        let addr = ctx.iconst(ScalarType::I64, self.addr as i64);
+        ctx.addr_to_ptr(addr)
     }
 }
 
@@ -648,6 +636,18 @@ pub fn const_mut_ptr<T: StagedType>(p: *mut T::RuntimeValue) -> ConstPtr<SMutPtr
 /// Use it to turn a raw byte buffer (`SMutPtr<u8>` loaded from a control block) into
 /// a typed `SMutPtr<T>` for element-strided indexing. Prefer the [`ptr_cast`] /
 /// [`ptr_cast_mut`] constructors, which fix the input to a real pointer type.
+///
+/// # Why this is safe despite reinterpreting the pointee
+///
+/// The cast itself cannot cause undefined behavior: it produces no instructions
+/// (the address value is unchanged) and only rewrites the *stage-0* type. The
+/// "the new pointee type is correct" claim is therefore an obligation that is
+/// **redeemed at the point of use, not here** — every way to actually touch the
+/// pointee (`load`, `store`, `ptr_offset`, `array_index`) is an `unsafe` staging
+/// operation whose contract already requires a valid, correctly-typed, aligned
+/// address. So a wrong `ptr_cast` is not itself unsound; it only becomes unsound
+/// through a later `unsafe` deref, which is where the audit belongs. Read a safe
+/// `ptr_cast` as "relabel this address", never as a proof that the bytes match `T`.
 pub struct PtrCast<P, S> {
     ptr: P,
     _s: PhantomData<S>,
@@ -665,7 +665,7 @@ impl<P: Copy, S> Copy for PtrCast<P, S> {}
 
 unsafe impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // A cast is a no-op on the address value; only the static type changes.
         self.ptr.codegen(ctx)
     }
@@ -793,11 +793,9 @@ where
     P::Out: RawPointer,
 {
     type Out = bool;
-    fn codegen(&self, ctx: &mut CompilationContext) -> cranelift_codegen::ir::Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let p = self.ptr.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, p, 0)
+        ctx.icmp_imm(IntCmp::Eq, p, 0)
     }
 }
 

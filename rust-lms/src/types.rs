@@ -5,8 +5,132 @@
 //! - `ConstantType`: Trait for types that can be compile-time constants
 //! - Concrete type markers: `i64`, `u64`, `bool`, etc.
 
-use cranelift_codegen::ir::{types, InstBuilder, Value};
-use cranelift_frontend::FunctionBuilder;
+use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
+use cranelift_codegen::ir::types;
+
+use crate::staged::{CompilationContext, ValueId};
+
+// =============================================================================
+// Backend-neutral scalar type (Phase 0 of docs/llvm.md)
+// =============================================================================
+
+/// Backend-neutral IR type representation.
+///
+/// This is the abstraction a future non-Cranelift backend (LLVM/MLIR) selects its
+/// own type from — the source of truth that replaces raw `cranelift ... Type` in the
+/// staged type system. During Phase 0 it is derived from the existing
+/// [`StagedType::cranelift_type`]; later, `cranelift_type` becomes the derived one.
+///
+/// Note `Bool` and `Ptr` are distinct from `I8`/`I64` even though both *currently*
+/// lower to the same Cranelift type: an MLIR backend needs `Bool`→`i1` at
+/// comparisons/branches and `Ptr`→`llvm.ptr` (see docs/llvm.md §8b/§8c).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum ScalarType {
+    Bool,
+    I8,
+    I16,
+    I32,
+    I64,
+    F32,
+    F64,
+    Ptr,
+}
+
+impl ScalarType {
+    /// Lower to the Cranelift IR type. `Bool` and `Ptr` fold onto `I8`/`I64` — the
+    /// Cranelift representation makes no such distinction.
+    pub fn to_cranelift(self) -> cranelift_codegen::ir::Type {
+        match self {
+            ScalarType::Bool | ScalarType::I8 => types::I8,
+            ScalarType::I16 => types::I16,
+            ScalarType::I32 => types::I32,
+            ScalarType::F32 => types::F32,
+            ScalarType::I64 | ScalarType::Ptr => types::I64,
+            ScalarType::F64 => types::F64,
+        }
+    }
+
+    /// Recover a `ScalarType` from a Cranelift type. Lossy where Cranelift folds
+    /// distinct neutral types together: `I8` cannot be told apart from `Bool`, and
+    /// `I64` from `Ptr`. Used only by the backend when reading a Cranelift value's
+    /// type back; the staged type system's source of truth is
+    /// [`StagedType::scalar_type`], stated directly per impl.
+    pub fn from_cranelift(ty: cranelift_codegen::ir::Type) -> ScalarType {
+        match ty {
+            types::I8 => ScalarType::I8,
+            types::I16 => ScalarType::I16,
+            types::I32 => ScalarType::I32,
+            types::F32 => ScalarType::F32,
+            types::I64 => ScalarType::I64,
+            types::F64 => ScalarType::F64,
+            _ => ScalarType::Ptr,
+        }
+    }
+
+    /// Size in bytes of a value of this type. `Ptr` is pointer-sized (8).
+    pub fn size_bytes(self) -> usize {
+        match self {
+            ScalarType::Bool | ScalarType::I8 => 1,
+            ScalarType::I16 => 2,
+            ScalarType::I32 | ScalarType::F32 => 4,
+            ScalarType::I64 | ScalarType::F64 | ScalarType::Ptr => 8,
+        }
+    }
+}
+
+/// Backend-neutral integer comparison predicate (see [`ScalarType`]).
+///
+/// The staged type system names this instead of Cranelift's `IntCC`; each backend
+/// lowers it (Cranelift via [`IntCmp::to_cranelift`]). Signed/unsigned is part of
+/// the predicate, selected by the operand's `IntNum` signedness at the call site.
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum IntCmp {
+    Eq,
+    Ne,
+    /// signed `<`
+    Slt,
+    /// signed `>`
+    Sgt,
+    /// unsigned `<`
+    Ult,
+    /// unsigned `>`
+    Ugt,
+}
+
+impl IntCmp {
+    /// Lower to the Cranelift condition code.
+    pub fn to_cranelift(self) -> IntCC {
+        match self {
+            IntCmp::Eq => IntCC::Equal,
+            IntCmp::Ne => IntCC::NotEqual,
+            IntCmp::Slt => IntCC::SignedLessThan,
+            IntCmp::Sgt => IntCC::SignedGreaterThan,
+            IntCmp::Ult => IntCC::UnsignedLessThan,
+            IntCmp::Ugt => IntCC::UnsignedGreaterThan,
+        }
+    }
+}
+
+/// Backend-neutral floating-point comparison predicate (ordered; see [`IntCmp`]).
+#[derive(Clone, Copy, PartialEq, Eq, Debug, Hash)]
+pub enum FloatCmp {
+    Eq,
+    /// ordered `<`
+    Lt,
+    /// ordered `>`
+    Gt,
+}
+
+impl FloatCmp {
+    /// Lower to the Cranelift condition code.
+    pub fn to_cranelift(self) -> FloatCC {
+        match self {
+            FloatCmp::Eq => FloatCC::Equal,
+            FloatCmp::Lt => FloatCC::LessThan,
+            FloatCmp::Gt => FloatCC::GreaterThan,
+        }
+    }
+}
 
 // =============================================================================
 // Core Traits
@@ -24,7 +148,7 @@ use cranelift_frontend::FunctionBuilder;
 ///
 /// # Safety
 ///
-/// `RuntimeValue`, `cranelift_type`, `size_of`, and `align_of` must describe one
+/// `RuntimeValue`, `scalar_type`, `size_of`, and `align_of` must describe one
 /// consistent runtime representation, and every value produced for this type
 /// must be a valid `RuntimeValue`. Incorrect implementations can make generated
 /// code perform invalid loads, stores, calls, or Rust value construction.
@@ -51,21 +175,18 @@ pub unsafe trait StagedType {
     #[doc(hidden)]
     const LAYOUT_VALID: () = ();
 
-    /// Get the Cranelift IR type representation.
-    /// For primitives, this is the actual type (I64, F64, etc.)
-    /// For structs, this is I64 (pointer to stack slot)
-    fn cranelift_type() -> cranelift_codegen::ir::Type;
+    /// The backend-neutral scalar representation of this type — the source of
+    /// truth the staged type system carries (see docs/llvm.md §8). For primitives
+    /// this is the matching `ScalarType` (`I64`, `F64`, …); booleans are `Bool` and
+    /// pointers/slice/struct handles are `Ptr` — distinctions Cranelift folds onto
+    /// `I8`/`I64` but an MLIR backend needs. Each backend lowers it to its own IR
+    /// type (Cranelift via [`ScalarType::to_cranelift`]).
+    fn scalar_type() -> ScalarType;
 
     /// Size of this type in bytes (for struct layout calculations)
     fn size_of() -> usize {
-        // Default: use Cranelift type size
-        match Self::cranelift_type() {
-            types::I8 => 1,
-            types::I16 => 2,
-            types::I32 | types::F32 => 4,
-            types::I64 | types::F64 => 8,
-            _ => 8, // Default to pointer size
-        }
+        // Default: the scalar representation's natural size.
+        Self::scalar_type().size_bytes()
     }
 
     /// Alignment of this type in bytes (for struct layout calculations)
@@ -98,7 +219,7 @@ pub unsafe trait StagedType {
 /// representation declared by [`StagedType`] and must represent `value`.
 pub unsafe trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue, builder: &mut FunctionBuilder) -> Value;
+    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_>) -> ValueId;
 }
 
 /// Marker trait for types that are Copy at the semantic level.
@@ -184,12 +305,12 @@ macro_rules! impl_by_value_runtime_type {
 // =============================================================================
 
 macro_rules! impl_int_staged_type {
-    ($ty:ty, $ir_ty:expr) => {
+    ($ty:ty, $scalar_ty:expr) => {
         unsafe impl StagedType for $ty {
             type RuntimeValue = $ty;
 
-            fn cranelift_type() -> cranelift_codegen::ir::Type {
-                $ir_ty
+            fn scalar_type() -> ScalarType {
+                $scalar_ty
             }
 
             fn size_of() -> usize {
@@ -202,8 +323,8 @@ macro_rules! impl_int_staged_type {
         }
 
         unsafe impl ConstantType for $ty {
-            fn codegen_constant(value: &$ty, builder: &mut FunctionBuilder) -> Value {
-                builder.ins().iconst($ir_ty, *value as i64)
+            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> ValueId {
+                ctx.iconst(Self::scalar_type(), *value as i64)
             }
         }
 
@@ -211,16 +332,16 @@ macro_rules! impl_int_staged_type {
     };
 }
 
-impl_int_staged_type!(i8, types::I8);
-impl_int_staged_type!(u8, types::I8);
-impl_int_staged_type!(i16, types::I16);
-impl_int_staged_type!(u16, types::I16);
+impl_int_staged_type!(i8, ScalarType::I8);
+impl_int_staged_type!(u8, ScalarType::I8);
+impl_int_staged_type!(i16, ScalarType::I16);
+impl_int_staged_type!(u16, ScalarType::I16);
 
 unsafe impl StagedType for i64 {
     type RuntimeValue = i64;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::I64
     }
 
     fn size_of() -> usize {
@@ -233,8 +354,8 @@ unsafe impl StagedType for i64 {
 }
 
 unsafe impl ConstantType for i64 {
-    fn codegen_constant(value: &i64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I64, *value)
+    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value)
     }
 }
 
@@ -243,8 +364,8 @@ unsafe impl CopyType for i64 {}
 unsafe impl StagedType for u64 {
     type RuntimeValue = u64;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::I64
     }
 
     fn size_of() -> usize {
@@ -257,8 +378,8 @@ unsafe impl StagedType for u64 {
 }
 
 unsafe impl ConstantType for u64 {
-    fn codegen_constant(value: &u64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I64, *value as i64)
+    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -267,8 +388,8 @@ unsafe impl CopyType for u64 {}
 unsafe impl StagedType for i32 {
     type RuntimeValue = i32;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I32
+    fn scalar_type() -> ScalarType {
+        ScalarType::I32
     }
 
     fn size_of() -> usize {
@@ -281,8 +402,8 @@ unsafe impl StagedType for i32 {
 }
 
 unsafe impl ConstantType for i32 {
-    fn codegen_constant(value: &i32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I32, *value as i64)
+    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -291,8 +412,8 @@ unsafe impl CopyType for i32 {}
 unsafe impl StagedType for u32 {
     type RuntimeValue = u32;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I32
+    fn scalar_type() -> ScalarType {
+        ScalarType::I32
     }
 
     fn size_of() -> usize {
@@ -305,8 +426,8 @@ unsafe impl StagedType for u32 {
 }
 
 unsafe impl ConstantType for u32 {
-    fn codegen_constant(value: &u32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I32, *value as i64)
+    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), *value as i64)
     }
 }
 
@@ -315,8 +436,8 @@ unsafe impl CopyType for u32 {}
 unsafe impl StagedType for f32 {
     type RuntimeValue = f32;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::F32
+    fn scalar_type() -> ScalarType {
+        ScalarType::F32
     }
 
     fn size_of() -> usize {
@@ -329,8 +450,8 @@ unsafe impl StagedType for f32 {
 }
 
 unsafe impl ConstantType for f32 {
-    fn codegen_constant(value: &f32, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().f32const(*value)
+    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.f32const(*value)
     }
 }
 
@@ -339,8 +460,8 @@ unsafe impl CopyType for f32 {}
 unsafe impl StagedType for bool {
     type RuntimeValue = bool;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I8
+    fn scalar_type() -> ScalarType {
+        ScalarType::Bool
     }
 
     fn size_of() -> usize {
@@ -353,8 +474,8 @@ unsafe impl StagedType for bool {
 }
 
 unsafe impl ConstantType for bool {
-    fn codegen_constant(value: &bool, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I8, if *value { 1 } else { 0 })
+    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 })
     }
 }
 
@@ -363,8 +484,8 @@ unsafe impl CopyType for bool {}
 unsafe impl StagedType for f64 {
     type RuntimeValue = f64;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::F64
+    fn scalar_type() -> ScalarType {
+        ScalarType::F64
     }
 
     fn size_of() -> usize {
@@ -377,8 +498,8 @@ unsafe impl StagedType for f64 {
 }
 
 unsafe impl ConstantType for f64 {
-    fn codegen_constant(value: &f64, builder: &mut FunctionBuilder) -> Value {
-        builder.ins().f64const(*value)
+    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.f64const(*value)
     }
 }
 
@@ -387,8 +508,8 @@ unsafe impl CopyType for f64 {}
 unsafe impl StagedType for () {
     type RuntimeValue = ();
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I8 // Minimal representation, value is ignored
+    fn scalar_type() -> ScalarType {
+        ScalarType::I8 // Minimal representation, value is ignored
     }
 
     fn size_of() -> usize {
@@ -401,8 +522,8 @@ unsafe impl StagedType for () {
 }
 
 unsafe impl ConstantType for () {
-    fn codegen_constant(_value: &(), builder: &mut FunctionBuilder) -> Value {
-        builder.ins().iconst(types::I8, 0)
+    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_>) -> ValueId {
+        ctx.iconst(Self::scalar_type(), 0)
     }
 }
 

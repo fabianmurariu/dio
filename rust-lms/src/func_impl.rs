@@ -5,10 +5,8 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{CompilationContext, IntoStaged, Staged};
-use crate::types::StagedType;
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
-use cranelift_module::Module;
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
+use crate::types::{ScalarType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -20,8 +18,9 @@ use std::marker::PhantomData;
 /// This captures the layout needed to marshal a value through canonical storage.
 #[derive(Clone, Debug)]
 pub struct TypeInfo {
-    /// Cranelift value type used after loading a scalar from its ABI slot.
-    pub value_type: cranelift_codegen::ir::Type,
+    /// Backend-neutral scalar representation used after loading a scalar from its
+    /// ABI slot.
+    pub repr: ScalarType,
     /// Exact runtime size in bytes.
     pub size: u32,
     /// Exact runtime alignment in bytes.
@@ -36,7 +35,7 @@ impl TypeInfo {
     /// Create TypeInfo from a StagedType
     pub fn from_staged_type<T: StagedType>() -> Self {
         TypeInfo {
-            value_type: T::cranelift_type(),
+            repr: T::scalar_type(),
             size: T::size_of() as u32,
             alignment: T::align_of() as u32,
             is_aggregate: T::is_copy_struct(),
@@ -44,12 +43,10 @@ impl TypeInfo {
         }
     }
 
-    fn stack_slot(&self) -> StackSlotData {
-        StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            self.size.max(1),
-            self.alignment.trailing_zeros() as u8,
-        )
+    /// Storage-slot dimensions `(size_bytes, align_shift)` for this value's ABI
+    /// slot, ready to pass to [`crate::staged::Backend::alloc_stack_slot`].
+    fn slot_dims(&self) -> (u32, u8) {
+        (self.size.max(1), self.alignment.trailing_zeros() as u8)
     }
 }
 
@@ -70,8 +67,8 @@ pub fn codegen_call(
     func_id: usize,
     param_infos: &[TypeInfo],
     return_info: &TypeInfo,
-    arg_values: &[Value],
-) -> Value {
+    arg_values: &[ValueId],
+) -> ValueId {
     assert_eq!(
         arg_values.len(),
         param_infos.len(),
@@ -80,66 +77,47 @@ pub fn codegen_call(
         arg_values.len()
     );
 
-    // Look up the function ID in our map
-    let cranelift_func_id = ctx
-        .func_map
-        .get(&func_id)
-        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
-
-    // Declare the function for calling
-    let func_ref = ctx
-        .module
-        .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
+    // Declare the callee for calling (resolves our function id inside the backend).
+    let func_ref = ctx.declare_func(func_id);
 
     // The private JIT ABI passes one storage pointer per logical argument.
-    let mut call_args: Vec<Value> = Vec::with_capacity(arg_values.len() + 1);
+    let mut call_args: Vec<ValueId> = Vec::with_capacity(arg_values.len() + 1);
 
     for (arg_value, param_info) in arg_values.iter().zip(param_infos.iter()) {
         if param_info.is_aggregate {
             call_args.push(*arg_value);
         } else {
-            let stack_slot = ctx.builder.create_sized_stack_slot(param_info.stack_slot());
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+            let (size, align_shift) = param_info.slot_dims();
+            let stack_slot = ctx.alloc_stack_slot(size, align_shift);
+            let slot_ptr = ctx.stack_addr(stack_slot, 0);
             if param_info.size != 0 {
-                ctx.builder
-                    .ins()
-                    .store(MemFlags::trusted(), *arg_value, slot_ptr, 0);
+                ctx.store(*arg_value, slot_ptr, 0);
             }
             call_args.push(slot_ptr);
         }
     }
 
-    let result_slot = ctx
-        .builder
-        .create_sized_stack_slot(return_info.stack_slot());
-    let result_ptr = ctx.builder.ins().stack_addr(types::I64, result_slot, 0);
+    let (ret_size, ret_align_shift) = return_info.slot_dims();
+    let result_slot = ctx.alloc_stack_slot(ret_size, ret_align_shift);
+    let result_ptr = ctx.stack_addr(result_slot, 0);
     call_args.push(result_ptr);
 
     // Generate the call
-    ctx.builder.ins().call(func_ref, &call_args);
+    ctx.call(func_ref, &call_args);
 
     if return_info.is_aggregate {
         result_ptr
     } else if return_info.size == 0 {
         ctx.get_unit_value()
     } else {
-        ctx.builder
-            .ins()
-            .load(return_info.value_type, MemFlags::trusted(), result_ptr, 0)
+        ctx.load(return_info.repr, result_ptr, 0)
     }
 }
 
 /// Generate code to get a function's address (for returning function pointers)
-pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> Value {
-    let cranelift_func_id = ctx
-        .func_map
-        .get(&func_id)
-        .unwrap_or_else(|| panic!("Function {} not found in func_map", func_id));
-
-    let func_ref = ctx
-        .module
-        .declare_func_in_func(*cranelift_func_id, ctx.builder.func);
-    ctx.builder.ins().func_addr(types::I64, func_ref)
+pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> ValueId {
+    let func_ref = ctx.declare_func(func_id);
+    ctx.func_addr(func_ref)
 }
 
 // =============================================================================
@@ -165,9 +143,9 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> StagedType for $FunType<OUT> {
             type RuntimeValue = extern "C" fn() -> OUT::RuntimeValue;
 
-            fn cranelift_type() -> cranelift_codegen::ir::Type {
-                types::I64
-            }
+            fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
         }
 
         /// Type-safe function reference for 0-ary functions
@@ -199,7 +177,7 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $FunRef<OUT> {
             type Out = $FunType<OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 codegen_func_addr(ctx, self.id)
             }
         }
@@ -213,7 +191,7 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $Call<OUT> {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 let return_info = TypeInfo::from_staged_type::<OUT>();
                 codegen_call(ctx, self.func.id, &[], &return_info, &[])
             }
@@ -238,9 +216,9 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
             type RuntimeValue = extern "C" fn($($T::RuntimeValue,)+) -> OUT::RuntimeValue;
 
-            fn cranelift_type() -> cranelift_codegen::ir::Type {
-                types::I64
-            }
+            fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
         }
 
         /// Type-safe function reference (Copy, stores just ID)
@@ -272,7 +250,7 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
             type Out = $FunType<$($T,)+ OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 codegen_func_addr(ctx, self.id)
             }
         }
@@ -290,7 +268,7 @@ macro_rules! impl_fun_n {
         {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
                 // Build type info from type parameters
                 let param_infos = [$(TypeInfo::from_staged_type::<$T>()),+];
                 let return_info = TypeInfo::from_staged_type::<OUT>();

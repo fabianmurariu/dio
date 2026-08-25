@@ -4,92 +4,95 @@
 
 use rust_lms::prelude::*;
 
+mod common;
+use common::for_each_backend;
+
 /// Test compute_stats with mutable reference parameters using store_ref/load_ref_mut.
 #[test]
 fn test_compute_stats() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let stats_fn = compiler.fun6(
+            "compute_stats",
+            |ctx,
+             data: Var<SRef<Slice<f64>>>,
+             v: Var<f64>,
+             mut count_ptr: Var<SRefMut<u64>>,
+             mut min_ptr: Var<SRefMut<f64>>,
+             mut max_ptr: Var<SRefMut<f64>>,
+             mut sum_ptr: Var<SRefMut<f64>>| {
+                let i = ctx.var(0u64);
+                // Accumulators kept in register-resident locals; values flushed to
+                // the output pointers only at the end.
+                let count = ctx.var(0u64);
+                let min = ctx.var(f64::INFINITY);
+                let max = ctx.var(f64::NEG_INFINITY);
+                let sum = ctx.var(0.0f64);
+                let val = ctx.var(0.0f64);
 
-    let stats_fn = compiler.fun6(
-        "compute_stats",
-        |ctx,
-         data: Var<SRef<Slice<f64>>>,
-         v: Var<f64>,
-         mut count_ptr: Var<SRefMut<u64>>,
-         mut min_ptr: Var<SRefMut<f64>>,
-         mut max_ptr: Var<SRefMut<f64>>,
-         mut sum_ptr: Var<SRefMut<f64>>| {
-            let i = ctx.var(0u64);
-            // Accumulators kept in register-resident locals; values flushed to
-            // the output pointers only at the end.
-            let count = ctx.var(0u64);
-            let min = ctx.var(f64::INFINITY);
-            let max = ctx.var(f64::NEG_INFINITY);
-            let sum = ctx.var(0.0f64);
-            let val = ctx.var(0.0f64);
-
-            ctx.while_loop(lt(i, data.clone().len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < data.len()`.
-                ctx.store(val, unsafe { data.clone().get_unchecked(i) });
-                ctx.if_then(gt(val, v), move |ctx| {
-                    ctx.store(count, count + 1u64);
-                    ctx.store(sum, sum + val);
-                    ctx.if_then(lt(val, min), move |ctx| ctx.store(min, val));
-                    ctx.if_then(gt(val, max), move |ctx| ctx.store(max, val));
+                ctx.while_loop(lt(i, data.clone().len()), move |ctx| {
+                    // SAFETY: the loop condition proves `i < data.len()`.
+                    ctx.store(val, unsafe { data.clone().get_unchecked(i) });
+                    ctx.if_then(gt(val, v), move |ctx| {
+                        ctx.store(count, count + 1u64);
+                        ctx.store(sum, sum + val);
+                        ctx.if_then(lt(val, min), move |ctx| ctx.store(min, val));
+                        ctx.if_then(gt(val, max), move |ctx| ctx.store(max, val));
+                    });
+                    ctx.store(i, i + 1u64);
                 });
-                ctx.store(i, i + 1u64);
-            });
 
-            // Emit the 4 store_refs as side effects, then return ().
-            ctx.emit(store_ref(&mut count_ptr, count));
-            ctx.emit(store_ref(&mut min_ptr, min));
-            ctx.emit(store_ref(&mut max_ptr, max));
-            ctx.emit(store_ref(&mut sum_ptr, sum));
-            Const::<()>::new(())
-        },
-    );
+                // Emit the 4 store_refs as side effects, then return ().
+                ctx.emit(store_ref(&mut count_ptr, count));
+                ctx.emit(store_ref(&mut min_ptr, min));
+                ctx.emit(store_ref(&mut max_ptr, max));
+                ctx.emit(store_ref(&mut sum_ptr, sum));
+                Const::<()>::new(())
+            },
+        );
 
-    let compiled = compiler
-        .compile(stats_fn)
-        .expect("Failed to compile rust-lms function");
-    let func = compiled.as_fn();
+        let compiled = compiler
+            .compile(stats_fn)
+            .expect("Failed to compile rust-lms function");
+        let func = compiled.as_fn();
 
-    let data = [1.0, 5.0, 3.0, 8.0, 2.0, 9.0, 4.0];
-    let threshold = 4.0; // Values > 4.0: 5.0, 8.0, 9.0
+        let data = [1.0, 5.0, 3.0, 8.0, 2.0, 9.0, 4.0];
+        let threshold = 4.0; // Values > 4.0: 5.0, 8.0, 9.0
 
-    let mut count = 0u64;
-    let mut min = 0.0;
-    let mut max = 0.0;
-    let mut sum = 0.0;
+        let mut count = 0u64;
+        let mut min = 0.0;
+        let mut max = 0.0;
+        let mut sum = 0.0;
 
-    func.call(
-        &data[..],
-        threshold,
-        &mut count,
-        &mut min,
-        &mut max,
-        &mut sum,
-    );
+        func.call(
+            &data[..],
+            threshold,
+            &mut count,
+            &mut min,
+            &mut max,
+            &mut sum,
+        );
 
-    assert_eq!(count, 3, "count mismatch");
-    assert_eq!(min, 5.0, "min mismatch");
-    assert_eq!(max, 9.0, "max mismatch");
-    assert_eq!(sum, 22.0, "sum mismatch");
+        assert_eq!(count, 3, "count mismatch");
+        assert_eq!(min, 5.0, "min mismatch");
+        assert_eq!(max, 9.0, "max mismatch");
+        assert_eq!(sum, 22.0, "sum mismatch");
+    });
 }
 
 /// Simple test for store_ref/load_ref_mut with a single mutable reference.
 #[test]
 fn test_simple_store_load() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let inc_fn = compiler.fun1("increment", |_ctx, mut ptr: Var<SRefMut<u64>>| {
+            let current = load_ref_mut(&mut ptr);
+            store_ref(&mut ptr, current + 1u64)
+        });
 
-    let inc_fn = compiler.fun1("increment", |_ctx, mut ptr: Var<SRefMut<u64>>| {
-        let current = load_ref_mut(&mut ptr);
-        store_ref(&mut ptr, current + 1u64)
+        let compiled = compiler.compile(inc_fn).expect("Failed to compile");
+        let func = compiled.as_fn();
+
+        let mut value = 41u64;
+        func.call(&mut value);
+        assert_eq!(value, 42);
     });
-
-    let compiled = compiler.compile(inc_fn).expect("Failed to compile");
-    let func = compiled.as_fn();
-
-    let mut value = 41u64;
-    func.call(&mut value);
-    assert_eq!(value, 42);
 }

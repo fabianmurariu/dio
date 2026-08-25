@@ -23,9 +23,8 @@
 
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var};
-use crate::types::{RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{types, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value};
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var};
+use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -111,8 +110,8 @@ pub struct COptionType<T: StagedType> {
 unsafe impl<T: StagedType> StagedType for COptionType<T> {
     type RuntimeValue = COption<T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Pointer to stack slot
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn is_copy_struct() -> bool {
@@ -129,7 +128,15 @@ unsafe impl<T: StagedType> StagedType for COptionType<T> {
 }
 
 impl<T: StagedType> COptionType<T> {
-    fn payload_offset() -> usize {
+    /// Byte offset of the payload inside the `#[repr(C, u64)] COption<T>` layout:
+    /// the 8-byte discriminant rounded up to `T`'s alignment.
+    ///
+    /// This is the single source of truth for the payload offset. Every codegen
+    /// site that loads/stores through a `COption` — including the opaque-iterator
+    /// loop in `func.rs`, which cannot see `COption`'s Rust layout directly — must
+    /// call this rather than re-deriving `align_up(8, align)` inline, per the
+    /// project's "slice/pointer layout lives in exactly one place" invariant.
+    pub(crate) fn payload_offset() -> usize {
         let alignment = T::align_of();
         debug_assert!(alignment.is_power_of_two());
         8usize.div_ceil(alignment) * alignment
@@ -159,8 +166,8 @@ pub struct OptRefType<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
     type RuntimeValue = Option<&'a T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Single pointer, null = None
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -203,8 +210,8 @@ pub struct OptMutRefType<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
     type RuntimeValue = Option<&'a mut T::RuntimeValue>;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64 // Single pointer, null = None
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }
 
@@ -238,36 +245,30 @@ pub struct CSome<T: StagedType, E> {
 unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // Get the inner value
         let value = self.value.codegen(ctx);
 
         // Allocate stack slot for COption<T>
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size,
-            alignment.trailing_zeros() as u8,
-        ));
+        let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
 
-        let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let ptr = ctx.stack_addr(stack_slot, 0);
 
         // Store discriminant = 1 (Some)
-        let one = ctx.builder.ins().iconst(types::I64, 1);
-        ctx.builder.ins().store(MemFlags::trusted(), one, ptr, 0);
+        let one = ctx.iconst(ScalarType::I64, 1);
+        ctx.store(one, ptr, 0);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
-        let payload_ptr = ctx.builder.ins().iadd_imm(ptr, payload_offset);
+        let payload_ptr = ctx.ptr_offset_const(ptr, payload_offset);
 
         // Store the payload at its actual aligned offset.
         if T::is_copy_struct() {
             // Aggregate staged values are addresses of their storage.
             ctx.copy_nonoverlapping(payload_ptr, value, T::size_of(), T::align_of());
         } else {
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), value, payload_ptr, 0);
+            ctx.store(value, payload_ptr, 0);
         }
 
         ptr
@@ -291,20 +292,16 @@ pub struct CNone<T: StagedType> {
 unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
-        let stack_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            size,
-            alignment.trailing_zeros() as u8,
-        ));
+        let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
 
-        let ptr = ctx.builder.ins().stack_addr(types::I64, stack_slot, 0);
+        let ptr = ctx.stack_addr(stack_slot, 0);
 
         // Store discriminant = 0 (None)
-        let zero = ctx.builder.ins().iconst(types::I64, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), zero, ptr, 0);
+        let zero = ctx.iconst(ScalarType::I64, 0);
+        ctx.store(zero, ptr, 0);
 
         ptr
     }
@@ -331,7 +328,7 @@ pub struct OptRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // The reference is the pointer - just pass it through
         self.reference.codegen(ctx)
     }
@@ -356,9 +353,9 @@ pub struct OptRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         // None is represented as null pointer
-        ctx.builder.ins().iconst(types::I64, 0)
+        ctx.iconst(ScalarType::I64, 0)
     }
 }
 
@@ -378,7 +375,7 @@ pub struct OptMutRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.reference.codegen(ctx)
     }
 }
@@ -402,8 +399,8 @@ pub struct OptMutRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        ctx.builder.ins().iconst(types::I64, 0)
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+        ctx.iconst(ScalarType::I64, 0)
     }
 }
 
@@ -427,19 +424,12 @@ pub struct IsSome<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
         // Load discriminant from offset 0
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant != 0
-        ctx.builder.ins().icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::NotEqual,
-            discriminant,
-            0,
-        )
+        ctx.icmp_imm(IntCmp::Ne, discriminant, 0)
     }
 }
 
@@ -457,18 +447,11 @@ pub struct IsNone<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
         // discriminant == 0
-        ctx.builder.ins().icmp_imm(
-            cranelift_codegen::ir::condcodes::IntCC::Equal,
-            discriminant,
-            0,
-        )
+        ctx.icmp_imm(IntCmp::Eq, discriminant, 0)
     }
 }
 
@@ -490,12 +473,10 @@ pub struct IsRefSome<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
     }
 }
 
@@ -515,12 +496,10 @@ pub struct IsRefNone<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
     }
 }
 
@@ -543,11 +522,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::NotEqual, ptr, 0)
+        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
     }
 }
 
@@ -568,11 +545,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
-        ctx.builder
-            .ins()
-            .icmp_imm(cranelift_codegen::ir::condcodes::IntCC::Equal, ptr, 0)
+        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
     }
 }
 
@@ -599,61 +574,48 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
-
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks for if-then-else
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
         // Add block parameter for the result
-        let result_type = T::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = T::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch: if discriminant != 0, go to some_block, else none_block
-        ctx.builder
-            .ins()
-            .brif(discriminant, some_block, &[], none_block, &[]);
+        ctx.brif(discriminant, some_block, &[], none_block, &[]);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
         // Some block: load the aligned payload.
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
         let some_val = if T::is_copy_struct() {
-            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
-            ctx.builder
-                .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
+            ctx.load(T::scalar_type(), payload_ptr, 0)
         };
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_val)]);
+        ctx.jump(merge_block, &[some_val]);
 
         // None block: use default
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let default_val = self.default.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(default_val)]);
+        ctx.jump(merge_block, &[default_val]);
 
         // Merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -699,69 +661,56 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
-
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx
-            .builder
-            .ins()
-            .load(types::I64, MemFlags::trusted(), opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
 
         // Create blocks
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch based on discriminant
-        ctx.builder
-            .ins()
-            .brif(discriminant, some_block, &[], none_block, &[]);
+        ctx.brif(discriminant, some_block, &[], none_block, &[]);
 
         // Some block: bind value and execute some_body
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
         // Load the value and bind it to the variable.
         let bound_val = if T::is_copy_struct() {
-            ctx.builder.ins().iadd_imm(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr, payload_offset)
         } else {
-            let payload_ptr = ctx.builder.ins().iadd_imm(opt_ptr, payload_offset);
-            ctx.builder
-                .ins()
-                .load(T::cranelift_type(), MemFlags::trusted(), payload_ptr, 0)
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
+            ctx.load(T::scalar_type(), payload_ptr, 0)
         };
 
         // Declare and define the bound variable
-        let bound_var = ctx.builder.declare_var(T::cranelift_type());
-        ctx.builder.def_var(bound_var, bound_val);
+        let bound_var = ctx.declare_var(T::scalar_type());
+        ctx.def_var(bound_var, bound_val);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
         // None block: execute none_body
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
         // Merge block
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -837,50 +786,42 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
-
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
 
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
         // Branch: if ptr != null, it's Some
-        ctx.builder
-            .ins()
-            .brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr, some_block, &[], none_block, &[]);
 
         // Some block: ptr IS the reference
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
         // Bind the pointer as SRef<T>
-        let bound_var = ctx.builder.declare_var(types::I64);
-        ctx.builder.def_var(bound_var, ptr);
+        let bound_var = ctx.declare_var(ScalarType::I64);
+        ctx.def_var(bound_var, ptr);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
         // None block
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
         // Merge
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -936,45 +877,37 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        use cranelift_codegen::ir::BlockArg;
-
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let ptr = self.opt.codegen(ctx);
 
-        let some_block = ctx.builder.create_block();
-        let none_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
+        let some_block = ctx.create_block();
+        let none_block = ctx.create_block();
+        let merge_block = ctx.create_block();
 
-        let result_type = OUT::cranelift_type();
-        ctx.builder.append_block_param(merge_block, result_type);
+        let result_type = OUT::scalar_type();
+        ctx.append_block_param(merge_block, result_type);
 
-        ctx.builder
-            .ins()
-            .brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr, some_block, &[], none_block, &[]);
 
-        ctx.builder.switch_to_block(some_block);
-        ctx.builder.seal_block(some_block);
+        ctx.switch_to_block(some_block);
+        ctx.seal_block(some_block);
 
-        let bound_var = ctx.builder.declare_var(types::I64);
-        ctx.builder.def_var(bound_var, ptr);
+        let bound_var = ctx.declare_var(ScalarType::I64);
+        ctx.def_var(bound_var, ptr);
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(some_result)]);
+        ctx.jump(merge_block, &[some_result]);
 
-        ctx.builder.switch_to_block(none_block);
-        ctx.builder.seal_block(none_block);
+        ctx.switch_to_block(none_block);
+        ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(none_result)]);
+        ctx.jump(merge_block, &[none_result]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
 
-        ctx.builder.block_params(merge_block)[0]
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -1020,8 +953,8 @@ mod tests {
     unsafe impl StagedType for AlignedPayload {
         type RuntimeValue = Self;
 
-        fn cranelift_type() -> cranelift_codegen::ir::Type {
-            types::I64
+        fn scalar_type() -> ScalarType {
+            ScalarType::Ptr
         }
 
         fn size_of() -> usize {

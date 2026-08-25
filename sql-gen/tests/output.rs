@@ -8,7 +8,8 @@ use arrow::array::{Array, Float64Array, Int32Array, Int64Array};
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use sql_gen::exec_jit;
+mod common;
+use common::exec_jit;
 
 /// Two columns: `a: Int32`, `b: Int64` (nullability inferred from the arrays).
 fn batch(a: Int32Array, b: Int64Array) -> RecordBatch {

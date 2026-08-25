@@ -59,10 +59,9 @@
 use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Var, VarUse};
-use crate::types::{CopyType, DirectValue, RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{
-    condcodes::IntCC, types, BlockArg, InstBuilder, MemFlags, StackSlotData, StackSlotKind, Value,
+use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::types::{
+    CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
 use std::marker::PhantomData;
 
@@ -101,6 +100,20 @@ pub struct Slice<T: StagedType> {
 /// The staged representation of `Self` must store a pointer at byte offset 0
 /// and a `u64` element count at byte offset 8. The pointer must have the same
 /// representation as a pointer to `T`.
+///
+/// # Why this is an open `unsafe trait`, not sealed
+///
+/// This is deliberately implementable by downstream crates, and it must stay
+/// that way: the only implementors today are `arrow-lms`'s `FfiBuffer` /
+/// `FfiBufferMut`, and `arrow-lms` is a *separate* crate. Sealing (a private
+/// supertrait) would confine impls to `rust-lms` itself and break the intended
+/// pattern where a data-layer crate defines its own `#[repr(C)]` descriptor and
+/// witnesses its layout. `unsafe` — plus the `unsafe fn as_slice` on the read
+/// side — is the whole safety boundary: an implementor must uphold the offset/
+/// representation contract above under `unsafe impl`, and no *safe* code can
+/// reinterpret an arbitrary `SRef<R>` as a slice (proven by the `compile_fail`
+/// doctest on `ReprSliceOps::as_slice`). Do not seal this without first moving
+/// every descriptor type into `rust-lms`.
 pub unsafe trait SliceRepr<T: StagedType>: StagedType {}
 
 /// Unsafe layout witness for staged types that can also be decoded as a
@@ -151,7 +164,7 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -205,7 +218,7 @@ where
 {
     type Out = SRef<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -312,7 +325,7 @@ where
 {
     type Out = SRefMut<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         self.repr.codegen(ctx)
     }
 }
@@ -325,9 +338,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     /// Runtime type is `&[T::RuntimeValue]`
     type RuntimeValue = &'a [T::RuntimeValue];
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        // Internally represented as pointer to (ptr, len) pair
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -373,8 +385,8 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     /// Runtime type is `&mut [T::RuntimeValue]`
     type RuntimeValue = &'a mut [T::RuntimeValue];
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 
     fn size_of() -> usize {
@@ -493,15 +505,15 @@ impl<'a, T: StagedType> slice_type_sealed::MutableSealed for SRefMut<'a, Slice<T
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
 
 /// Emit `data_ptr + index * sizeof(Elem)`, the address of element `index`.
-fn element_addr<S>(ctx: &mut CompilationContext, data_ptr: Value, index: Value) -> Value
+fn element_addr<S>(ctx: &mut CompilationContext, data_ptr: ValueId, index: ValueId) -> ValueId
 where
     S: Staged,
     S::Out: SliceType,
 {
     let element_size = ElemOf::<S>::size_of() as i64;
-    let scale = ctx.builder.ins().iconst(types::I64, element_size);
-    let byte_offset = ctx.builder.ins().imul(index, scale);
-    ctx.builder.ins().iadd(data_ptr, byte_offset)
+    let scale = ctx.iconst(ScalarType::I64, element_size);
+    let byte_offset = ctx.imul(index, scale);
+    ctx.ptr_offset_bytes(data_ptr, byte_offset)
 }
 
 // =============================================================================
@@ -521,7 +533,7 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         ctx.slice_len(&self.slice)
     }
 }
@@ -544,7 +556,7 @@ where
 {
     type Out = <S::Out as SliceType>::DataPtr;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         ctx.slice_data_ptr(&self.slice)
     }
 }
@@ -569,7 +581,7 @@ where
 {
     type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         element_addr::<S>(ctx, data_ptr, index)
@@ -591,7 +603,7 @@ where
 {
     type Out = SPtr<ElemOf<S>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         element_addr::<S>(ctx, data_ptr, index)
@@ -652,43 +664,31 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
 
-        let get_block = ctx.builder.create_block();
-        let default_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
-        ctx.builder
-            .append_block_param(merge_block, ElemOf::<S>::cranelift_type());
-        ctx.builder
-            .ins()
-            .brif(in_bounds, get_block, &[], default_block, &[]);
+        let get_block = ctx.create_block();
+        let default_block = ctx.create_block();
+        let merge_block = ctx.create_block();
+        ctx.append_block_param(merge_block, ElemOf::<S>::scalar_type());
+        ctx.brif(in_bounds, get_block, &[], default_block, &[]);
 
-        ctx.builder.switch_to_block(get_block);
-        ctx.builder.seal_block(get_block);
+        ctx.switch_to_block(get_block);
+        ctx.seal_block(get_block);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        let value = ctx.builder.ins().load(
-            ElemOf::<S>::cranelift_type(),
-            MemFlags::trusted(),
-            element_ptr,
-            0,
-        );
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(value)]);
+        let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0);
+        ctx.jump(merge_block, &[value]);
 
-        ctx.builder.switch_to_block(default_block);
-        ctx.builder.seal_block(default_block);
+        ctx.switch_to_block(default_block);
+        ctx.seal_block(default_block);
         let default = self.default.codegen(ctx);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(default)]);
+        ctx.jump(merge_block, &[default]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
-        ctx.builder.block_params(merge_block)[0]
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -709,41 +709,33 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.builder.ins().icmp(IntCC::UnsignedLessThan, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
 
-        let set_block = ctx.builder.create_block();
-        let out_of_bounds_block = ctx.builder.create_block();
-        let merge_block = ctx.builder.create_block();
-        ctx.builder.append_block_param(merge_block, types::I8);
-        ctx.builder
-            .ins()
-            .brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
+        let set_block = ctx.create_block();
+        let out_of_bounds_block = ctx.create_block();
+        let merge_block = ctx.create_block();
+        ctx.append_block_param(merge_block, ScalarType::I8);
+        ctx.brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
 
-        ctx.builder.switch_to_block(set_block);
-        ctx.builder.seal_block(set_block);
+        ctx.switch_to_block(set_block);
+        ctx.seal_block(set_block);
         let value = self.value.codegen(ctx);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, element_ptr, 0);
-        let written = ctx.builder.ins().iconst(types::I8, 1);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(written)]);
+        ctx.store(value, element_ptr, 0);
+        let written = ctx.iconst(ScalarType::I8, 1);
+        ctx.jump(merge_block, &[written]);
 
-        ctx.builder.switch_to_block(out_of_bounds_block);
-        ctx.builder.seal_block(out_of_bounds_block);
-        let not_written = ctx.builder.ins().iconst(types::I8, 0);
-        ctx.builder
-            .ins()
-            .jump(merge_block, &[BlockArg::Value(not_written)]);
+        ctx.switch_to_block(out_of_bounds_block);
+        ctx.seal_block(out_of_bounds_block);
+        let not_written = ctx.iconst(ScalarType::I8, 0);
+        ctx.jump(merge_block, &[not_written]);
 
-        ctx.builder.switch_to_block(merge_block);
-        ctx.builder.seal_block(merge_block);
-        ctx.builder.block_params(merge_block)[0]
+        ctx.switch_to_block(merge_block);
+        ctx.seal_block(merge_block);
+        ctx.block_param(merge_block, 0)
     }
 }
 
@@ -756,16 +748,11 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder.ins().load(
-            ElemOf::<S>::cranelift_type(),
-            MemFlags::trusted(),
-            element_ptr,
-            0,
-        )
+        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0)
     }
 }
 
@@ -791,14 +778,12 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), value, element_ptr, 0);
+        ctx.store(value, element_ptr, 0);
         ctx.get_unit_value()
     }
 }
@@ -826,18 +811,18 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let i = self.i.codegen(ctx);
         let j = self.j.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let addr_i = element_addr::<S>(ctx, data_ptr, i);
         let addr_j = element_addr::<S>(ctx, data_ptr, j);
 
-        let ty = ElemOf::<S>::cranelift_type();
-        let vi = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_i, 0);
-        let vj = ctx.builder.ins().load(ty, MemFlags::trusted(), addr_j, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), vj, addr_i, 0);
-        ctx.builder.ins().store(MemFlags::trusted(), vi, addr_j, 0);
+        let ty = ElemOf::<S>::scalar_type();
+        let vi = ctx.load(ty, addr_i, 0);
+        let vj = ctx.load(ty, addr_j, 0);
+        ctx.store(vj, addr_i, 0);
+        ctx.store(vi, addr_j, 0);
         ctx.get_unit_value()
     }
 }
@@ -868,28 +853,20 @@ where
 {
     type Out = S::Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
         let new_ptr = element_addr::<S>(ctx, data_ptr, start);
-        let new_len = ctx.builder.ins().isub(end, start);
+        let new_len = ctx.isub(end, start);
 
         // Materialize the new (ptr, len) pair on a 16-byte stack slot.
-        let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-            StackSlotKind::ExplicitSlot,
-            16, // size
-            3,  // align_shift = log2(8) = 3
-        ));
-        let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_ptr, slot_ptr, 0);
-        ctx.builder
-            .ins()
-            .store(MemFlags::trusted(), new_len, slot_ptr, 8);
+        let slot = ctx.alloc_stack_slot(16, 3);
+        let slot_ptr = ctx.stack_addr(slot, 0);
+        ctx.store(new_ptr, slot_ptr, 0);
+        ctx.store(new_len, slot_ptr, 8);
         slot_ptr
     }
 }

@@ -113,6 +113,10 @@ pub(crate) fn gen_grouped<I: InputsSource>(
                     build_bytes_key(ctx, bk, &row, &schema_f, &cx_c, state)
                 }
             };
+            // A null record pointer is the upsert's error sentinel (e.g. group
+            // count exceeded `u32`): poison the run and break so we never fold
+            // through null. The driver surfaces the recorded error.
+            super::stop_if_null(ctx, rec_ptr, &cx_c);
             // SAFETY: each upsert returns a record allocated with `layout` that
             // remains live until the next upsert; folding performs no upsert.
             let rec = unsafe { layout.wrap(rec_ptr) };

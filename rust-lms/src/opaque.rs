@@ -10,8 +10,7 @@
 
 use std::marker::PhantomData;
 
-use crate::types::StagedType;
-use cranelift_codegen::ir::types;
+use crate::types::{ScalarType, StagedType};
 
 /// Marker for an externally-owned value of type `T` that staged code may only
 /// address opaquely.
@@ -22,7 +21,7 @@ pub struct Opaque<T> {
 unsafe impl<T> StagedType for Opaque<T> {
     type RuntimeValue = T;
 
-    fn cranelift_type() -> cranelift_codegen::ir::Type {
-        types::I64
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
     }
 }

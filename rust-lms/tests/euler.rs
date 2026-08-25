@@ -23,27 +23,30 @@
 
 use rust_lms::prelude::*;
 
+mod common;
+use common::{for_each_backend, with_backends};
+
 // =============================================================================
 // Euler 1: Sum of multiples of 3 or 5 below n.
 // =============================================================================
 
 #[test]
 fn euler_01_multiples_of_3_or_5() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        // Branchless predicated sum over [1, n): keep i when divisible by 3 or 5.
+        // `select(a, true, b)` is a logical OR of the two divisibility tests.
+        let f = compiler.fun1("e01", |ctx, n: Var<i64>| {
+            range(1i64, n).sum_if(ctx, |i| {
+                select(eq(i % 3i64, 0i64), true, eq(i % 5i64, 0i64))
+            })
+        });
 
-    // Branchless predicated sum over [1, n): keep i when divisible by 3 or 5.
-    // `select(a, true, b)` is a logical OR of the two divisibility tests.
-    let f = compiler.fun1("e01", |ctx, n: Var<i64>| {
-        range(1i64, n).sum_if(ctx, |i| {
-            select(eq(i % 3i64, 0i64), true, eq(i % 5i64, 0i64))
-        })
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(10), 23);
+        assert_eq!(g.call(1000), 233168); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(10), 23);
-    assert_eq!(g.call(1000), 233168); // official answer
 }
 
 // =============================================================================
@@ -52,28 +55,28 @@ fn euler_01_multiples_of_3_or_5() {
 
 #[test]
 fn euler_02_even_fibonacci() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e02", |ctx, limit: Var<i64>| {
-        let a = ctx.var(1i64);
-        let b = ctx.var(2i64);
-        let acc = ctx.var(0i64);
-        let tmp = ctx.var(0i64);
-        ctx.while_loop(lt(a, limit + 1i64), move |ctx| {
-            ctx.if_then(eq(a % 2i64, 0i64), move |ctx| {
-                ctx.store(acc, acc + a);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e02", |ctx, limit: Var<i64>| {
+            let a = ctx.var(1i64);
+            let b = ctx.var(2i64);
+            let acc = ctx.var(0i64);
+            let tmp = ctx.var(0i64);
+            ctx.while_loop(lt(a, limit + 1i64), move |ctx| {
+                ctx.if_then(eq(a % 2i64, 0i64), move |ctx| {
+                    ctx.store(acc, acc + a);
+                });
+                ctx.store(tmp, a + b);
+                ctx.store(a, b);
+                ctx.store(b, tmp);
             });
-            ctx.store(tmp, a + b);
-            ctx.store(a, b);
-            ctx.store(b, tmp);
+            acc
         });
-        acc
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(4_000_000), 4613732); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(4_000_000), 4613732); // official answer
 }
 
 // =============================================================================
@@ -82,31 +85,31 @@ fn euler_02_even_fibonacci() {
 
 #[test]
 fn euler_03_largest_prime_factor() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e03", |ctx, n: Var<i64>| {
-        let m = ctx.var(0i64);
-        ctx.store(m, n);
-        let p = ctx.var(2i64);
-        let largest = ctx.var(1i64);
-        ctx.while_loop(lt(p * p, m + 1i64), move |ctx| {
-            ctx.while_loop(eq(m % p, 0i64), move |ctx| {
-                ctx.store(largest, p);
-                ctx.store(m, m / p);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e03", |ctx, n: Var<i64>| {
+            let m = ctx.var(0i64);
+            ctx.store(m, n);
+            let p = ctx.var(2i64);
+            let largest = ctx.var(1i64);
+            ctx.while_loop(lt(p * p, m + 1i64), move |ctx| {
+                ctx.while_loop(eq(m % p, 0i64), move |ctx| {
+                    ctx.store(largest, p);
+                    ctx.store(m, m / p);
+                });
+                ctx.store(p, p + 1i64);
             });
-            ctx.store(p, p + 1i64);
+            ctx.if_then(gt(m, 1i64), move |ctx| {
+                ctx.store(largest, m);
+            });
+            largest
         });
-        ctx.if_then(gt(m, 1i64), move |ctx| {
-            ctx.store(largest, m);
-        });
-        largest
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(13195), 29);
+        assert_eq!(g.call(600_851_475_143), 6857); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(13195), 29);
-    assert_eq!(g.call(600_851_475_143), 6857); // official answer
 }
 
 // =============================================================================
@@ -115,37 +118,37 @@ fn euler_03_largest_prime_factor() {
 
 #[test]
 fn euler_04_largest_palindrome_product() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun0("e04", |ctx| {
-        let a = ctx.var(100i64);
-        let best = ctx.var(0i64);
-        ctx.while_loop(lt(a, 1000i64), move |ctx| {
-            let b = ctx.var(100i64);
-            ctx.while_loop(lt(b, 1000i64), move |ctx| {
-                let n = ctx.var(0i64);
-                ctx.store(n, a * b);
-                let r = ctx.var(0i64);
-                let m = ctx.var(0i64);
-                ctx.store(m, n);
-                ctx.while_loop(gt(m, 0i64), move |ctx| {
-                    ctx.store(r, r * 10i64 + m % 10i64);
-                    ctx.store(m, m / 10i64);
-                });
-                ctx.if_then(eq(r, n), move |ctx| {
-                    ctx.if_then(gt(n, best), move |ctx| {
-                        ctx.store(best, n);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun0("e04", |ctx| {
+            let a = ctx.var(100i64);
+            let best = ctx.var(0i64);
+            ctx.while_loop(lt(a, 1000i64), move |ctx| {
+                let b = ctx.var(100i64);
+                ctx.while_loop(lt(b, 1000i64), move |ctx| {
+                    let n = ctx.var(0i64);
+                    ctx.store(n, a * b);
+                    let r = ctx.var(0i64);
+                    let m = ctx.var(0i64);
+                    ctx.store(m, n);
+                    ctx.while_loop(gt(m, 0i64), move |ctx| {
+                        ctx.store(r, r * 10i64 + m % 10i64);
+                        ctx.store(m, m / 10i64);
                     });
+                    ctx.if_then(eq(r, n), move |ctx| {
+                        ctx.if_then(gt(n, best), move |ctx| {
+                            ctx.store(best, n);
+                        });
+                    });
+                    ctx.store(b, b + 1i64);
                 });
-                ctx.store(b, b + 1i64);
+                ctx.store(a, a + 1i64);
             });
-            ctx.store(a, a + 1i64);
+            best
         });
-        best
-    });
 
-    let compiled = compiler.compile(call0(f)).expect("compile");
-    assert_eq!(compiled.run(), 906609); // official answer
+        let compiled = compiler.compile(call0(f)).expect("compile");
+        assert_eq!(compiled.run(), 906609); // official answer
+    });
 }
 
 // =============================================================================
@@ -154,33 +157,33 @@ fn euler_04_largest_palindrome_product() {
 
 #[test]
 fn euler_05_smallest_multiple() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e05", |ctx, n: Var<i64>| {
-        let acc = ctx.var(1i64);
-        let i = ctx.var(2i64);
-        ctx.while_loop(lt(i, n + 1i64), move |ctx| {
-            let x = ctx.var(0i64);
-            let y = ctx.var(0i64);
-            let t = ctx.var(0i64);
-            ctx.store(x, acc);
-            ctx.store(y, i);
-            ctx.while_loop(gt(y, 0i64), move |ctx| {
-                ctx.store(t, x % y);
-                ctx.store(x, y);
-                ctx.store(y, t);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e05", |ctx, n: Var<i64>| {
+            let acc = ctx.var(1i64);
+            let i = ctx.var(2i64);
+            ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+                let x = ctx.var(0i64);
+                let y = ctx.var(0i64);
+                let t = ctx.var(0i64);
+                ctx.store(x, acc);
+                ctx.store(y, i);
+                ctx.while_loop(gt(y, 0i64), move |ctx| {
+                    ctx.store(t, x % y);
+                    ctx.store(x, y);
+                    ctx.store(y, t);
+                });
+                ctx.store(acc, (acc / x) * i);
+                ctx.store(i, i + 1i64);
             });
-            ctx.store(acc, (acc / x) * i);
-            ctx.store(i, i + 1i64);
+            acc
         });
-        acc
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(10), 2520);
+        assert_eq!(g.call(20), 232792560); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(10), 2520);
-    assert_eq!(g.call(20), 232792560); // official answer
 }
 
 // =============================================================================
@@ -189,19 +192,19 @@ fn euler_05_smallest_multiple() {
 
 #[test]
 fn euler_06_sum_square_difference() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e06", |ctx, n: Var<i64>| {
+            let sum = range(1i64, n + 1i64).sum(ctx);
+            let sq_sum = range(1i64, n + 1i64).map(|i| i * i).sum(ctx);
+            sum * sum - sq_sum
+        });
 
-    let f = compiler.fun1("e06", |ctx, n: Var<i64>| {
-        let sum = range(1i64, n + 1i64).sum(ctx);
-        let sq_sum = range(1i64, n + 1i64).map(|i| i * i).sum(ctx);
-        sum * sum - sq_sum
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(10), 2640);
+        assert_eq!(g.call(100), 25164150); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(10), 2640);
-    assert_eq!(g.call(100), 25164150); // official answer
 }
 
 // =============================================================================
@@ -210,35 +213,35 @@ fn euler_06_sum_square_difference() {
 
 #[test]
 fn euler_07_nth_prime() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e07", |ctx, n: Var<i64>| {
-        let count = ctx.var(0i64);
-        let candidate = ctx.var(1i64);
-        let last_prime = ctx.var(0i64);
-        ctx.while_loop(lt(count, n), move |ctx| {
-            ctx.store(candidate, candidate + 1i64);
-            let prime = ctx.var(true);
-            let d = ctx.var(2i64);
-            ctx.while_loop(lt(d * d, candidate + 1i64), move |ctx| {
-                ctx.if_then(eq(candidate % d, 0i64), move |ctx| {
-                    ctx.store(prime, false);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e07", |ctx, n: Var<i64>| {
+            let count = ctx.var(0i64);
+            let candidate = ctx.var(1i64);
+            let last_prime = ctx.var(0i64);
+            ctx.while_loop(lt(count, n), move |ctx| {
+                ctx.store(candidate, candidate + 1i64);
+                let prime = ctx.var(true);
+                let d = ctx.var(2i64);
+                ctx.while_loop(lt(d * d, candidate + 1i64), move |ctx| {
+                    ctx.if_then(eq(candidate % d, 0i64), move |ctx| {
+                        ctx.store(prime, false);
+                    });
+                    ctx.store(d, d + 1i64);
                 });
-                ctx.store(d, d + 1i64);
+                ctx.if_then(prime, move |ctx| {
+                    ctx.store(count, count + 1i64);
+                    ctx.store(last_prime, candidate);
+                });
             });
-            ctx.if_then(prime, move |ctx| {
-                ctx.store(count, count + 1i64);
-                ctx.store(last_prime, candidate);
-            });
+            last_prime
         });
-        last_prime
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(6), 13);
+        assert_eq!(g.call(10001), 104743); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(6), 13);
-    assert_eq!(g.call(10001), 104743); // official answer
 }
 
 // =============================================================================
@@ -247,42 +250,42 @@ fn euler_07_nth_prime() {
 
 #[test]
 fn euler_08_largest_product_of_k_adjacent() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun2("e08", |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<u64>| {
-        let n = ctx.var(0u64);
-        ctx.store(n, digits.len());
-        let i = ctx.var(0u64);
-        let best = ctx.var(0i64);
-        ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
-            let prod = ctx.var(1i64);
-            let j = ctx.var(0u64);
-            ctx.while_loop(lt(j, k), move |ctx| {
-                // SAFETY: the outer loop maintains `i + k <= n`, and this
-                // loop proves `j < k`, so `i + j < n` for tested inputs.
-                ctx.store(prod, prod * unsafe { digits.get_unchecked(i + j) });
-                ctx.store(j, j + 1u64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("e08", |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<u64>| {
+            let n = ctx.var(0u64);
+            ctx.store(n, digits.len());
+            let i = ctx.var(0u64);
+            let best = ctx.var(0i64);
+            ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
+                let prod = ctx.var(1i64);
+                let j = ctx.var(0u64);
+                ctx.while_loop(lt(j, k), move |ctx| {
+                    // SAFETY: the outer loop maintains `i + k <= n`, and this
+                    // loop proves `j < k`, so `i + j < n` for tested inputs.
+                    ctx.store(prod, prod * unsafe { digits.get_unchecked(i + j) });
+                    ctx.store(j, j + 1u64);
+                });
+                ctx.if_then(gt(prod, best), move |ctx| {
+                    ctx.store(best, prod);
+                });
+                ctx.store(i, i + 1u64);
             });
-            ctx.if_then(gt(prod, best), move |ctx| {
-                ctx.store(best, prod);
-            });
-            ctx.store(i, i + 1u64);
+            best
         });
-        best
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        let digits: Vec<i64> = include_str!("euler_08_data.txt")
+            .chars()
+            .filter(|c| c.is_ascii_digit())
+            .map(|c| (c as i64) - ('0' as i64))
+            .collect();
+        assert_eq!(digits.len(), 1000, "input file should hold 1000 digits");
+
+        assert_eq!(g.call(&digits[..], 13u64), 23514624000); // official answer
+        assert_eq!(g.call(&digits[..], 4u64), 5832); // published smaller case
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    let digits: Vec<i64> = include_str!("euler_08_data.txt")
-        .chars()
-        .filter(|c| c.is_ascii_digit())
-        .map(|c| (c as i64) - ('0' as i64))
-        .collect();
-    assert_eq!(digits.len(), 1000, "input file should hold 1000 digits");
-
-    assert_eq!(g.call(&digits[..], 13u64), 23514624000); // official answer
-    assert_eq!(g.call(&digits[..], 4u64), 5832); // published smaller case
 }
 
 // =============================================================================
@@ -291,33 +294,33 @@ fn euler_08_largest_product_of_k_adjacent() {
 
 #[test]
 fn euler_09_pythagorean_triplet() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e09", |ctx, n: Var<i64>| {
-        let result = ctx.var(0i64);
-        let a = ctx.var(1i64);
-        ctx.while_loop(lt(a, n), move |ctx| {
-            let b = ctx.var(0i64);
-            ctx.store(b, a + 1i64);
-            ctx.while_loop(lt(b, n), move |ctx| {
-                let c = ctx.var(0i64);
-                ctx.store(c, n - a - b);
-                ctx.if_then(gt(c, b), move |ctx| {
-                    ctx.if_then(eq(a * a + b * b, c * c), move |ctx| {
-                        ctx.store(result, a * b * c);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e09", |ctx, n: Var<i64>| {
+            let result = ctx.var(0i64);
+            let a = ctx.var(1i64);
+            ctx.while_loop(lt(a, n), move |ctx| {
+                let b = ctx.var(0i64);
+                ctx.store(b, a + 1i64);
+                ctx.while_loop(lt(b, n), move |ctx| {
+                    let c = ctx.var(0i64);
+                    ctx.store(c, n - a - b);
+                    ctx.if_then(gt(c, b), move |ctx| {
+                        ctx.if_then(eq(a * a + b * b, c * c), move |ctx| {
+                            ctx.store(result, a * b * c);
+                        });
                     });
+                    ctx.store(b, b + 1i64);
                 });
-                ctx.store(b, b + 1i64);
+                ctx.store(a, a + 1i64);
             });
-            ctx.store(a, a + 1i64);
+            result
         });
-        result
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(1000), 31875000); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(1000), 31875000); // official answer
 }
 
 // =============================================================================
@@ -326,33 +329,33 @@ fn euler_09_pythagorean_triplet() {
 
 #[test]
 fn euler_10_sum_of_primes_below() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e10", |ctx, n: Var<i64>| {
-        let sum = ctx.var(0i64);
-        let i = ctx.var(2i64);
-        ctx.while_loop(lt(i, n), move |ctx| {
-            let prime = ctx.var(true);
-            let d = ctx.var(2i64);
-            ctx.while_loop(lt(d * d, i + 1i64), move |ctx| {
-                ctx.if_then(eq(i % d, 0i64), move |ctx| {
-                    ctx.store(prime, false);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e10", |ctx, n: Var<i64>| {
+            let sum = ctx.var(0i64);
+            let i = ctx.var(2i64);
+            ctx.while_loop(lt(i, n), move |ctx| {
+                let prime = ctx.var(true);
+                let d = ctx.var(2i64);
+                ctx.while_loop(lt(d * d, i + 1i64), move |ctx| {
+                    ctx.if_then(eq(i % d, 0i64), move |ctx| {
+                        ctx.store(prime, false);
+                    });
+                    ctx.store(d, d + 1i64);
                 });
-                ctx.store(d, d + 1i64);
+                ctx.if_then(prime, move |ctx| {
+                    ctx.store(sum, sum + i);
+                });
+                ctx.store(i, i + 1i64);
             });
-            ctx.if_then(prime, move |ctx| {
-                ctx.store(sum, sum + i);
-            });
-            ctx.store(i, i + 1i64);
+            sum
         });
-        sum
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(10), 17);
+        assert_eq!(g.call(2_000_000), 142913828922); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(10), 17);
-    assert_eq!(g.call(2_000_000), 142913828922); // official answer
 }
 
 // =============================================================================
@@ -361,38 +364,38 @@ fn euler_10_sum_of_primes_below() {
 
 #[test]
 fn euler_12_highly_divisible_triangle() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e12", |ctx, t: Var<i64>| {
-        let i = ctx.var(1i64);
-        let tri = ctx.var(0i64);
-        let result = ctx.var(0i64);
-        ctx.while_loop(eq(result, 0i64), move |ctx| {
-            ctx.store(tri, tri + i);
-            let count = ctx.var(0i64);
-            let d = ctx.var(1i64);
-            ctx.while_loop(lt(d * d, tri), move |ctx| {
-                ctx.if_then(eq(tri % d, 0i64), move |ctx| {
-                    ctx.store(count, count + 2i64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e12", |ctx, t: Var<i64>| {
+            let i = ctx.var(1i64);
+            let tri = ctx.var(0i64);
+            let result = ctx.var(0i64);
+            ctx.while_loop(eq(result, 0i64), move |ctx| {
+                ctx.store(tri, tri + i);
+                let count = ctx.var(0i64);
+                let d = ctx.var(1i64);
+                ctx.while_loop(lt(d * d, tri), move |ctx| {
+                    ctx.if_then(eq(tri % d, 0i64), move |ctx| {
+                        ctx.store(count, count + 2i64);
+                    });
+                    ctx.store(d, d + 1i64);
                 });
-                ctx.store(d, d + 1i64);
+                ctx.if_then(eq(d * d, tri), move |ctx| {
+                    ctx.store(count, count + 1i64);
+                });
+                ctx.if_then(gt(count, t), move |ctx| {
+                    ctx.store(result, tri);
+                });
+                ctx.store(i, i + 1i64);
             });
-            ctx.if_then(eq(d * d, tri), move |ctx| {
-                ctx.store(count, count + 1i64);
-            });
-            ctx.if_then(gt(count, t), move |ctx| {
-                ctx.store(result, tri);
-            });
-            ctx.store(i, i + 1i64);
+            result
         });
-        result
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(5), 28);
+        assert_eq!(g.call(500), 76576500); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(5), 28);
-    assert_eq!(g.call(500), 76576500); // official answer
 }
 
 // =============================================================================
@@ -401,36 +404,36 @@ fn euler_12_highly_divisible_triangle() {
 
 #[test]
 fn euler_14_longest_collatz() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e14", |ctx, limit: Var<i64>| {
-        let i = ctx.var(1i64);
-        let best_len = ctx.var(0i64);
-        let best_n = ctx.var(0i64);
-        ctx.while_loop(lt(i, limit), move |ctx| {
-            let x = ctx.var(0i64);
-            ctx.store(x, i);
-            let len = ctx.var(1i64);
-            ctx.while_loop(gt(x, 1i64), move |ctx| {
-                ctx.store(
-                    x,
-                    if_then_else(eq(x % 2i64, 0i64), x / 2i64, x * 3i64 + 1i64),
-                );
-                ctx.store(len, len + 1i64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e14", |ctx, limit: Var<i64>| {
+            let i = ctx.var(1i64);
+            let best_len = ctx.var(0i64);
+            let best_n = ctx.var(0i64);
+            ctx.while_loop(lt(i, limit), move |ctx| {
+                let x = ctx.var(0i64);
+                ctx.store(x, i);
+                let len = ctx.var(1i64);
+                ctx.while_loop(gt(x, 1i64), move |ctx| {
+                    ctx.store(
+                        x,
+                        if_then_else(eq(x % 2i64, 0i64), x / 2i64, x * 3i64 + 1i64),
+                    );
+                    ctx.store(len, len + 1i64);
+                });
+                ctx.if_then(gt(len, best_len), move |ctx| {
+                    ctx.store(best_len, len);
+                    ctx.store(best_n, i);
+                });
+                ctx.store(i, i + 1i64);
             });
-            ctx.if_then(gt(len, best_len), move |ctx| {
-                ctx.store(best_len, len);
-                ctx.store(best_n, i);
-            });
-            ctx.store(i, i + 1i64);
+            best_n
         });
-        best_n
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(1_000_000), 837799); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(1_000_000), 837799); // official answer
 }
 
 // =============================================================================
@@ -439,23 +442,23 @@ fn euler_14_longest_collatz() {
 
 #[test]
 fn euler_15_lattice_paths() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e15", |ctx, n: Var<i64>| {
-        let i = ctx.var(1i64);
-        let acc = ctx.var(1i64);
-        ctx.while_loop(lt(i, n + 1i64), move |ctx| {
-            ctx.store(acc, acc * (n + i) / i);
-            ctx.store(i, i + 1i64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e15", |ctx, n: Var<i64>| {
+            let i = ctx.var(1i64);
+            let acc = ctx.var(1i64);
+            ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+                ctx.store(acc, acc * (n + i) / i);
+                ctx.store(i, i + 1i64);
+            });
+            acc
         });
-        acc
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(2), 6);
+        assert_eq!(g.call(20), 137846528820); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(2), 6);
-    assert_eq!(g.call(20), 137846528820); // official answer
 }
 
 // =============================================================================
@@ -468,68 +471,71 @@ fn euler_15_lattice_paths() {
 
 #[test]
 fn euler_21_amicable_sum() {
-    let fill = {
-        let mut compiler = Compiler::new();
-        let fill_sigma = compiler.fun1("e21_sigma", |ctx, mut sigma: Var<SRefMut<Slice<u64>>>| {
-            let n = ctx.var(0u64);
-            ctx.store(n, sigma.len());
-            let i = ctx.var(2u64);
-            ctx.while_loop(lt(i, n), |ctx| {
-                let s = ctx.var(1u64);
-                let d = ctx.var(2u64);
-                ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
-                    ctx.if_then(eq(i % d, 0u64), move |ctx| {
-                        ctx.store(s, s + d);
-                        let q = ctx.var(0u64);
-                        ctx.store(q, i / d);
-                        ctx.if_then(gt(q, d), move |ctx| {
-                            ctx.store(s, s + q);
+    with_backends(|make| {
+        let mut compiler = make();
+        let fill = {
+            let fill_sigma =
+                compiler.fun1("e21_sigma", |ctx, mut sigma: Var<SRefMut<Slice<u64>>>| {
+                    let n = ctx.var(0u64);
+                    ctx.store(n, sigma.len());
+                    let i = ctx.var(2u64);
+                    ctx.while_loop(lt(i, n), |ctx| {
+                        let s = ctx.var(1u64);
+                        let d = ctx.var(2u64);
+                        ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
+                            ctx.if_then(eq(i % d, 0u64), move |ctx| {
+                                ctx.store(s, s + d);
+                                let q = ctx.var(0u64);
+                                ctx.store(q, i / d);
+                                ctx.if_then(gt(q, d), move |ctx| {
+                                    ctx.store(s, s + q);
+                                });
+                            });
+                            ctx.store(d, d + 1u64);
+                        });
+                        // SAFETY: the loop condition proves `i < sigma.len()`.
+                        ctx.emit(unsafe { sigma.set_unchecked(i, s) });
+                        ctx.store(i, i + 1u64);
+                    });
+                    Const::<()>::new(())
+                });
+            compiler.compile(fill_sigma).expect("compile fill")
+        };
+
+        let sum = {
+            let mut compiler = make();
+            let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<u64>>>| {
+                let n = ctx.var(0u64);
+                ctx.store(n, sigma.len());
+                let total = ctx.var(0u64);
+                let a = ctx.var(2u64);
+                ctx.while_loop(lt(a, n), move |ctx| {
+                    let b = ctx.var(0u64);
+                    // SAFETY: the loop condition proves `a < sigma.len()`.
+                    ctx.store(b, unsafe { sigma.get_unchecked(a) });
+                    ctx.if_then(gt(b, a), move |ctx| {
+                        ctx.if_then(lt(b, n), move |ctx| {
+                            // SAFETY: this branch proves `b < n == sigma.len()`.
+                            ctx.if_then(eq(unsafe { sigma.get_unchecked(b) }, a), move |ctx| {
+                                ctx.store(total, total + a + b);
+                            });
                         });
                     });
-                    ctx.store(d, d + 1u64);
+                    ctx.store(a, a + 1u64);
                 });
-                // SAFETY: the loop condition proves `i < sigma.len()`.
-                ctx.emit(unsafe { sigma.set_unchecked(i, s) });
-                ctx.store(i, i + 1u64);
+                total
             });
-            Const::<()>::new(())
-        });
-        compiler.compile(fill_sigma).expect("compile fill")
-    };
+            compiler.compile(sum_amicable).expect("compile sum")
+        };
 
-    let sum = {
-        let mut compiler = Compiler::new();
-        let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<u64>>>| {
-            let n = ctx.var(0u64);
-            ctx.store(n, sigma.len());
-            let total = ctx.var(0u64);
-            let a = ctx.var(2u64);
-            ctx.while_loop(lt(a, n), move |ctx| {
-                let b = ctx.var(0u64);
-                // SAFETY: the loop condition proves `a < sigma.len()`.
-                ctx.store(b, unsafe { sigma.get_unchecked(a) });
-                ctx.if_then(gt(b, a), move |ctx| {
-                    ctx.if_then(lt(b, n), move |ctx| {
-                        // SAFETY: this branch proves `b < n == sigma.len()`.
-                        ctx.if_then(eq(unsafe { sigma.get_unchecked(b) }, a), move |ctx| {
-                            ctx.store(total, total + a + b);
-                        });
-                    });
-                });
-                ctx.store(a, a + 1u64);
-            });
-            total
-        });
-        compiler.compile(sum_amicable).expect("compile sum")
-    };
+        let fill_fn = fill.as_fn();
+        let sum_fn = sum.as_fn();
 
-    let fill_fn = fill.as_fn();
-    let sum_fn = sum.as_fn();
-
-    let n: usize = 10_000;
-    let mut sigma = vec![0u64; n];
-    fill_fn.call(&mut sigma[..]);
-    assert_eq!(sum_fn.call(&sigma[..]), 31626); // official answer
+        let n: usize = 10_000;
+        let mut sigma = vec![0u64; n];
+        fill_fn.call(&mut sigma[..]);
+        assert_eq!(sum_fn.call(&sigma[..]), 31626); // official answer
+    });
 }
 
 // =============================================================================
@@ -552,21 +558,21 @@ fn euler_25_thousand_digit_fibonacci() {
 
 #[test]
 fn euler_28_spiral_diagonals() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        // Center (1) plus the four corners of each ring k = 3, 5, ..., size.
+        let f = compiler.fun1("e28", |ctx, size: Var<i64>| {
+            let rings = range_step(3i64, size + 1i64, 2i64)
+                .map(|k| k * k * 4i64 - (k - 1i64) * 6i64)
+                .sum(ctx);
+            rings + 1i64
+        });
 
-    // Center (1) plus the four corners of each ring k = 3, 5, ..., size.
-    let f = compiler.fun1("e28", |ctx, size: Var<i64>| {
-        let rings = range_step(3i64, size + 1i64, 2i64)
-            .map(|k| k * k * 4i64 - (k - 1i64) * 6i64)
-            .sum(ctx);
-        rings + 1i64
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        assert_eq!(g.call(5), 101);
+        assert_eq!(g.call(1001), 669171001); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    assert_eq!(g.call(5), 101);
-    assert_eq!(g.call(1001), 669171001); // official answer
 }
 
 // =============================================================================
@@ -575,34 +581,34 @@ fn euler_28_spiral_diagonals() {
 
 #[test]
 fn euler_30_digit_fifth_powers() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun1("e30", |ctx, upper: Var<i64>| {
-        let total = ctx.var(0i64);
-        let n = ctx.var(2i64);
-        ctx.while_loop(lt(n, upper), move |ctx| {
-            let m = ctx.var(0i64);
-            ctx.store(m, n);
-            let sum = ctx.var(0i64);
-            ctx.while_loop(gt(m, 0i64), move |ctx| {
-                let d = ctx.var(0i64);
-                ctx.store(d, m % 10i64);
-                ctx.store(sum, sum + d * d * d * d * d);
-                ctx.store(m, m / 10i64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("e30", |ctx, upper: Var<i64>| {
+            let total = ctx.var(0i64);
+            let n = ctx.var(2i64);
+            ctx.while_loop(lt(n, upper), move |ctx| {
+                let m = ctx.var(0i64);
+                ctx.store(m, n);
+                let sum = ctx.var(0i64);
+                ctx.while_loop(gt(m, 0i64), move |ctx| {
+                    let d = ctx.var(0i64);
+                    ctx.store(d, m % 10i64);
+                    ctx.store(sum, sum + d * d * d * d * d);
+                    ctx.store(m, m / 10i64);
+                });
+                ctx.if_then(eq(sum, n), move |ctx| {
+                    ctx.store(total, total + n);
+                });
+                ctx.store(n, n + 1i64);
             });
-            ctx.if_then(eq(sum, n), move |ctx| {
-                ctx.store(total, total + n);
-            });
-            ctx.store(n, n + 1i64);
+            total
         });
-        total
+
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
+
+        // 6 * 9^5 = 354294 is a safe upper bound.
+        assert_eq!(g.call(354295), 443839); // official answer
     });
-
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
-
-    // 6 * 9^5 = 354294 is a safe upper bound.
-    assert_eq!(g.call(354295), 443839); // official answer
 }
 
 // =============================================================================
@@ -614,38 +620,38 @@ fn euler_30_digit_fifth_powers() {
 
 #[test]
 fn euler_34_digit_factorials() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun2(
-        "e34",
-        |ctx, upper: Var<u64>, fact: Var<SRef<Slice<u64>>>| {
-            let total = ctx.var(0u64);
-            let n = ctx.var(3u64);
-            ctx.while_loop(lt(n, upper), move |ctx| {
-                let m = ctx.var(0u64);
-                ctx.store(m, n);
-                let sum = ctx.var(0u64);
-                ctx.while_loop(gt(m, 0u64), move |ctx| {
-                    // SAFETY: decimal digits are in `0..10`; callers supply
-                    // the ten-entry factorial lookup table.
-                    ctx.store(sum, sum + unsafe { fact.get_unchecked(m % 10u64) });
-                    ctx.store(m, m / 10u64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "e34",
+            |ctx, upper: Var<u64>, fact: Var<SRef<Slice<u64>>>| {
+                let total = ctx.var(0u64);
+                let n = ctx.var(3u64);
+                ctx.while_loop(lt(n, upper), move |ctx| {
+                    let m = ctx.var(0u64);
+                    ctx.store(m, n);
+                    let sum = ctx.var(0u64);
+                    ctx.while_loop(gt(m, 0u64), move |ctx| {
+                        // SAFETY: decimal digits are in `0..10`; callers supply
+                        // the ten-entry factorial lookup table.
+                        ctx.store(sum, sum + unsafe { fact.get_unchecked(m % 10u64) });
+                        ctx.store(m, m / 10u64);
+                    });
+                    ctx.if_then(eq(sum, n), move |ctx| {
+                        ctx.store(total, total + n);
+                    });
+                    ctx.store(n, n + 1u64);
                 });
-                ctx.if_then(eq(sum, n), move |ctx| {
-                    ctx.store(total, total + n);
-                });
-                ctx.store(n, n + 1u64);
-            });
-            total
-        },
-    );
+                total
+            },
+        );
 
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
 
-    let fact: [u64; 10] = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880];
-    // Safe upper bound: 7 * 9! = 2540160.
-    assert_eq!(g.call(2540160u64, &fact[..]), 40730); // official answer
+        let fact: [u64; 10] = [1, 1, 2, 6, 24, 120, 720, 5040, 40320, 362880];
+        // Safe upper bound: 7 * 9! = 2540160.
+        assert_eq!(g.call(2540160u64, &fact[..]), 40730); // official answer
+    });
 }
 
 // =============================================================================
@@ -672,89 +678,89 @@ fn euler_48_self_powers() {
 
 #[test]
 fn euler_67_max_path_sum_triangle() {
-    let mut compiler = Compiler::new();
-
-    let f = compiler.fun3(
-        "e67",
-        |ctx,
-         tri: Var<SRef<Slice<i64>>>,
-         mut workspace: Var<SRefMut<Slice<i64>>>,
-         num_rows: Var<u64>| {
-            // Seed workspace with the bottom row.
-            let last_row_offset = ctx.var(0u64);
-            ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, num_rows), |ctx| {
-                // SAFETY: callers supply a `num_rows` workspace and a complete
-                // triangular input; this loop bounds `i` to the bottom row.
-                let value = unsafe { tri.get_unchecked(last_row_offset + i) };
-                ctx.emit(unsafe { workspace.set_unchecked(i, value) });
-                ctx.store(i, i + 1u64);
-            });
-
-            // Fold from row num_rows-2 down to row 0. We track row+1 to keep the
-            // counter unsigned (it never reaches 0 during the loop body).
-            let row_plus_1 = ctx.var(0u64);
-            ctx.store(row_plus_1, num_rows - 1u64);
-            ctx.while_loop(gt(row_plus_1, 0u64), |ctx| {
-                let row = ctx.var(0u64);
-                ctx.store(row, row_plus_1 - 1u64);
-                let row_offset = ctx.var(0u64);
-                ctx.store(row_offset, row * (row + 1u64) / 2u64);
-                let j = ctx.var(0u64);
-                ctx.while_loop(lt(j, row + 1u64), |ctx| {
-                    let l = ctx.var(0i64);
-                    let r = ctx.var(0i64);
-                    // SAFETY: `j < row + 1 < num_rows`, so both frontier
-                    // indices are within the workspace.
-                    ctx.store(l, unsafe { workspace.get_unchecked(j) });
-                    ctx.store(r, unsafe { workspace.get_unchecked(j + 1u64) });
-                    let best = ctx.var(0i64);
-                    ctx.store(best, select(gt(l, r), l, r));
-                    // SAFETY: `j` is within the workspace and `row_offset + j`
-                    // is within the complete triangular input.
-                    let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
-                    ctx.emit(unsafe { workspace.set_unchecked(j, value) });
-                    ctx.store(j, j + 1u64);
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun3(
+            "e67",
+            |ctx,
+             tri: Var<SRef<Slice<i64>>>,
+             mut workspace: Var<SRefMut<Slice<i64>>>,
+             num_rows: Var<u64>| {
+                // Seed workspace with the bottom row.
+                let last_row_offset = ctx.var(0u64);
+                ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);
+                let i = ctx.var(0u64);
+                ctx.while_loop(lt(i, num_rows), |ctx| {
+                    // SAFETY: callers supply a `num_rows` workspace and a complete
+                    // triangular input; this loop bounds `i` to the bottom row.
+                    let value = unsafe { tri.get_unchecked(last_row_offset + i) };
+                    ctx.emit(unsafe { workspace.set_unchecked(i, value) });
+                    ctx.store(i, i + 1u64);
                 });
-                ctx.store(row_plus_1, row_plus_1 - 1u64);
-            });
-            // SAFETY: tested calls use at least one triangle row.
-            unsafe { workspace.get_unchecked(0u64) }
-        },
-    );
 
-    let compiled = compiler.compile(f).expect("compile");
-    let g = compiled.as_fn();
+                // Fold from row num_rows-2 down to row 0. We track row+1 to keep the
+                // counter unsigned (it never reaches 0 during the loop body).
+                let row_plus_1 = ctx.var(0u64);
+                ctx.store(row_plus_1, num_rows - 1u64);
+                ctx.while_loop(gt(row_plus_1, 0u64), |ctx| {
+                    let row = ctx.var(0u64);
+                    ctx.store(row, row_plus_1 - 1u64);
+                    let row_offset = ctx.var(0u64);
+                    ctx.store(row_offset, row * (row + 1u64) / 2u64);
+                    let j = ctx.var(0u64);
+                    ctx.while_loop(lt(j, row + 1u64), |ctx| {
+                        let l = ctx.var(0i64);
+                        let r = ctx.var(0i64);
+                        // SAFETY: `j < row + 1 < num_rows`, so both frontier
+                        // indices are within the workspace.
+                        ctx.store(l, unsafe { workspace.get_unchecked(j) });
+                        ctx.store(r, unsafe { workspace.get_unchecked(j + 1u64) });
+                        let best = ctx.var(0i64);
+                        ctx.store(best, select(gt(l, r), l, r));
+                        // SAFETY: `j` is within the workspace and `row_offset + j`
+                        // is within the complete triangular input.
+                        let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
+                        ctx.emit(unsafe { workspace.set_unchecked(j, value) });
+                        ctx.store(j, j + 1u64);
+                    });
+                    ctx.store(row_plus_1, row_plus_1 - 1u64);
+                });
+                // SAFETY: tested calls use at least one triangle row.
+                unsafe { workspace.get_unchecked(0u64) }
+            },
+        );
 
-    // Euler-18-style small triangle.
-    //         3
-    //       7  4
-    //     2  4  6
-    //   8  5  9  3
-    let small: [i64; 10] = [3, 7, 4, 2, 4, 6, 8, 5, 9, 3];
-    let mut ws = vec![0i64; 4];
-    assert_eq!(g.call(&small[..], &mut ws[..], 4u64), 23);
+        let compiled = compiler.compile(f).expect("compile");
+        let g = compiled.as_fn();
 
-    // Official Euler-18 15-row triangle (answer = 1074).
-    let e18_rows: [&[i64]; 15] = [
-        &[75],
-        &[95, 64],
-        &[17, 47, 82],
-        &[18, 35, 87, 10],
-        &[20, 4, 82, 47, 65],
-        &[19, 1, 23, 75, 3, 34],
-        &[88, 2, 77, 73, 7, 63, 67],
-        &[99, 65, 4, 28, 6, 16, 70, 92],
-        &[41, 41, 26, 56, 83, 40, 80, 70, 33],
-        &[41, 48, 72, 33, 47, 32, 37, 16, 94, 29],
-        &[53, 71, 44, 65, 25, 43, 91, 52, 97, 51, 14],
-        &[70, 11, 33, 28, 77, 73, 17, 78, 39, 68, 17, 57],
-        &[91, 71, 52, 38, 17, 14, 91, 43, 58, 50, 27, 29, 48],
-        &[63, 66, 4, 68, 89, 53, 67, 30, 73, 16, 69, 87, 40, 31],
-        &[4, 62, 98, 27, 23, 9, 70, 98, 73, 93, 38, 53, 60, 4, 23],
-    ];
-    let flat: Vec<i64> = e18_rows.iter().flat_map(|r| r.iter().copied()).collect();
-    let mut ws = vec![0i64; 15];
-    assert_eq!(g.call(&flat[..], &mut ws[..], 15u64), 1074);
+        // Euler-18-style small triangle.
+        //         3
+        //       7  4
+        //     2  4  6
+        //   8  5  9  3
+        let small: [i64; 10] = [3, 7, 4, 2, 4, 6, 8, 5, 9, 3];
+        let mut ws = vec![0i64; 4];
+        assert_eq!(g.call(&small[..], &mut ws[..], 4u64), 23);
+
+        // Official Euler-18 15-row triangle (answer = 1074).
+        let e18_rows: [&[i64]; 15] = [
+            &[75],
+            &[95, 64],
+            &[17, 47, 82],
+            &[18, 35, 87, 10],
+            &[20, 4, 82, 47, 65],
+            &[19, 1, 23, 75, 3, 34],
+            &[88, 2, 77, 73, 7, 63, 67],
+            &[99, 65, 4, 28, 6, 16, 70, 92],
+            &[41, 41, 26, 56, 83, 40, 80, 70, 33],
+            &[41, 48, 72, 33, 47, 32, 37, 16, 94, 29],
+            &[53, 71, 44, 65, 25, 43, 91, 52, 97, 51, 14],
+            &[70, 11, 33, 28, 77, 73, 17, 78, 39, 68, 17, 57],
+            &[91, 71, 52, 38, 17, 14, 91, 43, 58, 50, 27, 29, 48],
+            &[63, 66, 4, 68, 89, 53, 67, 30, 73, 16, 69, 87, 40, 31],
+            &[4, 62, 98, 27, 23, 9, 70, 98, 73, 93, 38, 53, 60, 4, 23],
+        ];
+        let flat: Vec<i64> = e18_rows.iter().flat_map(|r| r.iter().copied()).collect();
+        let mut ws = vec![0i64; 15];
+        assert_eq!(g.call(&flat[..], &mut ws[..], 15u64), 1074);
+    });
 }

@@ -25,7 +25,7 @@ use crate::func::{Compiler, Ctx};
 use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
 use crate::refer::SMutPtr;
-use crate::staged::{Staged, Var};
+use crate::staged::{Staged, ValueId, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::StagedIterator;
@@ -497,7 +497,6 @@ unsafe impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
 // module/`OpaqueIterSlot` docs.
 
 use crate::staged::CompilationContext;
-use cranelift_codegen::ir::Value;
 use std::mem::MaybeUninit;
 
 /// Inline storage budget (bytes) for a reused-storage iterator. Iterators that
@@ -656,7 +655,7 @@ impl Compiler<'_> {
 /// reserves one slot, so nested traversals allocate `O(depth)` (or zero, when
 /// the iterators fit the inline budget) rather than once per inner set.
 /// Codegens a producer's args (everything before the slot ptr) at compile time.
-type ArgsCodegen = Box<dyn Fn(&mut CompilationContext) -> Vec<Value>>;
+type ArgsCodegen = Box<dyn Fn(&mut CompilationContext) -> Vec<ValueId>>;
 
 pub struct ReusedOpaqueIter<K: ReusedOpaqueIterKind> {
     init: ExternRef<K::Init>,
@@ -689,7 +688,7 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
             move |cctx, slot_ptr| {
                 let mut a = (args)(cctx);
                 crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
-                let init_ref = cctx.get_extern_func_ref(init_id);
+                let init_ref = cctx.declare_extern_func(init_id);
                 crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
             },
             consumer,

@@ -10,7 +10,8 @@ use std::sync::{Arc, Weak};
 use arrow::array::{Array, ArrayRef, Int64Array, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use sql_gen::exec_jit_stream;
+mod common;
+use common::exec_jit_stream;
 
 fn schema_kv() -> SchemaRef {
     Arc::new(Schema::new(vec![
@@ -289,8 +290,11 @@ fn only_one_input_batch_resident_at_a_time() {
         inner: batches.into_iter(),
         last: None,
     };
-    // The GROUP BY still accumulates correctly across the drops.
-    let out = exec_jit_stream(
+    // The GROUP BY still accumulates correctly across the drops. This test asserts a
+    // host-side streaming-residency property (one batch resident at a time), which is
+    // backend-independent — and the both-backends `common` wrapper would defeat it by
+    // materializing the stream to replay it — so drive the real streaming entry point.
+    let out = sql_gen::exec_jit_stream(
         "SELECT key, sum(value) FROM t GROUP BY key",
         "t",
         schema_kv(),

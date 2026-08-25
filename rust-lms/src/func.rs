@@ -17,13 +17,12 @@
 //! Rust-facing wrappers preserve value semantics without exposing platform
 //! aggregate classification to Cranelift.
 
-use crate::staged::{assign, emit_copy_nonoverlapping, CompilationContext, Staged, Var};
-use crate::types::{RuntimeParam, RuntimeResult, StagedType};
-use cranelift_codegen::ir::{
-    types, AbiParam, InstBuilder, MemFlags, Signature, StackSlotData, StackSlotKind, Value,
-};
+use crate::cranelift::CraneliftBackend;
+use crate::staged::{assign, CompilationContext, SigSpec, Staged, ValueId, Var, VarHandle};
+use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
-use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext, Variable};
+use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
@@ -40,7 +39,7 @@ pub use crate::func_impl::*;
 pub(crate) struct FunDef {
     pub name: String,
     /// The body expression, type-erased but we know its signature
-    pub body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
+    pub body: Box<dyn FnOnce(&mut CompilationContext) -> ValueId>,
     /// Type info for each parameter (supports 0..N parameters)
     pub param_infos: Vec<TypeInfo>,
     /// Return type info
@@ -93,7 +92,7 @@ impl Ctx {
     pub(crate) fn into_body<Ret>(
         self,
         ret: Ret,
-    ) -> Box<dyn FnOnce(&mut CompilationContext) -> Value>
+    ) -> Box<dyn FnOnce(&mut CompilationContext) -> ValueId>
     where
         Ret: Staged + 'static,
     {
@@ -136,14 +135,14 @@ impl Ctx {
     {
         let init_staged = init.into_staged();
         let v = self.alloc::<T>();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         let init_for_action = init_staged.clone();
         self.actions.push(Box::new(move |ctx| {
             let value = init_for_action.codegen(ctx);
-            let cv = ctx.builder.declare_var(ctype);
+            let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         crate::staged::LetVar::new(v, init_staged)
     }
@@ -159,13 +158,13 @@ impl Ctx {
     {
         let v = self.alloc::<T>();
         let init_staged = init.into_staged();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = init_staged.codegen(ctx);
-            let cv = ctx.builder.declare_var(ctype);
+            let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         v
     }
@@ -178,18 +177,18 @@ impl Ctx {
         E: Staged<Out = T> + 'static,
     {
         let v = self.alloc::<T>();
-        let ctype = T::cranelift_type();
+        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
             let cv = if let Some(&existing) = ctx.var_map.get(&id) {
                 existing
             } else {
-                let cv = ctx.builder.declare_var(ctype);
+                let cv = ctx.declare_var(ctype);
                 ctx.var_map.insert(id, cv);
                 cv
             };
-            ctx.builder.def_var(cv, value);
+            ctx.def_var(cv, value);
         }));
         v
     }
@@ -235,20 +234,18 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let loop_header = ctx.builder.create_block();
-            let loop_body = ctx.builder.create_block();
-            let loop_exit = ctx.builder.create_block();
+            let loop_header = ctx.create_block();
+            let loop_body = ctx.create_block();
+            let loop_exit = ctx.create_block();
 
-            ctx.builder.ins().jump(loop_header, &[]);
+            ctx.jump(loop_header, &[]);
 
-            ctx.builder.switch_to_block(loop_header);
+            ctx.switch_to_block(loop_header);
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, loop_body, &[], loop_exit, &[]);
+            ctx.brif(cond_val, loop_body, &[], loop_exit, &[]);
 
-            ctx.builder.switch_to_block(loop_body);
-            ctx.builder.seal_block(loop_body);
+            ctx.switch_to_block(loop_body);
+            ctx.seal_block(loop_body);
             // Expose this loop's exit block so `break_loop` inside the body can
             // jump to it; pop once the body is fully emitted.
             ctx.loop_exit_stack.push(loop_exit);
@@ -256,11 +253,11 @@ impl Ctx {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(loop_header, &[]);
-            ctx.builder.seal_block(loop_header);
+            ctx.jump(loop_header, &[]);
+            ctx.seal_block(loop_header);
 
-            ctx.builder.switch_to_block(loop_exit);
-            ctx.builder.seal_block(loop_exit);
+            ctx.switch_to_block(loop_exit);
+            ctx.seal_block(loop_exit);
         }));
     }
 
@@ -298,7 +295,7 @@ impl Ctx {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
         let handle_id = handle.id;
-        let item_cty = Item::cranelift_type();
+        let item_cty = Item::scalar_type();
 
         // Build the body into a child Ctx (same shape as `while_loop`).
         let mut child = Ctx::new(self.next_var_id);
@@ -307,55 +304,50 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let header = ctx.builder.create_block();
-            let body = ctx.builder.create_block();
-            let exit = ctx.builder.create_block();
+            let header = ctx.create_block();
+            let body = ctx.create_block();
+            let exit = ctx.create_block();
 
-            ctx.builder.ins().jump(header, &[]);
+            ctx.jump(header, &[]);
 
             // header: call the canonical thunk and branch on the stored tag.
-            ctx.builder.switch_to_block(header);
+            ctx.switch_to_block(header);
             let it = ctx.var_map[&handle_id];
-            let it_val = ctx.builder.use_var(it);
-            let next_ref = ctx.get_extern_func_ref(next_id);
+            let it_val = ctx.use_var(it);
+            let next_ref = ctx.declare_extern_func(next_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
             let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
                 ctx, next_ref, args,
             );
-            let tag = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
-            let payload_alignment = Item::align_of();
-            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
-            let val =
-                ctx.builder
-                    .ins()
-                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
-            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
+            // Single source of truth for the COption payload offset (see
+            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
+            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i32;
+            let val = ctx.load(item_cty, option_ptr, payload_offset);
+            ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register (already the element's ABI type,
             // since COption<Item> returns [tag, ...Item's abi...]), replay
             // consumer, loop.
-            ctx.builder.switch_to_block(body);
-            ctx.builder.seal_block(body);
-            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.switch_to_block(body);
+            ctx.seal_block(body);
+            let elem_cv = ctx.declare_var(item_cty);
             ctx.var_map.insert(elem_id, elem_cv);
-            ctx.builder.def_var(elem_cv, val);
+            ctx.def_var(elem_cv, val);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(header, &[]);
-            ctx.builder.seal_block(header);
+            ctx.jump(header, &[]);
+            ctx.seal_block(header);
 
             // exit: free the iterator (reached by None and by break_loop).
-            ctx.builder.switch_to_block(exit);
-            ctx.builder.seal_block(exit);
-            let it_val2 = ctx.builder.use_var(it);
-            let drop_ref = ctx.get_extern_func_ref(drop_id);
+            ctx.switch_to_block(exit);
+            ctx.seal_block(exit);
+            let it_val2 = ctx.use_var(it);
+            let drop_ref = ctx.declare_extern_func(drop_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
             crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
@@ -389,12 +381,12 @@ impl Ctx {
         consumer: F,
     ) where
         Item: StagedType + 'static,
-        InitFn: FnOnce(&mut CompilationContext, Value) + 'static,
+        InitFn: FnOnce(&mut CompilationContext, ValueId) + 'static,
         F: FnOnce(&mut Ctx, Var<Item>) + 'static,
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
-        let item_cty = Item::cranelift_type();
+        let item_cty = Item::scalar_type();
 
         let mut child = Ctx::new(self.next_var_id);
         consumer(&mut child, elem);
@@ -402,107 +394,69 @@ impl Ctx {
         let body_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let call_conv = ctx.module.isa().default_call_conv();
-
             // One per-level slot, reserved once in the frame and reused.
-            let slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                slot_size,
-                slot_align_shift,
-            ));
-            let slot_ptr = ctx.builder.ins().stack_addr(types::I64, slot, 0);
+            let slot = ctx.alloc_stack_slot(slot_size, slot_align_shift);
+            let slot_ptr = ctx.stack_addr(slot, 0);
 
             // Producer builds the iterator into the slot (fills the mini-vtable).
             init_call(ctx, slot_ptr);
 
-            // Canonical storage-pointer signatures for indirect next/drop.
-            let mut next_sig = Signature::new(call_conv);
-            next_sig.params.push(AbiParam::new(types::I64)); // data slot
-            next_sig.params.push(AbiParam::new(types::I64)); // output slot
-            let next_sigref = ctx.builder.import_signature(next_sig);
+            // Canonical storage-pointer signatures for indirect next/drop:
+            // (data slot ptr, output slot ptr) -> void.
+            let storage_ptr_sig = SigSpec {
+                params: vec![ScalarType::Ptr, ScalarType::Ptr],
+                ret: None,
+            };
+            let next_sigref = ctx.import_signature(&storage_ptr_sig);
+            let drop_sigref = ctx.import_signature(&storage_ptr_sig);
 
-            let mut drop_sig = Signature::new(call_conv);
-            drop_sig.params.push(AbiParam::new(types::I64));
-            drop_sig.params.push(AbiParam::new(types::I64));
-            let drop_sigref = ctx.builder.import_signature(drop_sig);
-
-            let data_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
-                8,
-                3,
-            ));
-            let data_ptr = ctx.builder.ins().stack_addr(types::I64, data_slot, 0);
-            let option_slot = ctx.builder.create_sized_stack_slot(StackSlotData::new(
-                StackSlotKind::ExplicitSlot,
+            let data_slot = ctx.alloc_stack_slot(8, 3);
+            let data_ptr = ctx.stack_addr(data_slot, 0);
+            let option_slot = ctx.alloc_stack_slot(
                 crate::option::COptionType::<Item>::size_of() as u32,
                 crate::option::COptionType::<Item>::align_of().trailing_zeros() as u8,
-            ));
-            let option_ptr = ctx.builder.ins().stack_addr(types::I64, option_slot, 0);
+            );
+            let option_ptr = ctx.stack_addr(option_slot, 0);
 
-            let header = ctx.builder.create_block();
-            let body = ctx.builder.create_block();
-            let exit = ctx.builder.create_block();
-            ctx.builder.ins().jump(header, &[]);
+            let header = ctx.create_block();
+            let body = ctx.create_block();
+            let exit = ctx.create_block();
+            ctx.jump(header, &[]);
 
             // header: load data + next ptr, call it, branch on the tag register.
-            ctx.builder.switch_to_block(header);
-            let data = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
-            let next_fn =
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slot_ptr, next_off);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), data, data_ptr, 0);
-            ctx.builder
-                .ins()
-                .call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
-            let tag = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), option_ptr, 0);
-            let payload_alignment = Item::align_of();
-            let payload_offset = ((8 + payload_alignment - 1) & !(payload_alignment - 1)) as i32;
-            let val =
-                ctx.builder
-                    .ins()
-                    .load(item_cty, MemFlags::trusted(), option_ptr, payload_offset);
-            ctx.builder.ins().brif(tag, body, &[], exit, &[]);
+            ctx.switch_to_block(header);
+            let data = ctx.load(ScalarType::I64, slot_ptr, data_off);
+            let next_fn = ctx.load(ScalarType::I64, slot_ptr, next_off);
+            ctx.store(data, data_ptr, 0);
+            ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
+            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
+            // Single source of truth for the COption payload offset (see
+            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
+            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i32;
+            let val = ctx.load(item_cty, option_ptr, payload_offset);
+            ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register, replay consumer, loop.
-            ctx.builder.switch_to_block(body);
-            ctx.builder.seal_block(body);
-            let elem_cv = ctx.builder.declare_var(item_cty);
+            ctx.switch_to_block(body);
+            ctx.seal_block(body);
+            let elem_cv = ctx.declare_var(item_cty);
             ctx.var_map.insert(elem_id, elem_cv);
-            ctx.builder.def_var(elem_cv, val);
+            ctx.def_var(elem_cv, val);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
             }
             ctx.loop_exit_stack.pop();
-            ctx.builder.ins().jump(header, &[]);
-            ctx.builder.seal_block(header);
+            ctx.jump(header, &[]);
+            ctx.seal_block(header);
 
             // exit: drop the iterator (frees only if it was heap-boxed).
-            ctx.builder.switch_to_block(exit);
-            ctx.builder.seal_block(exit);
-            let data2 = ctx
-                .builder
-                .ins()
-                .load(types::I64, MemFlags::trusted(), slot_ptr, data_off);
-            let drop_fn =
-                ctx.builder
-                    .ins()
-                    .load(types::I64, MemFlags::trusted(), slot_ptr, drop_off);
-            ctx.builder
-                .ins()
-                .store(MemFlags::trusted(), data2, data_ptr, 0);
-            ctx.builder
-                .ins()
-                .call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
+            ctx.switch_to_block(exit);
+            ctx.seal_block(exit);
+            let data2 = ctx.load(ScalarType::I64, slot_ptr, data_off);
+            let drop_fn = ctx.load(ScalarType::I64, slot_ptr, drop_off);
+            ctx.store(data2, data_ptr, 0);
+            ctx.call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
         }));
     }
 
@@ -512,12 +466,12 @@ impl Ctx {
                 .loop_exit_stack
                 .last()
                 .expect("break_loop called outside of a loop");
-            ctx.builder.ins().jump(exit, &[]);
+            ctx.jump(exit, &[]);
             // The current block is now terminated; switch to a fresh (dead)
             // block so any following emitted instructions remain well-formed.
-            let dead = ctx.builder.create_block();
-            ctx.builder.switch_to_block(dead);
-            ctx.builder.seal_block(dead);
+            let dead = ctx.create_block();
+            ctx.switch_to_block(dead);
+            ctx.seal_block(dead);
         }));
     }
 
@@ -533,23 +487,21 @@ impl Ctx {
         let then_actions = child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let then_block = ctx.builder.create_block();
-            let merge_block = ctx.builder.create_block();
+            let then_block = ctx.create_block();
+            let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, then_block, &[], merge_block, &[]);
+            ctx.brif(cond_val, then_block, &[], merge_block, &[]);
 
-            ctx.builder.switch_to_block(then_block);
-            ctx.builder.seal_block(then_block);
+            ctx.switch_to_block(then_block);
+            ctx.seal_block(then_block);
             for action in then_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(merge_block);
-            ctx.builder.seal_block(merge_block);
+            ctx.switch_to_block(merge_block);
+            ctx.seal_block(merge_block);
         }));
     }
 
@@ -574,31 +526,29 @@ impl Ctx {
         let else_actions = else_child.actions;
 
         self.actions.push(Box::new(move |ctx| {
-            let then_block = ctx.builder.create_block();
-            let else_block = ctx.builder.create_block();
-            let merge_block = ctx.builder.create_block();
+            let then_block = ctx.create_block();
+            let else_block = ctx.create_block();
+            let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.builder
-                .ins()
-                .brif(cond_val, then_block, &[], else_block, &[]);
+            ctx.brif(cond_val, then_block, &[], else_block, &[]);
 
-            ctx.builder.switch_to_block(then_block);
-            ctx.builder.seal_block(then_block);
+            ctx.switch_to_block(then_block);
+            ctx.seal_block(then_block);
             for action in then_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(else_block);
-            ctx.builder.seal_block(else_block);
+            ctx.switch_to_block(else_block);
+            ctx.seal_block(else_block);
             for action in else_actions {
                 action(ctx);
             }
-            ctx.builder.ins().jump(merge_block, &[]);
+            ctx.jump(merge_block, &[]);
 
-            ctx.builder.switch_to_block(merge_block);
-            ctx.builder.seal_block(merge_block);
+            ctx.switch_to_block(merge_block);
+            ctx.seal_block(merge_block);
         }));
     }
 }
@@ -619,11 +569,87 @@ pub(crate) struct ExternFnDef {
     pub fn_ptr: *const u8,
 }
 
+/// Emit one function body under the private storage-pointer ABI, **backend-neutrally**.
+///
+/// The ABI is uniform: `params` is one storage pointer per logical argument followed by a
+/// single output pointer, and the function returns `void`. This unpacks each argument from
+/// its storage pointer into a variable (a fat-pointer slice into its `slice_vars` pair),
+/// runs `body` to produce the result, and writes the result back through the output pointer.
+/// Every step goes through the neutral [`Backend`](crate::staged::Backend) ops on `ctx`, so
+/// the same code drives Cranelift and MLIR; the caller supplies the (backend-specific)
+/// function entry and terminating `return`.
+pub(crate) fn emit_function_body(
+    ctx: &mut CompilationContext,
+    params: &[ValueId],
+    param_infos: &[TypeInfo],
+    param_var_ids: &[usize],
+    body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    return_info: &TypeInfo,
+) {
+    for (index, info) in param_infos.iter().enumerate() {
+        let var_id = param_var_ids[index];
+        let storage_ptr = params[index];
+
+        if info.is_aggregate {
+            if info.is_fat_pointer {
+                // A slice arrives as a `(ptr, len)` pair; keep both in register variables.
+                // The data pointer is `Ptr` (an `llvm.ptr` on MLIR); `len` is `I64`.
+                let ptr_value = ctx.load(ScalarType::Ptr, storage_ptr, 0);
+                let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
+                let ptr_var = ctx.declare_var(ScalarType::Ptr);
+                let len_var = ctx.declare_var(ScalarType::I64);
+                ctx.def_var(ptr_var, ptr_value);
+                ctx.def_var(len_var, len_value);
+                ctx.slice_vars
+                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+            }
+            // Aggregates are represented by a pointer to their storage.
+            let param_var = ctx.declare_var(ScalarType::Ptr);
+            ctx.def_var(param_var, storage_ptr);
+            ctx.var_map.insert(var_id, param_var);
+        } else {
+            let param_value = if info.size == 0 {
+                ctx.iconst(ScalarType::I8, 0)
+            } else {
+                ctx.load(info.repr, storage_ptr, 0)
+            };
+            let param_var = ctx.declare_var(info.repr);
+            ctx.def_var(param_var, param_value);
+            ctx.var_map.insert(var_id, param_var);
+        }
+    }
+
+    let result = body(ctx);
+
+    let output_ptr = params[param_infos.len()];
+    if return_info.is_aggregate {
+        ctx.copy_nonoverlapping(
+            output_ptr,
+            result,
+            return_info.size as usize,
+            return_info.alignment as usize,
+        );
+    } else if return_info.size != 0 {
+        ctx.store(result, output_ptr, 0);
+    }
+}
+
 /// The central coordinator for staged computations.
 ///
 /// `Compiler` owns all function definitions and variable IDs. It provides
 /// methods to create functions and variables, and to compile expressions
 /// to native code.
+/// Which code-generation backend [`Compiler::compile`] targets.
+///
+/// Cranelift is the default (pure-Rust, fast compile). `Llvm` (behind `--features llvm`)
+/// JITs through MLIR — same neutral AST, harder optimization.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum JitBackend {
+    Cranelift,
+    #[cfg(feature = "llvm")]
+    Llvm,
+}
+
 pub struct Compiler<'a> {
     /// Function definitions indexed by ID
     functions: Vec<Option<FunDef>>,
@@ -631,6 +657,8 @@ pub struct Compiler<'a> {
     extern_functions: Vec<ExternFnDef>,
     /// Next variable ID to assign
     next_var_id: usize,
+    /// Code-generation backend `compile` targets.
+    backend: JitBackend,
     _marker: PhantomData<&'a ()>,
 }
 
@@ -641,14 +669,21 @@ impl<'a> Default for Compiler<'a> {
 }
 
 impl<'a> Compiler<'a> {
-    /// Create a new compiler
+    /// Create a new compiler (targeting the default Cranelift backend).
     pub fn new() -> Self {
         Compiler {
             functions: Vec::new(),
             extern_functions: Vec::new(),
             next_var_id: 0,
+            backend: JitBackend::Cranelift,
             _marker: PhantomData,
         }
+    }
+
+    /// Select the code-generation backend (builder style). See [`JitBackend`].
+    pub fn with_backend(mut self, backend: JitBackend) -> Self {
+        self.backend = backend;
+        self
     }
 
     /// Register an external function and get a handle to call it.
@@ -1079,7 +1114,35 @@ impl<'a> Compiler<'a> {
     /// Generated functions use one storage pointer per logical parameter and
     /// one caller-owned output pointer. This keeps aggregate classification out
     /// of the private JIT ABI.
+    /// Compile the top-level expression to native code via the selected [`JitBackend`].
     pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+        match self.backend {
+            JitBackend::Cranelift => self.compile_cranelift(expr),
+            #[cfg(feature = "llvm")]
+            JitBackend::Llvm => self.compile_llvm(expr),
+        }
+    }
+
+    /// Compile through the MLIR backend: build `__main__` (from `expr`) alongside the
+    /// helper functions and JIT the module. The result reuses the same [`Compiled`]/`run`/
+    /// `as_fn` machinery as Cranelift — only the `Executable` resource differs.
+    #[cfg(feature = "llvm")]
+    fn compile_llvm<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+        let return_info = TypeInfo::from_staged_type::<S::Out>();
+        let (executable, main_ptr) = crate::llvm::assemble(
+            self.functions,
+            &self.extern_functions,
+            &return_info,
+            move |ctx| expr.codegen(ctx),
+        )?;
+        Ok(Compiled {
+            executable: Some(Executable::Mlir(executable)),
+            main_ptr,
+            _phantom: PhantomData,
+        })
+    }
+
+    fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -1190,96 +1253,45 @@ impl<'a> Compiler<'a> {
                     builder.seal_block(entry_block);
 
                     // Create var_map for this function
-                    let mut var_map: HashMap<usize, Variable> = HashMap::new();
+                    let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
                     // Optimized slice storage: var_id -> (ptr_var, len_var)
                     let mut slice_vars = HashMap::new();
 
-                    // Handle all parameters
-                    let block_params = builder.block_params(entry_block).to_vec();
-                    for (param_idx, param_info) in func_def.param_infos.iter().enumerate() {
-                        let var_id = func_def.param_var_ids[param_idx];
-                        let storage_ptr = block_params[param_idx];
+                    // Storage pointers (N args + output) as neutral handles.
+                    let params: Vec<ValueId> = builder
+                        .block_params(entry_block)
+                        .iter()
+                        .map(|value| ValueId::from_cranelift(*value))
+                        .collect();
 
-                        if param_info.is_aggregate {
-                            if param_info.is_fat_pointer {
-                                let ptr_value = builder.ins().load(
-                                    types::I64,
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    0,
-                                );
-                                let len_value = builder.ins().load(
-                                    types::I64,
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    8,
-                                );
-                                let ptr_var = builder.declare_var(types::I64);
-                                let len_var = builder.declare_var(types::I64);
-                                builder.def_var(ptr_var, ptr_value);
-                                builder.def_var(len_var, len_value);
-                                slice_vars
-                                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
-                            }
-
-                            // Aggregate expressions are represented by a pointer to
-                            // their complete runtime storage.
-                            let param_var = builder.declare_var(types::I64);
-                            builder.def_var(param_var, storage_ptr);
-                            var_map.insert(var_id, param_var);
-                        } else {
-                            let param_value = if param_info.size == 0 {
-                                builder.ins().iconst(types::I8, 0)
-                            } else {
-                                builder.ins().load(
-                                    param_info.value_type,
-                                    MemFlags::trusted(),
-                                    storage_ptr,
-                                    0,
-                                )
-                            };
-                            let param_var = builder.declare_var(param_info.value_type);
-                            builder.def_var(param_var, param_value);
-                            var_map.insert(var_id, param_var);
-                        }
-                    }
-
-                    // Generate the body code
-                    let result = {
-                        let mut extern_func_refs = HashMap::new();
-                        let mut ctx = CompilationContext {
+                    {
+                        let mut backend = CraneliftBackend {
                             builder: &mut builder,
                             module: &mut module,
-                            var_map: &mut var_map,
-                            func_map: &func_map,
-                            extern_func_refs: &mut extern_func_refs,
+                            func_ids: &func_map,
                             extern_func_ids: &extern_func_ids,
+                            func_ref_cache: HashMap::new(),
+                            extern_ref_cache: HashMap::new(),
+                        };
+                        let mut ctx = CompilationContext {
+                            backend: &mut backend,
+                            var_map: &mut var_map,
                             slice_vars: &mut slice_vars,
                             unit_value: None,
                             loop_exit_stack: Vec::new(),
                         };
-                        (func_def.body)(&mut ctx)
-                    };
-
-                    let output_ptr = block_params[func_def.param_infos.len()];
-                    if func_def.return_info.is_aggregate {
-                        let config = module.isa().frontend_config();
-                        emit_copy_nonoverlapping(
-                            &mut builder,
-                            config,
-                            output_ptr,
-                            result,
-                            func_def.return_info.size as usize,
-                            func_def.return_info.alignment as usize,
+                        emit_function_body(
+                            &mut ctx,
+                            &params,
+                            &func_def.param_infos,
+                            &func_def.param_var_ids,
+                            func_def.body,
+                            &func_def.return_info,
                         );
-                    } else if func_def.return_info.size != 0 {
-                        builder
-                            .ins()
-                            .store(MemFlags::trusted(), result, output_ptr, 0);
                     }
-                    builder.ins().return_(&[]);
 
-                    builder.finalize();
+                    builder.ins().return_(&[]);
+                    builder.finalize(module.isa().frontend_config());
                 }
 
                 // Debug output for Cranelift IR
@@ -1309,44 +1321,46 @@ impl<'a> Compiler<'a> {
                 builder.switch_to_block(entry_block);
                 builder.seal_block(entry_block);
 
-                let mut var_map: HashMap<usize, Variable> = HashMap::new();
+                let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
+                let mut slice_vars = HashMap::new();
 
-                let result = {
-                    let mut extern_func_refs = HashMap::new();
-                    let mut slice_vars = HashMap::new();
-                    let mut ctx = CompilationContext {
+                // `__main__` is a zero-argument function under the storage-pointer ABI: its
+                // one parameter is the output pointer.
+                let params: Vec<ValueId> = builder
+                    .block_params(entry_block)
+                    .iter()
+                    .map(|value| ValueId::from_cranelift(*value))
+                    .collect();
+                let return_info = TypeInfo::from_staged_type::<S::Out>();
+
+                {
+                    let mut backend = CraneliftBackend {
                         builder: &mut builder,
                         module: &mut module,
-                        var_map: &mut var_map,
-                        func_map: &func_map,
-                        extern_func_refs: &mut extern_func_refs,
+                        func_ids: &func_map,
                         extern_func_ids: &extern_func_ids,
+                        func_ref_cache: HashMap::new(),
+                        extern_ref_cache: HashMap::new(),
+                    };
+                    let mut ctx = CompilationContext {
+                        backend: &mut backend,
+                        var_map: &mut var_map,
                         slice_vars: &mut slice_vars,
                         unit_value: None,
                         loop_exit_stack: Vec::new(),
                     };
-                    expr.codegen(&mut ctx)
-                };
-
-                let output_ptr = builder.block_params(entry_block)[0];
-                if S::Out::is_copy_struct() {
-                    let config = module.isa().frontend_config();
-                    emit_copy_nonoverlapping(
-                        &mut builder,
-                        config,
-                        output_ptr,
-                        result,
-                        S::Out::size_of(),
-                        S::Out::align_of(),
+                    emit_function_body(
+                        &mut ctx,
+                        &params,
+                        &[],
+                        &[],
+                        |ctx| expr.codegen(ctx),
+                        &return_info,
                     );
-                } else if S::Out::size_of() != 0 {
-                    builder
-                        .ins()
-                        .store(MemFlags::trusted(), result, output_ptr, 0);
                 }
-                builder.ins().return_(&[]);
 
-                builder.finalize();
+                builder.ins().return_(&[]);
+                builder.finalize(module.isa().frontend_config());
             }
 
             // Debug output for main function IR
@@ -1371,7 +1385,7 @@ impl<'a> Compiler<'a> {
         let main_ptr = module.get_finalized_function(main_func_id);
 
         Ok(Compiled {
-            module: Some(module),
+            executable: Some(Executable::Cranelift(module)),
             main_ptr,
             _phantom: PhantomData,
         })
@@ -1410,18 +1424,29 @@ impl std::error::Error for CompileError {}
 /// methods for a compiled staged function. Executable memory is reclaimed when
 /// this value is dropped.
 pub struct Compiled<'a, T: StagedType> {
-    module: Option<JITModule>,
+    executable: Option<Executable>,
     main_ptr: *const u8,
     _phantom: PhantomData<&'a T>,
 }
 
+/// The backend-specific JIT resource a [`Compiled`] owns and frees on drop. `main_ptr`
+/// points into whichever variant is live; keeping the resource here keeps it valid.
+enum Executable {
+    Cranelift(JITModule),
+    #[cfg(feature = "llvm")]
+    Mlir(crate::llvm::MlirExecutable),
+}
+
 impl<'a, T: StagedType> Drop for Compiled<'a, T> {
     fn drop(&mut self) {
-        if let Some(module) = self.module.take() {
-            // SAFETY: safe entry points borrow this Compiled value, so no safe
-            // callable can remain when Drop obtains exclusive access. Escaped
-            // pointers are governed by `as_fn_unchecked`'s safety contract.
-            unsafe { module.free_memory() };
+        // SAFETY: safe entry points borrow this Compiled value, so no safe callable can
+        // remain when Drop obtains exclusive access. Escaped pointers are governed by
+        // `as_fn_unchecked`'s safety contract.
+        match self.executable.take() {
+            Some(Executable::Cranelift(module)) => unsafe { module.free_memory() },
+            #[cfg(feature = "llvm")]
+            Some(Executable::Mlir(executable)) => drop(executable),
+            None => {}
         }
     }
 }

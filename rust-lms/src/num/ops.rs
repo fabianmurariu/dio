@@ -1,9 +1,8 @@
 //! Operation structs for numeric staged computations.
 
-use cranelift_codegen::ir::{InstBuilder, MemFlags, Value};
 use std::marker::PhantomData;
 
-use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Var};
+use crate::staged::{CompilationContext, Const, IntoStaged, Staged, ValueId, Var};
 use crate::types::StagedType;
 
 use super::traits::{FloatNum, IntNum, Num};
@@ -27,10 +26,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_add(lv, rv, ctx.builder)
+        T::codegen_add(lv, rv, ctx)
     }
 }
 
@@ -49,10 +48,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_sub(lv, rv, ctx.builder)
+        T::codegen_sub(lv, rv, ctx)
     }
 }
 
@@ -71,10 +70,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_mul(lv, rv, ctx.builder)
+        T::codegen_mul(lv, rv, ctx)
     }
 }
 
@@ -93,10 +92,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_div(lv, rv, ctx.builder)
+        T::codegen_div(lv, rv, ctx)
     }
 }
 
@@ -115,10 +114,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_rem(lv, rv, ctx.builder)
+        T::codegen_rem(lv, rv, ctx)
     }
 }
 
@@ -141,10 +140,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitand(lv, rv, ctx.builder)
+        T::codegen_bitand(lv, rv, ctx)
     }
 }
 
@@ -163,10 +162,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitor(lv, rv, ctx.builder)
+        T::codegen_bitor(lv, rv, ctx)
     }
 }
 
@@ -185,10 +184,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitxor(lv, rv, ctx.builder)
+        T::codegen_bitxor(lv, rv, ctx)
     }
 }
 
@@ -207,10 +206,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_shl(lv, rv, ctx.builder)
+        T::codegen_shl(lv, rv, ctx)
     }
 }
 
@@ -229,10 +228,10 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_shr(lv, rv, ctx.builder)
+        T::codegen_shr(lv, rv, ctx)
     }
 }
 
@@ -262,17 +261,17 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let value = self.expr.codegen(ctx);
         let from_bits = FROM::size_of() * 8;
         let to_bits = TO::size_of() * 8;
-        let to_ty = TO::cranelift_type();
+        let to_ty = TO::scalar_type();
 
         match from_bits.cmp(&to_bits) {
             std::cmp::Ordering::Equal => value,
-            std::cmp::Ordering::Less if FROM::SIGNED => ctx.builder.ins().sextend(to_ty, value),
-            std::cmp::Ordering::Less => ctx.builder.ins().uextend(to_ty, value),
-            std::cmp::Ordering::Greater => ctx.builder.ins().ireduce(to_ty, value),
+            std::cmp::Ordering::Less if FROM::SIGNED => ctx.sextend(to_ty, value),
+            std::cmp::Ordering::Less => ctx.uextend(to_ty, value),
+            std::cmp::Ordering::Greater => ctx.ireduce(to_ty, value),
         }
     }
 }
@@ -302,13 +301,13 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let value = self.expr.codegen(ctx);
-        let to_ty = TO::cranelift_type();
+        let to_ty = TO::scalar_type();
         if FROM::SIGNED {
-            ctx.builder.ins().fcvt_from_sint(to_ty, value)
+            ctx.fcvt_from_sint(to_ty, value)
         } else {
-            ctx.builder.ins().fcvt_from_uint(to_ty, value)
+            ctx.fcvt_from_uint(to_ty, value)
         }
     }
 }
@@ -332,10 +331,10 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_lt(lv, rv, ctx.builder)
+        T::codegen_lt(lv, rv, ctx)
     }
 }
 
@@ -354,10 +353,10 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_gt(lv, rv, ctx.builder)
+        T::codegen_gt(lv, rv, ctx)
     }
 }
 
@@ -376,10 +375,10 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_eq(lv, rv, ctx.builder)
+        T::codegen_eq(lv, rv, ctx)
     }
 }
 
@@ -547,19 +546,17 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         assert_eq!(
             FROM::size_of(),
             TO::size_of(),
             "bitcast between different-sized types",
         );
         let value = self.expr.codegen(ctx);
-        let from_ty = FROM::cranelift_type();
-        let to_ty = TO::cranelift_type();
-        if from_ty == to_ty {
+        if FROM::scalar_type() == TO::scalar_type() {
             value
         } else {
-            ctx.builder.ins().bitcast(to_ty, MemFlags::new(), value)
+            ctx.bitcast(TO::scalar_type(), value)
         }
     }
 }
@@ -650,11 +647,11 @@ where
 {
     type Out = Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
         let cond = self.condition.codegen(ctx);
         let true_val = self.if_true.codegen(ctx);
         let false_val = self.if_false.codegen(ctx);
-        ctx.builder.ins().select(cond, true_val, false_val)
+        ctx.select(cond, true_val, false_val)
     }
 }
 
