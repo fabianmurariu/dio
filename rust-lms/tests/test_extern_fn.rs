@@ -3,6 +3,9 @@
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
 
+mod common;
+use common::for_each_backend;
+
 // =============================================================================
 // Simple external functions
 // =============================================================================
@@ -148,187 +151,191 @@ fn test_extern_marker_carries_the_complete_signature() {
 
 #[test]
 fn test_safe_extern_shared_reference() {
-    let mut compiler = Compiler::new();
-    let read = compiler.extern_fn::<ExtReadRefExtern>();
-    let test_fn = compiler.fun1("read_ref", |_ctx, value: Var<SRef<Opaque<i64>>>| {
-        call_extern1(read, value)
-    });
+    for_each_backend(|mut compiler| {
+        let read = compiler.extern_fn::<ExtReadRefExtern>();
+        let test_fn = compiler.fun1("read_ref", |_ctx, value: Var<SRef<Opaque<i64>>>| {
+            call_extern1(read, value)
+        });
 
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let value = 42i64;
-    assert_eq!(compiled.call(&value), 42);
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let value = 42i64;
+        assert_eq!(compiled.call(&value), 42);
+    });
 }
 
 #[test]
 fn test_safe_extern_mut_reference_reborrows_sequentially() {
-    let mut compiler = Compiler::new();
-    let add_assign = compiler.extern_fn::<ExtAddAssignExtern>();
-    let test_fn = compiler.fun1(
-        "add_assign_twice",
-        |ctx, mut value: Var<SRefMut<Opaque<i64>>>| {
-            let _first = ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(1)));
-            ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(2)))
-        },
-    );
+    for_each_backend(|mut compiler| {
+        let add_assign = compiler.extern_fn::<ExtAddAssignExtern>();
+        let test_fn = compiler.fun1(
+            "add_assign_twice",
+            |ctx, mut value: Var<SRefMut<Opaque<i64>>>| {
+                let _first = ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(1)));
+                ctx.bind(call_extern2(add_assign, &mut value, Const::<i64>::new(2)))
+            },
+        );
 
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let mut value = 10i64;
-    assert_eq!(compiled.call(&mut value), 13);
-    assert_eq!(value, 13);
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let mut value = 10i64;
+        assert_eq!(compiled.call(&mut value), 13);
+        assert_eq!(value, 13);
+    });
 }
 
 #[test]
 fn test_extern_slice_reference_uses_split_parameter_values() {
-    let mut compiler = Compiler::new();
-    let len = compiler.extern_fn::<ExtRefSliceLenExtern>();
-    let test_fn = compiler.fun1("ref_slice_len", |_ctx, data: Var<SRef<Slice<i64>>>| {
-        // SAFETY: `data` is a valid shared slice reference. This call is
-        // unchecked only because Rust slice references have no stable C ABI.
-        unsafe { call_extern1_unchecked(len, data) }
-    });
+    for_each_backend(|mut compiler| {
+        let len = compiler.extern_fn::<ExtRefSliceLenExtern>();
+        let test_fn = compiler.fun1("ref_slice_len", |_ctx, data: Var<SRef<Slice<i64>>>| {
+            // SAFETY: `data` is a valid shared slice reference. This call is
+            // unchecked only because Rust slice references have no stable C ABI.
+            unsafe { call_extern1_unchecked(len, data) }
+        });
 
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let data = [3i64, 5, 8, 13];
-    assert_eq!(compiled.call(&data), 4);
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let data = [3i64, 5, 8, 13];
+        assert_eq!(compiled.call(&data), 4);
+    });
 }
 
 #[test]
 fn test_unsafe_extern_requires_explicit_constructor() {
-    let mut compiler = Compiler::new();
-    let read = compiler.extern_fn::<ExtReadI64Extern>();
-    let test_fn = compiler.fun1("test", |_ctx, ptr: Var<SPtr<i64>>| {
-        // SAFETY: the generated function forwards its caller-provided pointer;
-        // this test supplies a live, aligned `i64` below.
-        unsafe { call_extern1_unchecked(read, ptr) }
-    });
+    for_each_backend(|mut compiler| {
+        let read = compiler.extern_fn::<ExtReadI64Extern>();
+        let test_fn = compiler.fun1("test", |_ctx, ptr: Var<SPtr<i64>>| {
+            // SAFETY: the generated function forwards its caller-provided pointer;
+            // this test supplies a live, aligned `i64` below.
+            unsafe { call_extern1_unchecked(read, ptr) }
+        });
 
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let function = compiled.as_fn();
-    let value = 42i64;
-    assert_eq!(function.call(&value), 42);
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let function = compiled.as_fn();
+        let value = 42i64;
+        assert_eq!(function.call(&value), 42);
+    });
 }
 
 #[test]
 fn test_extern_fn_simple_add() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        // Register the external function
+        let add_fn = compiler.extern_fn::<ExtAddExtern>();
 
-    // Register the external function
-    let add_fn = compiler.extern_fn::<ExtAddExtern>();
+        // Create a staged function that calls the external function
+        let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
+            call_extern2(add_fn, x, y)
+        });
 
-    // Create a staged function that calls the external function
-    let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
-        call_extern2(add_fn, x, y)
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        assert_eq!(f.call(10, 32), 42);
+        assert_eq!(f.call(-5, 5), 0);
+        assert_eq!(f.call(100, 200), 300);
     });
-
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    assert_eq!(f.call(10, 32), 42);
-    assert_eq!(f.call(-5, 5), 0);
-    assert_eq!(f.call(100, 200), 300);
 }
 
 #[test]
 fn test_extern_fn_simple_square() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let square_fn = compiler.extern_fn::<ExtSquareExtern>();
 
-    let square_fn = compiler.extern_fn::<ExtSquareExtern>();
+        let test_fn = compiler.fun1("test", |_ctx, x: Var<i64>| call_extern1(square_fn, x));
 
-    let test_fn = compiler.fun1("test", |_ctx, x: Var<i64>| call_extern1(square_fn, x));
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
 
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    assert_eq!(f.call(5), 25);
-    assert_eq!(f.call(7), 49);
-    assert_eq!(f.call(-3), 9);
+        assert_eq!(f.call(5), 25);
+        assert_eq!(f.call(7), 49);
+        assert_eq!(f.call(-3), 9);
+    });
 }
 
 #[test]
 fn test_extern_fn_chained() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let add_fn = compiler.extern_fn::<ExtAddExtern>();
+        let square_fn = compiler.extern_fn::<ExtSquareExtern>();
 
-    let add_fn = compiler.extern_fn::<ExtAddExtern>();
-    let square_fn = compiler.extern_fn::<ExtSquareExtern>();
+        // Compute square(x + y)
+        let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
+            let sum = call_extern2(add_fn, x, y);
+            call_extern1(square_fn, sum)
+        });
 
-    // Compute square(x + y)
-    let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
-        let sum = call_extern2(add_fn, x, y);
-        call_extern1(square_fn, sum)
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        // (3 + 4)^2 = 49
+        assert_eq!(f.call(3, 4), 49);
+        // (10 + 0)^2 = 100
+        assert_eq!(f.call(10, 0), 100);
     });
-
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    // (3 + 4)^2 = 49
-    assert_eq!(f.call(3, 4), 49);
-    // (10 + 0)^2 = 100
-    assert_eq!(f.call(10, 0), 100);
 }
 
 #[test]
 fn test_extern_fn_with_internal() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let ext_add = compiler.extern_fn::<ExtAddExtern>();
 
-    let ext_add = compiler.extern_fn::<ExtAddExtern>();
+        // Mix internal and external function calls
+        let internal_double = compiler.fun1("double", |_ctx, x: Var<i64>| x + x);
 
-    // Mix internal and external function calls
-    let internal_double = compiler.fun1("double", |_ctx, x: Var<i64>| x + x);
+        let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
+            // double(ext_add(x, y))
+            let sum = call_extern2(ext_add, x, y);
+            call1(internal_double, sum)
+        });
 
-    let test_fn = compiler.fun2("test", |_ctx, x: Var<i64>, y: Var<i64>| {
-        // double(ext_add(x, y))
-        let sum = call_extern2(ext_add, x, y);
-        call1(internal_double, sum)
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        // (10 + 32) * 2 = 84
+        assert_eq!(f.call(10, 32), 84);
     });
-
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    // (10 + 32) * 2 = 84
-    assert_eq!(f.call(10, 32), 84);
 }
 
 #[test]
 fn test_extern_fn_sum_slice() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let sum_fn = compiler.extern_fn::<ExtSumSliceExtern>();
 
-    let sum_fn = compiler.extern_fn::<ExtSumSliceExtern>();
+        // Function that takes a FatSlice and returns the sum
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+            call_extern1(sum_fn, data)
+        });
 
-    // Function that takes a FatSlice and returns the sum
-    let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
-        call_extern1(sum_fn, data)
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        let data = [1i64, 2, 3, 4, 5];
+        let fat_slice = FatSlice::from_slice(&data);
+        assert_eq!(f.call(fat_slice), 15); // 1+2+3+4+5 = 15
+
+        let data2 = [10i64, 20, 30];
+        let fat_slice2 = FatSlice::from_slice(&data2);
+        assert_eq!(f.call(fat_slice2), 60); // 10+20+30 = 60
     });
-
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    let data = [1i64, 2, 3, 4, 5];
-    let fat_slice = FatSlice::from_slice(&data);
-    assert_eq!(f.call(fat_slice), 15); // 1+2+3+4+5 = 15
-
-    let data2 = [10i64, 20, 30];
-    let fat_slice2 = FatSlice::from_slice(&data2);
-    assert_eq!(f.call(fat_slice2), 60); // 10+20+30 = 60
 }
 
 #[test]
 fn test_extern_fn_slice_len() {
-    let mut compiler = Compiler::new();
+    for_each_backend(|mut compiler| {
+        let len_fn = compiler.extern_fn::<ExtSliceLenExtern>();
 
-    let len_fn = compiler.extern_fn::<ExtSliceLenExtern>();
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+            call_extern1(len_fn, data)
+        });
 
-    let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
-        call_extern1(len_fn, data)
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        let data = [1i64, 2, 3, 4, 5];
+        let fat_slice = FatSlice::from_slice(&data);
+        assert_eq!(f.call(fat_slice), 5);
+
+        let empty: [i64; 0] = [];
+        let fat_empty = FatSlice::from_slice(&empty);
+        assert_eq!(f.call(fat_empty), 0);
     });
-
-    let compiled = compiler.compile(test_fn).expect("compilation failed");
-    let f = compiled.as_fn();
-
-    let data = [1i64, 2, 3, 4, 5];
-    let fat_slice = FatSlice::from_slice(&data);
-    assert_eq!(f.call(fat_slice), 5);
-
-    let empty: [i64; 0] = [];
-    let fat_empty = FatSlice::from_slice(&empty);
-    assert_eq!(f.call(fat_empty), 0);
 }

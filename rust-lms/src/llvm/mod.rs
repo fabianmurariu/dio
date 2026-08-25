@@ -124,6 +124,8 @@ pub fn jit_return_i64_const(value: i64) -> i64 {
     );
 
     let pass_manager = PassManager::new(&context);
+    pass_manager.add_pass(pass::transform::create_canonicalizer());
+    pass_manager.add_pass(pass::conversion::create_control_flow_to_llvm());
     pass_manager.add_pass(pass::conversion::create_to_llvm());
     pass_manager
         .run(&mut module)
@@ -158,11 +160,24 @@ fn jit_lookup(
     name: &str,
     symbols: &[(&str, *const u8)],
 ) -> (ExecutionEngine, *mut ()) {
+    if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
+        eprintln!("=== MLIR before lowering ===\n{}", module.as_operation());
+    }
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification before lowering"
     );
     let pass_manager = PassManager::new(context);
+    // Iterator terminals with early exits (`take_while`/`all`) leave *unreachable* blocks
+    // (no predecessors) whose `cf.br` the dialect-conversion framework skips — they survive
+    // to LLVM translation and fail with "missing LLVMTranslationDialectInterface for cf.br".
+    // Canonicalization does region simplification (prunes unreachable blocks) so only live
+    // branches remain to lower. (Cranelift prunes these itself; MLIR needs the pass.)
+    pass_manager.add_pass(pass::transform::create_canonicalizer());
+    // `cf` (`cf.br`/`cf.cond_br`, emitted by loops and the surviving branches) is not reliably
+    // picked up by the interface-based generic `convert-to-llvm` pass under these melior
+    // bindings, so lower `cf` explicitly first — every branch becomes `llvm.br`/`llvm.cond_br`.
+    pass_manager.add_pass(pass::conversion::create_control_flow_to_llvm());
     pass_manager.add_pass(pass::conversion::create_to_llvm());
     // Resolve the `builtin.unrealized_conversion_cast`s that `func_addr` inserts (function
     // value → `llvm.ptr`) once `func.constant` has become `llvm.mlir.addressof` (docs/llvm.md §7).

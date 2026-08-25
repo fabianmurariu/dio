@@ -16,7 +16,7 @@ use melior::ir::attribute::{
     TypeAttribute,
 };
 use melior::ir::block::BlockLike;
-use melior::ir::operation::Operation;
+use melior::ir::operation::{Operation, OperationBuilder};
 use melior::ir::r#type::{FunctionType, IntegerType};
 use melior::ir::{Block, Identifier, Location, Module, Region, RegionLike, Type, Value, ValueLike};
 use melior::Context;
@@ -335,6 +335,50 @@ impl<'c> MlirBackend<'c> {
             self.location,
         ))
     }
+
+    /// Reduce a branch condition to `i1`. Cranelift's `brif` treats any nonzero integer as
+    /// true, so the neutral AST is allowed to branch on a wider integer (e.g. a `u64`
+    /// `COption` discriminant); MLIR's `cf.cond_br` strictly requires `i1`. Already-`i1`
+    /// conditions pass through untouched; anything else becomes `cond != 0`.
+    fn coerce_to_bool(&mut self, cond: ValueId) -> ValueId {
+        let i1_ty: Type<'c> = IntegerType::new(self.context, 1).into();
+        let cond_ty = self.get(cond).r#type();
+        if cond_ty == i1_ty {
+            return cond;
+        }
+        let zero = self.emit_value(arith::constant(
+            self.context,
+            IntegerAttribute::new(cond_ty, 0).into(),
+            self.location,
+        ));
+        let (a, b) = (self.get(cond), self.get(zero));
+        self.emit_value(arith::cmpi(
+            self.context,
+            CmpiPredicate::Ne,
+            a,
+            b,
+            self.location,
+        ))
+    }
+
+    /// Reinterpret an integer callee address as an `llvm.ptr`. The opaque-iterator vtable
+    /// stores function pointers as `u64` (matching Cranelift's integer-addressed
+    /// `call_indirect`); LLVM needs a real pointer to call through. A value that is already
+    /// a pointer passes through.
+    fn int_to_ptr(&mut self, v: ValueId) -> ValueId {
+        let val = self.get(v);
+        let ty = val.r#type();
+        let ptr_ty = llvm::r#type::pointer(self.context, 0);
+        if ty == ptr_ty {
+            return v;
+        }
+        let op = OperationBuilder::new("llvm.inttoptr", self.location)
+            .add_operands(&[val])
+            .add_results(&[ptr_ty])
+            .build()
+            .expect("valid llvm.inttoptr");
+        self.emit_value(op)
+    }
 }
 
 impl<'c> Backend for MlirBackend<'c> {
@@ -643,6 +687,7 @@ impl<'c> Backend for MlirBackend<'c> {
         else_block: BlockHandle,
         else_args: &[ValueId],
     ) {
+        let cond = self.coerce_to_bool(cond);
         let cond = self.get(cond);
         let then_ops: Vec<Value> = then_args.iter().map(|id| self.get(*id)).collect();
         let else_ops: Vec<Value> = else_args.iter().map(|id| self.get(*id)).collect();
@@ -729,13 +774,36 @@ impl<'c> Backend for MlirBackend<'c> {
         args: &[ValueId],
     ) -> Option<ValueId> {
         let (_, ret) = self.sigs[sig.as_u32() as usize].clone();
-        let callee = self.get(callee);
-        let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
+        // The callee arrives as an integer address (opaque-iter vtable) or a pointer; LLVM
+        // calls through an `!llvm.ptr`. `func.call_indirect` demands a `!func.func` callee, so
+        // use an indirect `llvm.call` instead: the pointer is the first `callee_operands` value
+        // (no `callee` symbol, no `var_callee_type` since these are non-variadic).
+        let callee_ptr = self.int_to_ptr(callee);
+        let mut operands: Vec<Value> = Vec::with_capacity(1 + args.len());
+        operands.push(self.get(callee_ptr));
+        operands.extend(args.iter().map(|id| self.get(*id)));
         let result_types: Vec<Type> = ret
             .iter()
             .map(|t| scalar_to_mlir(self.context, *t))
             .collect();
-        let operation = func::call_indirect(callee, &operands, &result_types, self.location);
+        // `llvm.call` has `AttrSizedOperandSegments`: [callee_operands, op_bundle_operands].
+        let seg = DenseI32ArrayAttribute::new(self.context, &[operands.len() as i32, 0]);
+        let bundle_sizes = DenseI32ArrayAttribute::new(self.context, &[]);
+        let operation = OperationBuilder::new("llvm.call", self.location)
+            .add_operands(&operands)
+            .add_results(&result_types)
+            .add_attributes(&[
+                (
+                    Identifier::new(self.context, "operandSegmentSizes"),
+                    seg.into(),
+                ),
+                (
+                    Identifier::new(self.context, "op_bundle_sizes"),
+                    bundle_sizes.into(),
+                ),
+            ])
+            .build()
+            .expect("valid llvm.call");
         let raw = {
             let call_ref = self.blocks[self.current].append_operation(operation);
             ret.map(|_| {

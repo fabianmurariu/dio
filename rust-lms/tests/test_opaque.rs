@@ -6,6 +6,9 @@
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
 
+mod common;
+use common::for_each_backend;
+
 /// A stand-in for an external graph library (e.g. raphtory). Opaque to staged
 /// code — it never implements `StagedType`.
 pub struct Graph {
@@ -26,40 +29,42 @@ pub extern "C" fn graph_push_node(g: &mut Graph, id: u64) {
 
 #[test]
 fn opaque_ref_param_round_trips() {
-    let mut compiler = Compiler::new();
-    let node_count = compiler.extern_fn::<GraphNodeCountExtern>();
+    for_each_backend(|mut compiler| {
+        let node_count = compiler.extern_fn::<GraphNodeCountExtern>();
 
-    // fn(&Graph) -> u64 : just delegate to the extern.
-    let f = compiler.fun1("count_nodes", move |_ctx, g: Var<SRef<Opaque<Graph>>>| {
-        call_extern1(node_count, g)
+        // fn(&Graph) -> u64 : just delegate to the extern.
+        let f = compiler.fun1("count_nodes", move |_ctx, g: Var<SRef<Opaque<Graph>>>| {
+            call_extern1(node_count, g)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let kernel = compiled.as_fn();
+
+        let g = Graph {
+            nodes: vec![10, 20, 30, 40],
+        };
+        assert_eq!(kernel.call(&g), 4); // &g passed straight through
     });
-    let compiled = compiler.compile(f).expect("compile");
-    let kernel = compiled.as_fn();
-
-    let g = Graph {
-        nodes: vec![10, 20, 30, 40],
-    };
-    assert_eq!(kernel.call(&g), 4); // &g passed straight through
 }
 
 #[test]
 fn opaque_mut_ref_param() {
-    let mut compiler = Compiler::new();
-    let push = compiler.extern_fn::<GraphPushNodeExtern>();
-    let node_count = compiler.extern_fn::<GraphNodeCountExtern>();
+    for_each_backend(|mut compiler| {
+        let push = compiler.extern_fn::<GraphPushNodeExtern>();
+        let node_count = compiler.extern_fn::<GraphNodeCountExtern>();
 
-    // fn(&mut Graph) -> u64 : push one node, return the new count.
-    let f = compiler.fun1(
-        "push_and_count",
-        move |ctx, mut g: Var<SRefMut<Opaque<Graph>>>| {
-            ctx.emit(call_extern2(push, &mut g, Const::<u64>::new(99)));
-            call_extern1(node_count, &mut g)
-        },
-    );
-    let compiled = compiler.compile(f).expect("compile");
-    let kernel = compiled.as_fn();
+        // fn(&mut Graph) -> u64 : push one node, return the new count.
+        let f = compiler.fun1(
+            "push_and_count",
+            move |ctx, mut g: Var<SRefMut<Opaque<Graph>>>| {
+                ctx.emit(call_extern2(push, &mut g, Const::<u64>::new(99)));
+                call_extern1(node_count, &mut g)
+            },
+        );
+        let compiled = compiler.compile(f).expect("compile");
+        let kernel = compiled.as_fn();
 
-    let mut g = Graph { nodes: vec![1, 2] };
-    assert_eq!(kernel.call(&mut g), 3);
-    assert_eq!(g.nodes, vec![1, 2, 99]);
+        let mut g = Graph { nodes: vec![1, 2] };
+        assert_eq!(kernel.call(&mut g), 3);
+        assert_eq!(g.nodes, vec![1, 2, 99]);
+    });
 }

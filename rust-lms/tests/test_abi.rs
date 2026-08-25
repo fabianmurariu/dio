@@ -4,6 +4,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 
 use rust_lms::prelude::*;
 
+mod common;
+use common::{for_each_backend, with_backends};
+
 #[derive(Clone, Copy, Debug, PartialEq, StagedType)]
 #[repr(C)]
 pub struct PartialWord {
@@ -120,10 +123,11 @@ pub extern "C" fn record_unit_call() {
 macro_rules! assert_internal_round_trip {
     ($name:literal, $staged:ty, $value:expr $(,)?) => {{
         let value = $value;
-        let mut compiler = Compiler::new();
-        let identity = compiler.fun1($name, |_ctx, input: Var<$staged>| input);
-        let compiled = compiler.compile(identity).expect("compilation failed");
-        assert_eq!(compiled.call(value), value);
+        for_each_backend(|mut compiler| {
+            let identity = compiler.fun1($name, |_ctx, input: Var<$staged>| input);
+            let compiled = compiler.compile(identity).expect("compilation failed");
+            assert_eq!(compiled.call(value), value);
+        });
     }};
 }
 
@@ -185,13 +189,14 @@ fn internal_aggregate_round_trips_use_exact_layouts() {
 macro_rules! assert_extern_round_trip {
     ($marker:ty, $staged:ty, $value:expr $(,)?) => {{
         let value = $value;
-        let mut compiler = Compiler::new();
-        let external = compiler.extern_fn::<$marker>();
-        let forward = compiler.fun1("extern_round_trip", move |_ctx, input: Var<$staged>| {
-            call_extern1(external, input)
+        for_each_backend(|mut compiler| {
+            let external = compiler.extern_fn::<$marker>();
+            let forward = compiler.fun1("extern_round_trip", move |_ctx, input: Var<$staged>| {
+                call_extern1(external, input)
+            });
+            let compiled = compiler.compile(forward).expect("compilation failed");
+            assert_eq!(compiled.call(value), value);
         });
-        let compiled = compiler.compile(forward).expect("compilation failed");
-        assert_eq!(compiled.call(value), value);
     }};
 }
 
@@ -281,35 +286,39 @@ fn coption_roundtrips_over_aligned_payload_end_to_end() {
         flags: 4,
     };
 
-    // Some(value) -> unwrap_or(default) == value
-    let mut compiler = Compiler::new();
-    let some_rt = compiler.fun2(
-        "coption_some_aligned",
-        |_ctx, x: Var<Aligned16>, d: Var<Aligned16>| unwrap_or(c_some(x), d),
-    );
-    let compiled = compiler.compile(some_rt).expect("compilation failed");
-    assert_eq!(compiled.call(value, default), value);
+    with_backends(|make| {
+        let mut compiler = make();
+        // Some(value) -> unwrap_or(default) == value
+        let some_rt = compiler.fun2(
+            "coption_some_aligned",
+            |_ctx, x: Var<Aligned16>, d: Var<Aligned16>| unwrap_or(c_some(x), d),
+        );
+        let compiled = compiler.compile(some_rt).expect("compilation failed");
+        assert_eq!(compiled.call(value, default), value);
 
-    // None -> unwrap_or(default) == default
-    let mut compiler = Compiler::new();
-    let none_rt = compiler.fun2(
-        "coption_none_aligned",
-        |_ctx, _x: Var<Aligned16>, d: Var<Aligned16>| unwrap_or(c_none::<Aligned16>(), d),
-    );
-    let compiled = compiler.compile(none_rt).expect("compilation failed");
-    assert_eq!(compiled.call(value, default), default);
+        // None -> unwrap_or(default) == default
+        let mut compiler = make();
+        let none_rt = compiler.fun2(
+            "coption_none_aligned",
+            |_ctx, _x: Var<Aligned16>, d: Var<Aligned16>| unwrap_or(c_none::<Aligned16>(), d),
+        );
+        let compiled = compiler.compile(none_rt).expect("compilation failed");
+        assert_eq!(compiled.call(value, default), default);
+    });
 }
 
 #[test]
 fn unit_has_no_runtime_return_value() {
-    let compiler = Compiler::new();
-    compiler.compile(unit()).expect("compilation failed").run();
+    with_backends(|make| {
+        let compiler = make();
+        compiler.compile(unit()).expect("compilation failed").run();
 
-    UNIT_CALLS.store(0, Ordering::SeqCst);
-    let mut compiler = Compiler::new();
-    let external = compiler.extern_fn::<RecordUnitCallExtern>();
-    let invoke = compiler.fun0("invoke_unit", move |_ctx| call_extern0(external));
-    let compiled = compiler.compile(invoke).expect("compilation failed");
-    compiled.call();
-    assert_eq!(UNIT_CALLS.load(Ordering::SeqCst), 1);
+        UNIT_CALLS.store(0, Ordering::SeqCst);
+        let mut compiler = make();
+        let external = compiler.extern_fn::<RecordUnitCallExtern>();
+        let invoke = compiler.fun0("invoke_unit", move |_ctx| call_extern0(external));
+        let compiled = compiler.compile(invoke).expect("compilation failed");
+        compiled.call();
+        assert_eq!(UNIT_CALLS.load(Ordering::SeqCst), 1);
+    });
 }

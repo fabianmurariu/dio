@@ -13,6 +13,9 @@ use std::sync::atomic::{AtomicUsize, Ordering};
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
 
+mod common;
+use common::for_each_backend;
+
 // --- counting allocator (this is an integration test = its own binary) ---
 static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 struct Counting;
@@ -64,36 +67,37 @@ unsafe impl ReusedOpaqueIterKind for NeighK {
 
 #[test]
 fn nested_traversal_sums_neighbours_with_zero_allocation() {
-    let mut compiler = Compiler::new();
-    let nodes = compiler.reused_opaque_iter_fns::<NodesK>();
-    let neigh = compiler.reused_opaque_iter_fns::<NeighK>();
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.reused_opaque_iter_fns::<NodesK>();
+        let neigh = compiler.reused_opaque_iter_fns::<NeighK>();
 
-    // sum over all nodes of (sum of that node's neighbour ids)
-    let f = compiler.fun1("sum_neighbours", move |ctx, g: Var<SRef<Opaque<Nums>>>| {
-        let total = ctx.var(0u64);
-        nodes.iter1(g).for_each(ctx, move |ctx, n| {
-            neigh.iter2(g, n).for_each(ctx, move |ctx, dst| {
-                ctx.store(total, add(total, dst));
+        // sum over all nodes of (sum of that node's neighbour ids)
+        let f = compiler.fun1("sum_neighbours", move |ctx, g: Var<SRef<Opaque<Nums>>>| {
+            let total = ctx.var(0u64);
+            nodes.iter1(g).for_each(ctx, move |ctx, n| {
+                neigh.iter2(g, n).for_each(ctx, move |ctx, dst| {
+                    ctx.store(total, add(total, dst));
+                });
             });
+            total
         });
-        total
+        let compiled = compiler.compile(f).expect("compile");
+        let kernel = compiled.as_fn();
+
+        let g = Nums {
+            adj: vec![vec![1, 2, 3], vec![4], vec![5, 6], vec![]],
+        };
+        let expected: u64 = g.adj.iter().flatten().copied().sum(); // 1+2+3+4+5+6
+
+        // Measure allocations *during* the JIT'd nested traversal only.
+        let before = ALLOCS.load(Ordering::Relaxed);
+        let got = kernel.call(&g);
+        let allocs = ALLOCS.load(Ordering::Relaxed) - before;
+
+        assert_eq!(got, expected, "nested traversal produced the wrong sum");
+        assert_eq!(
+            allocs, 0,
+            "nested traversal allocated {allocs} times (expected 0 — iterators live in the reused slots)"
+        );
     });
-    let compiled = compiler.compile(f).expect("compile");
-    let kernel = compiled.as_fn();
-
-    let g = Nums {
-        adj: vec![vec![1, 2, 3], vec![4], vec![5, 6], vec![]],
-    };
-    let expected: u64 = g.adj.iter().flatten().copied().sum(); // 1+2+3+4+5+6
-
-    // Measure allocations *during* the JIT'd nested traversal only.
-    let before = ALLOCS.load(Ordering::Relaxed);
-    let got = kernel.call(&g);
-    let allocs = ALLOCS.load(Ordering::Relaxed) - before;
-
-    assert_eq!(got, expected, "nested traversal produced the wrong sum");
-    assert_eq!(
-        allocs, 0,
-        "nested traversal allocated {allocs} times (expected 0 — iterators live in the reused slots)"
-    );
 }

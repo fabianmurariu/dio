@@ -12,7 +12,7 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::{
-    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlags, Signature, StackSlotData,
+    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, Signature, StackSlotData,
     StackSlotKind, Value,
 };
 use cranelift_codegen::isa::TargetFrontendConfig;
@@ -43,7 +43,7 @@ pub(crate) fn emit_copy_nonoverlapping(
         alignment,
         alignment,
         true,
-        MemFlags::trusted(),
+        MemFlagsData::trusted(),
     );
 }
 
@@ -141,11 +141,11 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ))
     }
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId {
-        ValueId::from_cranelift(
-            self.builder
-                .ins()
-                .icmp_imm(cc.to_cranelift(), a.cranelift(), imm),
-        )
+        ValueId::from_cranelift(self.builder.ins().icmp_imm_s(
+            cc.to_cranelift(),
+            a.cranelift(),
+            imm,
+        ))
     }
     fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId {
         ValueId::from_cranelift(self.builder.ins().fcmp(
@@ -192,24 +192,24 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         if self.builder.func.dfg.value_type(v.cranelift()) == to_ty {
             return v;
         }
-        ValueId::from_cranelift(
-            self.builder
-                .ins()
-                .bitcast(to_ty, MemFlags::new(), v.cranelift()),
-        )
+        ValueId::from_cranelift(self.builder.ins().bitcast(
+            to_ty,
+            MemFlagsData::new(),
+            v.cranelift(),
+        ))
     }
     // ---- memory ----
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
         ValueId::from_cranelift(self.builder.ins().load(
             ty.to_cranelift(),
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             ptr.cranelift(),
             offset,
         ))
     }
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
         self.builder.ins().store(
-            MemFlags::trusted(),
+            MemFlagsData::trusted(),
             val.cranelift(),
             ptr.cranelift(),
             offset,
@@ -246,7 +246,7 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ValueId::from_cranelift(self.builder.ins().iadd(ptr.cranelift(), offset.cranelift()))
     }
     fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().iadd_imm(ptr.cranelift(), bytes))
+        ValueId::from_cranelift(self.builder.ins().iadd_imm_s(ptr.cranelift(), bytes))
     }
     fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
         addr

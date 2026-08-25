@@ -5,6 +5,9 @@
 use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
+mod common;
+use common::for_each_backend;
+
 type PoolRef<'stage> = SRefMut<'stage, Opaque<BytesPool>>;
 
 /// Build a `FatSlice<u8>` of literal bytes baked into the kernel frame.
@@ -17,27 +20,28 @@ fn lit(ctx: &mut Ctx, bytes: &[u8]) -> impl Staged<Out = FatSliceType<u8>> {
 
 #[test]
 fn kernel_appends_into_pool() {
-    let mut compiler = Compiler::new();
-    let append = compiler.extern_fn::<PoolAppendExtern>();
+    for_each_backend(|mut compiler| {
+        let append = compiler.extern_fn::<PoolAppendExtern>();
 
-    // fn(&mut BytesPool) -> u64 : append "hi" then "world", return the 2nd ptr.
-    // The return type is derived from `pool_append`'s own signature — no turbofish.
-    let f = compiler.fun1("append_two", move |ctx, mut pool: Var<PoolRef<'_>>| {
-        let hi = lit(ctx, b"hi");
-        let _a = ctx.bind(call_extern2(append, &mut pool, hi));
-        let world = lit(ctx, b"world");
-        ctx.bind(call_extern2(append, &mut pool, world))
+        // fn(&mut BytesPool) -> u64 : append "hi" then "world", return the 2nd ptr.
+        // The return type is derived from `pool_append`'s own signature — no turbofish.
+        let f = compiler.fun1("append_two", move |ctx, mut pool: Var<PoolRef<'_>>| {
+            let hi = lit(ctx, b"hi");
+            let _a = ctx.bind(call_extern2(append, &mut pool, hi));
+            let world = lit(ctx, b"world");
+            ctx.bind(call_extern2(append, &mut pool, world))
+        });
+        let compiled = compiler.compile(f).expect("compile");
+
+        let mut pool = BytesPool::new();
+        let world_addr = compiled.call(&mut pool);
+
+        // Both appends landed contiguously in one chunk, recoverable by the host.
+        assert_eq!(pool.chunks().len(), 1);
+        assert_eq!(pool.chunks()[0], b"hiworld");
+
+        // The returned pointer is stable and points at "world" within that chunk.
+        let base = pool.chunks()[0].as_ptr() as u64;
+        assert_eq!(world_addr, base + 2);
     });
-    let compiled = compiler.compile(f).expect("compile");
-
-    let mut pool = BytesPool::new();
-    let world_addr = compiled.call(&mut pool);
-
-    // Both appends landed contiguously in one chunk, recoverable by the host.
-    assert_eq!(pool.chunks().len(), 1);
-    assert_eq!(pool.chunks()[0], b"hiworld");
-
-    // The returned pointer is stable and points at "world" within that chunk.
-    let base = pool.chunks()[0].as_ptr() as u64;
-    assert_eq!(world_addr, base + 2);
 }

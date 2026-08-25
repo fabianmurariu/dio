@@ -1291,7 +1291,7 @@ impl<'a> Compiler<'a> {
                     }
 
                     builder.ins().return_(&[]);
-                    builder.finalize();
+                    builder.finalize(module.isa().frontend_config());
                 }
 
                 // Debug output for Cranelift IR
@@ -1360,7 +1360,7 @@ impl<'a> Compiler<'a> {
                 }
 
                 builder.ins().return_(&[]);
-                builder.finalize();
+                builder.finalize(module.isa().frontend_config());
             }
 
             // Debug output for main function IR

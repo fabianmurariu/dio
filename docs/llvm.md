@@ -843,14 +843,62 @@ backends via `as_fn` — `fun1`/`fun2`, and **recursion** (`fun1_rec` factorial:
 expressions, operators/casts, `select`, `if_then_else`, `while` loops, internal calls, recursion,
 `run` and `as_fn` — is now proven identical on Cranelift and MLIR through the public API.
 
-**Remaining for full parity.** (1) **Slices/aggregates** as parameters/returns: the ABI unpack in
-`emit_function_body` loads the fat-pointer's data field and the aggregate pointer as `I64` (fine on
-Cranelift; on MLIR they must be `Ptr` so downstream `getelementptr`/loads type-check) — a
-cross-cutting change touching `emit_function_body` + `slice_data_ptr`/`slice_len` (the slice layout
-must agree the data field is `Ptr` everywhere). (2) Externs end-to-end on MLIR (`test_extern_fn`
-shapes). (3) Point the real `tests/{programs,p99,euler,extern_fn,abi}.rs` at *both* backends as a
-differential oracle — the goal being every high-level-API test runs on Cranelift and MLIR. (4) The
-six-target CI story.
+**Slices/aggregates on MLIR — DONE.** The ABI unpack in `emit_function_body` and the
+`slice_data_ptr`/`slice_len` accessors now load the fat-pointer's data field (and the aggregate
+output pointer) as `ScalarType::Ptr`, not `I64`, so downstream `getelementptr`/loads type-check on
+MLIR while staying a no-op on Cranelift (the slice layout agrees the data field is `Ptr`
+everywhere — CLAUDE.md's "one place" invariant). A differential test sums an `f64`/`i64` slice
+param on both backends. The decision to **keep** the `(ptr,len)` fat-pointer representation (rather
+than "always memory-resolve") is recorded below under the benchmark: LLVM is already optimal with
+it, so the encoding is not the perf lever.
+
+**Cranelift 0.127 → 0.134 — DONE.** Routine dep bump; `MemFlags` became an interned handle
+(`ins().load/store/bitcast` + `emit_small_memory_copy` now take `MemFlagsData`), `icmp_imm`/
+`iadd_imm` → `_s` variants, and `FunctionBuilder::finalize` gained a `TargetFrontendConfig` arg.
+Does not touch the neutral AST or the MLIR path.
+
+**The both-backends test harness — the endgame mechanism.** The standing goal is that *every*
+high-level-API test (`Compiler` → `compile` → `run`/`as_fn`) runs on **both** backends as a
+differential oracle. Mechanism: `tests/common/mod.rs` exposes `for_each_backend(|mut compiler|
+{ … })`, which runs the closure once with a Cranelift `Compiler` and — under `--features llvm` —
+once more with an LLVM `Compiler`. Each `#[test]` wraps its body in it (state that the call mutates
+lives inside the closure so the two passes can't contaminate each other). A default `cargo test`
+still runs exactly one Cranelift pass; `cargo test --features llvm` runs both and asserts they
+agree. Every `tests/*.rs` file that compiles a kernel is being converted onto this harness; the few
+remaining LLVM gaps it surfaces (below) are fixed as they appear. **When the whole suite is green on
+`--features llvm`, the `llvm` branch is ready to merge.**
+
+**Whole suite green on both backends — DONE.** Every `tests/*.rs` file is on the `for_each_backend`
+harness (and the six two-kernel tests on `with_backends`, so both kernels run on the selected
+backend). `cargo test --features llvm -p rust-lms` runs all 255 tests on Cranelift *and* MLIR and
+passes; default `cargo test` is 366 workspace / clippy 27. Four backend gaps the harness surfaced,
+all fixed in the MLIR path and none touching the neutral AST or Cranelift:
+
+1. **Unreachable blocks from early-exit iterator terminals** (`take_while`/`all`). Their codegen
+   leaves predecessor-less blocks whose `cf.br` the dialect-conversion framework *skips* (it only
+   visits reachable blocks), so the op survives to LLVM translation → "missing
+   `LLVMTranslationDialectInterface` for `cf.br`". Fix: run `create_canonicalizer()` first — its
+   region simplification prunes the dead blocks. (Cranelift prunes these itself.)
+2. **`cf` not lowered by the generic `convert-to-llvm`.** Under these melior bindings the
+   interface-based pass doesn't reliably pick up `cf`, so lower it explicitly with
+   `create_control_flow_to_llvm()` before `create_to_llvm()`.
+3. **Non-`i1` branch conditions** (§8c). A `COption`'s `u64` discriminant reaches `cf.cond_br`,
+   which strictly requires `i1` (Cranelift's `brif` accepts any integer). Fix:
+   `MlirBackend::brif` coerces a wider condition with `!= 0` (`coerce_to_bool`).
+4. **Indirect calls through an integer address** (opaque-iterator mini-vtable). The vtable stores
+   function pointers as `u64`; `func.call_indirect` demands a `!func.func` callee. Fix: `llvm.inttoptr`
+   the address to `!llvm.ptr` and emit an indirect `llvm.call` (via `OperationBuilder`, setting the
+   `AttrSizedOperandSegments` sizes) instead of `func.call_indirect`.
+
+The MLIR lowering pipeline is now `canonicalize → convert-cf-to-llvm → convert-to-llvm →
+reconcile-unrealized-casts`. `RUST_LMS_DEBUG_IR=1` also dumps the pre-lowering MLIR module (the
+MLIR counterpart of the Cranelift IR dump).
+
+**Merge readiness.** With the whole high-level-API suite green on both backends, the differential
+oracle is in place: any future op that diverges fails `cargo test --features llvm`. The `llvm`
+branch is ready to merge. Remaining follow-ups are non-blocking: the six-target CI story (Cranelift
+on all six; LLVM where an MLIR 22 toolchain is provisioned), and wiring the same harness into the
+`sql-gen`/`arrow-lms` columnar kernels once they move onto `Compiler::with_backend`.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
