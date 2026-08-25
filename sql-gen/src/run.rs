@@ -50,8 +50,20 @@ fn normalize_out_schema(schema: &SchemaRef) -> SchemaRef {
 /// materializes rows (`SELECT … WHERE …`) or folds to one row (scalar
 /// aggregates like `count(*)`, `min`/`max`/`sum`).
 pub fn exec_jit(sql: &str, table: &str, rb: &RecordBatch) -> Result<RecordBatch> {
+    exec_jit_with(JitBackend::Cranelift, sql, table, rb)
+}
+
+/// Like [`exec_jit`], but selecting the codegen backend (see [`JitBackend`]). The
+/// query result is backend-independent — this is what lets the test suite run every
+/// query on both Cranelift and LLVM and assert they agree.
+pub fn exec_jit_with(
+    backend: JitBackend,
+    sql: &str,
+    table: &str,
+    rb: &RecordBatch,
+) -> Result<RecordBatch> {
     let op = sql_to_operator(sql, table, rb.schema())?;
-    run_operator(op, Inputs::single(rb.clone()))
+    run_operator(op, Inputs::single(rb.clone()), backend)
 }
 
 /// Like [`exec_jit`] but over a **stream** of batches (all sharing `schema`): the
@@ -70,9 +82,24 @@ where
     I: IntoIterator<Item = RecordBatch>,
     I::IntoIter: 'static,
 {
+    exec_jit_stream_with(JitBackend::Cranelift, sql, table, schema, batches)
+}
+
+/// Like [`exec_jit_stream`], but selecting the codegen backend (see [`JitBackend`]).
+pub fn exec_jit_stream_with<I>(
+    backend: JitBackend,
+    sql: &str,
+    table: &str,
+    schema: SchemaRef,
+    batches: I,
+) -> Result<RecordBatch>
+where
+    I: IntoIterator<Item = RecordBatch>,
+    I::IntoIter: 'static,
+{
     let op = sql_to_operator(sql, table, schema.clone())?;
     let inputs = Inputs::new(vec![ScanStream::new(schema, Box::new(batches.into_iter()))]);
-    run_operator(op, inputs)
+    run_operator(op, inputs, backend)
 }
 
 /// One named input table for [`exec_jit_multi`]: its schema and its batch stream.
@@ -100,6 +127,15 @@ impl StreamTable {
 /// stream. A single query still scans one table (joins arrive later); this is the
 /// id-routing plumbing joins will build on.
 pub fn exec_jit_multi(sql: &str, tables: Vec<StreamTable>) -> Result<RecordBatch> {
+    exec_jit_multi_with(JitBackend::Cranelift, sql, tables)
+}
+
+/// Like [`exec_jit_multi`], but selecting the codegen backend (see [`JitBackend`]).
+pub fn exec_jit_multi_with(
+    backend: JitBackend,
+    sql: &str,
+    tables: Vec<StreamTable>,
+) -> Result<RecordBatch> {
     // Build the plan against the table names/schemas (ids = positions), then take
     // ownership of each stream in the same id order.
     let op = {
@@ -113,14 +149,14 @@ pub fn exec_jit_multi(sql: &str, tables: Vec<StreamTable>) -> Result<RecordBatch
         .into_iter()
         .map(|t| ScanStream::new(t.schema, t.batches))
         .collect();
-    run_operator(op, Inputs::new(streams))
+    run_operator(op, Inputs::new(streams), backend)
 }
 
 /// Compile and run a whole operator tree over `inputs` in ONE kernel. A GROUP BY is
 /// a push operator inside it — we just allocate its Rust-hosted [`GroupState`] up
 /// front (it outlives the run) and bake the pointers into the codegen context; the
 /// projection/filter above it run in the same kernel.
-fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
+fn run_operator(op: Operator, mut inputs: Inputs, backend: JitBackend) -> Result<RecordBatch> {
     // Hash join: materialize + index the LEFT (build) side first, then run the probe
     // kernel over the RIGHT with the built `JoinState` baked in.
     if let Some(Operator::Join { left, on, .. }) = find_join(&op) {
@@ -145,21 +181,27 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
             _ => JoinState::empty_relation(),
         };
         match left.as_ref() {
-            Operator::Scan { .. } => build_join_index(&mut join_state, &left_schema, key_col)?,
-            build_subtree => {
-                build_join_materialized(&mut join_state, build_subtree, &on[0].0, &mut inputs)?
+            Operator::Scan { .. } => {
+                build_join_index(&mut join_state, &left_schema, key_col, backend)?
             }
+            build_subtree => build_join_materialized(
+                &mut join_state,
+                build_subtree,
+                &on[0].0,
+                &mut inputs,
+                backend,
+            )?,
         }
         // The baked pointer aliases `join_state`, which is not touched again until
         // after the probe kernel runs — the same contract as `GroupState`.
         let handle = Rc::new(JoinHandle {
             state: &mut join_state as *mut JoinState,
         });
-        let result = run_kernel(&op, &mut inputs, Some(handle));
+        let result = run_kernel(&op, &mut inputs, Some(handle), backend);
         drop(join_state);
         return result;
     }
-    run_kernel(&op, &mut inputs, None)
+    run_kernel(&op, &mut inputs, None, backend)
 }
 
 /// Compile and run the join **build index kernel**: it iterates the (already
@@ -167,8 +209,13 @@ fn run_operator(op: Operator, mut inputs: Inputs) -> Result<RecordBatch> {
 /// its known type and `join_insert`s the locator — the JIT counterpart of a host
 /// per-value key loop. Takes no inputs and produces no output; its whole job is the
 /// side effect of populating `js`'s key index.
-fn build_join_index(js: &mut JoinState, rel_schema: &SchemaRef, key_col: usize) -> Result<()> {
-    let mut compiler = Compiler::new();
+fn build_join_index(
+    js: &mut JoinState,
+    rel_schema: &SchemaRef,
+    key_col: usize,
+    backend: JitBackend,
+) -> Result<()> {
+    let mut compiler = Compiler::new().with_backend(backend);
     let rt = Runtime::register(&mut compiler);
     let handle = Rc::new(JoinHandle {
         state: js as *mut JoinState,
@@ -201,11 +248,12 @@ fn build_join_materialized(
     build: &Operator,
     key_expr: &Expr,
     inputs: &mut Inputs,
+    backend: JitBackend,
 ) -> Result<()> {
     let out_schema = normalize_out_schema(&build.output_schema());
     let mut out = OutCols::alloc(&out_schema);
 
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new().with_backend(backend);
     let rt = Runtime::register(&mut compiler);
 
     // Intern the build subtree's string literals (kept alive until after the run).
@@ -257,6 +305,7 @@ fn run_kernel(
     op: &Operator,
     inputs: &mut Inputs,
     join: Option<Rc<JoinHandle>>,
+    backend: JitBackend,
 ) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
 
@@ -275,7 +324,7 @@ fn run_kernel(
 
     let mut out = OutCols::alloc(&out_schema);
 
-    let mut compiler = Compiler::new();
+    let mut compiler = Compiler::new().with_backend(backend);
     let rt = Runtime::register(&mut compiler);
 
     // Intern every string literal into a pool that outlives the run; codegen bakes

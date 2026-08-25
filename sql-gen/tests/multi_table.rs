@@ -9,7 +9,8 @@ use std::sync::Arc;
 use arrow::array::Int64Array;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
-use sql_gen::{StreamTable, exec_jit_multi};
+mod common;
+use common::{StreamTable, exec_jit_multi};
 
 /// A one-column `Int64` table named `n`.
 fn n_schema() -> SchemaRef {

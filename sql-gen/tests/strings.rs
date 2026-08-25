@@ -6,7 +6,8 @@ use std::sync::Arc;
 use arrow::array::{Array, Int32Array, Int64Array, StringViewArray};
 use arrow::datatypes::{DataType, Field, Schema as ArrowSchema};
 use arrow::record_batch::RecordBatch;
-use sql_gen::exec_jit;
+mod common;
+use common::exec_jit;
 
 /// A batch with a `name: Utf8View` column (nullability inferred).
 fn batch(names: StringViewArray) -> RecordBatch {

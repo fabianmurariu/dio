@@ -894,6 +894,20 @@ The MLIR lowering pipeline is now `canonicalize → convert-cf-to-llvm → conve
 reconcile-unrealized-casts`. `RUST_LMS_DEBUG_IR=1` also dumps the pre-lowering MLIR module (the
 MLIR counterpart of the Cranelift IR dump).
 
+**sql-gen on both backends — DONE.** The SQL engine now threads a `JitBackend` through
+`run_operator`/`run_kernel`/the join builders (via `exec_jit_with` / `exec_jit_stream_with` /
+`exec_jit_multi_with`; a `sql-gen` `llvm` feature enables `rust-lms/llvm`). Its whole test suite
+(113 tests: scan/filter/project, scalar + GROUP BY aggregates incl. composite keys, `Utf8View`
+strings, hash joins, multi-table, streaming, and the proptests) runs on **both** backends through a
+`tests/common` wrapper that shadows `exec_jit*` and asserts the two `RecordBatch`es are identical —
+so each test file opted in by changing only its `use` line, no body edits. One test
+(`streaming::only_one_input_batch_resident_at_a_time`) drives the real `sql_gen::exec_jit_stream`
+because it asserts a host-side residency property the both-backends wrapper (which materializes the
+stream to replay it) would defeat. This surfaced a **fifth** MLIR gap, now fixed: **(5) integer
+compare on pointer operands.** sql-gen compares raw pointers (e.g. scan cursor vs end, `ptr_is_null`)
+with `icmp`; Cranelift compares addresses as integers but MLIR's `arith.cmpi` rejects `!llvm.ptr`, so
+`MlirBackend::icmp`/`icmp_imm` now `llvm.ptrtoint` pointer operands to `i64` first (`ptr_to_int`).
+
 **Merge readiness.** With the whole high-level-API suite green on both backends, the differential
 oracle is in place: any future op that diverges fails `cargo test --features llvm`. The `llvm`
 branch is ready to merge. CI (`.github/workflows/ci.yml`) runs the Cranelift suite on all six

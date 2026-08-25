@@ -379,6 +379,25 @@ impl<'c> MlirBackend<'c> {
             .expect("valid llvm.inttoptr");
         self.emit_value(op)
     }
+
+    /// Reinterpret an `llvm.ptr` as its `i64` address. Cranelift compares/measures pointers
+    /// as integers directly; MLIR's `arith` ops reject `!llvm.ptr`, so pointer operands are
+    /// `llvm.ptrtoint`-ed to `i64` first (e.g. an `icmp`/`ptr_is_null` on a pointer, or
+    /// pointer difference). A non-pointer value passes through.
+    fn ptr_to_int(&mut self, v: ValueId) -> ValueId {
+        let val = self.get(v);
+        let ptr_ty = llvm::r#type::pointer(self.context, 0);
+        if val.r#type() != ptr_ty {
+            return v;
+        }
+        let i64_ty = scalar_to_mlir(self.context, ScalarType::I64);
+        let op = OperationBuilder::new("llvm.ptrtoint", self.location)
+            .add_operands(&[val])
+            .add_results(&[i64_ty])
+            .build()
+            .expect("valid llvm.ptrtoint");
+        self.emit_value(op)
+    }
 }
 
 impl<'c> Backend for MlirBackend<'c> {
@@ -476,6 +495,9 @@ impl<'c> Backend for MlirBackend<'c> {
 
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
+        // Pointer operands (e.g. comparing two `SPtr`s) become `i64` addresses first.
+        let a = self.ptr_to_int(a);
+        let b = self.ptr_to_int(b);
         let (a, b) = (self.get(a), self.get(b));
         self.emit_value(arith::cmpi(
             self.context,
@@ -486,8 +508,9 @@ impl<'c> Backend for MlirBackend<'c> {
         ))
     }
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId {
-        // Materialize a constant of `a`'s (integer) type, then compare. Pointer operands
-        // are not supported here (an AST path not yet driven through MLIR).
+        // A pointer operand (e.g. `ptr_is_null`, which compares against 0) becomes its `i64`
+        // address, so the materialized constant and the compare are plain integer ops.
+        let a = self.ptr_to_int(a);
         let a_val = self.get(a);
         let ty = a_val.r#type();
         let imm_raw = self.blocks[self.current]
