@@ -8,8 +8,9 @@
 use std::collections::HashMap;
 use std::ops::{Deref, DerefMut};
 
-// Entity types named only by the opaque handles' Cranelift conversions below.
-use cranelift_codegen::ir::{Block, FuncRef, SigRef, StackSlot, Value};
+// Entity types named only by the opaque handles' Cranelift conversions below. Cranelift's
+// `Value` is aliased so the neutral AST-level `Value` (defined below) owns the bare name.
+use cranelift_codegen::ir::{Block, FuncRef, SigRef, StackSlot, Value as CraneliftValue};
 use cranelift_frontend::Variable;
 
 use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedType};
@@ -23,6 +24,35 @@ use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedT
 /// into its own `Vec<MlirValue>`. The AST never names a backend value type.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct ValueId(u32);
+
+/// A neutral staged value — the result of [`Staged::codegen`] and the AST-level currency.
+///
+/// A `Value` is a value's *shape*, tracked by the neutral layer itself. Today every value is
+/// a single backend SSA leaf ([`ValueId`]) — the `Scalar` shape. The `Fat(ptr, len)` shape
+/// for slices (letting a slice be two SSA values instead of a pointer to a `{ptr,len}` pair
+/// threaded through the `slice_vars` side-channel) lands in a later step of the A′ refactor
+/// (`docs/post_llvm_plan.md`). Backends still speak only in leaves; this wrapper is what lets
+/// the AST stop smuggling multi-value shapes past a single-value contract.
+#[derive(Clone, Copy, Debug)]
+pub struct Value(ValueId);
+
+impl Value {
+    /// Wrap a single backend leaf as a scalar value.
+    pub(crate) fn scalar(leaf: ValueId) -> Self {
+        Value(leaf)
+    }
+
+    /// The backend leaf of a scalar value. (Every value is scalar until the `Fat` shape lands.)
+    pub(crate) fn leaf(self) -> ValueId {
+        self.0
+    }
+}
+
+impl From<ValueId> for Value {
+    fn from(leaf: ValueId) -> Self {
+        Value(leaf)
+    }
+}
 
 /// Opaque handle to a basic block during codegen (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -57,11 +87,11 @@ pub struct SigSpec {
 // These stay here (not in the `cranelift` module) because they touch the handles' private
 // `.0` field; that privacy is exactly what stops an AST module from fabricating a handle.
 impl ValueId {
-    pub(crate) fn from_cranelift(v: Value) -> Self {
+    pub(crate) fn from_cranelift(v: CraneliftValue) -> Self {
         Self(v.as_u32())
     }
-    pub(crate) fn cranelift(self) -> Value {
-        Value::from_u32(self.0)
+    pub(crate) fn cranelift(self) -> CraneliftValue {
+        CraneliftValue::from_u32(self.0)
     }
 }
 impl BlockHandle {
@@ -359,7 +389,7 @@ impl<'c> CompilationContext<'c> {
         // Memory-resolved: load ptr from offset 0 of the (ptr, len) pair. Loaded as `Ptr`
         // (identical to `I64` on Cranelift; an `llvm.ptr` on MLIR so pointer ops type-check).
         let slice_ptr = slice.codegen(self);
-        self.load(ScalarType::Ptr, slice_ptr, 0)
+        self.load(ScalarType::Ptr, slice_ptr.leaf(), 0)
     }
 
     /// Resolve the length (`usize`) of a slice operand.
@@ -373,7 +403,7 @@ impl<'c> CompilationContext<'c> {
             }
         }
         let slice_ptr = slice.codegen(self);
-        self.load(ScalarType::I64, slice_ptr, 8)
+        self.load(ScalarType::I64, slice_ptr.leaf(), 8)
     }
 
     /// Resolve both parts of a slice while evaluating a memory-resolved slice
@@ -388,8 +418,8 @@ impl<'c> CompilationContext<'c> {
         }
 
         let slice_ptr = slice.codegen(self);
-        let data_ptr = self.load(ScalarType::Ptr, slice_ptr, 0);
-        let len = self.load(ScalarType::I64, slice_ptr, 8);
+        let data_ptr = self.load(ScalarType::Ptr, slice_ptr.leaf(), 0);
+        let len = self.load(ScalarType::I64, slice_ptr.leaf(), 8);
         (data_ptr, len)
     }
 }
@@ -434,7 +464,7 @@ pub unsafe trait Staged {
     type Out: StagedType;
 
     /// Generate Cranelift IR code for this computation
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId;
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value;
 
     /// Return the variable ID if this is a direct Var reference.
     /// Used for optimized slice access to bypass stack loads.
@@ -515,13 +545,13 @@ impl<T: StagedType> Var<T> {
 unsafe impl<T: StagedType> Staged for Var<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Look up our ID in the var_map to get the Cranelift Variable
         let var = *ctx
             .var_map
             .get(&self.id)
             .expect(&format!("Variable {} not found in var_map", self.id));
-        ctx.use_var(var)
+        Value::scalar(ctx.use_var(var))
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -532,12 +562,12 @@ unsafe impl<T: StagedType> Staged for Var<T> {
 unsafe impl<T: StagedType> Staged for VarUse<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let var = *ctx
             .var_map
             .get(&self.id)
             .unwrap_or_else(|| panic!("Variable {} not found in var_map", self.id));
-        ctx.use_var(var)
+        Value::scalar(ctx.use_var(var))
     }
 
     fn var_id(&self) -> Option<usize> {
@@ -582,7 +612,7 @@ impl<T: ConstantType + Copy> Copy for Const<T> where T::RuntimeValue: Copy {}
 unsafe impl<T: ConstantType> Staged for Const<T> {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         T::codegen_constant(&self.value, ctx)
     }
 }
@@ -822,7 +852,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate code for the value expression
         let value = self.expr.codegen(ctx);
 
@@ -836,10 +866,10 @@ where
             var
         };
 
-        ctx.def_var(var, value);
+        ctx.def_var(var, value.leaf());
 
         // Return cached unit value
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -930,7 +960,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate code for the initialization value
         let value = self.init.codegen(ctx);
 
@@ -944,10 +974,10 @@ where
             var
         };
 
-        ctx.def_var(var, value);
+        ctx.def_var(var, value.leaf());
 
         // Return cached unit value
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 

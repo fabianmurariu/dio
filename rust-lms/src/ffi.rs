@@ -26,7 +26,9 @@ use std::slice;
 
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::slice::Slice;
-use crate::staged::{CompilationContext, FuncRefId, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::staged::{
+    CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse,
+};
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 
 // =============================================================================
@@ -295,14 +297,14 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
         let slot = ctx.alloc_stack_slot(16, 3);
         let slot_ptr = ctx.stack_addr(slot, 0);
-        ctx.store(ptr, slot_ptr, 0);
-        ctx.store(len, slot_ptr, 8);
-        slot_ptr
+        ctx.store(ptr.leaf(), slot_ptr, 0);
+        ctx.store(len.leaf(), slot_ptr, 8);
+        Value::scalar(slot_ptr)
     }
 }
 
@@ -346,7 +348,7 @@ pub struct StackBytes {
 unsafe impl Staged for StackBytes {
     type Out = SPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let n = self.bytes.len();
         // Round the slot up to a whole number of 8-byte words (min one word, so a
         // zero-length literal still has a valid, non-empty slot to address).
@@ -365,7 +367,7 @@ unsafe impl Staged for StackBytes {
             ctx.store(v, addr, off as i32);
             off += 8;
         }
-        addr
+        Value::scalar(addr)
     }
 }
 
@@ -396,12 +398,12 @@ pub struct StackAlloc {
 unsafe impl Staged for StackAlloc {
     type Out = SMutPtr<u8>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Round up to a whole number of 8-byte words (min one word).
         let slot_len = ((self.size + 7) & !7).max(8);
         // align_shift = 3 → 8-byte aligned
         let slot = ctx.alloc_stack_slot(slot_len as u32, 3);
-        ctx.stack_addr(slot, 0)
+        Value::scalar(ctx.stack_addr(slot, 0))
     }
 }
 
@@ -546,7 +548,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.arg.codegen(ctx)
     }
 
@@ -672,9 +674,9 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
-        emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
+        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new()))
     }
 }
 
@@ -708,13 +710,13 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
 
-        emit_extern_call::<S::Ret>(ctx, func_ref, args)
+        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
     }
 }
 
@@ -847,14 +849,14 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
 
-        emit_extern_call::<S::Ret>(ctx, func_ref, args)
+        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
     }
 }
 
@@ -930,7 +932,7 @@ where
     AType: StagedType,
 {
     let arg_value = arg.codegen(ctx);
-    push_extern_value::<AType>(ctx, args, arg_value);
+    push_extern_value::<AType>(ctx, args, arg_value.leaf());
 }
 
 pub(crate) fn push_extern_value<T: StagedType>(
@@ -999,7 +1001,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
@@ -1007,7 +1009,7 @@ where
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
 
-        emit_extern_call::<S::Ret>(ctx, func_ref, args)
+        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
     }
 }
 
@@ -1096,7 +1098,7 @@ where
 {
     type Out = S::Ret;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
         let mut args = Vec::new();
@@ -1105,7 +1107,7 @@ where
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
         push_extern_arg::<_, DType>(ctx, &mut args, &self.arg3);
 
-        emit_extern_call::<S::Ret>(ctx, func_ref, args)
+        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
     }
 }
 

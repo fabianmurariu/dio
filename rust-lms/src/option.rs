@@ -23,7 +23,7 @@
 
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var};
 use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -245,7 +245,7 @@ pub struct CSome<T: StagedType, E> {
 unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Get the inner value
         let value = self.value.codegen(ctx);
 
@@ -266,12 +266,12 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         // Store the payload at its actual aligned offset.
         if T::is_copy_struct() {
             // Aggregate staged values are addresses of their storage.
-            ctx.copy_nonoverlapping(payload_ptr, value, T::size_of(), T::align_of());
+            ctx.copy_nonoverlapping(payload_ptr, value.leaf(), T::size_of(), T::align_of());
         } else {
-            ctx.store(value, payload_ptr, 0);
+            ctx.store(value.leaf(), payload_ptr, 0);
         }
 
-        ptr
+        Value::scalar(ptr)
     }
 }
 
@@ -292,7 +292,7 @@ pub struct CNone<T: StagedType> {
 unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
         let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
@@ -303,7 +303,7 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
         let zero = ctx.iconst(ScalarType::I64, 0);
         ctx.store(zero, ptr, 0);
 
-        ptr
+        Value::scalar(ptr)
     }
 }
 
@@ -328,7 +328,7 @@ pub struct OptRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // The reference is the pointer - just pass it through
         self.reference.codegen(ctx)
     }
@@ -353,9 +353,9 @@ pub struct OptRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // None is represented as null pointer
-        ctx.iconst(ScalarType::I64, 0)
+        Value::scalar(ctx.iconst(ScalarType::I64, 0))
     }
 }
 
@@ -375,7 +375,7 @@ pub struct OptMutRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.reference.codegen(ctx)
     }
 }
@@ -399,8 +399,8 @@ pub struct OptMutRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.iconst(ScalarType::I64, 0)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.iconst(ScalarType::I64, 0))
     }
 }
 
@@ -424,12 +424,12 @@ pub struct IsSome<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
         // Load discriminant from offset 0
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
         // discriminant != 0
-        ctx.icmp_imm(IntCmp::Ne, discriminant, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, discriminant, 0))
     }
 }
 
@@ -447,11 +447,11 @@ pub struct IsNone<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
         // discriminant == 0
-        ctx.icmp_imm(IntCmp::Eq, discriminant, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, discriminant, 0))
     }
 }
 
@@ -473,10 +473,10 @@ pub struct IsRefSome<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, ptr.leaf(), 0))
     }
 }
 
@@ -496,10 +496,10 @@ pub struct IsRefNone<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
-        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, ptr.leaf(), 0))
     }
 }
 
@@ -522,9 +522,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, ptr.leaf(), 0))
     }
 }
 
@@ -545,9 +545,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, ptr.leaf(), 0))
     }
 }
 
@@ -574,11 +574,11 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
 
         // Create blocks for if-then-else
         let some_block = ctx.create_block();
@@ -598,9 +598,9 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
         let some_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset)
         } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
             ctx.load(T::scalar_type(), payload_ptr, 0)
         };
         ctx.jump(merge_block, &[some_val]);
@@ -609,13 +609,13 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let default_val = self.default.codegen(ctx);
-        ctx.jump(merge_block, &[default_val]);
+        ctx.jump(merge_block, &[default_val.leaf()]);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 
@@ -661,11 +661,11 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
 
         // Create blocks
         let some_block = ctx.create_block();
@@ -686,9 +686,9 @@ where
 
         // Load the value and bind it to the variable.
         let bound_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr, payload_offset)
+            ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset)
         } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
+            let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
             ctx.load(T::scalar_type(), payload_ptr, 0)
         };
 
@@ -698,19 +698,19 @@ where
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump(merge_block, &[some_result.leaf()]);
 
         // None block: execute none_body
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump(merge_block, &[none_result.leaf()]);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 
@@ -786,7 +786,7 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
@@ -797,7 +797,7 @@ where
         ctx.append_block_param(merge_block, result_type);
 
         // Branch: if ptr != null, it's Some
-        ctx.brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
 
         // Some block: ptr IS the reference
         ctx.switch_to_block(some_block);
@@ -805,23 +805,23 @@ where
 
         // Bind the pointer as SRef<T>
         let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr);
+        ctx.def_var(bound_var, ptr.leaf());
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump(merge_block, &[some_result.leaf()]);
 
         // None block
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump(merge_block, &[none_result.leaf()]);
 
         // Merge
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 
@@ -877,7 +877,7 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
@@ -887,27 +887,27 @@ where
         let result_type = OUT::scalar_type();
         ctx.append_block_param(merge_block, result_type);
 
-        ctx.brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
 
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
         let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr);
+        ctx.def_var(bound_var, ptr.leaf());
         ctx.var_map.insert(self.bound_var_id, bound_var);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump(merge_block, &[some_result.leaf()]);
 
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump(merge_block, &[none_result.leaf()]);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 

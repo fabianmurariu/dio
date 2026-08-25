@@ -241,7 +241,7 @@ pub fn jit_run_i64_unary(
 /// Nullary (no parameters) sidesteps the storage-pointer parameter ABI, which still lives in
 /// the Cranelift-specific `compile()` driver (its abstraction is the next step).
 pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
-    run_kernel_over_mlir(|ctx| expr.codegen(ctx))
+    run_kernel_over_mlir(|ctx| expr.codegen(ctx).leaf())
 }
 
 /// Compile and run a **nullary imperative `Ctx` body** (`Out = i64`) through the MLIR

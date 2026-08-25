@@ -101,7 +101,7 @@ impl Ctx {
             for action in actions {
                 action(ctx);
             }
-            ret.codegen(ctx)
+            ret.codegen(ctx).leaf()
         })
     }
 
@@ -142,7 +142,7 @@ impl Ctx {
             let value = init_for_action.codegen(ctx);
             let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.def_var(cv, value);
+            ctx.def_var(cv, value.leaf());
         }));
         crate::staged::LetVar::new(v, init_staged)
     }
@@ -164,7 +164,7 @@ impl Ctx {
             let value = init_staged.codegen(ctx);
             let cv = ctx.declare_var(ctype);
             ctx.var_map.insert(id, cv);
-            ctx.def_var(cv, value);
+            ctx.def_var(cv, value.leaf());
         }));
         v
     }
@@ -188,7 +188,7 @@ impl Ctx {
                 ctx.var_map.insert(id, cv);
                 cv
             };
-            ctx.def_var(cv, value);
+            ctx.def_var(cv, value.leaf());
         }));
         v
     }
@@ -242,7 +242,7 @@ impl Ctx {
 
             ctx.switch_to_block(loop_header);
             let cond_val = cond.codegen(ctx);
-            ctx.brif(cond_val, loop_body, &[], loop_exit, &[]);
+            ctx.brif(cond_val.leaf(), loop_body, &[], loop_exit, &[]);
 
             ctx.switch_to_block(loop_body);
             ctx.seal_block(loop_body);
@@ -491,7 +491,7 @@ impl Ctx {
             let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.brif(cond_val, then_block, &[], merge_block, &[]);
+            ctx.brif(cond_val.leaf(), then_block, &[], merge_block, &[]);
 
             ctx.switch_to_block(then_block);
             ctx.seal_block(then_block);
@@ -531,7 +531,7 @@ impl Ctx {
             let merge_block = ctx.create_block();
 
             let cond_val = cond.codegen(ctx);
-            ctx.brif(cond_val, then_block, &[], else_block, &[]);
+            ctx.brif(cond_val.leaf(), then_block, &[], else_block, &[]);
 
             ctx.switch_to_block(then_block);
             ctx.seal_block(then_block);
@@ -1133,7 +1133,7 @@ impl<'a> Compiler<'a> {
             self.functions,
             &self.extern_functions,
             &return_info,
-            move |ctx| expr.codegen(ctx),
+            move |ctx| expr.codegen(ctx).leaf(),
         )?;
         Ok(Compiled {
             executable: Some(Executable::Mlir(executable)),
@@ -1354,7 +1354,7 @@ impl<'a> Compiler<'a> {
                         &params,
                         &[],
                         &[],
-                        |ctx| expr.codegen(ctx),
+                        |ctx| expr.codegen(ctx).leaf(),
                         &return_info,
                     );
                 }

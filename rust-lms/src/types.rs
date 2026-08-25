@@ -8,7 +8,7 @@
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
 
-use crate::staged::{CompilationContext, ValueId};
+use crate::staged::{CompilationContext, Value};
 
 // =============================================================================
 // Backend-neutral scalar type (Phase 0 of docs/llvm.md)
@@ -219,7 +219,7 @@ pub unsafe trait StagedType {
 /// representation declared by [`StagedType`] and must represent `value`.
 pub unsafe trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_>) -> ValueId;
+    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
 /// Marker trait for types that are Copy at the semantic level.
@@ -323,8 +323,8 @@ macro_rules! impl_int_staged_type {
         }
 
         unsafe impl ConstantType for $ty {
-            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.iconst(Self::scalar_type(), *value as i64)
+            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
             }
         }
 
@@ -354,8 +354,8 @@ unsafe impl StagedType for i64 {
 }
 
 unsafe impl ConstantType for i64 {
-    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value)
+    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value))
     }
 }
 
@@ -378,8 +378,8 @@ unsafe impl StagedType for u64 {
 }
 
 unsafe impl ConstantType for u64 {
-    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -402,8 +402,8 @@ unsafe impl StagedType for i32 {
 }
 
 unsafe impl ConstantType for i32 {
-    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -426,8 +426,8 @@ unsafe impl StagedType for u32 {
 }
 
 unsafe impl ConstantType for u32 {
-    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -450,8 +450,8 @@ unsafe impl StagedType for f32 {
 }
 
 unsafe impl ConstantType for f32 {
-    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.f32const(*value)
+    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.f32const(*value))
     }
 }
 
@@ -474,8 +474,8 @@ unsafe impl StagedType for bool {
 }
 
 unsafe impl ConstantType for bool {
-    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 })
+    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 }))
     }
 }
 
@@ -498,8 +498,8 @@ unsafe impl StagedType for f64 {
 }
 
 unsafe impl ConstantType for f64 {
-    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.f64const(*value)
+    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.f64const(*value))
     }
 }
 
@@ -522,8 +522,8 @@ unsafe impl StagedType for () {
 }
 
 unsafe impl ConstantType for () {
-    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), 0)
+    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), 0))
     }
 }
 

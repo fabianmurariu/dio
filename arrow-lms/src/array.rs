@@ -268,7 +268,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
         let view = ValidityView {
             validity: self.validity.clone(),
         };

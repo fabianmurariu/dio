@@ -613,7 +613,7 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
             args: Box::new(move |c| {
                 let value = a.codegen(c);
                 let mut args = Vec::with_capacity(1);
-                crate::ffi::push_extern_value::<AType>(c, &mut args, value);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, value.leaf());
                 args
             }),
         }
@@ -634,8 +634,8 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
                 let a = a.codegen(c);
                 let b = b.codegen(c);
                 let mut args = Vec::with_capacity(2);
-                crate::ffi::push_extern_value::<AType>(c, &mut args, a);
-                crate::ffi::push_extern_value::<BType>(c, &mut args, b);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, a.leaf());
+                crate::ffi::push_extern_value::<BType>(c, &mut args, b.leaf());
                 args
             }),
         }

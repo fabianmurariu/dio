@@ -5,7 +5,7 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId};
 use crate::types::{ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -177,8 +177,8 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $FunRef<OUT> {
             type Out = $FunType<OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-                codegen_func_addr(ctx, self.id)
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+                Value::scalar(codegen_func_addr(ctx, self.id))
             }
         }
 
@@ -191,9 +191,9 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $Call<OUT> {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
                 let return_info = TypeInfo::from_staged_type::<OUT>();
-                codegen_call(ctx, self.func.id, &[], &return_info, &[])
+                Value::scalar(codegen_call(ctx, self.func.id, &[], &return_info, &[]))
             }
         }
 
@@ -250,8 +250,8 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
             type Out = $FunType<$($T,)+ OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-                codegen_func_addr(ctx, self.id)
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+                Value::scalar(codegen_func_addr(ctx, self.id))
             }
         }
 
@@ -268,15 +268,15 @@ macro_rules! impl_fun_n {
         {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
                 // Build type info from type parameters
                 let param_infos = [$(TypeInfo::from_staged_type::<$T>()),+];
                 let return_info = TypeInfo::from_staged_type::<OUT>();
 
-                // Generate arg values
-                let args = [$(self.$arg.codegen(ctx)),+];
+                // Generate arg values (leaves — the call ABI is scalar-per-arg)
+                let args = [$(self.$arg.codegen(ctx).leaf()),+];
 
-                codegen_call(ctx, self.func.id, &param_infos, &return_info, &args)
+                Value::scalar(codegen_call(ctx, self.func.id, &param_infos, &return_info, &args))
             }
         }
 

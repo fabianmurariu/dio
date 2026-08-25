@@ -11,7 +11,7 @@
 //! `bool` deliberately does not implement `Num` — boolean values use the
 //! control-flow combinators (`if_then`, `if_then_else`) rather than arithmetic.
 
-use crate::staged::{CompilationContext, ValueId};
+use crate::staged::{CompilationContext, Value};
 use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, StagedType};
 
 // =============================================================================
@@ -27,25 +27,25 @@ mod sealed {
 /// This trait is sealed because its methods return raw IR values whose type is
 /// trusted by every arithmetic expression.
 pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
-    fn codegen_add(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_sub(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_mul(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_div(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_lt(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_gt(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_eq(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
+    fn codegen_add(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_sub(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_mul(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_div(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_lt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_gt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_eq(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
 /// Integer-typed numbers — additionally support remainder (modulo).
 pub trait IntNum: Num {
     const SIGNED: bool;
 
-    fn codegen_rem(left: ValueId, right: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
-    fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId;
+    fn codegen_rem(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
 /// Floating-point numbers — marker; reserved for future float-only ops.
@@ -59,96 +59,96 @@ macro_rules! impl_int_num {
     ($ty:ty, signed) => {
         impl sealed::Sealed for $ty {}
         impl Num for $ty {
-            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.iadd(l, r)
+            fn codegen_add(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.iadd(l.leaf(), r.leaf()))
             }
-            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.isub(l, r)
+            fn codegen_sub(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.isub(l.leaf(), r.leaf()))
             }
-            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.imul(l, r)
+            fn codegen_mul(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.imul(l.leaf(), r.leaf()))
             }
-            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.sdiv(l, r)
+            fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.sdiv(l.leaf(), r.leaf()))
             }
-            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Slt, l, r)
+            fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Slt, l.leaf(), r.leaf()))
             }
-            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Sgt, l, r)
+            fn codegen_gt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Sgt, l.leaf(), r.leaf()))
             }
-            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Eq, l, r)
+            fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
             }
         }
         impl IntNum for $ty {
             const SIGNED: bool = true;
 
-            fn codegen_rem(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.srem(l, r)
+            fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.srem(l.leaf(), r.leaf()))
             }
-            fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.band(l, r)
+            fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.band(l.leaf(), r.leaf()))
             }
-            fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.bor(l, r)
+            fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.bor(l.leaf(), r.leaf()))
             }
-            fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.bxor(l, r)
+            fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.bxor(l.leaf(), r.leaf()))
             }
-            fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.ishl(l, r)
+            fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
             }
-            fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.sshr(l, r)
+            fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.sshr(l.leaf(), r.leaf()))
             }
         }
     };
     ($ty:ty, unsigned) => {
         impl sealed::Sealed for $ty {}
         impl Num for $ty {
-            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.iadd(l, r)
+            fn codegen_add(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.iadd(l.leaf(), r.leaf()))
             }
-            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.isub(l, r)
+            fn codegen_sub(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.isub(l.leaf(), r.leaf()))
             }
-            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.imul(l, r)
+            fn codegen_mul(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.imul(l.leaf(), r.leaf()))
             }
-            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.udiv(l, r)
+            fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.udiv(l.leaf(), r.leaf()))
             }
-            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Ult, l, r)
+            fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Ult, l.leaf(), r.leaf()))
             }
-            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Ugt, l, r)
+            fn codegen_gt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Ugt, l.leaf(), r.leaf()))
             }
-            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.icmp(IntCmp::Eq, l, r)
+            fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
             }
         }
         impl IntNum for $ty {
             const SIGNED: bool = false;
 
-            fn codegen_rem(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.urem(l, r)
+            fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.urem(l.leaf(), r.leaf()))
             }
-            fn codegen_bitand(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.band(l, r)
+            fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.band(l.leaf(), r.leaf()))
             }
-            fn codegen_bitor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.bor(l, r)
+            fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.bor(l.leaf(), r.leaf()))
             }
-            fn codegen_bitxor(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.bxor(l, r)
+            fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.bxor(l.leaf(), r.leaf()))
             }
-            fn codegen_shl(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.ishl(l, r)
+            fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
             }
-            fn codegen_shr(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.ushr(l, r)
+            fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.ushr(l.leaf(), r.leaf()))
             }
         }
     };
@@ -171,26 +171,26 @@ macro_rules! impl_float_num {
     ($ty:ty) => {
         impl sealed::Sealed for $ty {}
         impl Num for $ty {
-            fn codegen_add(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fadd(l, r)
+            fn codegen_add(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fadd(l.leaf(), r.leaf()))
             }
-            fn codegen_sub(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fsub(l, r)
+            fn codegen_sub(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fsub(l.leaf(), r.leaf()))
             }
-            fn codegen_mul(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fmul(l, r)
+            fn codegen_mul(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fmul(l.leaf(), r.leaf()))
             }
-            fn codegen_div(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fdiv(l, r)
+            fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fdiv(l.leaf(), r.leaf()))
             }
-            fn codegen_lt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCmp::Lt, l, r)
+            fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fcmp(FloatCmp::Lt, l.leaf(), r.leaf()))
             }
-            fn codegen_gt(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCmp::Gt, l, r)
+            fn codegen_gt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fcmp(FloatCmp::Gt, l.leaf(), r.leaf()))
             }
-            fn codegen_eq(l: ValueId, r: ValueId, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.fcmp(FloatCmp::Eq, l, r)
+            fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fcmp(FloatCmp::Eq, l.leaf(), r.leaf()))
             }
         }
         impl FloatNum for $ty {}

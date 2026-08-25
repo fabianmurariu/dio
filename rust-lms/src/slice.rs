@@ -59,7 +59,7 @@
 use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -164,7 +164,7 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.repr.codegen(ctx)
     }
 }
@@ -218,7 +218,7 @@ where
 {
     type Out = SRef<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.repr.codegen(ctx)
     }
 }
@@ -325,7 +325,7 @@ where
 {
     type Out = SRefMut<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.repr.codegen(ctx)
     }
 }
@@ -533,8 +533,8 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.slice_len(&self.slice)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.slice_len(&self.slice))
     }
 }
 
@@ -556,8 +556,8 @@ where
 {
     type Out = <S::Out as SliceType>::DataPtr;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.slice_data_ptr(&self.slice)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.slice_data_ptr(&self.slice))
     }
 }
 
@@ -581,10 +581,10 @@ where
 {
     type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        element_addr::<S>(ctx, data_ptr, index)
+        Value::scalar(element_addr::<S>(ctx, data_ptr, index.leaf()))
     }
 }
 
@@ -603,10 +603,10 @@ where
 {
     type Out = SPtr<ElemOf<S>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        element_addr::<S>(ctx, data_ptr, index)
+        Value::scalar(element_addr::<S>(ctx, data_ptr, index.leaf()))
     }
 }
 
@@ -664,10 +664,10 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index.leaf(), len);
 
         let get_block = ctx.create_block();
         let default_block = ctx.create_block();
@@ -677,18 +677,18 @@ where
 
         ctx.switch_to_block(get_block);
         ctx.seal_block(get_block);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
         let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0);
         ctx.jump(merge_block, &[value]);
 
         ctx.switch_to_block(default_block);
         ctx.seal_block(default_block);
         let default = self.default.codegen(ctx);
-        ctx.jump(merge_block, &[default]);
+        ctx.jump(merge_block, &[default.leaf()]);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 
@@ -709,10 +709,10 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index.leaf(), len);
 
         let set_block = ctx.create_block();
         let out_of_bounds_block = ctx.create_block();
@@ -723,8 +723,8 @@ where
         ctx.switch_to_block(set_block);
         ctx.seal_block(set_block);
         let value = self.value.codegen(ctx);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.store(value, element_ptr, 0);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        ctx.store(value.leaf(), element_ptr, 0);
         let written = ctx.iconst(ScalarType::I8, 1);
         ctx.jump(merge_block, &[written]);
 
@@ -735,7 +735,7 @@ where
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0))
     }
 }
 
@@ -748,11 +748,11 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0)
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        Value::scalar(ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0))
     }
 }
 
@@ -778,13 +778,13 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.store(value, element_ptr, 0);
-        ctx.get_unit_value()
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        ctx.store(value.leaf(), element_ptr, 0);
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -811,19 +811,19 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let i = self.i.codegen(ctx);
         let j = self.j.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let addr_i = element_addr::<S>(ctx, data_ptr, i);
-        let addr_j = element_addr::<S>(ctx, data_ptr, j);
+        let addr_i = element_addr::<S>(ctx, data_ptr, i.leaf());
+        let addr_j = element_addr::<S>(ctx, data_ptr, j.leaf());
 
         let ty = ElemOf::<S>::scalar_type();
         let vi = ctx.load(ty, addr_i, 0);
         let vj = ctx.load(ty, addr_j, 0);
         ctx.store(vj, addr_i, 0);
         ctx.store(vi, addr_j, 0);
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -853,21 +853,21 @@ where
 {
     type Out = S::Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
-        let new_ptr = element_addr::<S>(ctx, data_ptr, start);
-        let new_len = ctx.isub(end, start);
+        let new_ptr = element_addr::<S>(ctx, data_ptr, start.leaf());
+        let new_len = ctx.isub(end.leaf(), start.leaf());
 
         // Materialize the new (ptr, len) pair on a 16-byte stack slot.
         let slot = ctx.alloc_stack_slot(16, 3);
         let slot_ptr = ctx.stack_addr(slot, 0);
         ctx.store(new_ptr, slot_ptr, 0);
         ctx.store(new_len, slot_ptr, 8);
-        slot_ptr
+        Value::scalar(slot_ptr)
     }
 }
 

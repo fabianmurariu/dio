@@ -6,7 +6,7 @@ use rust_lms_derive::StagedType;
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::r#struct::{load_field_unchecked, Field, LoadField};
-use crate::staged::{CompilationContext, Staged, ValueId, Var};
+use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
@@ -132,11 +132,11 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let left = self.left.codegen(ctx);
         let right = self.right.codegen(ctx);
-        let left_is_shorter = ctx.icmp(IntCmp::Ult, left, right);
-        ctx.select(left_is_shorter, left, right)
+        let left_is_shorter = ctx.icmp(IntCmp::Ult, left.leaf(), right.leaf());
+        Value::scalar(ctx.select(left_is_shorter, left.leaf(), right.leaf()))
     }
 }
 
@@ -176,7 +176,7 @@ where
 {
     type Out = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // SAFETY: `ZipGetAt` is only constructed by a bounded zip loop or by
         // `IndexedSource::get_at`, whose caller supplies the same bound.
         let first = unsafe { IndexedSource::get_at(self.iter.clone(), self.index) }.codegen(ctx);
@@ -189,7 +189,7 @@ where
 
         store_value::<<I as IndexedSource>::Item>(
             ctx,
-            first,
+            first.leaf(),
             slot_ptr,
             ZipItemType::__field_first::<
                 <I as IndexedSource>::Item,
@@ -198,7 +198,7 @@ where
         );
         store_value::<<S as IndexedSource>::Item>(
             ctx,
-            second,
+            second.leaf(),
             slot_ptr,
             ZipItemType::__field_second::<
                 <I as IndexedSource>::Item,
@@ -206,7 +206,7 @@ where
             >::OFFSET as i32,
         );
 
-        slot_ptr
+        Value::scalar(slot_ptr)
     }
 }
 
