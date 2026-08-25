@@ -298,13 +298,10 @@ where
     type Out = FatSliceType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // A slice built from raw parts is a fat value directly — no stack slot.
         let ptr = self.ptr.codegen(ctx);
         let len = self.len.codegen(ctx);
-        let slot = ctx.alloc_stack_slot(16, 3);
-        let slot_ptr = ctx.stack_addr(slot, 0);
-        ctx.store(ptr.leaf(), slot_ptr, 0);
-        ctx.store(len.leaf(), slot_ptr, 8);
-        Value::scalar(slot_ptr)
+        Value::fat(ptr.leaf(), len.leaf())
     }
 }
 
@@ -932,7 +929,10 @@ where
     AType: StagedType,
 {
     let arg_value = arg.codegen(ctx);
-    push_extern_value::<AType>(ctx, args, arg_value.leaf());
+    // Materialize to the arg's ABI leaf: a scalar passes through; a fat (slice) value becomes
+    // a pointer to a `{ptr,len}` stack slot — exactly the storage a slice extern arg expects.
+    let arg_leaf = ctx.materialize_value(arg_value);
+    push_extern_value::<AType>(ctx, args, arg_leaf);
 }
 
 pub(crate) fn push_extern_value<T: StagedType>(

@@ -58,7 +58,7 @@ use melior::{Context, ExecutionEngine};
 use std::collections::HashMap;
 
 use crate::func::{CompileError, Ctx, ExternFnDef, FunDef, TypeInfo};
-use crate::staged::{Backend, CompilationContext, Staged, ValueId, Var};
+use crate::staged::{Backend, CompilationContext, Staged, Value, ValueId, Var};
 use crate::types::ScalarType;
 
 /// The optimization level passed to `ExecutionEngine`. Must be ≥ 2 so LLVM's own
@@ -241,7 +241,7 @@ pub fn jit_run_i64_unary(
 /// Nullary (no parameters) sidesteps the storage-pointer parameter ABI, which still lives in
 /// the Cranelift-specific `compile()` driver (its abstraction is the next step).
 pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
-    run_kernel_over_mlir(|ctx| expr.codegen(ctx).leaf())
+    run_kernel_over_mlir(|ctx| expr.codegen(ctx))
 }
 
 /// Compile and run a **nullary imperative `Ctx` body** (`Out = i64`) through the MLIR
@@ -300,7 +300,7 @@ where
         };
         body(&mut ctx)
     };
-    backend.ret(Some(result));
+    backend.ret(Some(result.leaf()));
     let module = backend.into_module("kernel", &[ScalarType::I64]);
 
     let (engine, pointer) = jit_lookup(&context, module, "kernel", &[]);
@@ -313,7 +313,7 @@ where
 
 /// Shared tail: build a nullary `() -> i64` kernel whose body is `emit_body` (run against a
 /// [`CompilationContext`] backed by [`MlirBackend`]), JIT it, and run it.
-fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> ValueId) -> i64 {
+fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value) -> i64 {
     let context = make_context();
     let mut backend = MlirBackend::new(&context, Vec::new());
 
@@ -329,7 +329,7 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
         };
         emit_body(&mut ctx)
     };
-    backend.ret(Some(result));
+    backend.ret(Some(result.leaf()));
     let module = backend.into_module("kernel", &[ScalarType::I64]);
 
     let (engine, pointer) = jit_lookup(&context, module, "kernel", &[]);
@@ -363,7 +363,7 @@ pub(crate) fn assemble(
     functions: Vec<Option<FunDef>>,
     externs: &[ExternFnDef],
     main_return_info: &TypeInfo,
-    main_body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    main_body: impl FnOnce(&mut CompilationContext) -> Value,
 ) -> Result<(MlirExecutable, *const u8), CompileError> {
     let context = make_context();
 
@@ -431,7 +431,7 @@ fn build_function<'c>(
     name: &str,
     param_infos: &[TypeInfo],
     param_var_ids: &[usize],
-    body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    body: impl FnOnce(&mut CompilationContext) -> Value,
     return_info: &TypeInfo,
     internal_meta: &[Option<(String, usize)>],
     extern_meta: &[(String, usize)],

@@ -18,7 +18,7 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{assign, CompilationContext, SigSpec, Staged, ValueId, Var, VarHandle};
+use crate::staged::{assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarHandle};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
@@ -39,7 +39,7 @@ pub use crate::func_impl::*;
 pub(crate) struct FunDef {
     pub name: String,
     /// The body expression, type-erased but we know its signature
-    pub body: Box<dyn FnOnce(&mut CompilationContext) -> ValueId>,
+    pub body: Box<dyn FnOnce(&mut CompilationContext) -> Value>,
     /// Type info for each parameter (supports 0..N parameters)
     pub param_infos: Vec<TypeInfo>,
     /// Return type info
@@ -92,7 +92,7 @@ impl Ctx {
     pub(crate) fn into_body<Ret>(
         self,
         ret: Ret,
-    ) -> Box<dyn FnOnce(&mut CompilationContext) -> ValueId>
+    ) -> Box<dyn FnOnce(&mut CompilationContext) -> Value>
     where
         Ret: Staged + 'static,
     {
@@ -101,7 +101,7 @@ impl Ctx {
             for action in actions {
                 action(ctx);
             }
-            ret.codegen(ctx).leaf()
+            ret.codegen(ctx)
         })
     }
 
@@ -135,14 +135,11 @@ impl Ctx {
     {
         let init_staged = init.into_staged();
         let v = self.alloc::<T>();
-        let ctype = T::scalar_type();
         let id = v.id;
         let init_for_action = init_staged.clone();
         self.actions.push(Box::new(move |ctx| {
             let value = init_for_action.codegen(ctx);
-            let cv = ctx.declare_var(ctype);
-            ctx.var_map.insert(id, cv);
-            ctx.def_var(cv, value.leaf());
+            ctx.assign_var::<T>(id, value, false);
         }));
         crate::staged::LetVar::new(v, init_staged)
     }
@@ -158,13 +155,10 @@ impl Ctx {
     {
         let v = self.alloc::<T>();
         let init_staged = init.into_staged();
-        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = init_staged.codegen(ctx);
-            let cv = ctx.declare_var(ctype);
-            ctx.var_map.insert(id, cv);
-            ctx.def_var(cv, value.leaf());
+            ctx.assign_var::<T>(id, value, false);
         }));
         v
     }
@@ -177,18 +171,10 @@ impl Ctx {
         E: Staged<Out = T> + 'static,
     {
         let v = self.alloc::<T>();
-        let ctype = T::scalar_type();
         let id = v.id;
         self.actions.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
-            let cv = if let Some(&existing) = ctx.var_map.get(&id) {
-                existing
-            } else {
-                let cv = ctx.declare_var(ctype);
-                ctx.var_map.insert(id, cv);
-                cv
-            };
-            ctx.def_var(cv, value.leaf());
+            ctx.assign_var::<T>(id, value, true);
         }));
         v
     }
@@ -583,27 +569,28 @@ pub(crate) fn emit_function_body(
     params: &[ValueId],
     param_infos: &[TypeInfo],
     param_var_ids: &[usize],
-    body: impl FnOnce(&mut CompilationContext) -> ValueId,
+    body: impl FnOnce(&mut CompilationContext) -> Value,
     return_info: &TypeInfo,
 ) {
     for (index, info) in param_infos.iter().enumerate() {
         let var_id = param_var_ids[index];
         let storage_ptr = params[index];
 
-        if info.is_aggregate {
-            if info.is_fat_pointer {
-                // A slice arrives as a `(ptr, len)` pair; keep both in register variables.
-                // The data pointer is `Ptr` (an `llvm.ptr` on MLIR); `len` is `I64`.
-                let ptr_value = ctx.load(ScalarType::Ptr, storage_ptr, 0);
-                let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
-                let ptr_var = ctx.declare_var(ScalarType::Ptr);
-                let len_var = ctx.declare_var(ScalarType::I64);
-                ctx.def_var(ptr_var, ptr_value);
-                ctx.def_var(len_var, len_value);
-                ctx.slice_vars
-                    .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
-            }
-            // Aggregates are represented by a pointer to their storage.
+        if info.is_fat_pointer {
+            // A slice arrives as a `{ptr, len}` pair in memory; load it once into a register
+            // pair — that *is* the slice's fat value (read back by `resolve_var`). The data
+            // pointer is `Ptr` (an `llvm.ptr` on MLIR); `len` is `I64`. This memory→fat load
+            // is the one boundary where a slice touches memory on the way in.
+            let ptr_value = ctx.load(ScalarType::Ptr, storage_ptr, 0);
+            let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
+            let ptr_var = ctx.declare_var(ScalarType::Ptr);
+            let len_var = ctx.declare_var(ScalarType::I64);
+            ctx.def_var(ptr_var, ptr_value);
+            ctx.def_var(len_var, len_value);
+            ctx.slice_vars
+                .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+        } else if info.is_aggregate {
+            // A non-slice aggregate is represented by a pointer to its storage.
             let param_var = ctx.declare_var(ScalarType::Ptr);
             ctx.def_var(param_var, storage_ptr);
             ctx.var_map.insert(var_id, param_var);
@@ -622,15 +609,20 @@ pub(crate) fn emit_function_body(
     let result = body(ctx);
 
     let output_ptr = params[param_infos.len()];
-    if return_info.is_aggregate {
+    if return_info.is_fat_pointer {
+        // A returned slice is a fat value; write its (ptr, len) into the output `{ptr,len}`.
+        let (ptr, len) = result.parts();
+        ctx.store(ptr, output_ptr, 0);
+        ctx.store(len, output_ptr, 8);
+    } else if return_info.is_aggregate {
         ctx.copy_nonoverlapping(
             output_ptr,
-            result,
+            result.leaf(),
             return_info.size as usize,
             return_info.alignment as usize,
         );
     } else if return_info.size != 0 {
-        ctx.store(result, output_ptr, 0);
+        ctx.store(result.leaf(), output_ptr, 0);
     }
 }
 
@@ -1133,7 +1125,7 @@ impl<'a> Compiler<'a> {
             self.functions,
             &self.extern_functions,
             &return_info,
-            move |ctx| expr.codegen(ctx).leaf(),
+            move |ctx| expr.codegen(ctx),
         )?;
         Ok(Compiled {
             executable: Some(Executable::Mlir(executable)),
@@ -1354,7 +1346,7 @@ impl<'a> Compiler<'a> {
                         &params,
                         &[],
                         &[],
-                        |ctx| expr.codegen(ctx).leaf(),
+                        |ctx| expr.codegen(ctx),
                         &return_info,
                     );
                 }

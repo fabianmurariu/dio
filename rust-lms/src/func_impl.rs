@@ -114,6 +114,13 @@ pub fn codegen_call(
     }
 }
 
+/// Codegen one call argument to its ABI leaf: a scalar passes through; a fat (slice) value is
+/// materialized to a `{ptr,len}` stack slot and passed by pointer (the storage-pointer ABI).
+pub(crate) fn materialized_arg(ctx: &mut CompilationContext, arg: &impl Staged) -> ValueId {
+    let value = arg.codegen(ctx);
+    ctx.materialize_value(value)
+}
+
 /// Generate code to get a function's address (for returning function pointers)
 pub fn codegen_func_addr(ctx: &mut CompilationContext, func_id: usize) -> ValueId {
     let func_ref = ctx.declare_func(func_id);
@@ -273,8 +280,8 @@ macro_rules! impl_fun_n {
                 let param_infos = [$(TypeInfo::from_staged_type::<$T>()),+];
                 let return_info = TypeInfo::from_staged_type::<OUT>();
 
-                // Generate arg values (leaves — the call ABI is scalar-per-arg)
-                let args = [$(self.$arg.codegen(ctx).leaf()),+];
+                // Generate arg leaves (scalars pass through; slices materialize to memory)
+                let args = [$(materialized_arg(ctx, &self.$arg)),+];
 
                 Value::scalar(codegen_call(ctx, self.func.id, &param_infos, &return_info, &args))
             }

@@ -165,7 +165,9 @@ where
     type Out = FatSliceType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        self.repr.codegen(ctx)
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -219,7 +221,9 @@ where
     type Out = SRef<'a, Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        self.repr.codegen(ctx)
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -326,7 +330,9 @@ where
     type Out = SRefMut<'a, Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        self.repr.codegen(ctx)
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -859,15 +865,11 @@ where
         let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
+        // The sub-slice is a fat value (two SSA leaves) — no stack slot, unlike the old
+        // memory-resolved encoding.
         let new_ptr = element_addr::<S>(ctx, data_ptr, start.leaf());
         let new_len = ctx.isub(end.leaf(), start.leaf());
-
-        // Materialize the new (ptr, len) pair on a 16-byte stack slot.
-        let slot = ctx.alloc_stack_slot(16, 3);
-        let slot_ptr = ctx.stack_addr(slot, 0);
-        ctx.store(new_ptr, slot_ptr, 0);
-        ctx.store(new_len, slot_ptr, 8);
-        Value::scalar(slot_ptr)
+        Value::fat(new_ptr, new_len)
     }
 }
 
