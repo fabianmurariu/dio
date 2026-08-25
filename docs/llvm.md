@@ -896,9 +896,12 @@ MLIR counterpart of the Cranelift IR dump).
 
 **Merge readiness.** With the whole high-level-API suite green on both backends, the differential
 oracle is in place: any future op that diverges fails `cargo test --features llvm`. The `llvm`
-branch is ready to merge. Remaining follow-ups are non-blocking: the six-target CI story (Cranelift
-on all six; LLVM where an MLIR 22 toolchain is provisioned), and wiring the same harness into the
-`sql-gen`/`arrow-lms` columnar kernels once they move onto `Compiler::with_backend`.
+branch is ready to merge. CI (`.github/workflows/ci.yml`) runs the Cranelift suite on all six
+targets plus a dedicated **`llvm` job** (macos-15, Homebrew `llvm@22`) that runs
+`cargo test -p rust-lms --features llvm` — so the differential check is enforced on every push/PR.
+Remaining follow-ups are non-blocking: a Linux LLVM CI job (apt.llvm.org MLIR 22, once static-lib
+provisioning is sorted), and wiring the same harness into the `sql-gen`/`arrow-lms` columnar kernels
+once they move onto `Compiler::with_backend`.
 
 **Phase 4 — parity & choice.** Differential-test the full suite on both backends; expose
 `Compiler::with_backend(Backend::Cranelift | Backend::Llvm)`; decide the six-target CI
