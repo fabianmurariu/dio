@@ -1,14 +1,70 @@
 # Post-LLVM review — remediation plan
 
 Companion to [`post_llvm_review.md`](post_llvm_review.md). This plan first records what
-I independently verified against the code, then lays out an ordered, green-at-every-step
-remediation. Each milestone is a self-contained, committable unit; the full Cranelift
-suite + `--features llvm` suite + clippy must stay green after each.
+was independently verified against the original LLVM implementation, then lays out an
+ordered, green-at-every-step remediation. The dashboards below are the current source of
+truth; the detailed findings and milestone descriptions that follow are retained as design
+history and acceptance criteria, not as claims about the current tree.
 
-## 1. Verification of the review
+**Last audited:** 2026-08-26 at `5d8c523` (`value_refactor`).
 
-I read the cited code for every P0/P1 finding, the two load-bearing factual claims, and
-the benchmark. **The review is accurate.** Summary:
+## Current status
+
+Legend: ✅ complete; 🟨 partially complete; ⬜ open; ⛔ release blocker.
+
+### Engineering remediation
+
+| Work | Status | Current evidence | Remaining exit criterion |
+|---|:---:|---|---|
+| Root A/A′: structured values and typed leaves | ✅ | `Value::{Scalar,Fat}` is canonical; every `ValueId` carries `ScalarType`; both backends validate the neutral operation stream | None for Root A. Keep malformed-IR regressions in the both-backends suite. |
+| M1 / Root B: integer edge semantics | ⬜ **NEXT** | Safe `div`, `rem`, and shifts still lower directly to backend operations | Define one public contract, guard zero and signed overflow, mask or reject oversized shifts, and test every integer width on both backends. |
+| M2: semantic null pointers and reference options | ✅ | `Backend::null_ptr` exists; reference `None` values are `Ptr`; option reference tests run through `for_each_backend` | None. This was completed as part of Root A. |
+| M3: memcpy and checked narrowing | ⬜ | LLVM still copies byte-by-byte and narrows `size`/offset/arena counts with `as i32`/`as u32` | Add LLVM memcpy lowering and checked conversions or explicit size limits at every narrowing boundary. |
+| M4: both-backends test coverage | 🟨 | Shared `tests/common` harness exists and 17 integration targets use it; all 20 JIT-backed option tests now run on both backends | Move/convert the remaining backend-sensitive `refer.rs` and `tuple.rs` unit tests; add the missing invalid-symbol and malformed-call cases. |
+| M5: LLVM failures return `CompileError` | ⬜ | `Compiler::compile` returns `Result`, but MLIR verify/pass/lookup paths still contain `assert!` and `expect` | Return structured errors with stage/function context and capture MLIR diagnostics. |
+| M6: collision-proof internal symbols | ⬜ | User-provided function names and fixed `__main__` still become module/linker symbols | Generate symbols from internal IDs, reserve runtime namespaces, and keep user names only as diagnostics/debug metadata. |
+| M7: indirect-call validation | ✅ | Typed leaves plus retained `SigSpec` validate callee type, arity, argument types, and result type before call emission on both backends | Keep a deliberate malformed-signature regression; checked operand-count conversion belongs to M3. |
+| M8: target contract and CI scope | 🟨 | CI declares four Linux/macOS both-backend targets and two Windows Cranelift targets; comments honestly exclude LLVM on Windows | Add compile-time architecture/pointer-width guards, document endianness, and confirm a public green matrix. Do not claim Windows LLVM support. |
+| M9 / Root C: LLVM driver and metadata cleanup | ⬜ | `llvm` and `MlirBackend` are public; five prototype JIT drivers remain public; per-function declaration metadata is cloned | Make prototypes test-only/private and build one shared module plan consumed by both backends. |
+| M10: current LLVM documentation | ⬜ | `docs/llvm.md` still opens with “design study — no code yet” and contains contradictory phase diary entries; melior/mlir-sys are not exactly paired | Replace it with current architecture, setup, invariants, supported targets, and known gaps; archive or delete the implementation diary. |
+| M11: benchmark correctness and evidence | ⬜ | `sum_above_median` still exposes unchecked indexing through a safe closure, uses different length semantics from native, and resolves `as_fn()` inside each wrapper call | Fix the safety/semantic mismatch first; then add cold-compile results, environment metadata, and representative SQL kernels before publishing performance claims. |
+
+### Open-source release gate
+
+The repository is **not ready to publish as an open-source project yet**. This is a release
+checklist, separate from whether the code is useful or the local tests pass.
+
+| Release item | Status | Required action |
+|---|:---:|---|
+| License | ⛔ | Choose a license, add a root `LICENSE` (or dual-license files), and put the matching SPDX expression in every published crate manifest. A README “License” heading is not a license grant. |
+| Third-party provenance | ⛔ | Audit the PDFs under `docs/` and remove them or record redistribution permission; verify the `sql-gen/optd` submodule is intended for redistribution and change its SSH URL to HTTPS for anonymous clones. |
+| Cargo package metadata | ⬜ | Add descriptions, repository/homepage, license, `rust-version`, categories/keywords where useful, and explicit versions beside path dependencies. Decide which crates are publishable and set `publish = false` on the rest. |
+| Safety and correctness claims | ⬜ | Complete M1/Root B and M3, fix M11's safe-wrapper preconditions, and qualify README claims until those contracts are true. “Type-safe” must not imply that all safe staged programs are UB-free while these items remain. |
+| Public API and errors | ⬜ | Complete M5, M6, and M9; decide what is stable in `0.1`; keep backend prototypes and internal handles out of the supported public surface. |
+| Documentation | ⬜ | Complete M10, update the root README's two-backend architecture and exact support matrix, and clearly label experimental APIs and known limitations. |
+| CI and release checks | 🟨 | The six-target workflow exists, but a public green run is not recorded here. Before release, require format, warning-denying Clippy, docs, default tests, LLVM tests where provisioned, and `cargo package` for each published crate. Add dependency/license and secret scans. |
+| Community files | ⬜ | Add concise `CONTRIBUTING.md` and `SECURITY.md`; add a code of conduct only if the project wants one rather than copying boilerplate without an enforcement contact. |
+
+### Recommended order from here
+
+| Order | Work | Why now |
+|---:|---|---|
+| 0 | Choose the license and audit third-party artifacts | These are legal release blockers and can proceed independently of code changes. |
+| 1 | M1 / Root B, plus M11's unsafe wrapper fix | This is the remaining safe-API/generated-code soundness boundary. It is the next code phase. |
+| 2 | M3 checked memory boundaries | Remove silent narrowing and the byte-at-a-time LLVM copy before broadening the supported surface. |
+| 3 | M5 + M6 | A public compiler API should report user-triggerable failures and must not let display names collide with runtime symbols. |
+| 4 | Finish M4 and M8 | Close the differential-test gaps and make the support contract mechanically true. |
+| 5 | M9 / Root C | Reduce the public LLVM surface and duplicated module planning before documenting it as stable architecture. |
+| 6 | M10 and the README/package metadata pass | Publish current facts, setup, limitations, and crate intent after the architecture settles. |
+| 7 | Finish M11 performance work | Publish benchmark conclusions only after correctness and methodology are defensible. |
+| 8 | Run the release gate | `fmt`, warning-denying Clippy, docs, both backend suites, `cargo package`, dependency/license audit, secret scan, and the public CI matrix must all pass. |
+
+## 1. Historical verification of the original review
+
+This section records the 2026-08-25 baseline that motivated the plan. Several findings have
+since been fixed; use the dashboard above for current status. At that baseline, the cited
+code for every P0/P1 finding, the two load-bearing factual claims, and the benchmark was
+checked and the review was accurate. Summary:
 
 | # | Finding | Verdict | Evidence checked |
 |---|---------|---------|------------------|
@@ -48,7 +104,7 @@ the benchmark. **The review is accurate.** Summary:
 - **Bounded, committable increments.** Milestones are ordered by the review's priority
   (soundness → hardening → cleanup → docs → bench) and sized to a single review.
 
-## 3. Milestones
+## 3. Original milestone definitions
 
 ### M1 — Integer edge semantics (P0 #1) ⚠️ decision first
 
@@ -181,7 +237,7 @@ a lowering pass) for `Div`/`Rem`/`Shl`/`Shr`; mask shift counts. Add runtime-arg
   post-optimization LLVM IR/asm and benchmark representative sql-gen plans before letting
   that claim stand in the (rewritten) doc.
 
-## 4. Sequencing & checkpoints
+## 4. Original sequencing and checkpoints
 
 ```
 P0 soundness:   M1 (decision) → M2 → M3
@@ -196,7 +252,10 @@ gap that let #2 hide in the first place. M1 is gated on a **contract decision**;
 the three options to you before writing code. Everything else is mechanical-but-careful and
 proceeds under the green-at-every-step rule.
 
-## 5. Not doing (yet), with rationale
+## 5. Original deferred items (historical)
+
+This was the deferral list before Root A/A′ landed. In particular, the typed-value item below
+is now complete; the current disposition of every item is in the dashboard.
 
 - **Six-target LLVM CI including Windows** — deferred to M8's stretch; provisioning an
   MLIR 22 toolchain on Windows runners is high-cost and low-value versus documenting the
@@ -207,7 +266,10 @@ proceeds under the green-at-every-step rule.
 - **Registering only required dialects** (#13) — measure cold-compile impact first; only
   worth it if it moves the needle.
 
-## 6. A deeper simplification (recommended over piecemeal patching)
+## 6. Design rationale and implementation log (historical)
+
+The proposal text below intentionally preserves the reasoning written before implementation;
+the increment records at the end of the section state what actually landed.
 
 Stepping back from the individual findings, most of them are three root causes wearing
 different hats. Fixing the root causes makes whole classes of these bugs *unrepresentable*
