@@ -6,7 +6,7 @@ use rust_lms_derive::StagedType;
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::r#struct::{load_field_unchecked, Field, LoadField};
-use crate::staged::{CompilationContext, Staged, ValueId, Var};
+use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
@@ -132,11 +132,11 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let left = self.left.codegen(ctx);
         let right = self.right.codegen(ctx);
-        let left_is_shorter = ctx.icmp(IntCmp::Ult, left, right);
-        ctx.select(left_is_shorter, left, right)
+        let left_is_shorter = ctx.icmp(IntCmp::Ult, left.leaf(), right.leaf());
+        Value::scalar(ctx.select(left_is_shorter, left.leaf(), right.leaf()))
     }
 }
 
@@ -176,7 +176,7 @@ where
 {
     type Out = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // SAFETY: `ZipGetAt` is only constructed by a bounded zip loop or by
         // `IndexedSource::get_at`, whose caller supplies the same bound.
         let first = unsafe { IndexedSource::get_at(self.iter.clone(), self.index) }.codegen(ctx);
@@ -206,22 +206,18 @@ where
             >::OFFSET as i32,
         );
 
-        slot_ptr
+        Value::scalar(slot_ptr)
     }
 }
 
 fn store_value<T: StagedType>(
     ctx: &mut CompilationContext,
-    value: ValueId,
+    value: Value,
     ptr: ValueId,
     offset: i32,
 ) {
-    if T::is_copy_struct() {
-        let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
-        ctx.copy_nonoverlapping(destination, value, T::size_of(), T::align_of());
-    } else {
-        ctx.store(value, ptr, offset);
-    }
+    let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
+    ctx.store_value::<T>(destination, value);
 }
 
 impl<I, S> StagedIterator for Zip<I, S>
@@ -241,8 +237,8 @@ where
     {
         let i = ctx.var(0u64);
         let len = ctx.bind(ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         ));
         let prim = self.iter;
         let sec = self.other;
@@ -268,8 +264,8 @@ where
 
     fn len(&self) -> Self::LenExpr {
         ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         )
     }
 }
@@ -287,10 +283,10 @@ where
     type LenExpr = ZipLen<<I as IndexedSource>::LenExpr, <S as IndexedSource>::LenExpr>;
     type GetExpr = ZipGetAt<I, S>;
 
-    fn len(&self) -> Self::LenExpr {
+    fn count(&self) -> Self::LenExpr {
         ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         )
     }
 
@@ -319,8 +315,8 @@ where
     {
         let i = ctx.var(0u64);
         let len = ctx.bind(ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         ));
         let prim = self.iter;
         let sec = self.other;

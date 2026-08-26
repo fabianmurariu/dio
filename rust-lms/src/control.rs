@@ -7,7 +7,7 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value};
 use crate::types::{IntCmp, StagedType};
 
 // =============================================================================
@@ -39,7 +39,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate condition code in current block
         let cond_val = self.condition.codegen(ctx);
 
@@ -48,30 +48,28 @@ where
         let else_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        // Add block parameter to merge_block to receive the result (phi node)
-        ctx.append_block_param(merge_block, T::scalar_type());
+        ctx.append_value_block_params::<T>(merge_block);
 
         // Branch based on condition
-        ctx.brif(cond_val, then_block, &[], else_block, &[]);
+        ctx.brif(cond_val.leaf(), then_block, &[], else_block, &[]);
 
         // Generate then branch
         ctx.switch_to_block(then_block);
         ctx.seal_block(then_block); // Single predecessor (entry block)
         let then_val = self.then_branch.codegen(ctx);
-        ctx.jump(merge_block, &[then_val]);
+        ctx.jump_value(merge_block, then_val);
 
         // Generate else branch
         ctx.switch_to_block(else_block);
         ctx.seal_block(else_block); // Single predecessor (entry block)
         let else_val = self.else_branch.codegen(ctx);
-        ctx.jump(merge_block, &[else_val]);
+        ctx.jump_value(merge_block, else_val);
 
         // Continue in merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block); // Two predecessors now known
 
-        // Return the block parameter (the merged value)
-        ctx.block_param(merge_block, 0)
+        ctx.block_value::<T>(merge_block)
     }
 }
 
@@ -125,7 +123,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Generate condition code in current block
         let cond_val = self.condition.codegen(ctx);
 
@@ -134,7 +132,7 @@ where
         let merge_block = ctx.create_block();
 
         // Branch: if true go to then_block, else skip to merge_block
-        ctx.brif(cond_val, then_block, &[], merge_block, &[]);
+        ctx.brif(cond_val.leaf(), then_block, &[], merge_block, &[]);
 
         // Generate then branch (body)
         ctx.switch_to_block(then_block);
@@ -147,7 +145,7 @@ where
         ctx.seal_block(merge_block); // Two predecessors now known
 
         // Return unit value
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -207,7 +205,7 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Create the blocks for the loop structure
         let loop_header = ctx.create_block();
         let loop_body = ctx.create_block();
@@ -222,7 +220,7 @@ where
         // We'll seal it after generating the back-edge from loop_body
 
         let cond_val = self.condition.codegen(ctx);
-        ctx.brif(cond_val, loop_body, &[], loop_exit, &[]);
+        ctx.brif(cond_val.leaf(), loop_body, &[], loop_exit, &[]);
 
         // Loop body: execute body and jump back to header
         ctx.switch_to_block(loop_body);
@@ -238,7 +236,7 @@ where
         ctx.seal_block(loop_exit); // Single predecessor (loop_header)
 
         // Return unit value
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -274,10 +272,10 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let v = self.cond.codegen(ctx);
         // bool is an i8 in {0, 1}; `v == 0` is its negation.
-        ctx.icmp_imm(IntCmp::Eq, v, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, v.leaf(), 0))
     }
 }
 

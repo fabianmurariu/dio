@@ -20,7 +20,7 @@ fn p99_01_last_element() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("p01_last", |ctx, arr: Var<SRef<Slice<i64>>>| {
             let n = ctx.var(0u64);
-            ctx.store(n, arr.len());
+            ctx.store(n, arr.count());
             let result = ctx.var(0i64);
             ctx.if_then(gt(n, 0u64), move |ctx| {
                 // SAFETY: this branch proves `n > 0`, so `n - 1 < n`.

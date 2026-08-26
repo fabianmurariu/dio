@@ -38,12 +38,12 @@ pub extern "C" fn ext_noop() {
     // Do nothing
 }
 
+/// # Safety
 /// An unsafe callback must use `call_extern1_unchecked`.
 #[extern_fn]
 #[no_mangle]
 pub unsafe extern "C" fn ext_read_i64(ptr: *const i64) -> i64 {
-    // SAFETY: required by this function's contract.
-    unsafe { *ptr }
+    *ptr
 }
 
 /// A safe shared-reference callback retains a staged `SRef` signature.
@@ -86,6 +86,12 @@ pub extern "C" fn ext_sum_slice(data: FatSlice<i64>) -> i64 {
 #[no_mangle]
 pub extern "C" fn ext_slice_len(data: FatSlice<i64>) -> i64 {
     data.len as i64
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn ext_identity_slice(data: FatSlice<i64>) -> FatSlice<i64> {
+    data
 }
 
 /// Double each element in a mutable slice
@@ -337,5 +343,20 @@ fn test_extern_fn_slice_len() {
         let empty: [i64; 0] = [];
         let fat_empty = FatSlice::from_slice(&empty);
         assert_eq!(f.call(fat_empty), 0);
+    });
+}
+
+#[test]
+fn test_extern_call_preserves_fat_slice_return() {
+    for_each_backend(|mut compiler| {
+        let identity = compiler.extern_fn::<ExtIdentitySliceExtern>();
+        let test_fn = compiler.fun1("identity_len", |ctx, data: Var<FatSliceType<i64>>| {
+            let returned: Var<FatSliceType<i64>> = ctx.bind(call_extern1(identity, data));
+            returned.len()
+        });
+
+        let compiled = compiler.compile(test_fn).expect("compilation failed");
+        let data = [1i64, 2, 3];
+        assert_eq!(compiled.call(FatSlice::from_slice(&data)), 3);
     });
 }

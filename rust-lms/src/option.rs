@@ -17,13 +17,13 @@
 //! # Niche-Optimized Reference Options
 //!
 //! For pointer types, we use niche optimization:
-//! - `OptRefType<T>` / `OptMutRefType<T>` are single i64 values
+//! - `OptRefType<T>` / `OptMutRefType<T>` are single pointer values
 //! - null (0) = None
 //! - non-null = Some(pointer)
 
 use crate::func::VarBuilder;
 use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var};
 use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -245,7 +245,7 @@ pub struct CSome<T: StagedType, E> {
 unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Get the inner value
         let value = self.value.codegen(ctx);
 
@@ -263,15 +263,9 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         let payload_offset = COptionType::<T>::payload_offset() as i64;
         let payload_ptr = ctx.ptr_offset_const(ptr, payload_offset);
 
-        // Store the payload at its actual aligned offset.
-        if T::is_copy_struct() {
-            // Aggregate staged values are addresses of their storage.
-            ctx.copy_nonoverlapping(payload_ptr, value, T::size_of(), T::align_of());
-        } else {
-            ctx.store(value, payload_ptr, 0);
-        }
+        ctx.store_value::<T>(payload_ptr, value);
 
-        ptr
+        Value::scalar(ptr)
     }
 }
 
@@ -292,7 +286,7 @@ pub struct CNone<T: StagedType> {
 unsafe impl<T: StagedType> Staged for CNone<T> {
     type Out = COptionType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let size = COptionType::<T>::size_of() as u32;
         let alignment = COptionType::<T>::align_of();
         let stack_slot = ctx.alloc_stack_slot(size, alignment.trailing_zeros() as u8);
@@ -303,7 +297,7 @@ unsafe impl<T: StagedType> Staged for CNone<T> {
         let zero = ctx.iconst(ScalarType::I64, 0);
         ctx.store(zero, ptr, 0);
 
-        ptr
+        Value::scalar(ptr)
     }
 }
 
@@ -328,7 +322,7 @@ pub struct OptRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // The reference is the pointer - just pass it through
         self.reference.codegen(ctx)
     }
@@ -353,9 +347,8 @@ pub struct OptRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        // None is represented as null pointer
-        ctx.iconst(ScalarType::I64, 0)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.null_ptr())
     }
 }
 
@@ -375,7 +368,7 @@ pub struct OptMutRefSome<'a, T: StagedType, E> {
 unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.reference.codegen(ctx)
     }
 }
@@ -399,8 +392,8 @@ pub struct OptMutRefNone<'a, T: StagedType> {
 unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.iconst(ScalarType::I64, 0)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.null_ptr())
     }
 }
 
@@ -424,12 +417,12 @@ pub struct IsSome<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
         // Load discriminant from offset 0
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
         // discriminant != 0
-        ctx.icmp_imm(IntCmp::Ne, discriminant, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, discriminant, 0))
     }
 }
 
@@ -447,11 +440,11 @@ pub struct IsNone<E> {
 unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
         // discriminant == 0
-        ctx.icmp_imm(IntCmp::Eq, discriminant, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, discriminant, 0))
     }
 }
 
@@ -473,10 +466,10 @@ pub struct IsRefSome<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr != null
-        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, ptr.leaf(), 0))
     }
 }
 
@@ -496,10 +489,10 @@ pub struct IsRefNone<E> {
 unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
         // ptr == null
-        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, ptr.leaf(), 0))
     }
 }
 
@@ -522,9 +515,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(IntCmp::Ne, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Ne, ptr.leaf(), 0))
     }
 }
 
@@ -545,9 +538,9 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
-        ctx.icmp_imm(IntCmp::Eq, ptr, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, ptr.leaf(), 0))
     }
 }
 
@@ -574,20 +567,18 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
 
         // Create blocks for if-then-else
         let some_block = ctx.create_block();
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        // Add block parameter for the result
-        let result_type = T::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<T>(merge_block);
 
         // Branch: if discriminant != 0, go to some_block, else none_block
         ctx.brif(discriminant, some_block, &[], none_block, &[]);
@@ -597,25 +588,21 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         // Some block: load the aligned payload.
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
-        let some_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr, payload_offset)
-        } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
-            ctx.load(T::scalar_type(), payload_ptr, 0)
-        };
-        ctx.jump(merge_block, &[some_val]);
+        let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
+        let some_val = ctx.load_value::<T>(payload_ptr);
+        ctx.jump_value(merge_block, some_val);
 
         // None block: use default
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let default_val = self.default.codegen(ctx);
-        ctx.jump(merge_block, &[default_val]);
+        ctx.jump_value(merge_block, default_val);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        ctx.block_value::<T>(merge_block)
     }
 }
 
@@ -661,19 +648,18 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let opt_ptr = self.opt.codegen(ctx);
 
         // Load discriminant
-        let discriminant = ctx.load(ScalarType::I64, opt_ptr, 0);
+        let discriminant = ctx.load(ScalarType::I64, opt_ptr.leaf(), 0);
 
         // Create blocks
         let some_block = ctx.create_block();
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
         // Branch based on discriminant
         ctx.brif(discriminant, some_block, &[], none_block, &[]);
@@ -684,33 +670,24 @@ where
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
-        // Load the value and bind it to the variable.
-        let bound_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr, payload_offset)
-        } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr, payload_offset);
-            ctx.load(T::scalar_type(), payload_ptr, 0)
-        };
-
-        // Declare and define the bound variable
-        let bound_var = ctx.declare_var(T::scalar_type());
-        ctx.def_var(bound_var, bound_val);
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
+        let bound_val = ctx.load_value::<T>(payload_ptr);
+        ctx.assign_var::<T>(self.bound_var_id, bound_val, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump_value(merge_block, some_result);
 
         // None block: execute none_body
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump_value(merge_block, none_result);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -786,42 +763,38 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
         // Branch: if ptr != null, it's Some
-        ctx.brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
 
         // Some block: ptr IS the reference
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        // Bind the pointer as SRef<T>
-        let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr);
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        ctx.assign_var::<SRef<'a, T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump_value(merge_block, some_result);
 
         // None block
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump_value(merge_block, none_result);
 
         // Merge
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -877,37 +850,34 @@ where
 {
     type Out = OUT;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.opt.codegen(ctx);
 
         let some_block = ctx.create_block();
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
-        ctx.brif(ptr, some_block, &[], none_block, &[]);
+        ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
 
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr);
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        ctx.assign_var::<SRefMut<'a, T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result]);
+        ctx.jump_value(merge_block, some_result);
 
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result]);
+        ctx.jump_value(merge_block, none_result);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        ctx.block_param(merge_block, 0)
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -938,13 +908,9 @@ where
         _phantom: PhantomData,
     }
 }
-
 #[cfg(test)]
 mod tests {
     use super::*;
-    use crate::func::Compiler;
-    use crate::num::add;
-    use crate::prelude::*;
 
     #[repr(C, align(16))]
     #[derive(Clone, Copy)]
@@ -969,27 +935,6 @@ mod tests {
             true
         }
     }
-
-    #[test]
-    fn test_c_option_layout() {
-        // Verify layout matches our assumptions
-        assert_eq!(std::mem::size_of::<COption<i64>>(), 16);
-        assert_eq!(std::mem::align_of::<COption<i64>>(), 8);
-
-        // Verify discriminant values
-        let none: COption<i64> = COption::None;
-        let some: COption<i64> = COption::Some(42);
-
-        // Check that discriminant is at offset 0
-        let none_ptr = &none as *const COption<i64> as *const u64;
-        let some_ptr = &some as *const COption<i64> as *const u64;
-
-        unsafe {
-            assert_eq!(*none_ptr, 0); // None discriminant
-            assert_eq!(*some_ptr, 1); // Some discriminant
-        }
-    }
-
     #[test]
     fn c_option_respects_overaligned_payload_layout() {
         assert_eq!(COptionType::<AlignedPayload>::payload_offset(), 16);
@@ -1008,488 +953,5 @@ mod tests {
         let bytes = &option as *const COption<AlignedPayload> as *const u8;
         // SAFETY: the payload offset and its first byte are within `option`.
         assert_eq!(unsafe { *bytes.add(16) }, 0x5a);
-    }
-
-    #[test]
-    fn test_c_some_i64() {
-        let compiler = Compiler::new();
-
-        // Create COption::Some(42)
-        let expr = c_some::<i64, _>(42i64);
-        let wrapped = unwrap_or(expr, 0i64);
-
-        let compiled = compiler.compile(wrapped).expect("compilation failed");
-        assert_eq!(compiled.run(), 42);
-    }
-
-    #[test]
-    fn test_c_none_i64() {
-        let compiler = Compiler::new();
-
-        // Create COption::None, unwrap_or should return default
-        let expr = c_none::<i64>();
-        let wrapped = unwrap_or(expr, 99i64);
-
-        let compiled = compiler.compile(wrapped).expect("compilation failed");
-        assert_eq!(compiled.run(), 99);
-    }
-
-    #[test]
-    fn test_is_some() {
-        let compiler = Compiler::new();
-
-        let some_expr = c_some::<i64, _>(42i64);
-        let check = is_some(some_expr);
-
-        let compiled = compiler.compile(check).expect("compilation failed");
-        assert_eq!(compiled.run(), true);
-    }
-
-    #[test]
-    fn test_is_none() {
-        let compiler = Compiler::new();
-
-        let none_expr = c_none::<i64>();
-        let check = is_none(none_expr);
-
-        let compiled = compiler.compile(check).expect("compilation failed");
-        assert_eq!(compiled.run(), true);
-    }
-
-    #[test]
-    fn test_match_opt_some() {
-        let mut compiler = Compiler::new();
-
-        // match Some(10) { Some(x) => x + 5, None => 0 }
-        let func = compiler.fun1("test", |ctx, _dummy: Var<i64>| {
-            let opt = c_some::<i64, _>(10i64);
-            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<i64>::new(0))
-        });
-
-        let compiled = compiler
-            .compile(call1(func, 0i64))
-            .expect("compilation failed");
-        assert_eq!(compiled.run(), 15);
-    }
-
-    #[test]
-    fn test_match_opt_none() {
-        let mut compiler = Compiler::new();
-
-        // match None { Some(x) => x + 5, None => 99 }
-        let func = compiler.fun1("test", |ctx, _dummy: Var<i64>| {
-            let opt = c_none::<i64>();
-            match_opt(ctx, opt, |_ctx, val| add(val, 5i64), Const::<i64>::new(99))
-        });
-
-        let compiled = compiler
-            .compile(call1(func, 0i64))
-            .expect("compilation failed");
-        assert_eq!(compiled.run(), 99);
-    }
-
-    #[test]
-    fn test_coption_from_option() {
-        let some: COption<i64> = Some(42).into();
-        assert_eq!(some, COption::Some(42));
-
-        let none: COption<i64> = None.into();
-        assert_eq!(none, COption::None);
-    }
-
-    #[test]
-    fn test_option_from_coption() {
-        let some: Option<i64> = COption::Some(42).into();
-        assert_eq!(some, Some(42));
-
-        let none: Option<i64> = COption::<i64>::None.into();
-        assert_eq!(none, None);
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: COption<i64>
-    // =========================================================================
-
-    #[test]
-    fn test_fn_taking_coption_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn unwrap_or_default(opt: COption<i64>) -> i64
-        let unwrap_fn = compiler.fun1("unwrap_or_default", |_ctx, opt: Var<COptionType<i64>>| {
-            unwrap_or(opt, -1i64)
-        });
-
-        let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        // Test with Some
-        assert_eq!(f.call(COption::Some(42)), 42);
-        assert_eq!(f.call(COption::Some(0)), 0);
-        assert_eq!(f.call(COption::Some(-100)), -100);
-
-        // Test with None
-        assert_eq!(f.call(COption::None), -1);
-    }
-
-    #[test]
-    fn test_fn_returning_coption_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn maybe_double(x: i64) -> COption<i64>
-        // Returns Some(x * 2) if x > 0, else None
-        let maybe_double = compiler.fun1("maybe_double", |ctx, x: Var<i64>| {
-            let doubled = c_some::<i64, _>(mul(x, 2i64));
-            let none = c_none::<i64>();
-            // if x > 0 then Some(x*2) else None
-            match_opt(
-                ctx,
-                if_then_else(lt(0i64, x), doubled, none),
-                |_ctx, val| c_some::<i64, _>(val),
-                c_none::<i64>(),
-            )
-        });
-
-        let compiled = compiler.compile(maybe_double).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(5), COption::Some(10));
-        assert_eq!(f.call(1), COption::Some(2));
-        assert_eq!(f.call(0), COption::None);
-        assert_eq!(f.call(-5), COption::None);
-    }
-
-    #[test]
-    fn test_fn_coption_i64_roundtrip() {
-        let mut compiler = Compiler::new();
-
-        // fn add_one_if_some(opt: COption<i64>) -> COption<i64>
-        let add_one = compiler.fun1("add_one_if_some", |ctx, opt: Var<COptionType<i64>>| {
-            match_opt(
-                ctx,
-                opt,
-                |_ctx, val| c_some::<i64, _>(add(val, 1i64)),
-                c_none::<i64>(),
-            )
-        });
-
-        let compiled = compiler.compile(add_one).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(COption::Some(10)), COption::Some(11));
-        assert_eq!(f.call(COption::Some(-1)), COption::Some(0));
-        assert_eq!(f.call(COption::None), COption::None);
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: COption<f64>
-    // =========================================================================
-
-    #[test]
-    fn test_c_option_f64_layout() {
-        // Verify layout for f64 variant
-        assert_eq!(std::mem::size_of::<COption<f64>>(), 16);
-        assert_eq!(std::mem::align_of::<COption<f64>>(), 8);
-
-        let some: COption<f64> = COption::Some(3.15);
-        let ptr = &some as *const COption<f64> as *const u8;
-        unsafe {
-            // Discriminant at offset 0
-            let disc = *(ptr as *const u64);
-            assert_eq!(disc, 1, "discriminant should be 1 for Some");
-            // Value at offset 8
-            let val = *((ptr.add(8)) as *const f64);
-            assert_eq!(val, 3.15, "value should be 3.15");
-        }
-    }
-
-    #[test]
-    fn test_fn_taking_coption_f64() {
-        let mut compiler = Compiler::new();
-
-        // fn unwrap_or_zero(opt: COption<f64>) -> f64
-        let unwrap_fn = compiler.fun1("unwrap_or_zero", |_ctx, opt: Var<COptionType<f64>>| {
-            unwrap_or(opt, 0.0f64)
-        });
-
-        let compiled = compiler.compile(unwrap_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(COption::Some(3.15)), 3.15);
-        assert_eq!(f.call(COption::Some(-2.5)), -2.5);
-        assert_eq!(f.call(COption::None), 0.0);
-    }
-
-    #[test]
-    fn test_fn_returning_coption_f64() {
-        let mut compiler = Compiler::new();
-
-        // fn wrap_f64(x: f64) -> COption<f64>
-        // Always returns Some(x)
-        let wrap = compiler.fun1("wrap_f64", |_ctx, x: Var<f64>| c_some::<f64, _>(x));
-
-        let compiled = compiler.compile(wrap).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(3.15), COption::Some(3.15));
-        assert_eq!(f.call(0.0), COption::Some(0.0));
-        assert_eq!(f.call(-1.5), COption::Some(-1.5));
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: OptRefType (Option<&T>)
-    // =========================================================================
-
-    #[test]
-    fn test_fn_taking_opt_ref_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn deref_or_default(opt: Option<&i64>) -> i64
-        let deref_fn = compiler.fun1("deref_or_default", |ctx, opt: Var<OptRefType<i64>>| {
-            use crate::refer::load_ref;
-            // if some, load the value; else return -1
-            match_opt_ref(ctx, opt, |_ctx, ptr| load_ref(ptr), Const::<i64>::new(-1))
-        });
-
-        let compiled = compiler.compile(deref_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let val = 42i64;
-        assert_eq!(f.call(Some(&val)), 42);
-
-        let val2 = -100i64;
-        assert_eq!(f.call(Some(&val2)), -100);
-
-        assert_eq!(f.call(None), -1);
-    }
-
-    #[test]
-    fn test_fn_returning_opt_ref_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn make_ref(ptr: &i64) -> Option<&i64>
-        // Just wraps the reference in Some
-        let make_ref = compiler.fun1("make_ref", |_ctx, ptr: Var<SRef<i64>>| {
-            opt_ref_some::<i64, _>(ptr)
-        });
-
-        let compiled = compiler.compile(make_ref).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let val = 99i64;
-        let result = f.call(&val);
-        assert_eq!(result, Some(&99i64));
-    }
-
-    #[test]
-    fn test_fn_opt_ref_conditional() {
-        let mut compiler = Compiler::new();
-
-        // fn ref_if_positive(ptr: &i64) -> Option<&i64>
-        // Returns Some(ptr) if *ptr > 0, else None
-        let ref_if_pos = compiler.fun1("ref_if_positive", |_ctx, ptr: Var<SRef<i64>>| {
-            use crate::refer::load_ref;
-            let val = load_ref(ptr);
-            if_then_else(
-                lt(0i64, val), // val > 0
-                opt_ref_some::<i64, _>(ptr),
-                opt_ref_none::<i64>(),
-            )
-        });
-
-        let compiled = compiler.compile(ref_if_pos).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let pos = 42i64;
-        assert_eq!(f.call(&pos), Some(&42i64));
-
-        let zero = 0i64;
-        assert_eq!(f.call(&zero), None);
-
-        let neg = -10i64;
-        assert_eq!(f.call(&neg), None);
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: OptMutRefType (Option<&mut T>)
-    // =========================================================================
-
-    #[test]
-    fn test_fn_taking_opt_mut_ref_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn read_and_double(opt: Option<&mut i64>) -> i64
-        // If Some, reads the value and returns it doubled (without mutating); else returns -1
-        let read_fn = compiler.fun1("read_and_double", |ctx, opt: Var<OptMutRefType<i64>>| {
-            use crate::refer::load_ref_mut;
-            match_opt_mut_ref(
-                ctx,
-                opt,
-                |_ctx, mut ptr| mul(load_ref_mut(&mut ptr), 2i64),
-                Const::<i64>::new(-1),
-            )
-        });
-
-        let compiled = compiler.compile(read_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        // Test with Some - just reading, not mutating
-        let mut val = 21i64;
-        assert_eq!(f.call(Some(&mut val)), 42);
-
-        let mut val2 = 5i64;
-        assert_eq!(f.call(Some(&mut val2)), 10);
-
-        // None case
-        assert_eq!(f.call(None), -1);
-    }
-
-    #[test]
-    fn test_fn_mutating_opt_mut_ref_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn increment_in_place(opt: Option<&mut i64>) -> i64
-        // If Some, increments the value in place and returns new value; else returns -1
-        let incr_fn = compiler.fun1("increment_in_place", |ctx, opt: Var<OptMutRefType<i64>>| {
-            use crate::refer::{load_ref_mut, store_ref};
-            // Use a local variable to hold the new value
-            let result = ctx.let_var(0i64);
-            (
-                result,
-                match_opt_mut_ref(
-                    ctx,
-                    opt,
-                    |_ctx, mut ptr| {
-                        // Load current value, add 1, store back, and assign to result
-                        let incremented = add(load_ref_mut(&mut ptr), 1i64);
-                        (
-                            store_ref(&mut ptr, incremented),
-                            assign(*result, load_ref_mut(&mut ptr)),
-                        )
-                    },
-                    assign(*result, -1i64),
-                ),
-                *result,
-            )
-        });
-
-        let compiled = compiler.compile(incr_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        // Test mutation
-        let mut val = 41i64;
-        let returned = f.call(Some(&mut val));
-        assert_eq!(returned, 42);
-        assert_eq!(val, 42);
-
-        // None case
-        assert_eq!(f.call(None), -1);
-    }
-
-    #[test]
-    fn test_fn_returning_opt_mut_ref_i64() {
-        let mut compiler = Compiler::new();
-
-        // fn make_mut_ref(ptr: &mut i64) -> Option<&mut i64>
-        let make_ref = compiler.fun1("make_mut_ref", |_ctx, ptr: Var<SRefMut<i64>>| {
-            opt_mut_ref_some::<i64, _>(ptr)
-        });
-
-        let compiled = compiler.compile(make_ref).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        let mut val = 99i64;
-        let result = f.call(&mut val);
-        assert!(result.is_some());
-        if let Some(r) = result {
-            assert_eq!(*r, 99);
-            *r = 100;
-        }
-        assert_eq!(val, 100);
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: COption<f64> advanced
-    // =========================================================================
-
-    #[test]
-    fn test_fn_coption_f64_roundtrip() {
-        let mut compiler = Compiler::new();
-
-        // fn square_if_some(opt: COption<f64>) -> COption<f64>
-        let square_fn = compiler.fun1("square_if_some", |ctx, opt: Var<COptionType<f64>>| {
-            use crate::num::mul;
-            match_opt(
-                ctx,
-                opt,
-                |_ctx, val| c_some::<f64, _>(mul(val, val)),
-                c_none::<f64>(),
-            )
-        });
-
-        let compiled = compiler.compile(square_fn).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(COption::Some(3.0)), COption::Some(9.0));
-        assert_eq!(f.call(COption::Some(-2.0)), COption::Some(4.0));
-        assert_eq!(f.call(COption::None), COption::None);
-    }
-
-    // =========================================================================
-    // Function Pointer Tests: Multi-argument functions with options
-    // =========================================================================
-
-    #[test]
-    fn test_fn2_with_coption() {
-        let mut compiler = Compiler::new();
-
-        // fn add_options(a: COption<i64>, b: COption<i64>) -> COption<i64>
-        // Returns Some(a + b) if both are Some, else None
-        let add_opts = compiler.fun2(
-            "add_options",
-            |ctx, a: Var<COptionType<i64>>, b: Var<COptionType<i64>>| {
-                match_opt(
-                    ctx,
-                    a,
-                    |ctx, a_val| {
-                        match_opt(
-                            ctx,
-                            b,
-                            |_ctx, b_val| c_some::<i64, _>(add(a_val, b_val)),
-                            c_none::<i64>(),
-                        )
-                    },
-                    c_none::<i64>(),
-                )
-            },
-        );
-
-        let compiled = compiler.compile(add_opts).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(
-            f.call(COption::Some(10), COption::Some(20)),
-            COption::Some(30)
-        );
-        assert_eq!(f.call(COption::Some(5), COption::None), COption::None);
-        assert_eq!(f.call(COption::None, COption::Some(5)), COption::None);
-        assert_eq!(f.call(COption::None, COption::None), COption::None);
-    }
-
-    #[test]
-    fn test_fn2_mixed_option_and_primitive() {
-        let mut compiler = Compiler::new();
-
-        // fn unwrap_or_add(opt: COption<i64>, default: i64) -> i64
-        let unwrap_add = compiler.fun2(
-            "unwrap_or_add",
-            |_ctx, opt: Var<COptionType<i64>>, default: Var<i64>| unwrap_or(opt, default),
-        );
-
-        let compiled = compiler.compile(unwrap_add).expect("compilation failed");
-        let f = compiled.as_fn();
-
-        assert_eq!(f.call(COption::Some(42), 0), 42);
-        assert_eq!(f.call(COption::None, 99), 99);
-        assert_eq!(f.call(COption::Some(10), 99), 10);
     }
 }

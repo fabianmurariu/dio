@@ -10,7 +10,7 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{CompilationContext, Staged, ValueId, Var, VarUse};
+use crate::staged::{CompilationContext, Staged, Value, Var, VarUse};
 use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -181,9 +181,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.load(T::scalar_type(), ptr_val, 0)
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -221,9 +221,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.load(T::scalar_type(), ptr_val, 0)
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -262,9 +262,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.load(T::scalar_type(), ptr_val, 0)
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -327,9 +327,9 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        ctx.load(T::scalar_type(), ptr_val, 0)
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -366,13 +366,13 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
-        ctx.store(value, ptr_val, 0);
+        ctx.store_value::<T>(ptr_val.leaf(), value);
 
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -404,11 +404,11 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
-        ctx.store(value, ptr_val, 0);
-        ctx.get_unit_value()
+        ctx.store_value::<T>(ptr_val.leaf(), value);
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -446,15 +446,15 @@ where
 {
     type Out = SPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.iconst(ScalarType::I64, element_size);
-        let byte_offset = ctx.imul(idx, scale);
+        let byte_offset = ctx.imul(idx.leaf(), scale);
 
-        ctx.ptr_offset_bytes(ptr, byte_offset)
+        Value::scalar(ctx.ptr_offset_bytes(ptr.leaf(), byte_offset))
     }
 }
 
@@ -488,15 +488,15 @@ where
 {
     type Out = SMutPtr<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.iconst(ScalarType::I64, element_size);
-        let byte_offset = ctx.imul(idx, scale);
+        let byte_offset = ctx.imul(idx.leaf(), scale);
 
-        ctx.ptr_offset_bytes(ptr, byte_offset)
+        Value::scalar(ctx.ptr_offset_bytes(ptr.leaf(), byte_offset))
     }
 }
 
@@ -533,17 +533,17 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr = self.ptr.codegen(ctx);
         let idx = self.index.codegen(ctx);
 
         let element_size = std::mem::size_of::<T::RuntimeValue>() as i64;
         let scale = ctx.iconst(ScalarType::I64, element_size);
-        let byte_offset = ctx.imul(idx, scale);
+        let byte_offset = ctx.imul(idx.leaf(), scale);
 
-        let offset_ptr = ctx.ptr_offset_bytes(ptr, byte_offset);
+        let offset_ptr = ctx.ptr_offset_bytes(ptr.leaf(), byte_offset);
 
-        ctx.load(T::scalar_type(), offset_ptr, 0)
+        Value::scalar(ctx.load(T::scalar_type(), offset_ptr, 0))
     }
 }
 
@@ -588,11 +588,11 @@ impl<S> Copy for ConstPtr<S> {}
 
 unsafe impl<S: StagedType> Staged for ConstPtr<S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // A baked host address becomes a staged pointer (Cranelift: the i64 itself;
         // MLIR: inttoptr).
         let addr = ctx.iconst(ScalarType::I64, self.addr as i64);
-        ctx.addr_to_ptr(addr)
+        Value::scalar(ctx.addr_to_ptr(addr))
     }
 }
 
@@ -665,7 +665,7 @@ impl<P: Copy, S> Copy for PtrCast<P, S> {}
 
 unsafe impl<P: Staged, S: StagedType> Staged for PtrCast<P, S> {
     type Out = S;
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // A cast is a no-op on the address value; only the static type changes.
         self.ptr.codegen(ctx)
     }
@@ -793,9 +793,9 @@ where
     P::Out: RawPointer,
 {
     type Out = bool;
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let p = self.ptr.codegen(ctx);
-        ctx.icmp_imm(IntCmp::Eq, p, 0)
+        Value::scalar(ctx.icmp_imm(IntCmp::Eq, p.leaf(), 0))
     }
 }
 

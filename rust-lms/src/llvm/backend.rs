@@ -23,7 +23,8 @@ use melior::Context;
 use mlir_sys::MlirValue;
 
 use crate::staged::{
-    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    expect_arguments, Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId,
+    VarHandle,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
 
@@ -89,7 +90,7 @@ pub(super) struct FuncDecl {
 pub struct MlirBackend<'c> {
     context: &'c Context,
     location: Location<'c>,
-    param_types: Vec<Type<'c>>,
+    param_types: Vec<ScalarType>,
     /// Function parameters (as block args) + all allocas; branches to `blocks[0]`.
     entry: Block<'c>,
     /// Body blocks; `blocks[0]` is the "start" block. Indexed by [`BlockHandle`].
@@ -98,8 +99,8 @@ pub struct MlirBackend<'c> {
     current: usize,
     /// `ValueId` → MLIR value arena.
     values: Vec<MlirValue>,
-    /// `VarHandle` → (alloca ptr `ValueId`, element type).
-    vars: Vec<(ValueId, ScalarType)>,
+    /// `VarHandle` → alloca pointer. The element type lives in the handle.
+    vars: Vec<ValueId>,
     /// `StackSlotId` → alloca ptr `ValueId` (an `llvm.ptr` to a byte buffer).
     slots: Vec<ValueId>,
     /// `SigRefId` → (param types, optional result) for `call_indirect`.
@@ -118,9 +119,12 @@ impl<'c> MlirBackend<'c> {
     /// Begin a function body whose entry block takes `param_types`. The parameters are
     /// interned as the first `ValueId`s, reachable via [`MlirBackend::param`]. Codegen
     /// starts in body block 0.
-    pub fn new(context: &'c Context, param_types: Vec<Type<'c>>) -> Self {
+    pub fn new(context: &'c Context, param_types: Vec<ScalarType>) -> Self {
         let location = Location::unknown(context);
-        let block_args: Vec<_> = param_types.iter().map(|t| (*t, location)).collect();
+        let block_args: Vec<_> = param_types
+            .iter()
+            .map(|ty| (scalar_to_mlir(context, *ty), location))
+            .collect();
         let entry = Block::new(&block_args);
         let mut values = Vec::with_capacity(param_types.len());
         for index in 0..param_types.len() {
@@ -146,7 +150,7 @@ impl<'c> MlirBackend<'c> {
 
     /// The [`ValueId`] of entry-block parameter `index`.
     pub fn param(&self, index: usize) -> ValueId {
-        ValueId::from_u32(index as u32)
+        ValueId::from_u32(index as u32, self.param_types[index])
     }
 
     /// Record an external function `name(params) -> ret` and return its extern id (for the
@@ -233,7 +237,11 @@ impl<'c> MlirBackend<'c> {
             .iter()
             .map(|t| scalar_to_mlir(context, *t))
             .collect();
-        let function_type = FunctionType::new(context, &param_types, &results);
+        let params: Vec<Type> = param_types
+            .iter()
+            .map(|ty| scalar_to_mlir(context, *ty))
+            .collect();
+        let function_type = FunctionType::new(context, &params, &results);
 
         entry.append_operation(cf::br(&blocks[0], &[], location));
 
@@ -255,8 +263,8 @@ impl<'c> MlirBackend<'c> {
     }
 
     // ---- internal helpers ----
-    fn intern(&mut self, raw: MlirValue) -> ValueId {
-        let id = ValueId::from_u32(self.values.len() as u32);
+    fn intern(&mut self, raw: MlirValue, ty: ScalarType) -> ValueId {
+        let id = ValueId::from_u32(self.values.len() as u32, ty);
         self.values.push(raw);
         id
     }
@@ -264,17 +272,24 @@ impl<'c> MlirBackend<'c> {
     fn get(&self, id: ValueId) -> Value<'c, '_> {
         // SAFETY: every raw came from a `Value` produced into a block owned by `self`
         // (alive for the backend's whole lifetime); ids are only minted by `intern`/`new`.
-        unsafe { Value::from_raw(self.values[id.as_u32() as usize]) }
+        let value = unsafe { Value::from_raw(self.values[id.as_u32() as usize]) };
+        assert_eq!(
+            value.r#type(),
+            scalar_to_mlir(self.context, id.scalar_type()),
+            "ValueId {:?} disagrees with its MLIR value type",
+            id
+        );
+        value
     }
 
     /// Append a single-result op to the current block and intern its result.
-    fn emit_value(&mut self, operation: Operation<'c>) -> ValueId {
+    fn emit_value(&mut self, operation: Operation<'c>, ty: ScalarType) -> ValueId {
         let raw = self.blocks[self.current]
             .append_operation(operation)
             .result(0)
             .expect("operation produces one result")
             .to_raw();
-        self.intern(raw)
+        self.intern(raw, ty)
     }
 
     /// Append a result-less op to the current block.
@@ -314,7 +329,7 @@ impl<'c> MlirBackend<'c> {
             .result(0)
             .expect("alloca result")
             .to_raw();
-        self.intern(ptr_raw)
+        self.intern(ptr_raw, ScalarType::Ptr)
     }
 
     /// `ptr + bytes` (a byte-indexed `llvm.getelementptr` over `i8`); no-op when `bytes == 0`.
@@ -326,14 +341,10 @@ impl<'c> MlirBackend<'c> {
         let i8_ty = scalar_to_mlir(self.context, ScalarType::I8);
         let ptr_ty = llvm::r#type::pointer(self.context, 0);
         let indices = DenseI32ArrayAttribute::new(self.context, &[bytes]);
-        self.emit_value(llvm::get_element_ptr(
-            self.context,
-            base,
-            indices,
-            i8_ty,
-            ptr_ty,
-            self.location,
-        ))
+        self.emit_value(
+            llvm::get_element_ptr(self.context, base, indices, i8_ty, ptr_ty, self.location),
+            ScalarType::Ptr,
+        )
     }
 
     /// Reduce a branch condition to `i1`. Cranelift's `brif` treats any nonzero integer as
@@ -341,43 +352,28 @@ impl<'c> MlirBackend<'c> {
     /// `COption` discriminant); MLIR's `cf.cond_br` strictly requires `i1`. Already-`i1`
     /// conditions pass through untouched; anything else becomes `cond != 0`.
     fn coerce_to_bool(&mut self, cond: ValueId) -> ValueId {
-        let i1_ty: Type<'c> = IntegerType::new(self.context, 1).into();
-        let cond_ty = self.get(cond).r#type();
-        if cond_ty == i1_ty {
+        if cond.scalar_type() == ScalarType::Bool {
             return cond;
         }
-        let zero = self.emit_value(arith::constant(
-            self.context,
-            IntegerAttribute::new(cond_ty, 0).into(),
-            self.location,
-        ));
+        let cond = self.ptr_to_int(cond);
+        assert!(
+            cond.scalar_type().is_integer(),
+            "branch condition must be Bool, an integer, or Ptr"
+        );
+        let cond_ty = scalar_to_mlir(self.context, cond.scalar_type());
+        let zero = self.emit_value(
+            arith::constant(
+                self.context,
+                IntegerAttribute::new(cond_ty, 0).into(),
+                self.location,
+            ),
+            cond.scalar_type(),
+        );
         let (a, b) = (self.get(cond), self.get(zero));
-        self.emit_value(arith::cmpi(
-            self.context,
-            CmpiPredicate::Ne,
-            a,
-            b,
-            self.location,
-        ))
-    }
-
-    /// Reinterpret an integer callee address as an `llvm.ptr`. The opaque-iterator vtable
-    /// stores function pointers as `u64` (matching Cranelift's integer-addressed
-    /// `call_indirect`); LLVM needs a real pointer to call through. A value that is already
-    /// a pointer passes through.
-    fn int_to_ptr(&mut self, v: ValueId) -> ValueId {
-        let val = self.get(v);
-        let ty = val.r#type();
-        let ptr_ty = llvm::r#type::pointer(self.context, 0);
-        if ty == ptr_ty {
-            return v;
-        }
-        let op = OperationBuilder::new("llvm.inttoptr", self.location)
-            .add_operands(&[val])
-            .add_results(&[ptr_ty])
-            .build()
-            .expect("valid llvm.inttoptr");
-        self.emit_value(op)
+        self.emit_value(
+            arith::cmpi(self.context, CmpiPredicate::Ne, a, b, self.location),
+            ScalarType::Bool,
+        )
     }
 
     /// Reinterpret an `llvm.ptr` as its `i64` address. Cranelift compares/measures pointers
@@ -385,112 +381,138 @@ impl<'c> MlirBackend<'c> {
     /// `llvm.ptrtoint`-ed to `i64` first (e.g. an `icmp`/`ptr_is_null` on a pointer, or
     /// pointer difference). A non-pointer value passes through.
     fn ptr_to_int(&mut self, v: ValueId) -> ValueId {
-        let val = self.get(v);
-        let ptr_ty = llvm::r#type::pointer(self.context, 0);
-        if val.r#type() != ptr_ty {
+        if v.scalar_type() != ScalarType::Ptr {
             return v;
         }
+        let val = self.get(v);
         let i64_ty = scalar_to_mlir(self.context, ScalarType::I64);
         let op = OperationBuilder::new("llvm.ptrtoint", self.location)
             .add_operands(&[val])
             .add_results(&[i64_ty])
             .build()
             .expect("valid llvm.ptrtoint");
-        self.emit_value(op)
+        self.emit_value(op, ScalarType::I64)
     }
 }
 
 impl<'c> Backend for MlirBackend<'c> {
     // ---- constants ----
     fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
-        let ty = scalar_to_mlir(self.context, ty);
-        let attribute = IntegerAttribute::new(ty, imm).into();
-        self.emit_value(arith::constant(self.context, attribute, self.location))
+        let mlir_ty = scalar_to_mlir(self.context, ty);
+        let attribute = IntegerAttribute::new(mlir_ty, imm).into();
+        self.emit_value(arith::constant(self.context, attribute, self.location), ty)
+    }
+    fn null_ptr(&mut self) -> ValueId {
+        let ty = scalar_to_mlir(self.context, ScalarType::Ptr);
+        self.emit_value(llvm::zero(ty, self.location), ScalarType::Ptr)
     }
     fn f64const(&mut self, v: f64) -> ValueId {
         let ty = scalar_to_mlir(self.context, ScalarType::F64);
         let attribute = melior::ir::attribute::FloatAttribute::new(self.context, ty, v).into();
-        self.emit_value(arith::constant(self.context, attribute, self.location))
+        self.emit_value(
+            arith::constant(self.context, attribute, self.location),
+            ScalarType::F64,
+        )
     }
     fn f32const(&mut self, v: f32) -> ValueId {
         let ty = scalar_to_mlir(self.context, ScalarType::F32);
         let attribute =
             melior::ir::attribute::FloatAttribute::new(self.context, ty, v as f64).into();
-        self.emit_value(arith::constant(self.context, attribute, self.location))
+        self.emit_value(
+            arith::constant(self.context, attribute, self.location),
+            ScalarType::F32,
+        )
     }
 
     // ---- integer arithmetic ----
     fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::addi(a, b, self.location))
+        self.emit_value(arith::addi(a, b, self.location), ty)
     }
     fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::subi(a, b, self.location))
+        self.emit_value(arith::subi(a, b, self.location), ty)
     }
     fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::muli(a, b, self.location))
+        self.emit_value(arith::muli(a, b, self.location), ty)
     }
     fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::divsi(a, b, self.location))
+        self.emit_value(arith::divsi(a, b, self.location), ty)
     }
     fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::divui(a, b, self.location))
+        self.emit_value(arith::divui(a, b, self.location), ty)
     }
     fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::remsi(a, b, self.location))
+        self.emit_value(arith::remsi(a, b, self.location), ty)
     }
     fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::remui(a, b, self.location))
+        self.emit_value(arith::remui(a, b, self.location), ty)
     }
 
     // ---- float arithmetic ----
     fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::addf(a, b, self.location))
+        self.emit_value(arith::addf(a, b, self.location), ty)
     }
     fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::subf(a, b, self.location))
+        self.emit_value(arith::subf(a, b, self.location), ty)
     }
     fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::mulf(a, b, self.location))
+        self.emit_value(arith::mulf(a, b, self.location), ty)
     }
     fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::divf(a, b, self.location))
+        self.emit_value(arith::divf(a, b, self.location), ty)
     }
 
     // ---- bitwise / shift ----
     fn band(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::andi(a, b, self.location))
+        self.emit_value(arith::andi(a, b, self.location), ty)
     }
     fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::ori(a, b, self.location))
+        self.emit_value(arith::ori(a, b, self.location), ty)
     }
     fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::xori(a, b, self.location))
+        self.emit_value(arith::xori(a, b, self.location), ty)
     }
     fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::shli(a, b, self.location))
+        self.emit_value(arith::shli(a, b, self.location), ty)
     }
     fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::shrsi(a, b, self.location))
+        self.emit_value(arith::shrsi(a, b, self.location), ty)
     }
     fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::shrui(a, b, self.location))
+        self.emit_value(arith::shrui(a, b, self.location), ty)
     }
 
     // ---- compare / select ----
@@ -499,20 +521,16 @@ impl<'c> Backend for MlirBackend<'c> {
         let a = self.ptr_to_int(a);
         let b = self.ptr_to_int(b);
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::cmpi(
-            self.context,
-            int_predicate(cc),
-            a,
-            b,
-            self.location,
-        ))
+        self.emit_value(
+            arith::cmpi(self.context, int_predicate(cc), a, b, self.location),
+            ScalarType::Bool,
+        )
     }
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId {
         // A pointer operand (e.g. `ptr_is_null`, which compares against 0) becomes its `i64`
         // address, so the materialized constant and the compare are plain integer ops.
         let a = self.ptr_to_int(a);
-        let a_val = self.get(a);
-        let ty = a_val.r#type();
+        let ty = scalar_to_mlir(self.context, a.scalar_type());
         let imm_raw = self.blocks[self.current]
             .append_operation(arith::constant(
                 self.context,
@@ -522,56 +540,54 @@ impl<'c> Backend for MlirBackend<'c> {
             .result(0)
             .expect("constant result")
             .to_raw();
-        let imm_id = self.intern(imm_raw);
+        let imm_id = self.intern(imm_raw, a.scalar_type());
         self.icmp(cc, a, imm_id)
     }
     fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId {
         let (a, b) = (self.get(a), self.get(b));
-        self.emit_value(arith::cmpf(
-            self.context,
-            float_predicate(cc),
-            a,
-            b,
-            self.location,
-        ))
+        self.emit_value(
+            arith::cmpf(self.context, float_predicate(cc), a, b, self.location),
+            ScalarType::Bool,
+        )
     }
     fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
         let (cond, a, b) = (self.get(cond), self.get(a), self.get(b));
-        self.emit_value(arith::select(cond, a, b, self.location))
+        self.emit_value(arith::select(cond, a, b, self.location), ty)
     }
 
     // ---- casts ----
     fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::extsi(v, ty, self.location))
+        self.emit_value(arith::extsi(v, ty, self.location), to)
     }
     fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::extui(v, ty, self.location))
+        self.emit_value(arith::extui(v, ty, self.location), to)
     }
     fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::trunci(v, ty, self.location))
+        self.emit_value(arith::trunci(v, ty, self.location), to)
     }
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::sitofp(v, ty, self.location))
+        self.emit_value(arith::sitofp(v, ty, self.location), to)
     }
     fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::uitofp(v, ty, self.location))
+        self.emit_value(arith::uitofp(v, ty, self.location), to)
     }
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         // Same-width reinterpret between non-pointer scalars (e.g. f64↔i64), the Cranelift
         // `bitcast` contract.
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
-        self.emit_value(arith::bitcast(v, ty, self.location))
+        self.emit_value(arith::bitcast(v, ty, self.location), to)
     }
 
     // ---- memory ----
@@ -579,13 +595,16 @@ impl<'c> Backend for MlirBackend<'c> {
         let ptr = self.offset_ptr_const(ptr, offset);
         let mlir_ty = scalar_to_mlir(self.context, ty);
         let ptr = self.get(ptr);
-        self.emit_value(llvm::load(
-            self.context,
-            ptr,
-            mlir_ty,
-            self.location,
-            LoadStoreOptions::new(),
-        ))
+        self.emit_value(
+            llvm::load(
+                self.context,
+                ptr,
+                mlir_ty,
+                self.location,
+                LoadStoreOptions::new(),
+            ),
+            ty,
+        )
     }
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
         let ptr = self.offset_ptr_const(ptr, offset);
@@ -627,7 +646,7 @@ impl<'c> Backend for MlirBackend<'c> {
                 .result(0)
                 .expect("load result")
                 .to_raw();
-            let byte = self.intern(byte_raw);
+            let byte = self.intern(byte_raw, ScalarType::I8);
             let dst_ptr = self.offset_ptr_const(dst, offset);
             let (byte_val, dst_val) = (self.get(byte), self.get(dst_ptr));
             self.emit(llvm::store(
@@ -646,14 +665,17 @@ impl<'c> Backend for MlirBackend<'c> {
         let index = self.get(offset);
         let i8_ty = scalar_to_mlir(self.context, ScalarType::I8);
         let ptr_ty = llvm::r#type::pointer(self.context, 0);
-        self.emit_value(llvm::get_element_ptr_dynamic(
-            self.context,
-            base,
-            &[index],
-            i8_ty,
-            ptr_ty,
-            self.location,
-        ))
+        self.emit_value(
+            llvm::get_element_ptr_dynamic(
+                self.context,
+                base,
+                &[index],
+                i8_ty,
+                ptr_ty,
+                self.location,
+            ),
+            ScalarType::Ptr,
+        )
     }
     fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
         self.offset_ptr_const(ptr, bytes as i32)
@@ -668,7 +690,7 @@ impl<'c> Backend for MlirBackend<'c> {
                 .add_results(&[ptr_ty])
                 .build()
                 .expect("valid llvm.inttoptr");
-        self.emit_value(operation)
+        self.emit_value(operation, ScalarType::Ptr)
     }
 
     // ---- blocks & control flow ----
@@ -682,14 +704,14 @@ impl<'c> Backend for MlirBackend<'c> {
         let raw = self.blocks[block.as_u32() as usize]
             .add_argument(mlir_ty, self.location)
             .to_raw();
-        self.intern(raw)
+        self.intern(raw, ty)
     }
-    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId {
+    fn block_param(&mut self, block: BlockHandle, idx: usize, ty: ScalarType) -> ValueId {
         let raw = self.blocks[block.as_u32() as usize]
             .argument(idx)
             .expect("block argument exists")
             .to_raw();
-        self.intern(raw)
+        self.intern(raw, ty)
     }
     fn switch_to_block(&mut self, block: BlockHandle) {
         self.current = block.as_u32() as usize;
@@ -733,12 +755,12 @@ impl<'c> Backend for MlirBackend<'c> {
         let elem_ty = scalar_to_mlir(self.context, ty);
         let align = ty.size_bytes() as i64;
         let ptr = self.alloca_entry(elem_ty, 1, align);
-        let handle = VarHandle::from_u32(self.vars.len() as u32);
-        self.vars.push((ptr, ty));
+        let handle = VarHandle::from_u32(self.vars.len() as u32, ty);
+        self.vars.push(ptr);
         handle
     }
     fn def_var(&mut self, var: VarHandle, val: ValueId) {
-        let (ptr, _) = self.vars[var.as_u32() as usize];
+        let ptr = self.vars[var.as_u32() as usize];
         let (val, ptr) = (self.get(val), self.get(ptr));
         self.emit(llvm::store(
             self.context,
@@ -749,23 +771,29 @@ impl<'c> Backend for MlirBackend<'c> {
         ));
     }
     fn use_var(&mut self, var: VarHandle) -> ValueId {
-        let (ptr, ty) = self.vars[var.as_u32() as usize];
+        let ptr = self.vars[var.as_u32() as usize];
+        let ty = var.scalar_type();
         let mlir_ty = scalar_to_mlir(self.context, ty);
         let ptr = self.get(ptr);
-        self.emit_value(llvm::load(
-            self.context,
-            ptr,
-            mlir_ty,
-            self.location,
-            LoadStoreOptions::new(),
-        ))
+        self.emit_value(
+            llvm::load(
+                self.context,
+                ptr,
+                mlir_ty,
+                self.location,
+                LoadStoreOptions::new(),
+            ),
+            ty,
+        )
     }
 
     // ---- calls & signatures ----
     fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId> {
         let decl = &self.func_refs[func.as_u32() as usize];
         let name = decl.name.clone();
+        let params = decl.params.clone();
         let ret = decl.ret;
+        expect_arguments("call", args, &params);
         let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
         let result_types: Vec<Type> = ret
             .iter()
@@ -788,7 +816,7 @@ impl<'c> Backend for MlirBackend<'c> {
                     .to_raw()
             })
         };
-        raw.map(|raw| self.intern(raw))
+        raw.map(|raw| self.intern(raw, func.return_type().unwrap()))
     }
     fn call_indirect(
         &mut self,
@@ -796,14 +824,19 @@ impl<'c> Backend for MlirBackend<'c> {
         callee: ValueId,
         args: &[ValueId],
     ) -> Option<ValueId> {
-        let (_, ret) = self.sigs[sig.as_u32() as usize].clone();
-        // The callee arrives as an integer address (opaque-iter vtable) or a pointer; LLVM
-        // calls through an `!llvm.ptr`. `func.call_indirect` demands a `!func.func` callee, so
+        let (params, ret) = self.sigs[sig.as_u32() as usize].clone();
+        expect_arguments("call_indirect", args, &params);
+        // The callee is a typed pointer (including opaque-iterator vtables). LLVM calls
+        // through an `!llvm.ptr`. `func.call_indirect` demands a `!func.func` callee, so
         // use an indirect `llvm.call` instead: the pointer is the first `callee_operands` value
         // (no `callee` symbol, no `var_callee_type` since these are non-variadic).
-        let callee_ptr = self.int_to_ptr(callee);
+        assert_eq!(
+            callee.scalar_type(),
+            ScalarType::Ptr,
+            "call_indirect callee must be Ptr"
+        );
         let mut operands: Vec<Value> = Vec::with_capacity(1 + args.len());
-        operands.push(self.get(callee_ptr));
+        operands.push(self.get(callee));
         operands.extend(args.iter().map(|id| self.get(*id)));
         let result_types: Vec<Type> = ret
             .iter()
@@ -836,7 +869,7 @@ impl<'c> Backend for MlirBackend<'c> {
                     .to_raw()
             })
         };
-        raw.map(|raw| self.intern(raw))
+        raw.map(|raw| self.intern(raw, sig.return_type().unwrap()))
     }
     fn func_addr(&mut self, func: FuncRefId) -> ValueId {
         let decl = &self.func_refs[func.as_u32() as usize];
@@ -853,14 +886,18 @@ impl<'c> Backend for MlirBackend<'c> {
             .collect();
         let fn_ty = FunctionType::new(self.context, &params, &results);
         let callee = FlatSymbolRefAttribute::new(self.context, &name);
-        let function_value =
-            self.emit_value(func::constant(self.context, callee, fn_ty, self.location));
+        let function_raw = self.blocks[self.current]
+            .append_operation(func::constant(self.context, callee, fn_ty, self.location))
+            .result(0)
+            .expect("function constant produces one result")
+            .to_raw();
 
         // `func.constant` yields a *function-typed* value; the storage-pointer ABI needs the
         // function's *address* as an `llvm.ptr`. Bridge with an unrealized conversion cast —
         // `create_to_llvm` lowers `func.constant` to `llvm.mlir.addressof` (a real `ptr`) and
         // reconciles the (now ptr→ptr) cast away.
-        let function_value = self.get(function_value);
+        // SAFETY: the value belongs to the current block, which is owned by `self`.
+        let function_value = unsafe { Value::from_raw(function_raw) };
         let ptr_ty = llvm::r#type::pointer(self.context, 0);
         let cast = melior::ir::operation::OperationBuilder::new(
             "builtin.unrealized_conversion_cast",
@@ -870,10 +907,10 @@ impl<'c> Backend for MlirBackend<'c> {
         .add_results(&[ptr_ty])
         .build()
         .expect("valid unrealized_conversion_cast");
-        self.emit_value(cast)
+        self.emit_value(cast, ScalarType::Ptr)
     }
     fn import_signature(&mut self, sig: &SigSpec) -> SigRefId {
-        let id = SigRefId::from_u32(self.sigs.len() as u32);
+        let id = SigRefId::from_u32(self.sigs.len() as u32, sig.ret);
         self.sigs.push((sig.params.clone(), sig.ret));
         id
     }
@@ -884,7 +921,7 @@ impl<'c> Backend for MlirBackend<'c> {
             params: decl.params.clone(),
             ret: decl.ret,
         };
-        let id = FuncRefId::from_u32(self.func_refs.len() as u32);
+        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.ret);
         self.func_refs.push(resolved);
         id
     }
@@ -895,7 +932,7 @@ impl<'c> Backend for MlirBackend<'c> {
             params: decl.params.clone(),
             ret: decl.ret,
         };
-        let id = FuncRefId::from_u32(self.func_refs.len() as u32);
+        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.ret);
         self.func_refs.push(resolved);
         id
     }

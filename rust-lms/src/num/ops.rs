@@ -2,7 +2,7 @@
 
 use std::marker::PhantomData;
 
-use crate::staged::{CompilationContext, Const, IntoStaged, Staged, ValueId, Var};
+use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::types::StagedType;
 
 use super::traits::{FloatNum, IntNum, Num};
@@ -26,7 +26,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_add(lv, rv, ctx)
@@ -48,7 +48,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_sub(lv, rv, ctx)
@@ -70,7 +70,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_mul(lv, rv, ctx)
@@ -92,7 +92,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_div(lv, rv, ctx)
@@ -114,7 +114,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_rem(lv, rv, ctx)
@@ -140,7 +140,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_bitand(lv, rv, ctx)
@@ -162,7 +162,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_bitor(lv, rv, ctx)
@@ -184,7 +184,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_bitxor(lv, rv, ctx)
@@ -206,7 +206,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_shl(lv, rv, ctx)
@@ -228,7 +228,7 @@ where
 {
     type Out = T;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_shr(lv, rv, ctx)
@@ -261,7 +261,7 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let value = self.expr.codegen(ctx);
         let from_bits = FROM::size_of() * 8;
         let to_bits = TO::size_of() * 8;
@@ -269,9 +269,11 @@ where
 
         match from_bits.cmp(&to_bits) {
             std::cmp::Ordering::Equal => value,
-            std::cmp::Ordering::Less if FROM::SIGNED => ctx.sextend(to_ty, value),
-            std::cmp::Ordering::Less => ctx.uextend(to_ty, value),
-            std::cmp::Ordering::Greater => ctx.ireduce(to_ty, value),
+            std::cmp::Ordering::Less if FROM::SIGNED => {
+                Value::scalar(ctx.sextend(to_ty, value.leaf()))
+            }
+            std::cmp::Ordering::Less => Value::scalar(ctx.uextend(to_ty, value.leaf())),
+            std::cmp::Ordering::Greater => Value::scalar(ctx.ireduce(to_ty, value.leaf())),
         }
     }
 }
@@ -301,13 +303,13 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let value = self.expr.codegen(ctx);
         let to_ty = TO::scalar_type();
         if FROM::SIGNED {
-            ctx.fcvt_from_sint(to_ty, value)
+            Value::scalar(ctx.fcvt_from_sint(to_ty, value.leaf()))
         } else {
-            ctx.fcvt_from_uint(to_ty, value)
+            Value::scalar(ctx.fcvt_from_uint(to_ty, value.leaf()))
         }
     }
 }
@@ -331,7 +333,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_lt(lv, rv, ctx)
@@ -353,7 +355,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_gt(lv, rv, ctx)
@@ -375,7 +377,7 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_eq(lv, rv, ctx)
@@ -546,7 +548,7 @@ where
 {
     type Out = TO;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         assert_eq!(
             FROM::size_of(),
             TO::size_of(),
@@ -556,7 +558,7 @@ where
         if FROM::scalar_type() == TO::scalar_type() {
             value
         } else {
-            ctx.bitcast(TO::scalar_type(), value)
+            Value::scalar(ctx.bitcast(TO::scalar_type(), value.leaf()))
         }
     }
 }
@@ -647,11 +649,11 @@ where
 {
     type Out = Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let cond = self.condition.codegen(ctx);
         let true_val = self.if_true.codegen(ctx);
         let false_val = self.if_false.codegen(ctx);
-        ctx.select(cond, true_val, false_val)
+        Value::scalar(ctx.select(cond.leaf(), true_val.leaf(), false_val.leaf()))
     }
 }
 
@@ -674,6 +676,7 @@ where
 }
 
 /// Branchless minimum.
+#[allow(clippy::type_complexity)]
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
     T: Num,
@@ -695,6 +698,7 @@ where
 }
 
 /// Branchless maximum.
+#[allow(clippy::type_complexity)]
 pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
     T: Num,

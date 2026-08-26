@@ -76,8 +76,8 @@ fn test_ergonomic_while_loop() {
         let compiled = compiler.compile(count_to_n).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f.call(5), 0 + 1 + 2 + 3 + 4); // Sum of 0..5
-        assert_eq!(f.call(3), 0 + 1 + 2); // Sum of 0..3
+        assert_eq!(f.call(5), 1 + 2 + 3 + 4); // Sum of 0..5
+        assert_eq!(f.call(3), 1 + 2); // Sum of 0..3
         assert_eq!(f.call(55), (54 * 55) / 2); // Sum of 0..55
     });
 }
@@ -130,9 +130,9 @@ fn test_ergonomic_slice_subslice() {
             let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
             let sub = unsafe { arr.slice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.clone().len()), move |ctx| {
+            ctx.while_loop(lt(i, sub.count()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
-                ctx.store(total, total + unsafe { sub.clone().get_unchecked(i) });
+                ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
             });
             total
@@ -211,7 +211,7 @@ fn test_imperative_while_loop() {
         let compiled = compiler.compile(count_to_n).expect("compilation failed");
         let f = compiled.as_fn();
 
-        assert_eq!(f.call(5), 0 + 1 + 2 + 3 + 4);
+        assert_eq!(f.call(5), 1 + 2 + 3 + 4);
         assert_eq!(f.call(10), 45);
     });
 }

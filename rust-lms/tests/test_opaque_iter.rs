@@ -18,6 +18,10 @@ pub struct Graph {
     nodes: Vec<u64>,
 }
 
+pub struct SliceGraph {
+    rows: Vec<Vec<i64>>,
+}
+
 type NodeIter = std::vec::IntoIter<u64>;
 
 /// Producer: a fresh owned iterator over the node ids, boxed to a thin handle.
@@ -26,6 +30,19 @@ type NodeIter = std::vec::IntoIter<u64>;
 pub extern "C" fn graph_iter_nodes(g: &Graph) -> *mut () {
     let it: Box<NodeIter> = Box::new(g.nodes.clone().into_iter());
     Box::into_raw(it) as *mut ()
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn graph_iter_slices(g: &SliceGraph) -> *mut () {
+    let rows = g
+        .rows
+        .iter()
+        .map(|row| FatSlice::from_slice(row))
+        .collect::<Vec<_>>();
+    // SAFETY: the generated traversal transfers this handle to the matching
+    // `DynIter<FatSliceType<i64>>` next/drop functions exactly once.
+    unsafe { box_dyn_iter(rows.into_iter()).into_raw() }
 }
 
 #[extern_fn]
@@ -146,5 +163,30 @@ fn exact_size_count_is_o1_and_sum_works() {
         let compiled = compiler.compile(sum_fn).expect("compile");
         let sum = compiled.as_fn();
         assert_eq!(sum.call(&graph(vec![10, 20, 30, 40])), 100);
+    });
+}
+
+#[test]
+fn opaque_iterator_supports_fat_slice_items() {
+    for_each_backend(|mut compiler| {
+        let producer = compiler.extern_fn::<GraphIterSlicesExtern>();
+        let rows = compiler.opaque_iter_fns::<DynIter<FatSliceType<i64>>>();
+        let total_len = compiler.fun1(
+            "total_row_len",
+            move |ctx, graph: Var<SRef<Opaque<SliceGraph>>>| {
+                let total = ctx.var(0u64);
+                let handle = call_extern1(producer, graph);
+                // SAFETY: the producer transfers a matching fresh iterator handle.
+                unsafe { rows.iter(handle) }.for_each(ctx, move |ctx, row| {
+                    ctx.store(total, total + row.len());
+                });
+                total
+            },
+        );
+
+        let graph = SliceGraph {
+            rows: vec![vec![1], vec![2, 3, 4], vec![]],
+        };
+        assert_eq!(compiler.compile(total_len).unwrap().call(&graph), 4);
     });
 }

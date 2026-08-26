@@ -17,21 +17,10 @@
 //!
 //! # Canonical Staged representation
 //!
-//! Within the staged graph a slice's `codegen` value is always a single `i64`,
-//! resolved one of two ways (see [`CompilationContext::slice_data_ptr`] /
-//! [`CompilationContext::slice_len`], which are the only code that knows this):
-//!
-//! - **register-resolved** — slice *parameters* load the descriptor into two
-//!   Cranelift variables (`ptr_var`, `len_var`) kept in
-//!   `ctx.slice_vars` keyed by `var_id`. Slice ops read those registers
-//!   directly, with no memory access (the fast path for tight loops).
-//! - **memory-resolved** — subslices (and any operand without a `var_id`) have
-//!   a `codegen` value that is a *pointer to* a `(ptr, len)` pair on a stack
-//!   slot: `ptr` at offset 0, `len` at offset 8.
-//!
-//! So `Slice<T>` really is just "ptr + len"; the indirection only exists
-//! because `Staged::codegen` returns a single `Value`, so an anonymous slice
-//! needs somewhere (the stack slot) to hold its two halves.
+//! Within the staged graph, a slice's `codegen` value is `Value::Fat { ptr, len }`.
+//! Both leaves remain in SSA registers through variables, sub-slicing, and slice ops.
+//! The pair is materialized as a descriptor only when it crosses the private function or
+//! extern ABI, and loaded back into a fat value on entry.
 //!
 //! # Example
 //!
@@ -59,7 +48,7 @@
 use crate::ffi::FatSliceType;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId, Var, VarUse};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -164,8 +153,10 @@ where
 {
     type Out = FatSliceType<T>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        self.repr.codegen(ctx)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -218,8 +209,10 @@ where
 {
     type Out = SRef<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        self.repr.codegen(ctx)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -245,7 +238,7 @@ where
     ///
     /// The descriptor must contain a pointer that is live and aligned for
     /// reads of `len` values of `T` for the duration of generated execution.
-    unsafe fn as_slice<T>(self) -> AsSlice<Self, T>
+    unsafe fn into_slice<T>(self) -> AsSlice<Self, T>
     where
         T: StagedType + 'a,
         R: SliceRepr<T>,
@@ -279,7 +272,7 @@ where
     /// The descriptor must contain a pointer that is live, aligned, and
     /// exclusively writable for `len` values of `T` for the duration of
     /// generated execution.
-    unsafe fn as_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    unsafe fn into_mut_slice<T>(self) -> AsMutSlice<Self, T>
     where
         T: StagedType + 'a,
         R: MutSliceRepr<T>,
@@ -325,8 +318,10 @@ where
 {
     type Out = SRefMut<'a, Slice<T>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        self.repr.codegen(ctx)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
+        let base = self.repr.codegen(ctx).leaf();
+        ctx.load_fat(base)
     }
 }
 
@@ -533,8 +528,8 @@ where
 {
     type Out = u64;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.slice_len(&self.slice)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.slice_len(&self.slice))
     }
 }
 
@@ -556,8 +551,8 @@ where
 {
     type Out = <S::Out as SliceType>::DataPtr;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-        ctx.slice_data_ptr(&self.slice)
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::scalar(ctx.slice_data_ptr(&self.slice))
     }
 }
 
@@ -581,10 +576,10 @@ where
 {
     type Out = <S::Out as SliceType>::ElemRef;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        element_addr::<S>(ctx, data_ptr, index)
+        Value::scalar(element_addr::<S>(ctx, data_ptr, index.leaf()))
     }
 }
 
@@ -603,10 +598,10 @@ where
 {
     type Out = SPtr<ElemOf<S>>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        element_addr::<S>(ctx, data_ptr, index)
+        Value::scalar(element_addr::<S>(ctx, data_ptr, index.leaf()))
     }
 }
 
@@ -664,10 +659,10 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index.leaf(), len);
 
         let get_block = ctx.create_block();
         let default_block = ctx.create_block();
@@ -677,18 +672,18 @@ where
 
         ctx.switch_to_block(get_block);
         ctx.seal_block(get_block);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
         let value = ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0);
         ctx.jump(merge_block, &[value]);
 
         ctx.switch_to_block(default_block);
         ctx.seal_block(default_block);
         let default = self.default.codegen(ctx);
-        ctx.jump(merge_block, &[default]);
+        ctx.jump(merge_block, &[default.leaf()]);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0, ElemOf::<S>::scalar_type()))
     }
 }
 
@@ -709,33 +704,33 @@ where
 {
     type Out = bool;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let (data_ptr, len) = ctx.slice_parts(&self.slice);
-        let in_bounds = ctx.icmp(IntCmp::Ult, index, len);
+        let in_bounds = ctx.icmp(IntCmp::Ult, index.leaf(), len);
 
         let set_block = ctx.create_block();
         let out_of_bounds_block = ctx.create_block();
         let merge_block = ctx.create_block();
-        ctx.append_block_param(merge_block, ScalarType::I8);
+        ctx.append_block_param(merge_block, ScalarType::Bool);
         ctx.brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
 
         ctx.switch_to_block(set_block);
         ctx.seal_block(set_block);
         let value = self.value.codegen(ctx);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.store(value, element_ptr, 0);
-        let written = ctx.iconst(ScalarType::I8, 1);
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        ctx.store(value.leaf(), element_ptr, 0);
+        let written = ctx.iconst(ScalarType::Bool, 1);
         ctx.jump(merge_block, &[written]);
 
         ctx.switch_to_block(out_of_bounds_block);
         ctx.seal_block(out_of_bounds_block);
-        let not_written = ctx.iconst(ScalarType::I8, 0);
+        let not_written = ctx.iconst(ScalarType::Bool, 0);
         ctx.jump(merge_block, &[not_written]);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        ctx.block_param(merge_block, 0)
+        Value::scalar(ctx.block_param(merge_block, 0, ScalarType::Bool))
     }
 }
 
@@ -748,11 +743,11 @@ where
 {
     type Out = ElemOf<S>;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0)
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        ctx.load_value::<ElemOf<S>>(element_ptr)
     }
 }
 
@@ -778,13 +773,13 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let element_ptr = element_addr::<S>(ctx, data_ptr, index);
-        ctx.store(value, element_ptr, 0);
-        ctx.get_unit_value()
+        let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
+        ctx.store_value::<ElemOf<S>>(element_ptr, value);
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -811,19 +806,18 @@ where
 {
     type Out = ();
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let i = self.i.codegen(ctx);
         let j = self.j.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
-        let addr_i = element_addr::<S>(ctx, data_ptr, i);
-        let addr_j = element_addr::<S>(ctx, data_ptr, j);
+        let addr_i = element_addr::<S>(ctx, data_ptr, i.leaf());
+        let addr_j = element_addr::<S>(ctx, data_ptr, j.leaf());
 
-        let ty = ElemOf::<S>::scalar_type();
-        let vi = ctx.load(ty, addr_i, 0);
-        let vj = ctx.load(ty, addr_j, 0);
-        ctx.store(vj, addr_i, 0);
-        ctx.store(vi, addr_j, 0);
-        ctx.get_unit_value()
+        let vi = ctx.load_value::<ElemOf<S>>(addr_i);
+        let vj = ctx.load_value::<ElemOf<S>>(addr_j);
+        ctx.store_value::<ElemOf<S>>(addr_i, vj);
+        ctx.store_value::<ElemOf<S>>(addr_j, vi);
+        Value::scalar(ctx.get_unit_value())
     }
 }
 
@@ -835,8 +829,7 @@ where
 ///
 /// Reports `Out = S::Out`, so sub-slicing a `&[T]` yields a `&[T]` and
 /// sub-slicing a `&mut [T]` yields a `&mut [T]` — slices stay closed under
-/// this operation. Materializes a fresh `(ptr, len)` pair on a stack slot
-/// (the memory-resolved encoding; see the module docs).
+/// this operation. The result stays as a `(ptr, len)` SSA pair.
 #[derive(Clone, Copy)]
 pub struct SliceSliceUnchecked<S, START, END> {
     slice: S,
@@ -853,21 +846,17 @@ where
 {
     type Out = S::Out;
 
-    fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let start = self.start.codegen(ctx);
         let end = self.end.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
 
         // New base pointer: data_ptr + start * sizeof(Elem); new len: end - start.
-        let new_ptr = element_addr::<S>(ctx, data_ptr, start);
-        let new_len = ctx.isub(end, start);
-
-        // Materialize the new (ptr, len) pair on a 16-byte stack slot.
-        let slot = ctx.alloc_stack_slot(16, 3);
-        let slot_ptr = ctx.stack_addr(slot, 0);
-        ctx.store(new_ptr, slot_ptr, 0);
-        ctx.store(new_len, slot_ptr, 8);
-        slot_ptr
+        // The sub-slice is a fat value (two SSA leaves) — no stack slot, unlike the old
+        // memory-resolved encoding.
+        let new_ptr = element_addr::<S>(ctx, data_ptr, start.leaf());
+        let new_len = ctx.isub(end.leaf(), start.leaf());
+        Value::fat(new_ptr, new_len)
     }
 }
 
@@ -880,12 +869,12 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone
 {
     /// Get the length of the slice.
-    fn len(self) -> SliceLen<Self> {
+    fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
     /// Get the raw data pointer.
-    fn as_ptr(self) -> SliceAsPtr<Self> {
+    fn into_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
     }
 
@@ -1268,12 +1257,12 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
 /// gated on `MutSliceType`, so it only exists here.
 pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized {
     /// Get the length of the slice.
-    fn len(self) -> SliceLen<Self> {
+    fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
     /// Get the raw mutable data pointer.
-    fn as_mut_ptr(self) -> SliceAsPtr<Self> {
+    fn into_mut_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
     }
 
@@ -1425,9 +1414,4 @@ where
     END: Staged<Out = u64>,
     T: StagedType + 'a,
 {
-}
-
-#[cfg(test)]
-mod tests {
-    // Tests will be added in a separate file
 }

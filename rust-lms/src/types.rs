@@ -8,7 +8,7 @@
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::types;
 
-use crate::staged::{CompilationContext, ValueId};
+use crate::staged::{CompilationContext, Value};
 
 // =============================================================================
 // Backend-neutral scalar type (Phase 0 of docs/llvm.md)
@@ -37,6 +37,24 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
+    pub(crate) fn is_integer(self) -> bool {
+        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
+    }
+
+    pub(crate) fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+
+    pub(crate) fn bit_width(self) -> u16 {
+        match self {
+            Self::Bool => 1,
+            Self::I8 => 8,
+            Self::I16 => 16,
+            Self::I32 | Self::F32 => 32,
+            Self::I64 | Self::F64 | Self::Ptr => 64,
+        }
+    }
+
     /// Lower to the Cranelift IR type. `Bool` and `Ptr` fold onto `I8`/`I64` — the
     /// Cranelift representation makes no such distinction.
     pub fn to_cranelift(self) -> cranelift_codegen::ir::Type {
@@ -47,23 +65,6 @@ impl ScalarType {
             ScalarType::F32 => types::F32,
             ScalarType::I64 | ScalarType::Ptr => types::I64,
             ScalarType::F64 => types::F64,
-        }
-    }
-
-    /// Recover a `ScalarType` from a Cranelift type. Lossy where Cranelift folds
-    /// distinct neutral types together: `I8` cannot be told apart from `Bool`, and
-    /// `I64` from `Ptr`. Used only by the backend when reading a Cranelift value's
-    /// type back; the staged type system's source of truth is
-    /// [`StagedType::scalar_type`], stated directly per impl.
-    pub fn from_cranelift(ty: cranelift_codegen::ir::Type) -> ScalarType {
-        match ty {
-            types::I8 => ScalarType::I8,
-            types::I16 => ScalarType::I16,
-            types::I32 => ScalarType::I32,
-            types::F32 => ScalarType::F32,
-            types::I64 => ScalarType::I64,
-            types::F64 => ScalarType::F64,
-            _ => ScalarType::Ptr,
         }
     }
 
@@ -219,7 +220,7 @@ pub unsafe trait StagedType {
 /// representation declared by [`StagedType`] and must represent `value`.
 pub unsafe trait ConstantType: StagedType {
     /// Generate code for a constant value
-    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_>) -> ValueId;
+    fn codegen_constant(value: &Self::RuntimeValue, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
 /// Marker trait for types that are Copy at the semantic level.
@@ -323,8 +324,8 @@ macro_rules! impl_int_staged_type {
         }
 
         unsafe impl ConstantType for $ty {
-            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> ValueId {
-                ctx.iconst(Self::scalar_type(), *value as i64)
+            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
             }
         }
 
@@ -354,8 +355,8 @@ unsafe impl StagedType for i64 {
 }
 
 unsafe impl ConstantType for i64 {
-    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value)
+    fn codegen_constant(value: &i64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value))
     }
 }
 
@@ -378,8 +379,8 @@ unsafe impl StagedType for u64 {
 }
 
 unsafe impl ConstantType for u64 {
-    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &u64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -402,8 +403,8 @@ unsafe impl StagedType for i32 {
 }
 
 unsafe impl ConstantType for i32 {
-    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &i32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -426,8 +427,8 @@ unsafe impl StagedType for u32 {
 }
 
 unsafe impl ConstantType for u32 {
-    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), *value as i64)
+    fn codegen_constant(value: &u32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), *value as i64))
     }
 }
 
@@ -450,8 +451,8 @@ unsafe impl StagedType for f32 {
 }
 
 unsafe impl ConstantType for f32 {
-    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.f32const(*value)
+    fn codegen_constant(value: &f32, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.f32const(*value))
     }
 }
 
@@ -474,8 +475,8 @@ unsafe impl StagedType for bool {
 }
 
 unsafe impl ConstantType for bool {
-    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 })
+    fn codegen_constant(value: &bool, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), if *value { 1 } else { 0 }))
     }
 }
 
@@ -498,8 +499,8 @@ unsafe impl StagedType for f64 {
 }
 
 unsafe impl ConstantType for f64 {
-    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.f64const(*value)
+    fn codegen_constant(value: &f64, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.f64const(*value))
     }
 }
 
@@ -522,8 +523,8 @@ unsafe impl StagedType for () {
 }
 
 unsafe impl ConstantType for () {
-    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_>) -> ValueId {
-        ctx.iconst(Self::scalar_type(), 0)
+    fn codegen_constant(_value: &(), ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.iconst(Self::scalar_type(), 0))
     }
 }
 

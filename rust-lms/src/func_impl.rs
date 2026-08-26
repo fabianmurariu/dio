@@ -5,7 +5,7 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{CompilationContext, IntoStaged, Staged, ValueId};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId};
 use crate::types::{ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -61,14 +61,14 @@ impl TypeInfo {
 /// - func_id: The function's ID in the Compiler
 /// - param_infos: Type info for each parameter
 /// - return_info: Type info for the return value
-/// - arg_values: One Cranelift Value per logical parameter (pointer for structs)
+/// - arg_values: One ABI leaf per logical parameter (storage pointer for aggregates)
 pub fn codegen_call(
     ctx: &mut CompilationContext,
     func_id: usize,
     param_infos: &[TypeInfo],
     return_info: &TypeInfo,
     arg_values: &[ValueId],
-) -> ValueId {
+) -> Value {
     assert_eq!(
         arg_values.len(),
         param_infos.len(),
@@ -105,13 +105,22 @@ pub fn codegen_call(
     // Generate the call
     ctx.call(func_ref, &call_args);
 
-    if return_info.is_aggregate {
-        result_ptr
+    if return_info.is_fat_pointer {
+        ctx.load_fat(result_ptr)
+    } else if return_info.is_aggregate {
+        Value::scalar(result_ptr)
     } else if return_info.size == 0 {
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     } else {
-        ctx.load(return_info.repr, result_ptr, 0)
+        Value::scalar(ctx.load(return_info.repr, result_ptr, 0))
     }
+}
+
+/// Codegen one call argument to its ABI leaf: a scalar passes through; a fat (slice) value is
+/// materialized to a `{ptr,len}` stack slot and passed by pointer (the storage-pointer ABI).
+pub(crate) fn materialized_arg(ctx: &mut CompilationContext, arg: &impl Staged) -> ValueId {
+    let value = arg.codegen(ctx);
+    ctx.materialize_value(value)
 }
 
 /// Generate code to get a function's address (for returning function pointers)
@@ -177,8 +186,8 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $FunRef<OUT> {
             type Out = $FunType<OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-                codegen_func_addr(ctx, self.id)
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+                Value::scalar(codegen_func_addr(ctx, self.id))
             }
         }
 
@@ -191,7 +200,7 @@ macro_rules! impl_fun_n {
         unsafe impl<OUT: StagedType> Staged for $Call<OUT> {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
                 let return_info = TypeInfo::from_staged_type::<OUT>();
                 codegen_call(ctx, self.func.id, &[], &return_info, &[])
             }
@@ -250,8 +259,8 @@ macro_rules! impl_fun_n {
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> Staged for $FunRef<$($T,)+ OUT> {
             type Out = $FunType<$($T,)+ OUT>;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
-                codegen_func_addr(ctx, self.id)
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+                Value::scalar(codegen_func_addr(ctx, self.id))
             }
         }
 
@@ -268,19 +277,20 @@ macro_rules! impl_fun_n {
         {
             type Out = OUT;
 
-            fn codegen(&self, ctx: &mut CompilationContext) -> ValueId {
+            fn codegen(&self, ctx: &mut CompilationContext) -> Value {
                 // Build type info from type parameters
                 let param_infos = [$(TypeInfo::from_staged_type::<$T>()),+];
                 let return_info = TypeInfo::from_staged_type::<OUT>();
 
-                // Generate arg values
-                let args = [$(self.$arg.codegen(ctx)),+];
+                // Generate arg leaves (scalars pass through; slices materialize to memory)
+                let args = [$(materialized_arg(ctx, &self.$arg)),+];
 
                 codegen_call(ctx, self.func.id, &param_infos, &return_info, &args)
             }
         }
 
         /// Create a call expression
+        #[allow(clippy::too_many_arguments)]
         pub fn $call_fn<$($T,)+ OUT, $($Arg),+>(
             func: $FunRef<$($T,)+ OUT>,
             $($arg: $Arg,)+
