@@ -37,6 +37,24 @@ pub enum ScalarType {
 }
 
 impl ScalarType {
+    pub(crate) fn is_integer(self) -> bool {
+        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
+    }
+
+    pub(crate) fn is_float(self) -> bool {
+        matches!(self, Self::F32 | Self::F64)
+    }
+
+    pub(crate) fn bit_width(self) -> u16 {
+        match self {
+            Self::Bool => 1,
+            Self::I8 => 8,
+            Self::I16 => 16,
+            Self::I32 | Self::F32 => 32,
+            Self::I64 | Self::F64 | Self::Ptr => 64,
+        }
+    }
+
     /// Lower to the Cranelift IR type. `Bool` and `Ptr` fold onto `I8`/`I64` — the
     /// Cranelift representation makes no such distinction.
     pub fn to_cranelift(self) -> cranelift_codegen::ir::Type {
@@ -47,23 +65,6 @@ impl ScalarType {
             ScalarType::F32 => types::F32,
             ScalarType::I64 | ScalarType::Ptr => types::I64,
             ScalarType::F64 => types::F64,
-        }
-    }
-
-    /// Recover a `ScalarType` from a Cranelift type. Lossy where Cranelift folds
-    /// distinct neutral types together: `I8` cannot be told apart from `Bool`, and
-    /// `I64` from `Ptr`. Used only by the backend when reading a Cranelift value's
-    /// type back; the staged type system's source of truth is
-    /// [`StagedType::scalar_type`], stated directly per impl.
-    pub fn from_cranelift(ty: cranelift_codegen::ir::Type) -> ScalarType {
-        match ty {
-            types::I8 => ScalarType::I8,
-            types::I16 => ScalarType::I16,
-            types::I32 => ScalarType::I32,
-            types::F32 => ScalarType::F32,
-            types::I64 => ScalarType::I64,
-            types::F64 => ScalarType::F64,
-            _ => ScalarType::Ptr,
         }
     }
 

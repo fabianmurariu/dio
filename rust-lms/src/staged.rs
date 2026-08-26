@@ -15,15 +15,17 @@ use cranelift_frontend::Variable;
 
 use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedType};
 
-/// An opaque handle to a value produced during codegen.
+/// An opaque, typed handle to a scalar value produced during codegen.
 ///
-/// Phase 0e of docs/llvm.md: the AST-facing value handle is now **opaque** — a bare
-/// `u32` the AST cannot inspect. The active backend interprets it: `CraneliftBackend`
-/// treats it as a Cranelift `Value` index (`as_u32`/`from_u32`, stateless — Cranelift
-/// values *are* `u32` entities); an MLIR backend would use the same `u32` as an index
-/// into its own `Vec<MlirValue>`. The AST never names a backend value type.
+/// The active backend interprets `index`: Cranelift stores its `Value` entity index and
+/// MLIR stores an index into its own value arena. `ty` remains backend-neutral and is the
+/// source of truth for validating the neutral operation stream. In particular, it preserves
+/// `Bool` versus `I8` and `Ptr` versus `I64`, distinctions Cranelift's native types erase.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct ValueId(u32);
+pub struct ValueId {
+    index: u32,
+    ty: ScalarType,
+}
 
 /// A neutral staged value — the result of [`Staged::codegen`] and the AST-level currency.
 ///
@@ -52,6 +54,8 @@ impl Value {
 
     /// A fat (slice) value: data pointer + length, each a backend leaf.
     pub(crate) fn fat(ptr: ValueId, len: ValueId) -> Self {
+        expect_type(ptr, ScalarType::Ptr, "fat value data pointer");
+        expect_type(len, ScalarType::I64, "fat value length");
         Value::Fat { ptr, len }
     }
 
@@ -67,7 +71,11 @@ impl Value {
     /// The `(data ptr, len)` leaves of a fat (slice) value. Panics on a `Scalar`.
     pub(crate) fn parts(self) -> (ValueId, ValueId) {
         match self {
-            Value::Fat { ptr, len } => (ptr, len),
+            Value::Fat { ptr, len } => {
+                expect_type(ptr, ScalarType::Ptr, "fat value data pointer");
+                expect_type(len, ScalarType::I64, "fat value length");
+                (ptr, len)
+            }
             Value::Scalar(_) => panic!("expected a fat (slice) value, found a scalar value"),
         }
     }
@@ -83,9 +91,12 @@ impl From<ValueId> for Value {
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
 pub struct BlockHandle(u32);
 
-/// Opaque handle to a mutable variable during codegen (see [`ValueId`]).
+/// Opaque, typed handle to a mutable variable during codegen (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct VarHandle(u32);
+pub struct VarHandle {
+    index: u32,
+    ty: ScalarType,
+}
 
 /// Opaque handle to a stack allocation during codegen (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
@@ -95,14 +106,21 @@ pub struct StackSlotId(u32);
 /// currently being built (see [`ValueId`]). Cranelift interprets it as a `FuncRef` index;
 /// an MLIR backend as an index into its own symbol table.
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct FuncRefId(u32);
+pub struct FuncRefId {
+    index: u32,
+    ret: Option<ScalarType>,
+}
 
 /// Opaque handle to a signature imported for `call_indirect` (see [`ValueId`]).
 #[derive(Clone, Copy, PartialEq, Eq, Hash, Debug)]
-pub struct SigRefId(u32);
+pub struct SigRefId {
+    index: u32,
+    ret: Option<ScalarType>,
+}
 
 /// A backend-neutral function signature: parameter types and an optional single result.
 /// Backends lower it to their own signature (Cranelift `Signature`, MLIR function type).
+#[derive(Clone, Debug)]
 pub struct SigSpec {
     pub params: Vec<ScalarType>,
     pub ret: Option<ScalarType>,
@@ -112,11 +130,25 @@ pub struct SigSpec {
 // These stay here (not in the `cranelift` module) because they touch the handles' private
 // `.0` field; that privacy is exactly what stops an AST module from fabricating a handle.
 impl ValueId {
-    pub(crate) fn from_cranelift(v: CraneliftValue) -> Self {
-        Self(v.as_u32())
+    pub fn scalar_type(self) -> ScalarType {
+        self.ty
+    }
+
+    pub(crate) fn with_type(self, ty: ScalarType) -> Self {
+        Self {
+            index: self.index,
+            ty,
+        }
+    }
+
+    pub(crate) fn from_cranelift(v: CraneliftValue, ty: ScalarType) -> Self {
+        Self {
+            index: v.as_u32(),
+            ty,
+        }
     }
     pub(crate) fn cranelift(self) -> CraneliftValue {
-        CraneliftValue::from_u32(self.0)
+        CraneliftValue::from_u32(self.index)
     }
 }
 impl BlockHandle {
@@ -128,11 +160,17 @@ impl BlockHandle {
     }
 }
 impl VarHandle {
-    pub(crate) fn from_cranelift(v: Variable) -> Self {
-        Self(v.as_u32())
+    pub(crate) fn from_cranelift(v: Variable, ty: ScalarType) -> Self {
+        Self {
+            index: v.as_u32(),
+            ty,
+        }
     }
     pub(crate) fn cranelift(self) -> Variable {
-        Variable::from_u32(self.0)
+        Variable::from_u32(self.index)
+    }
+    pub(crate) fn scalar_type(self) -> ScalarType {
+        self.ty
     }
 }
 impl StackSlotId {
@@ -144,33 +182,44 @@ impl StackSlotId {
     }
 }
 impl FuncRefId {
-    pub(crate) fn from_cranelift(f: FuncRef) -> Self {
-        Self(f.as_u32())
+    pub(crate) fn from_cranelift(f: FuncRef, ret: Option<ScalarType>) -> Self {
+        Self {
+            index: f.as_u32(),
+            ret,
+        }
     }
     pub(crate) fn cranelift(self) -> FuncRef {
-        FuncRef::from_u32(self.0)
+        FuncRef::from_u32(self.index)
+    }
+    pub(crate) fn return_type(self) -> Option<ScalarType> {
+        self.ret
     }
 }
 impl SigRefId {
-    pub(crate) fn from_cranelift(s: SigRef) -> Self {
-        Self(s.as_u32())
+    pub(crate) fn from_cranelift(s: SigRef, ret: Option<ScalarType>) -> Self {
+        Self {
+            index: s.as_u32(),
+            ret,
+        }
     }
     pub(crate) fn cranelift(self) -> SigRef {
-        SigRef::from_u32(self.0)
+        SigRef::from_u32(self.index)
+    }
+    pub(crate) fn return_type(self) -> Option<ScalarType> {
+        self.ret
     }
 }
 
-// The LLVM/MLIR backend interprets these handles as indices into its own arenas
-// (docs/llvm.md §9) — the same "u32 the active backend interprets" contract the
-// Cranelift path uses, just a different encoding: `ValueId` → value arena slot,
-// `BlockHandle` → body-block index, `VarHandle` → variable (alloca) index.
+// The LLVM/MLIR backend interprets each handle's index through its own arenas
+// (docs/llvm.md §9). `ValueId` and `VarHandle` keep their neutral types alongside
+// that backend-specific index; call handles also retain their optional result type.
 #[cfg(feature = "llvm")]
 impl ValueId {
-    pub(crate) fn from_u32(index: u32) -> Self {
-        Self(index)
+    pub(crate) fn from_u32(index: u32, ty: ScalarType) -> Self {
+        Self { index, ty }
     }
     pub(crate) fn as_u32(self) -> u32 {
-        self.0
+        self.index
     }
 }
 #[cfg(feature = "llvm")]
@@ -184,11 +233,11 @@ impl BlockHandle {
 }
 #[cfg(feature = "llvm")]
 impl VarHandle {
-    pub(crate) fn from_u32(index: u32) -> Self {
-        Self(index)
+    pub(crate) fn from_u32(index: u32, ty: ScalarType) -> Self {
+        Self { index, ty }
     }
     pub(crate) fn as_u32(self) -> u32 {
-        self.0
+        self.index
     }
 }
 #[cfg(feature = "llvm")]
@@ -202,20 +251,20 @@ impl StackSlotId {
 }
 #[cfg(feature = "llvm")]
 impl FuncRefId {
-    pub(crate) fn from_u32(index: u32) -> Self {
-        Self(index)
+    pub(crate) fn from_u32(index: u32, ret: Option<ScalarType>) -> Self {
+        Self { index, ret }
     }
     pub(crate) fn as_u32(self) -> u32 {
-        self.0
+        self.index
     }
 }
 #[cfg(feature = "llvm")]
 impl SigRefId {
-    pub(crate) fn from_u32(index: u32) -> Self {
-        Self(index)
+    pub(crate) fn from_u32(index: u32, ret: Option<ScalarType>) -> Self {
+        Self { index, ret }
     }
     pub(crate) fn as_u32(self) -> u32 {
-        self.0
+        self.index
     }
 }
 
@@ -245,13 +294,15 @@ pub(crate) enum VarValue {
 /// }
 /// ```
 pub struct CompilationContext<'c> {
-    /// The active IR backend (Cranelift or LLVM/MLIR).
-    /// `CompilationContext` derefs to this, so `ctx.<op>()` routes to the backend.
+    /// The active IR backend (Cranelift or LLVM/MLIR). Checked inherent operations route
+    /// through this field; `Deref` remains for type-free lifecycle operations.
     pub(crate) backend: &'c mut dyn Backend,
     /// Mapping from staged variable IDs to shape-aware backend variable bindings.
     pub(crate) variables: &'c mut HashMap<usize, VarValue>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
     pub(crate) unit_value: Option<ValueId>,
+    /// Neutral parameter types for blocks created through this context.
+    pub(crate) block_params: HashMap<BlockHandle, Vec<ScalarType>>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
     /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
     pub(crate) loop_exit_stack: Vec<BlockHandle>,
@@ -259,10 +310,10 @@ pub struct CompilationContext<'c> {
 
 /// The IR-emission backend: the single interface a code generator implements.
 ///
-/// Phase 0d of docs/llvm.md. Cranelift is the only impl today (`CraneliftBackend`);
-/// an LLVM/MLIR impl slots in behind the same trait. `CompilationContext` owns the
-/// codegen bookkeeping (var/slice maps, loop-exit stack) and derefs to a `dyn Backend`
-/// for the primitive ops. Object-safe (all methods take concrete handles).
+/// Cranelift and LLVM/MLIR both implement this scalar lowering contract. The checked
+/// inherent methods on `CompilationContext` validate typed leaves before delegating here;
+/// the context also owns value-shape, block-signature, variable, and loop bookkeeping.
+/// Object-safe (all methods take concrete handles).
 ///
 /// `pub` + `#[doc(hidden)]` only because `CompilationContext` (a public type) derefs
 /// to `dyn Backend`; it is an internal, unstable contract, not a public API.
@@ -280,6 +331,7 @@ pub struct CompilationContext<'c> {
 pub trait Backend {
     // constants
     fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId;
+    fn null_ptr(&mut self) -> ValueId;
     fn f64const(&mut self, v: f64) -> ValueId;
     fn f32const(&mut self, v: f32) -> ValueId;
     // integer arithmetic
@@ -328,7 +380,7 @@ pub trait Backend {
     // blocks & control flow
     fn create_block(&mut self) -> BlockHandle;
     fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId;
-    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId;
+    fn block_param(&mut self, block: BlockHandle, idx: usize, ty: ScalarType) -> ValueId;
     fn switch_to_block(&mut self, block: BlockHandle);
     fn seal_block(&mut self, block: BlockHandle);
     fn jump(&mut self, target: BlockHandle, args: &[ValueId]);
@@ -374,7 +426,446 @@ impl<'c> DerefMut for CompilationContext<'c> {
     }
 }
 
+fn expect_type(value: ValueId, expected: ScalarType, operation: &str) -> ValueId {
+    assert_eq!(
+        value.scalar_type(),
+        expected,
+        "{operation}: expected {expected:?}, found {:?}",
+        value.scalar_type()
+    );
+    value
+}
+
+fn same_type(a: ValueId, b: ValueId, operation: &str) -> ScalarType {
+    assert_eq!(
+        a.scalar_type(),
+        b.scalar_type(),
+        "{operation}: operands must have the same type, found {:?} and {:?}",
+        a.scalar_type(),
+        b.scalar_type()
+    );
+    a.scalar_type()
+}
+
+fn integer_binary(a: ValueId, b: ValueId, operation: &str) -> ScalarType {
+    let ty = same_type(a, b, operation);
+    assert!(
+        ty.is_integer(),
+        "{operation}: expected integer operands, found {ty:?}"
+    );
+    ty
+}
+
+fn float_binary(a: ValueId, b: ValueId, operation: &str) -> ScalarType {
+    let ty = same_type(a, b, operation);
+    assert!(
+        ty.is_float(),
+        "{operation}: expected floating-point operands, found {ty:?}"
+    );
+    ty
+}
+
+fn bitwise_binary(a: ValueId, b: ValueId, operation: &str) -> ScalarType {
+    let ty = same_type(a, b, operation);
+    assert!(
+        ty.is_integer() || ty == ScalarType::Bool,
+        "{operation}: expected integer or boolean operands, found {ty:?}"
+    );
+    ty
+}
+
+pub(crate) fn expect_arguments(operation: &str, args: &[ValueId], params: &[ScalarType]) {
+    assert_eq!(
+        args.len(),
+        params.len(),
+        "{operation}: expected {} arguments, found {}",
+        params.len(),
+        args.len()
+    );
+    for (index, (&arg, &expected)) in args.iter().zip(params).enumerate() {
+        expect_type(arg, expected, &format!("{operation} argument {index}"));
+    }
+}
+
+macro_rules! checked_binary_op {
+    ($name:ident, $check:ident) => {
+        #[doc(hidden)]
+        pub fn $name(&mut self, a: ValueId, b: ValueId) -> ValueId {
+            let ty = $check(a, b, stringify!($name));
+            let result = self.backend.$name(a, b);
+            expect_type(result, ty, stringify!($name))
+        }
+    };
+}
+
 impl<'c> CompilationContext<'c> {
+    // These inherent methods are the checked neutral operation boundary. They shadow the
+    // backend methods exposed through `Deref`, validate neutral types once, then delegate.
+    #[doc(hidden)]
+    pub fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
+        assert!(
+            ty.is_integer() || ty == ScalarType::Bool,
+            "iconst: expected an integer or Bool result type, found {ty:?}"
+        );
+        if ty == ScalarType::Bool {
+            assert!(matches!(imm, 0 | 1), "iconst: Bool constant must be 0 or 1");
+        }
+        let result = self.backend.iconst(ty, imm);
+        expect_type(result, ty, "iconst")
+    }
+
+    #[doc(hidden)]
+    pub fn null_ptr(&mut self) -> ValueId {
+        let result = self.backend.null_ptr();
+        expect_type(result, ScalarType::Ptr, "null_ptr")
+    }
+
+    #[doc(hidden)]
+    pub fn f64const(&mut self, value: f64) -> ValueId {
+        let result = self.backend.f64const(value);
+        expect_type(result, ScalarType::F64, "f64const")
+    }
+
+    #[doc(hidden)]
+    pub fn f32const(&mut self, value: f32) -> ValueId {
+        let result = self.backend.f32const(value);
+        expect_type(result, ScalarType::F32, "f32const")
+    }
+
+    checked_binary_op!(iadd, integer_binary);
+    checked_binary_op!(isub, integer_binary);
+    checked_binary_op!(imul, integer_binary);
+    checked_binary_op!(sdiv, integer_binary);
+    checked_binary_op!(udiv, integer_binary);
+    checked_binary_op!(srem, integer_binary);
+    checked_binary_op!(urem, integer_binary);
+
+    checked_binary_op!(fadd, float_binary);
+    checked_binary_op!(fsub, float_binary);
+    checked_binary_op!(fmul, float_binary);
+    checked_binary_op!(fdiv, float_binary);
+
+    checked_binary_op!(band, bitwise_binary);
+    checked_binary_op!(bor, bitwise_binary);
+    checked_binary_op!(bxor, bitwise_binary);
+    checked_binary_op!(ishl, bitwise_binary);
+    checked_binary_op!(sshr, bitwise_binary);
+    checked_binary_op!(ushr, bitwise_binary);
+
+    #[doc(hidden)]
+    pub fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
+        let ty = same_type(a, b, "icmp");
+        assert!(
+            ty.is_integer() || matches!(ty, ScalarType::Bool | ScalarType::Ptr),
+            "icmp: expected integer, boolean, or pointer operands, found {ty:?}"
+        );
+        if ty == ScalarType::Ptr {
+            assert!(
+                matches!(cc, IntCmp::Eq | IntCmp::Ne),
+                "icmp: pointers only support equality comparisons"
+            );
+        }
+        let result = self.backend.icmp(cc, a, b);
+        expect_type(result, ScalarType::Bool, "icmp")
+    }
+
+    #[doc(hidden)]
+    pub fn icmp_imm(&mut self, cc: IntCmp, value: ValueId, imm: i64) -> ValueId {
+        let ty = value.scalar_type();
+        assert!(
+            ty.is_integer() || matches!(ty, ScalarType::Bool | ScalarType::Ptr),
+            "icmp_imm: expected an integer, boolean, or pointer operand, found {ty:?}"
+        );
+        if ty == ScalarType::Ptr {
+            assert!(
+                imm == 0 && matches!(cc, IntCmp::Eq | IntCmp::Ne),
+                "icmp_imm: pointers may only be compared with null for equality"
+            );
+        }
+        let result = self.backend.icmp_imm(cc, value, imm);
+        expect_type(result, ScalarType::Bool, "icmp_imm")
+    }
+
+    #[doc(hidden)]
+    pub fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId {
+        float_binary(a, b, "fcmp");
+        let result = self.backend.fcmp(cc, a, b);
+        expect_type(result, ScalarType::Bool, "fcmp")
+    }
+
+    #[doc(hidden)]
+    pub fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
+        expect_type(cond, ScalarType::Bool, "select condition");
+        let ty = same_type(a, b, "select");
+        let result = self.backend.select(cond, a, b);
+        expect_type(result, ty, "select")
+    }
+
+    fn check_integer_cast(from: ScalarType, to: ScalarType, operation: &str) {
+        assert!(
+            from.is_integer() && to.is_integer(),
+            "{operation}: expected integer types, found {from:?} -> {to:?}"
+        );
+    }
+
+    #[doc(hidden)]
+    pub fn sextend(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        let from = value.scalar_type();
+        Self::check_integer_cast(from, to, "sextend");
+        assert!(
+            from.bit_width() < to.bit_width(),
+            "sextend: target must be wider"
+        );
+        let result = self.backend.sextend(to, value);
+        expect_type(result, to, "sextend")
+    }
+
+    #[doc(hidden)]
+    pub fn uextend(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        let from = value.scalar_type();
+        Self::check_integer_cast(from, to, "uextend");
+        assert!(
+            from.bit_width() < to.bit_width(),
+            "uextend: target must be wider"
+        );
+        let result = self.backend.uextend(to, value);
+        expect_type(result, to, "uextend")
+    }
+
+    #[doc(hidden)]
+    pub fn ireduce(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        let from = value.scalar_type();
+        Self::check_integer_cast(from, to, "ireduce");
+        assert!(
+            from.bit_width() > to.bit_width(),
+            "ireduce: target must be narrower"
+        );
+        let result = self.backend.ireduce(to, value);
+        expect_type(result, to, "ireduce")
+    }
+
+    #[doc(hidden)]
+    pub fn fcvt_from_sint(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        assert!(
+            value.scalar_type().is_integer() && to.is_float(),
+            "fcvt_from_sint: expected integer -> float, found {:?} -> {to:?}",
+            value.scalar_type()
+        );
+        let result = self.backend.fcvt_from_sint(to, value);
+        expect_type(result, to, "fcvt_from_sint")
+    }
+
+    #[doc(hidden)]
+    pub fn fcvt_from_uint(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        assert!(
+            value.scalar_type().is_integer() && to.is_float(),
+            "fcvt_from_uint: expected integer -> float, found {:?} -> {to:?}",
+            value.scalar_type()
+        );
+        let result = self.backend.fcvt_from_uint(to, value);
+        expect_type(result, to, "fcvt_from_uint")
+    }
+
+    #[doc(hidden)]
+    pub fn bitcast(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        let from = value.scalar_type();
+        assert!(
+            (from.is_integer() || from.is_float()) && (to.is_integer() || to.is_float()),
+            "bitcast: expected numeric scalar types, found {from:?} -> {to:?}"
+        );
+        assert_eq!(
+            from.bit_width(),
+            to.bit_width(),
+            "bitcast: source and target must have equal width"
+        );
+        let result = self.backend.bitcast(to, value);
+        expect_type(result, to, "bitcast")
+    }
+
+    #[doc(hidden)]
+    pub fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+        expect_type(ptr, ScalarType::Ptr, "load pointer");
+        let result = self.backend.load(ty, ptr, offset);
+        expect_type(result, ty, "load")
+    }
+
+    #[doc(hidden)]
+    pub fn store(&mut self, value: ValueId, ptr: ValueId, offset: i32) {
+        expect_type(ptr, ScalarType::Ptr, "store pointer");
+        self.backend.store(value, ptr, offset);
+    }
+
+    #[doc(hidden)]
+    pub fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId {
+        let result = self.backend.stack_addr(slot, offset);
+        expect_type(result, ScalarType::Ptr, "stack_addr")
+    }
+
+    #[doc(hidden)]
+    pub fn copy_nonoverlapping(&mut self, dst: ValueId, src: ValueId, size: usize, align: usize) {
+        expect_type(dst, ScalarType::Ptr, "copy_nonoverlapping destination");
+        expect_type(src, ScalarType::Ptr, "copy_nonoverlapping source");
+        self.backend.copy_nonoverlapping(dst, src, size, align);
+    }
+
+    #[doc(hidden)]
+    pub fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
+        expect_type(ptr, ScalarType::Ptr, "ptr_offset_bytes pointer");
+        expect_type(offset, ScalarType::I64, "ptr_offset_bytes offset");
+        let result = self.backend.ptr_offset_bytes(ptr, offset);
+        expect_type(result, ScalarType::Ptr, "ptr_offset_bytes")
+    }
+
+    #[doc(hidden)]
+    pub fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
+        expect_type(ptr, ScalarType::Ptr, "ptr_offset_const pointer");
+        let result = self.backend.ptr_offset_const(ptr, bytes);
+        expect_type(result, ScalarType::Ptr, "ptr_offset_const")
+    }
+
+    #[doc(hidden)]
+    pub fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
+        expect_type(addr, ScalarType::I64, "addr_to_ptr address");
+        let result = self.backend.addr_to_ptr(addr);
+        expect_type(result, ScalarType::Ptr, "addr_to_ptr")
+    }
+
+    #[doc(hidden)]
+    pub fn append_block_param(&mut self, block: BlockHandle, ty: ScalarType) -> ValueId {
+        let result = self.backend.append_block_param(block, ty);
+        self.block_params
+            .get_mut(&block)
+            .unwrap_or_else(|| panic!("append_block_param: unknown block {block:?}"))
+            .push(ty);
+        expect_type(result, ty, "append_block_param")
+    }
+
+    #[doc(hidden)]
+    pub fn block_param(&mut self, block: BlockHandle, index: usize, ty: ScalarType) -> ValueId {
+        let actual = *self
+            .block_params
+            .get(&block)
+            .unwrap_or_else(|| panic!("block_param: unknown block {block:?}"))
+            .get(index)
+            .unwrap_or_else(|| panic!("block_param: block {block:?} has no parameter {index}"));
+        assert_eq!(
+            actual, ty,
+            "block_param: expected parameter {index} of {block:?} to be {ty:?}, found {actual:?}"
+        );
+        let result = self.backend.block_param(block, index, ty);
+        expect_type(result, ty, "block_param")
+    }
+
+    #[doc(hidden)]
+    pub fn create_block(&mut self) -> BlockHandle {
+        let block = self.backend.create_block();
+        assert!(
+            self.block_params.insert(block, Vec::new()).is_none(),
+            "create_block: backend reused block handle {block:?}"
+        );
+        block
+    }
+
+    fn check_block_args(&self, operation: &str, block: BlockHandle, args: &[ValueId]) {
+        let params = self
+            .block_params
+            .get(&block)
+            .unwrap_or_else(|| panic!("{operation}: unknown target block {block:?}"));
+        assert_eq!(
+            args.len(),
+            params.len(),
+            "{operation}: block {block:?} expects {} arguments, found {}",
+            params.len(),
+            args.len()
+        );
+        for (index, (&arg, &expected)) in args.iter().zip(params).enumerate() {
+            expect_type(arg, expected, &format!("{operation} argument {index}"));
+        }
+    }
+
+    #[doc(hidden)]
+    pub fn jump(&mut self, target: BlockHandle, args: &[ValueId]) {
+        self.check_block_args("jump", target, args);
+        self.backend.jump(target, args);
+    }
+
+    #[doc(hidden)]
+    pub fn brif(
+        &mut self,
+        cond: ValueId,
+        then_block: BlockHandle,
+        then_args: &[ValueId],
+        else_block: BlockHandle,
+        else_args: &[ValueId],
+    ) {
+        let ty = cond.scalar_type();
+        assert!(
+            ty == ScalarType::Bool || ty.is_integer() || ty == ScalarType::Ptr,
+            "brif: expected a boolean, integer, or pointer condition, found {ty:?}"
+        );
+        self.check_block_args("brif then", then_block, then_args);
+        self.check_block_args("brif else", else_block, else_args);
+        self.backend
+            .brif(cond, then_block, then_args, else_block, else_args);
+    }
+
+    #[doc(hidden)]
+    pub fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
+        let var = self.backend.declare_var(ty);
+        assert_eq!(
+            var.scalar_type(),
+            ty,
+            "declare_var: backend returned a variable with the wrong type"
+        );
+        var
+    }
+
+    #[doc(hidden)]
+    pub fn def_var(&mut self, var: VarHandle, value: ValueId) {
+        expect_type(value, var.scalar_type(), "def_var");
+        self.backend.def_var(var, value);
+    }
+
+    #[doc(hidden)]
+    pub fn use_var(&mut self, var: VarHandle) -> ValueId {
+        let result = self.backend.use_var(var);
+        expect_type(result, var.scalar_type(), "use_var")
+    }
+
+    #[doc(hidden)]
+    pub fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId> {
+        let result = self.backend.call(func, args);
+        assert_eq!(
+            result.map(ValueId::scalar_type),
+            func.return_type(),
+            "call: backend result does not match the declared function result"
+        );
+        result
+    }
+
+    #[doc(hidden)]
+    pub fn call_indirect(
+        &mut self,
+        sig: SigRefId,
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Option<ValueId> {
+        expect_type(callee, ScalarType::Ptr, "call_indirect callee");
+        let result = self.backend.call_indirect(sig, callee, args);
+        assert_eq!(
+            result.map(ValueId::scalar_type),
+            sig.return_type(),
+            "call_indirect: backend result does not match the declared signature result"
+        );
+        result
+    }
+
+    #[doc(hidden)]
+    pub fn func_addr(&mut self, func: FuncRefId) -> ValueId {
+        let result = self.backend.func_addr(func);
+        expect_type(result, ScalarType::Ptr, "func_addr")
+    }
+
     /// Get or create the cached unit value (iconst.i8 0).
     ///
     /// This avoids creating duplicate dead values when sequencing side-effecting
@@ -430,9 +921,12 @@ impl<'c> CompilationContext<'c> {
     /// Reconstruct a staged value from the parameters of a merge block.
     pub(crate) fn block_value<T: StagedType>(&mut self, block: BlockHandle) -> Value {
         if T::is_fat_pointer() {
-            Value::fat(self.block_param(block, 0), self.block_param(block, 1))
+            Value::fat(
+                self.block_param(block, 0, ScalarType::Ptr),
+                self.block_param(block, 1, ScalarType::I64),
+            )
         } else {
-            Value::scalar(self.block_param(block, 0))
+            Value::scalar(self.block_param(block, 0, T::scalar_type()))
         }
     }
 
@@ -470,6 +964,7 @@ impl<'c> CompilationContext<'c> {
 
         match value {
             Value::Scalar(leaf) if !T::is_fat_pointer() => {
+                expect_type(leaf, T::scalar_type(), "staged variable assignment");
                 let var = match existing {
                     Some(VarValue::Scalar(var)) => var,
                     Some(VarValue::Fat { .. }) => {
@@ -517,6 +1012,7 @@ impl<'c> CompilationContext<'c> {
     /// pointer to such a descriptor (an FFI array field, a param's incoming pair) as a slice —
     /// the memory→fat boundary, mirror of [`Self::materialize_value`].
     pub(crate) fn load_fat(&mut self, base: ValueId) -> Value {
+        expect_type(base, ScalarType::Ptr, "load_fat base");
         let ptr = self.load(ScalarType::Ptr, base, 0);
         let len = self.load(ScalarType::I64, base, 8);
         Value::fat(ptr, len)
@@ -524,6 +1020,7 @@ impl<'c> CompilationContext<'c> {
 
     /// Load a staged value from its canonical in-memory representation.
     pub(crate) fn load_value<T: StagedType>(&mut self, base: ValueId) -> Value {
+        expect_type(base, ScalarType::Ptr, "load_value base");
         if T::is_fat_pointer() {
             self.load_fat(base)
         } else if T::is_copy_struct() {
@@ -537,14 +1034,17 @@ impl<'c> CompilationContext<'c> {
 
     /// Store a staged value in its canonical in-memory representation.
     pub(crate) fn store_value<T: StagedType>(&mut self, base: ValueId, value: Value) {
+        expect_type(base, ScalarType::Ptr, "store_value base");
         if T::is_fat_pointer() {
             let (ptr, len) = value.parts();
             self.store(ptr, base, 0);
             self.store(len, base, 8);
         } else if T::is_copy_struct() {
-            self.copy_nonoverlapping(base, value.leaf(), T::size_of(), T::align_of());
+            let value = expect_type(value.leaf(), ScalarType::Ptr, "copy value");
+            self.copy_nonoverlapping(base, value, T::size_of(), T::align_of());
         } else if T::size_of() != 0 {
-            self.store(value.leaf(), base, 0);
+            let value = expect_type(value.leaf(), T::scalar_type(), "stored value");
+            self.store(value, base, 0);
         }
     }
 

@@ -392,7 +392,39 @@ Verification: `cargo test --workspace`, `cargo test -p rust-lms --features llvm`
 `cargo test -p sql-gen --features llvm` all pass. Plain workspace clippy completes with the
 existing warning baseline; `-D warnings` remains blocked by pre-existing lints.
 
-**Still pending in Root A:** replace bare `ValueId` leaves with `(backend id, ScalarType)` and
-enable neutral-layer type assertions operation by operation. Increment 2 makes value *shape*
-explicit; typed leaves are the remaining step that makes pointer-vs-integer mistakes
-construction-time errors on both backends.
+### A′ increment 3 — DONE, green
+
+Completed the typed-leaf portion of Root A:
+
+- `ValueId` is now `(backend index, ScalarType)`. `VarHandle`, function references, and
+  imported signatures retain the result metadata needed to reproduce typed leaves without
+  interrogating a backend value.
+- `CompilationContext` is the checked neutral operation boundary. It validates operand
+  categories and equality, cast widths, pointer-only memory operations, variable types,
+  block signatures, indirect callees, and scalar function results before lowering. Direct
+  and indirect argument lists are checked against each backend's retained neutral declaration
+  or `SigSpec` before the backend emits a call.
+- `Value::Fat` enforces `(Ptr, I64)`. Block parameter types are recorded centrally and branch
+  arguments are checked before either backend emits a terminator.
+- `Backend::null_ptr` gives reference options a pointer-shaped null (`iconst.i64 0` tagged
+  `Ptr` on Cranelift, `llvm.mlir.zero : !llvm.ptr` on MLIR).
+- MLIR parameters and emitted results are interned with explicit neutral types. Native-type
+  recovery and the lossy `ScalarType::from_cranelift` path are gone; pointer truthiness uses
+  the leaf's semantic type and indirect callees remain `Ptr` end to end.
+- Regression tests cover mismatched operation leaves, integer-as-pointer misuse, a staged
+  result that disagrees with its declared `Out`, and pointer/null branching on both backends.
+
+Final verification passes:
+
+- `cargo test --workspace`
+- `cargo test -p rust-lms --features llvm`
+- `cargo test -p sql-gen --features llvm`
+- `cargo clippy --workspace --all-targets -- -D warnings`
+- `cargo clippy -p rust-lms -p sql-gen --all-targets --features llvm -- -D warnings`
+
+The LLVM Clippy pass also exposed the pre-existing large-variant layout of `Executable`;
+boxing its `JITModule` owner keeps the enum small without changing executable-memory
+ownership or drop order.
+
+**Root A/A′ is complete.** Root B (safe arithmetic runtime preconditions) and Root C (shared
+module planning/driver simplification) remain independent follow-up work.

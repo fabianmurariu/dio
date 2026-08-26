@@ -683,7 +683,7 @@ where
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        Value::scalar(ctx.block_param(merge_block, 0))
+        Value::scalar(ctx.block_param(merge_block, 0, ElemOf::<S>::scalar_type()))
     }
 }
 
@@ -712,7 +712,7 @@ where
         let set_block = ctx.create_block();
         let out_of_bounds_block = ctx.create_block();
         let merge_block = ctx.create_block();
-        ctx.append_block_param(merge_block, ScalarType::I8);
+        ctx.append_block_param(merge_block, ScalarType::Bool);
         ctx.brif(in_bounds, set_block, &[], out_of_bounds_block, &[]);
 
         ctx.switch_to_block(set_block);
@@ -720,17 +720,17 @@ where
         let value = self.value.codegen(ctx);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
         ctx.store(value.leaf(), element_ptr, 0);
-        let written = ctx.iconst(ScalarType::I8, 1);
+        let written = ctx.iconst(ScalarType::Bool, 1);
         ctx.jump(merge_block, &[written]);
 
         ctx.switch_to_block(out_of_bounds_block);
         ctx.seal_block(out_of_bounds_block);
-        let not_written = ctx.iconst(ScalarType::I8, 0);
+        let not_written = ctx.iconst(ScalarType::Bool, 0);
         ctx.jump(merge_block, &[not_written]);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
-        Value::scalar(ctx.block_param(merge_block, 0))
+        Value::scalar(ctx.block_param(merge_block, 0, ScalarType::Bool))
     }
 }
 

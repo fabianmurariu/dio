@@ -627,7 +627,15 @@ pub(crate) fn emit_function_body(
             return_info.alignment as usize,
         );
     } else if return_info.size != 0 {
-        ctx.store(result.leaf(), output_ptr, 0);
+        let result = result.leaf();
+        assert_eq!(
+            result.scalar_type(),
+            return_info.repr,
+            "function result: expected {:?}, found {:?}",
+            return_info.repr,
+            result.scalar_type()
+        );
+        ctx.store(result, output_ptr, 0);
     }
 }
 
@@ -1255,7 +1263,7 @@ impl<'a> Compiler<'a> {
                     let params: Vec<ValueId> = builder
                         .block_params(entry_block)
                         .iter()
-                        .map(|value| ValueId::from_cranelift(*value))
+                        .map(|value| ValueId::from_cranelift(*value, ScalarType::Ptr))
                         .collect();
 
                     {
@@ -1266,11 +1274,13 @@ impl<'a> Compiler<'a> {
                             extern_func_ids: &extern_func_ids,
                             func_ref_cache: HashMap::new(),
                             extern_ref_cache: HashMap::new(),
+                            sig_specs: HashMap::new(),
                         };
                         let mut ctx = CompilationContext {
                             backend: &mut backend,
                             variables: &mut variables,
                             unit_value: None,
+                            block_params: HashMap::new(),
                             loop_exit_stack: Vec::new(),
                         };
                         emit_function_body(
@@ -1321,7 +1331,7 @@ impl<'a> Compiler<'a> {
                 let params: Vec<ValueId> = builder
                     .block_params(entry_block)
                     .iter()
-                    .map(|value| ValueId::from_cranelift(*value))
+                    .map(|value| ValueId::from_cranelift(*value, ScalarType::Ptr))
                     .collect();
                 let return_info = TypeInfo::from_staged_type::<S::Out>();
 
@@ -1333,11 +1343,13 @@ impl<'a> Compiler<'a> {
                         extern_func_ids: &extern_func_ids,
                         func_ref_cache: HashMap::new(),
                         extern_ref_cache: HashMap::new(),
+                        sig_specs: HashMap::new(),
                     };
                     let mut ctx = CompilationContext {
                         backend: &mut backend,
                         variables: &mut variables,
                         unit_value: None,
+                        block_params: HashMap::new(),
                         loop_exit_stack: Vec::new(),
                     };
                     emit_function_body(
@@ -1376,7 +1388,7 @@ impl<'a> Compiler<'a> {
         let main_ptr = module.get_finalized_function(main_func_id);
 
         Ok(Compiled {
-            executable: Some(Executable::Cranelift(module)),
+            executable: Some(Executable::Cranelift(Box::new(module))),
             main_ptr,
             _phantom: PhantomData,
         })
@@ -1423,7 +1435,7 @@ pub struct Compiled<'a, T: StagedType> {
 /// The backend-specific JIT resource a [`Compiled`] owns and frees on drop. `main_ptr`
 /// points into whichever variant is live; keeping the resource here keeps it valid.
 enum Executable {
-    Cranelift(JITModule),
+    Cranelift(Box<JITModule>),
     #[cfg(feature = "llvm")]
     Mlir(crate::llvm::MlirExecutable),
 }
@@ -1434,7 +1446,7 @@ impl<'a, T: StagedType> Drop for Compiled<'a, T> {
         // remain when Drop obtains exclusive access. Escaped pointers are governed by
         // `as_fn_unchecked`'s safety contract.
         match self.executable.take() {
-            Some(Executable::Cranelift(module)) => unsafe { module.free_memory() },
+            Some(Executable::Cranelift(module)) => unsafe { (*module).free_memory() },
             #[cfg(feature = "llvm")]
             Some(Executable::Mlir(executable)) => drop(executable),
             None => {}

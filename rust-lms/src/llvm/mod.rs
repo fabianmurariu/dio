@@ -33,16 +33,15 @@
 //!
 //! ## The value arena (docs/llvm.md §9 — confirmed)
 //!
-//! The opaque [`crate::staged::ValueId`] maps to an MLIR value the same stateless way it
-//! maps to a Cranelift `Value`: melior's `Value<'c, 'a>` is `#[repr(transparent)]` over a
-//! lifetime-free `mlir_sys::MlirValue`, reachable via the public `ValueLike::to_raw` and
-//! reconstructable via `Value::from_raw`. So [`MlirBackend`]'s `Vec<MlirValue>` indexed by
-//! `ValueId` is the MLIR analogue of Cranelift's entity arena — an ordinary safe `Vec`, no
-//! self-referential-struct problem: every op appends to the entry block and immediately
-//! stashes the result's raw value, so the block borrow never outlives one method call.
+//! The index in each typed [`crate::staged::ValueId`] maps to an MLIR value arena slot.
+//! melior's `Value<'c, 'a>` is `#[repr(transparent)]` over a lifetime-free
+//! `mlir_sys::MlirValue`, reachable via `ValueLike::to_raw` and reconstructable via
+//! `Value::from_raw`. The arena is therefore an ordinary safe `Vec`, with no
+//! self-referential-struct problem: every op appends to a block and immediately stashes its
+//! raw result. The neutral `ScalarType` stays on `ValueId` and is checked against MLIR when
+//! the value is retrieved; it is never reconstructed from the MLIR type.
 
 mod backend;
-use backend::scalar_to_mlir;
 pub use backend::MlirBackend;
 
 use melior::dialect::{arith, func, DialectRegistry};
@@ -215,9 +214,7 @@ pub fn jit_run_i64_unary(
     arg: i64,
 ) -> i64 {
     let context = make_context();
-    let i64_ty = scalar_to_mlir(&context, ScalarType::I64);
-
-    let mut backend = MlirBackend::new(&context, vec![i64_ty]);
+    let mut backend = MlirBackend::new(&context, vec![ScalarType::I64]);
     let x = backend.param(0);
     let result = build(&mut backend, x);
     backend.ret(Some(result));
@@ -279,8 +276,7 @@ where
     let body = builder.into_body(ret);
 
     let context = make_context();
-    let i64_ty = scalar_to_mlir(&context, ScalarType::I64);
-    let mut backend = MlirBackend::new(&context, vec![i64_ty]);
+    let mut backend = MlirBackend::new(&context, vec![ScalarType::I64]);
 
     // Store the incoming argument into the parameter's variable slot, then map its var id.
     let incoming = backend.param(0);
@@ -294,6 +290,7 @@ where
             backend: &mut backend,
             variables: &mut variables,
             unit_value: None,
+            block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
         };
         body(&mut ctx)
@@ -321,6 +318,7 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
             backend: &mut backend,
             variables: &mut variables,
             unit_value: None,
+            block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
         };
         emit_body(&mut ctx)
@@ -433,8 +431,7 @@ fn build_function<'c>(
     extern_meta: &[(String, usize)],
 ) -> (Operation<'c>, Vec<backend::FuncDecl>) {
     let num_params = param_infos.len();
-    let ptr_ty = scalar_to_mlir(context, ScalarType::Ptr);
-    let mut mlir = MlirBackend::new(context, vec![ptr_ty; num_params + 1]);
+    let mut mlir = MlirBackend::new(context, vec![ScalarType::Ptr; num_params + 1]);
 
     // Register internal functions id-aligned (placeholder for undefined slots) and externs.
     for meta in internal_meta {
@@ -460,6 +457,7 @@ fn build_function<'c>(
             backend: &mut mlir,
             variables: &mut variables,
             unit_value: None,
+            block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
         };
         crate::func::emit_function_body(
@@ -672,8 +670,7 @@ mod tests {
     fn calls_registered_extern_returning_i64() {
         // kernel(p: ptr) -> i64 { func.call @host_read_i64(p) }
         let context = make_context();
-        let mut backend =
-            MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::Ptr)]);
+        let mut backend = MlirBackend::new(&context, vec![ScalarType::Ptr]);
         let extern_id =
             backend.declare_extern("host_read_i64", &[ScalarType::Ptr], Some(ScalarType::I64));
         let func = backend.declare_extern_func(extern_id);
@@ -698,13 +695,7 @@ mod tests {
     fn calls_registered_void_extern_with_two_args() {
         // kernel(out: ptr, x: i64) { func.call @host_write_i64(out, x); return }
         let context = make_context();
-        let mut backend = MlirBackend::new(
-            &context,
-            vec![
-                scalar_to_mlir(&context, ScalarType::Ptr),
-                scalar_to_mlir(&context, ScalarType::I64),
-            ],
-        );
+        let mut backend = MlirBackend::new(&context, vec![ScalarType::Ptr, ScalarType::I64]);
         let extern_id =
             backend.declare_extern("host_write_i64", &[ScalarType::Ptr, ScalarType::I64], None);
         let func = backend.declare_extern_func(extern_id);
@@ -887,7 +878,7 @@ mod tests {
         let context = make_context();
 
         let double_op = {
-            let mut b = MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::I64)]);
+            let mut b = MlirBackend::new(&context, vec![ScalarType::I64]);
             let x = b.param(0);
             let two = b.iconst(ScalarType::I64, 2);
             let doubled = b.imul(x, two);
@@ -896,7 +887,7 @@ mod tests {
         };
 
         let quad_op = {
-            let mut b = MlirBackend::new(&context, vec![scalar_to_mlir(&context, ScalarType::I64)]);
+            let mut b = MlirBackend::new(&context, vec![ScalarType::I64]);
             let double_id =
                 b.declare_internal_func("double", &[ScalarType::I64], Some(ScalarType::I64));
             let callee = b.declare_func(double_id);

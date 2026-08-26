@@ -163,6 +163,94 @@ fn test_function_reuse() {
     });
 }
 
+#[derive(Clone, Copy)]
+struct MismatchedBackendAdd;
+
+unsafe impl Staged for MismatchedBackendAdd {
+    type Out = i64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let integer = ctx.iconst(ScalarType::I64, 1);
+        let float = ctx.f64const(2.0);
+        Value::Scalar(ctx.iadd(integer, float))
+    }
+}
+
+#[test]
+fn neutral_ir_rejects_mismatched_operation_leaves() {
+    for_each_backend(|compiler| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = compiler.compile(MismatchedBackendAdd);
+        }));
+        assert!(result.is_err(), "ill-typed iadd reached the backend");
+    });
+}
+
+#[derive(Clone, Copy)]
+struct IntegerUsedAsPointer;
+
+unsafe impl Staged for IntegerUsedAsPointer {
+    type Out = i64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let integer = ctx.iconst(ScalarType::I64, 0);
+        Value::Scalar(ctx.load(ScalarType::I64, integer, 0))
+    }
+}
+
+#[test]
+fn neutral_ir_rejects_integer_used_as_pointer() {
+    for_each_backend(|compiler| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = compiler.compile(IntegerUsedAsPointer);
+        }));
+        assert!(
+            result.is_err(),
+            "integer leaf reached a pointer-only operation"
+        );
+    });
+}
+
+#[derive(Clone, Copy)]
+struct WrongDeclaredResult;
+
+unsafe impl Staged for WrongDeclaredResult {
+    type Out = i64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        Value::Scalar(ctx.f64const(1.0))
+    }
+}
+
+#[test]
+fn neutral_ir_rejects_leaf_that_disagrees_with_staged_output() {
+    for_each_backend(|compiler| {
+        let result = std::panic::catch_unwind(std::panic::AssertUnwindSafe(|| {
+            let _ = compiler.compile(WrongDeclaredResult);
+        }));
+        assert!(
+            result.is_err(),
+            "ill-typed Staged result reached native code"
+        );
+    });
+}
+
+#[test]
+fn null_pointer_branch_is_typed_on_every_backend() {
+    for_each_backend(|mut compiler| {
+        let function = compiler.fun0("null_pointer_branch", |ctx| {
+            match_opt_ref(
+                ctx,
+                opt_ref_none::<i64>(),
+                |_ctx, _reference| Const::<i64>::new(1),
+                Const::<i64>::new(2),
+            )
+        });
+        let compiled = compiler.compile(function).expect("compilation failed");
+        assert_eq!(compiled.as_fn().call(), 2);
+    });
+}
+
 // The following tests are compile-fail tests - they should NOT compile
 // Uncomment them to verify that type errors are caught at compile time
 

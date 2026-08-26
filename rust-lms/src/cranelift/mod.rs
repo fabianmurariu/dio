@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::{
-    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, Signature, StackSlotData,
-    StackSlotKind, Value,
+    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, SigRef, Signature,
+    StackSlotData, StackSlotKind, Value,
 };
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::FunctionBuilder;
@@ -21,7 +21,8 @@ use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 
 use crate::staged::{
-    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    expect_arguments, Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId,
+    VarHandle,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
 
@@ -58,6 +59,9 @@ pub(crate) struct CraneliftBackend<'a, 'b> {
     /// Per-function caches of imported `FuncRef`s (a fresh backend is built per function).
     pub(crate) func_ref_cache: HashMap<usize, FuncRef>,
     pub(crate) extern_ref_cache: HashMap<usize, FuncRef>,
+    /// Imported signatures retain their neutral types, which Cranelift's `I8`/`I64`
+    /// representation cannot recover without losing `Bool`/`Ptr` distinctions.
+    pub(crate) sig_specs: HashMap<SigRef, SigSpec>,
 }
 
 /// Encode a `Vec<BlockArg>` from opaque `ValueId`s for a branch/jump.
@@ -70,112 +74,180 @@ fn block_args(args: &[ValueId]) -> Vec<BlockArg> {
 impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     // ---- constants ----
     fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().iconst(ty.to_cranelift(), imm))
+        ValueId::from_cranelift(self.builder.ins().iconst(ty.to_cranelift(), imm), ty)
+    }
+    fn null_ptr(&mut self) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().iconst(types::I64, 0), ScalarType::Ptr)
     }
     fn f64const(&mut self, v: f64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().f64const(v))
+        ValueId::from_cranelift(self.builder.ins().f64const(v), ScalarType::F64)
     }
     fn f32const(&mut self, v: f32) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().f32const(v))
+        ValueId::from_cranelift(self.builder.ins().f32const(v), ScalarType::F32)
     }
     // ---- integer arithmetic ----
     fn iadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().iadd(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().iadd(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn isub(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().isub(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().isub(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn imul(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().imul(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().imul(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn sdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().sdiv(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().sdiv(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().udiv(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().udiv(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().srem(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().srem(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().urem(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().urem(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     // ---- float arithmetic ----
     fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fadd(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().fadd(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fsub(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().fsub(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn fmul(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fmul(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().fmul(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn fdiv(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fdiv(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().fdiv(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     // ---- bitwise / shift ----
     fn band(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().band(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().band(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn bor(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().bor(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().bor(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn bxor(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().bxor(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().bxor(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().ishl(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().ishl(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().sshr(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().sshr(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().ushr(a.cranelift(), b.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().ushr(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().icmp(
-            cc.to_cranelift(),
-            a.cranelift(),
-            b.cranelift(),
-        ))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .icmp(cc.to_cranelift(), a.cranelift(), b.cranelift()),
+            ScalarType::Bool,
+        )
     }
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().icmp_imm_s(
-            cc.to_cranelift(),
-            a.cranelift(),
-            imm,
-        ))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .icmp_imm_s(cc.to_cranelift(), a.cranelift(), imm),
+            ScalarType::Bool,
+        )
     }
     fn fcmp(&mut self, cc: FloatCmp, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().fcmp(
-            cc.to_cranelift(),
-            a.cranelift(),
-            b.cranelift(),
-        ))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .fcmp(cc.to_cranelift(), a.cranelift(), b.cranelift()),
+            ScalarType::Bool,
+        )
     }
     fn select(&mut self, cond: ValueId, a: ValueId, b: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().select(
-            cond.cranelift(),
-            a.cranelift(),
-            b.cranelift(),
-        ))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .select(cond.cranelift(), a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
     }
     // ---- casts ----
     fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().sextend(to.to_cranelift(), v.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().sextend(to.to_cranelift(), v.cranelift()),
+            to,
+        )
     }
     fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().uextend(to.to_cranelift(), v.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().uextend(to.to_cranelift(), v.cranelift()),
+            to,
+        )
     }
     fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().ireduce(to.to_cranelift(), v.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().ireduce(to.to_cranelift(), v.cranelift()),
+            to,
+        )
     }
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         ValueId::from_cranelift(
             self.builder
                 .ins()
                 .fcvt_from_sint(to.to_cranelift(), v.cranelift()),
+            to,
         )
     }
     fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
@@ -183,6 +255,7 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             self.builder
                 .ins()
                 .fcvt_from_uint(to.to_cranelift(), v.cranelift()),
+            to,
         )
     }
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
@@ -190,22 +263,26 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         // Neutral types that differ (e.g. `Ptr` vs `I64`) can still lower to the
         // same Cranelift type; a same-type `bitcast` is invalid IR, so no-op it.
         if self.builder.func.dfg.value_type(v.cranelift()) == to_ty {
-            return v;
+            return v.with_type(to);
         }
-        ValueId::from_cranelift(self.builder.ins().bitcast(
-            to_ty,
-            MemFlagsData::new(),
-            v.cranelift(),
-        ))
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .bitcast(to_ty, MemFlagsData::new(), v.cranelift()),
+            to,
+        )
     }
     // ---- memory ----
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().load(
-            ty.to_cranelift(),
-            MemFlagsData::trusted(),
-            ptr.cranelift(),
-            offset,
-        ))
+        ValueId::from_cranelift(
+            self.builder.ins().load(
+                ty.to_cranelift(),
+                MemFlagsData::trusted(),
+                ptr.cranelift(),
+                offset,
+            ),
+            ty,
+        )
     }
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
         self.builder.ins().store(
@@ -220,6 +297,7 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             self.builder
                 .ins()
                 .stack_addr(types::I64, slot.cranelift(), offset),
+            ScalarType::Ptr,
         )
     }
     fn alloc_stack_slot(&mut self, size: u32, align_shift: u8) -> StackSlotId {
@@ -243,13 +321,19 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     }
     // ---- pointers (semantic; §8b) ----
     fn ptr_offset_bytes(&mut self, ptr: ValueId, offset: ValueId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().iadd(ptr.cranelift(), offset.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().iadd(ptr.cranelift(), offset.cranelift()),
+            ScalarType::Ptr,
+        )
     }
     fn ptr_offset_const(&mut self, ptr: ValueId, bytes: i64) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().iadd_imm_s(ptr.cranelift(), bytes))
+        ValueId::from_cranelift(
+            self.builder.ins().iadd_imm_s(ptr.cranelift(), bytes),
+            ScalarType::Ptr,
+        )
     }
     fn addr_to_ptr(&mut self, addr: ValueId) -> ValueId {
-        addr
+        addr.with_type(ScalarType::Ptr)
     }
     // ---- blocks & control flow ----
     fn create_block(&mut self) -> BlockHandle {
@@ -259,10 +343,11 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         ValueId::from_cranelift(
             self.builder
                 .append_block_param(block.cranelift(), ty.to_cranelift()),
+            ty,
         )
     }
-    fn block_param(&mut self, block: BlockHandle, idx: usize) -> ValueId {
-        ValueId::from_cranelift(self.builder.block_params(block.cranelift())[idx])
+    fn block_param(&mut self, block: BlockHandle, idx: usize, ty: ScalarType) -> ValueId {
+        ValueId::from_cranelift(self.builder.block_params(block.cranelift())[idx], ty)
     }
     fn switch_to_block(&mut self, block: BlockHandle) {
         self.builder.switch_to_block(block.cranelift());
@@ -294,23 +379,26 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     }
     // ---- variables ----
     fn declare_var(&mut self, ty: ScalarType) -> VarHandle {
-        VarHandle::from_cranelift(self.builder.declare_var(ty.to_cranelift()))
+        VarHandle::from_cranelift(self.builder.declare_var(ty.to_cranelift()), ty)
     }
     fn def_var(&mut self, var: VarHandle, val: ValueId) {
         self.builder.def_var(var.cranelift(), val.cranelift());
     }
     fn use_var(&mut self, var: VarHandle) -> ValueId {
-        ValueId::from_cranelift(self.builder.use_var(var.cranelift()))
+        ValueId::from_cranelift(self.builder.use_var(var.cranelift()), var.scalar_type())
     }
     // ---- calls & signatures ----
     fn call(&mut self, func: FuncRefId, args: &[ValueId]) -> Option<ValueId> {
+        let signature = self.builder.func.dfg.ext_funcs[func.cranelift()].signature;
+        let arity = self.builder.func.dfg.signatures[signature].params.len();
+        expect_arguments("call", args, &vec![ScalarType::Ptr; arity]);
         let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
         let inst = self.builder.ins().call(func.cranelift(), &cargs);
         self.builder
             .inst_results(inst)
             .first()
             .copied()
-            .map(ValueId::from_cranelift)
+            .map(|value| ValueId::from_cranelift(value, func.return_type().unwrap()))
     }
     fn call_indirect(
         &mut self,
@@ -318,6 +406,11 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         callee: ValueId,
         args: &[ValueId],
     ) -> Option<ValueId> {
+        let spec = self
+            .sig_specs
+            .get(&sig.cranelift())
+            .expect("call_indirect: imported signature is not registered");
+        expect_arguments("call_indirect", args, &spec.params);
         let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
         let inst = self
             .builder
@@ -327,10 +420,13 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             .inst_results(inst)
             .first()
             .copied()
-            .map(ValueId::from_cranelift)
+            .map(|value| ValueId::from_cranelift(value, sig.return_type().unwrap()))
     }
     fn func_addr(&mut self, func: FuncRefId) -> ValueId {
-        ValueId::from_cranelift(self.builder.ins().func_addr(types::I64, func.cranelift()))
+        ValueId::from_cranelift(
+            self.builder.ins().func_addr(types::I64, func.cranelift()),
+            ScalarType::Ptr,
+        )
     }
     fn import_signature(&mut self, sig: &SigSpec) -> SigRefId {
         let mut signature = Signature::new(self.module.isa().default_call_conv());
@@ -340,11 +436,13 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         if let Some(ret) = sig.ret {
             signature.returns.push(AbiParam::new(ret.to_cranelift()));
         }
-        SigRefId::from_cranelift(self.builder.import_signature(signature))
+        let sig_ref = self.builder.import_signature(signature);
+        self.sig_specs.insert(sig_ref, sig.clone());
+        SigRefId::from_cranelift(sig_ref, sig.ret)
     }
     fn declare_func(&mut self, func_id: usize) -> FuncRefId {
         if let Some(&func_ref) = self.func_ref_cache.get(&func_id) {
-            return FuncRefId::from_cranelift(func_ref);
+            return FuncRefId::from_cranelift(func_ref, None);
         }
         let cranelift_id = *self
             .func_ids
@@ -354,11 +452,11 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             .module
             .declare_func_in_func(cranelift_id, self.builder.func);
         self.func_ref_cache.insert(func_id, func_ref);
-        FuncRefId::from_cranelift(func_ref)
+        FuncRefId::from_cranelift(func_ref, None)
     }
     fn declare_extern_func(&mut self, extern_id: usize) -> FuncRefId {
         if let Some(&func_ref) = self.extern_ref_cache.get(&extern_id) {
-            return FuncRefId::from_cranelift(func_ref);
+            return FuncRefId::from_cranelift(func_ref, None);
         }
         let cranelift_id = *self
             .extern_func_ids
@@ -368,6 +466,6 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             .module
             .declare_func_in_func(cranelift_id, self.builder.func);
         self.extern_ref_cache.insert(extern_id, func_ref);
-        FuncRefId::from_cranelift(func_ref)
+        FuncRefId::from_cranelift(func_ref, None)
     }
 }

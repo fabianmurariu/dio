@@ -4,7 +4,19 @@ Reviewed: 2026-08-17
 
 ## Remediation status
 
-Last updated: 2026-08-20
+Last updated: 2026-08-26
+
+Post-LLVM Root A/A-prime is complete. Neutral values now have explicit scalar/fat shape,
+and every scalar leaf carries its backend-independent `ScalarType`. The checked
+`CompilationContext` surface rejects mismatched arithmetic, casts, pointer operations,
+variables, block arguments, indirect callees, and function results during IR construction;
+backend declaration tables reject mismatched direct and indirect call arguments before call
+emission. Reference-option `None` uses a semantic `null_ptr` operation on both backends;
+MLIR no longer guesses `Bool`/`Ptr` by inspecting native value types. Regression tests
+deliberately construct malformed unsafe `Staged` implementations and verify rejection before
+backend verification or native execution. Root B (safe arithmetic runtime preconditions) and
+Root C (shared module planning/driver simplification) remain pending in
+`docs/post_llvm_plan.md`.
 
 Phases 1, 2, and 2A are complete. **Phase 3: ABI correctness is implemented and
 passes locally on `aarch64-apple-darwin`.** A native six-target GitHub Actions

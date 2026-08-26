@@ -348,8 +348,7 @@ unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
     type Out = OptRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // None is represented as null pointer
-        Value::scalar(ctx.iconst(ScalarType::I64, 0))
+        Value::scalar(ctx.null_ptr())
     }
 }
 
@@ -394,7 +393,7 @@ unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
     type Out = OptMutRefType<'a, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        Value::scalar(ctx.iconst(ScalarType::I64, 0))
+        Value::scalar(ctx.null_ptr())
     }
 }
 
