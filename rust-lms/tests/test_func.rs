@@ -379,7 +379,7 @@ fn test_local_variables_in_fun1() {
             (
                 (i, sum, v),
                 while_loop(
-                    lt(*i, arr.len()),
+                    lt(*i, arr.count()),
                     (
                         // v = arr.get_unchecked(i)
                         // SAFETY: the surrounding loop proves `i < arr.len()`.

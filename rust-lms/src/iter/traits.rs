@@ -455,7 +455,7 @@ pub trait IndexedSource: Clone + 'static {
     type LenExpr: Staged<Out = u64> + Clone + 'static;
     type GetExpr: Staged<Out = Self::Item> + 'static;
 
-    fn len(&self) -> Self::LenExpr;
+    fn count(&self) -> Self::LenExpr;
     /// Return an expression that reads the item at `index` without checking it.
     ///
     /// # Safety

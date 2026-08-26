@@ -52,7 +52,7 @@ where
         let i = ctx.var(0u64);
         let slice = self.slice;
 
-        ctx.while_loop(lt(i, slice.clone().len()), move |ctx| {
+        ctx.while_loop(lt(i, slice.clone().count()), move |ctx| {
             // Bind the element *inside* the loop: no dead pre-loop init, and the
             // frontend resolves this single-def var to the loaded value with no
             // copy — so the emitted body matches a hand-written `while_loop`.
@@ -74,7 +74,7 @@ where
     type LenExpr = SliceLen<S>;
 
     fn len(&self) -> Self::LenExpr {
-        self.slice.clone().len()
+        self.slice.clone().count()
     }
 }
 
@@ -89,8 +89,8 @@ where
     type LenExpr = SliceLen<S>;
     type GetExpr = SliceGetUnchecked<S, Var<u64>>;
 
-    fn len(&self) -> Self::LenExpr {
-        self.slice.clone().len()
+    fn count(&self) -> Self::LenExpr {
+        self.slice.clone().count()
     }
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
@@ -112,8 +112,8 @@ where
     type LenExpr = SliceLen<Self>;
     type GetExpr = SliceGetUnchecked<Self, Var<u64>>;
 
-    fn len(&self) -> Self::LenExpr {
-        SliceRefOps::len(*self)
+    fn count(&self) -> Self::LenExpr {
+        SliceRefOps::count(*self)
     }
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {

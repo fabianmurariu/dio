@@ -237,8 +237,8 @@ where
     {
         let i = ctx.var(0u64);
         let len = ctx.bind(ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         ));
         let prim = self.iter;
         let sec = self.other;
@@ -264,8 +264,8 @@ where
 
     fn len(&self) -> Self::LenExpr {
         ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         )
     }
 }
@@ -283,10 +283,10 @@ where
     type LenExpr = ZipLen<<I as IndexedSource>::LenExpr, <S as IndexedSource>::LenExpr>;
     type GetExpr = ZipGetAt<I, S>;
 
-    fn len(&self) -> Self::LenExpr {
+    fn count(&self) -> Self::LenExpr {
         ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         )
     }
 
@@ -315,8 +315,8 @@ where
     {
         let i = ctx.var(0u64);
         let len = ctx.bind(ZipLen::new(
-            IndexedSource::len(&self.iter),
-            IndexedSource::len(&self.other),
+            IndexedSource::count(&self.iter),
+            IndexedSource::count(&self.other),
         ));
         let prim = self.iter;
         let sec = self.other;

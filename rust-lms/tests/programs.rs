@@ -29,7 +29,7 @@ fn test_compute_stats() {
                 let sum = ctx.var(0.0f64);
                 let val = ctx.var(0.0f64);
 
-                ctx.while_loop(lt(i, data.len()), move |ctx| {
+                ctx.while_loop(lt(i, data.count()), move |ctx| {
                     // SAFETY: the loop condition proves `i < data.len()`.
                     ctx.store(val, unsafe { data.get_unchecked(i) });
                     ctx.if_then(gt(val, v), move |ctx| {

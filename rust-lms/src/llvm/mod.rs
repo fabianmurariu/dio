@@ -288,7 +288,7 @@ where
     backend.def_var(param_var, incoming);
 
     let mut variables = HashMap::new();
-    variables.insert(param_id, crate::staged::VariableValue::Scalar(param_var));
+    variables.insert(param_id, crate::staged::VarValue::Scalar(param_var));
     let result = {
         let mut ctx = CompilationContext {
             backend: &mut backend,
@@ -1059,7 +1059,7 @@ mod tests {
             let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
                 let i = ctx.var(0u64);
                 let total = ctx.var(0i64);
-                ctx.while_loop(lt(i, arr.len()), move |ctx| {
+                ctx.while_loop(lt(i, arr.count()), move |ctx| {
                     ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
                     ctx.store(i, add(i, 1u64));
                 });
@@ -1072,7 +1072,7 @@ mod tests {
             let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
                 let i = ctx.var(0u64);
                 let total = ctx.var(0i64);
-                ctx.while_loop(lt(i, arr.len()), move |ctx| {
+                ctx.while_loop(lt(i, arr.count()), move |ctx| {
                     ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
                     ctx.store(i, add(i, 1u64));
                 });

@@ -238,7 +238,7 @@ where
     ///
     /// The descriptor must contain a pointer that is live and aligned for
     /// reads of `len` values of `T` for the duration of generated execution.
-    unsafe fn as_slice<T>(self) -> AsSlice<Self, T>
+    unsafe fn into_slice<T>(self) -> AsSlice<Self, T>
     where
         T: StagedType + 'a,
         R: SliceRepr<T>,
@@ -272,7 +272,7 @@ where
     /// The descriptor must contain a pointer that is live, aligned, and
     /// exclusively writable for `len` values of `T` for the duration of
     /// generated execution.
-    unsafe fn as_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    unsafe fn into_mut_slice<T>(self) -> AsMutSlice<Self, T>
     where
         T: StagedType + 'a,
         R: MutSliceRepr<T>,
@@ -869,12 +869,12 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone
 {
     /// Get the length of the slice.
-    fn len(self) -> SliceLen<Self> {
+    fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
     /// Get the raw data pointer.
-    fn as_ptr(self) -> SliceAsPtr<Self> {
+    fn into_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
     }
 
@@ -1257,12 +1257,12 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
 /// gated on `MutSliceType`, so it only exists here.
 pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized {
     /// Get the length of the slice.
-    fn len(self) -> SliceLen<Self> {
+    fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
     /// Get the raw mutable data pointer.
-    fn as_mut_ptr(self) -> SliceAsPtr<Self> {
+    fn into_mut_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
     }
 

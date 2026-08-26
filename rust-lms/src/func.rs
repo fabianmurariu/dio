@@ -18,9 +18,7 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{
-    assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VariableValue,
-};
+use crate::staged::{assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarValue};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
@@ -591,7 +589,7 @@ pub(crate) fn emit_function_body(
             ctx.def_var(len_var, len_value);
             ctx.variables.insert(
                 var_id,
-                VariableValue::Fat {
+                VarValue::Fat {
                     ptr: ptr_var,
                     len: len_var,
                 },
@@ -600,8 +598,7 @@ pub(crate) fn emit_function_body(
             // A non-slice aggregate is represented by a pointer to its storage.
             let param_var = ctx.declare_var(ScalarType::Ptr);
             ctx.def_var(param_var, storage_ptr);
-            ctx.variables
-                .insert(var_id, VariableValue::Scalar(param_var));
+            ctx.variables.insert(var_id, VarValue::Scalar(param_var));
         } else {
             let param_value = if info.size == 0 {
                 ctx.iconst(ScalarType::I8, 0)
@@ -610,8 +607,7 @@ pub(crate) fn emit_function_body(
             };
             let param_var = ctx.declare_var(info.repr);
             ctx.def_var(param_var, param_value);
-            ctx.variables
-                .insert(var_id, VariableValue::Scalar(param_var));
+            ctx.variables.insert(var_id, VarValue::Scalar(param_var));
         }
     }
 

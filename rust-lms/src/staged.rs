@@ -226,7 +226,7 @@ impl SigRefId {
 /// Backend variables holding one neutral [`Value`]. Keeping the shape in the binding
 /// prevents scalar and fat variables from being split across unrelated maps.
 #[derive(Clone, Copy)]
-pub(crate) enum VariableValue {
+pub(crate) enum VarValue {
     Scalar(VarHandle),
     Fat { ptr: VarHandle, len: VarHandle },
 }
@@ -249,7 +249,7 @@ pub struct CompilationContext<'c> {
     /// `CompilationContext` derefs to this, so `ctx.<op>()` routes to the backend.
     pub(crate) backend: &'c mut dyn Backend,
     /// Mapping from staged variable IDs to shape-aware backend variable bindings.
-    pub(crate) variables: &'c mut HashMap<usize, VariableValue>,
+    pub(crate) variables: &'c mut HashMap<usize, VarValue>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
     pub(crate) unit_value: Option<ValueId>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
@@ -446,17 +446,17 @@ impl<'c> CompilationContext<'c> {
             .unwrap_or_else(|| panic!("staged variable {id} is not defined"));
 
         match binding {
-            VariableValue::Scalar(var) if !T::is_fat_pointer() => Value::scalar(self.use_var(var)),
-            VariableValue::Fat { ptr, len } if T::is_fat_pointer() => {
+            VarValue::Scalar(var) if !T::is_fat_pointer() => Value::scalar(self.use_var(var)),
+            VarValue::Fat { ptr, len } if T::is_fat_pointer() => {
                 let ptr = self.use_var(ptr);
                 let len = self.use_var(len);
                 Value::fat(ptr, len)
             }
-            VariableValue::Scalar(_) => panic!(
+            VarValue::Scalar(_) => panic!(
                 "staged variable {id} has scalar storage, but {} declares a fat value",
                 std::any::type_name::<T>()
             ),
-            VariableValue::Fat { .. } => panic!(
+            VarValue::Fat { .. } => panic!(
                 "staged variable {id} has fat storage, but {} declares a scalar value",
                 std::any::type_name::<T>()
             ),
@@ -471,19 +471,19 @@ impl<'c> CompilationContext<'c> {
         match value {
             Value::Scalar(leaf) if !T::is_fat_pointer() => {
                 let var = match existing {
-                    Some(VariableValue::Scalar(var)) => var,
-                    Some(VariableValue::Fat { .. }) => {
+                    Some(VarValue::Scalar(var)) => var,
+                    Some(VarValue::Fat { .. }) => {
                         panic!("cannot assign a scalar value to fat staged variable {id}")
                     }
                     None => self.declare_var(T::scalar_type()),
                 };
                 self.def_var(var, leaf);
-                self.variables.insert(id, VariableValue::Scalar(var));
+                self.variables.insert(id, VarValue::Scalar(var));
             }
             Value::Fat { ptr, len } if T::is_fat_pointer() => {
                 let (ptr_var, len_var) = match existing {
-                    Some(VariableValue::Fat { ptr, len }) => (ptr, len),
-                    Some(VariableValue::Scalar(_)) => {
+                    Some(VarValue::Fat { ptr, len }) => (ptr, len),
+                    Some(VarValue::Scalar(_)) => {
                         panic!("cannot assign a fat value to scalar staged variable {id}")
                     }
                     None => (
@@ -495,7 +495,7 @@ impl<'c> CompilationContext<'c> {
                 self.def_var(len_var, len);
                 self.variables.insert(
                     id,
-                    VariableValue::Fat {
+                    VarValue::Fat {
                         ptr: ptr_var,
                         len: len_var,
                     },

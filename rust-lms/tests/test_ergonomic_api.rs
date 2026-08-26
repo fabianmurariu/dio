@@ -130,7 +130,7 @@ fn test_ergonomic_slice_subslice() {
             let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
             let sub = unsafe { arr.slice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.len()), move |ctx| {
+            ctx.while_loop(lt(i, sub.count()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
                 ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);

@@ -253,7 +253,7 @@ fn euler_08_largest_product_of_k_adjacent() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2("e08", |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<u64>| {
             let n = ctx.var(0u64);
-            ctx.store(n, digits.len());
+            ctx.store(n, digits.count());
             let i = ctx.var(0u64);
             let best = ctx.var(0i64);
             ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
@@ -506,7 +506,7 @@ fn euler_21_amicable_sum() {
             let mut compiler = make();
             let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<u64>>>| {
                 let n = ctx.var(0u64);
-                ctx.store(n, sigma.len());
+                ctx.store(n, sigma.count());
                 let total = ctx.var(0u64);
                 let a = ctx.var(2u64);
                 ctx.while_loop(lt(a, n), move |ctx| {

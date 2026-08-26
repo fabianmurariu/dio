@@ -64,7 +64,7 @@ pub trait FfiArrayOps<'r>: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {
     ///
     /// The descriptor's Arrow physical values buffer must be represented by
     /// `M` for every generated-code use.
-    unsafe fn as_primitive<M: StagedType>(
+    unsafe fn into_primitive<M: StagedType>(
         self,
     ) -> PrimitiveArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone, M> {
         PrimitiveArrayView {

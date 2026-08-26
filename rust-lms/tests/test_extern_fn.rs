@@ -38,6 +38,7 @@ pub extern "C" fn ext_noop() {
     // Do nothing
 }
 
+/// # Safety
 /// An unsafe callback must use `call_extern1_unchecked`.
 #[extern_fn]
 #[no_mangle]
