@@ -738,7 +738,7 @@ fn euler_67_max_path_sum_triangle() {
         //     2  4  6
         //   8  5  9  3
         let small: [i64; 10] = [3, 7, 4, 2, 4, 6, 8, 5, 9, 3];
-        let mut ws = vec![0i64; 4];
+        let mut ws = [0i64; 4];
         assert_eq!(g.call(&small[..], &mut ws[..], 4u64), 23);
 
         // Official Euler-18 15-row triangle (answer = 1074).
@@ -760,7 +760,7 @@ fn euler_67_max_path_sum_triangle() {
             &[4, 62, 98, 27, 23, 9, 70, 98, 73, 93, 38, 53, 60, 4, 23],
         ];
         let flat: Vec<i64> = e18_rows.iter().flat_map(|r| r.iter().copied()).collect();
-        let mut ws = vec![0i64; 15];
+        let mut ws = [0i64; 15];
         assert_eq!(g.call(&flat[..], &mut ws[..], 15u64), 1074);
     });
 }

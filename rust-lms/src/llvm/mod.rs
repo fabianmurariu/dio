@@ -287,14 +287,12 @@ where
     let param_var = backend.declare_var(ScalarType::I64);
     backend.def_var(param_var, incoming);
 
-    let mut var_map = HashMap::new();
-    var_map.insert(param_id, param_var);
-    let mut slice_vars = HashMap::new();
+    let mut variables = HashMap::new();
+    variables.insert(param_id, crate::staged::VariableValue::Scalar(param_var));
     let result = {
         let mut ctx = CompilationContext {
             backend: &mut backend,
-            var_map: &mut var_map,
-            slice_vars: &mut slice_vars,
+            variables: &mut variables,
             unit_value: None,
             loop_exit_stack: Vec::new(),
         };
@@ -317,13 +315,11 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
     let context = make_context();
     let mut backend = MlirBackend::new(&context, Vec::new());
 
-    let mut var_map = HashMap::new();
-    let mut slice_vars = HashMap::new();
+    let mut variables = HashMap::new();
     let result = {
         let mut ctx = CompilationContext {
             backend: &mut backend,
-            var_map: &mut var_map,
-            slice_vars: &mut slice_vars,
+            variables: &mut variables,
             unit_value: None,
             loop_exit_stack: Vec::new(),
         };
@@ -459,12 +455,10 @@ fn build_function<'c>(
 
     let params: Vec<ValueId> = (0..=num_params).map(|i| mlir.param(i)).collect();
     {
-        let mut var_map = HashMap::new();
-        let mut slice_vars = HashMap::new();
+        let mut variables = HashMap::new();
         let mut ctx = CompilationContext {
             backend: &mut mlir,
-            var_map: &mut var_map,
-            slice_vars: &mut slice_vars,
+            variables: &mut variables,
             unit_value: None,
             loop_exit_stack: Vec::new(),
         };

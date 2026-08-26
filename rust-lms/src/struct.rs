@@ -225,13 +225,8 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let base_ptr = self.ptr.codegen(ctx);
-        let offset = F::OFFSET as i32;
-        if F::Out::is_copy_struct() {
-            let offset = ctx.iconst(ScalarType::I64, F::OFFSET as i64);
-            Value::scalar(ctx.ptr_offset_bytes(base_ptr.leaf(), offset))
-        } else {
-            Value::scalar(ctx.load(F::Out::scalar_type(), base_ptr.leaf(), offset))
-        }
+        let field_ptr = ctx.ptr_offset_const(base_ptr.leaf(), F::OFFSET as i64);
+        ctx.load_value::<F::Out>(field_ptr)
     }
 }
 

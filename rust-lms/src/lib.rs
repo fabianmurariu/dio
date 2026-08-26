@@ -99,14 +99,16 @@ pub mod prelude {
         call0, call1, call2, call3, Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2,
         FunRef3, FunType0, FunType1, FunType2, FunType3, JitBackend,
     };
+    #[allow(deprecated)]
     pub use crate::iter::{
         box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step, DynExactIter, DynIter,
         ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind,
         Filter, FilterMap, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
-        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot,
-        RangeIter, RangeStep, RegisterScalar, ReusedOpaqueIter, ReusedOpaqueIterFns,
-        ReusedOpaqueIterKind, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt,
-        ZipItem, ZipItemAccess, ZipItemType, ZipLen, OPAQUE_ITER_INLINE_CAP,
+        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner,
+        OpaqueIterSlot, RangeIter, RangeStep, RegisterScalar, ReusedOpaqueIter,
+        ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan, SkipWhile, SliceIter, StagedIterator,
+        TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen,
+        OPAQUE_ITER_INLINE_CAP,
     };
     pub use crate::num::{
         add, bitand, bitcast, bitor, bitxor, div, eq, gt, int_cast, int_to_float, lt, max, min,

@@ -61,14 +61,14 @@ impl TypeInfo {
 /// - func_id: The function's ID in the Compiler
 /// - param_infos: Type info for each parameter
 /// - return_info: Type info for the return value
-/// - arg_values: One Cranelift Value per logical parameter (pointer for structs)
+/// - arg_values: One ABI leaf per logical parameter (storage pointer for aggregates)
 pub fn codegen_call(
     ctx: &mut CompilationContext,
     func_id: usize,
     param_infos: &[TypeInfo],
     return_info: &TypeInfo,
     arg_values: &[ValueId],
-) -> ValueId {
+) -> Value {
     assert_eq!(
         arg_values.len(),
         param_infos.len(),
@@ -105,12 +105,14 @@ pub fn codegen_call(
     // Generate the call
     ctx.call(func_ref, &call_args);
 
-    if return_info.is_aggregate {
-        result_ptr
+    if return_info.is_fat_pointer {
+        ctx.load_fat(result_ptr)
+    } else if return_info.is_aggregate {
+        Value::scalar(result_ptr)
     } else if return_info.size == 0 {
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     } else {
-        ctx.load(return_info.repr, result_ptr, 0)
+        Value::scalar(ctx.load(return_info.repr, result_ptr, 0))
     }
 }
 
@@ -200,7 +202,7 @@ macro_rules! impl_fun_n {
 
             fn codegen(&self, ctx: &mut CompilationContext) -> Value {
                 let return_info = TypeInfo::from_staged_type::<OUT>();
-                Value::scalar(codegen_call(ctx, self.func.id, &[], &return_info, &[]))
+                codegen_call(ctx, self.func.id, &[], &return_info, &[])
             }
         }
 
@@ -283,11 +285,12 @@ macro_rules! impl_fun_n {
                 // Generate arg leaves (scalars pass through; slices materialize to memory)
                 let args = [$(materialized_arg(ctx, &self.$arg)),+];
 
-                Value::scalar(codegen_call(ctx, self.func.id, &param_infos, &return_info, &args))
+                codegen_call(ctx, self.func.id, &param_infos, &return_info, &args)
             }
         }
 
         /// Create a call expression
+        #[allow(clippy::too_many_arguments)]
         pub fn $call_fn<$($T,)+ OUT, $($Arg),+>(
             func: $FunRef<$($T,)+ OUT>,
             $($arg: $Arg,)+

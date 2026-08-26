@@ -212,6 +212,10 @@ unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     fn is_copy_struct() -> bool {
         true
     }
+
+    fn is_fat_pointer() -> bool {
+        true
+    }
 }
 
 unsafe impl<T: StagedType> CopyType for FatSliceType<T> {}
@@ -252,6 +256,10 @@ unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     }
 
     fn is_copy_struct() -> bool {
+        true
+    }
+
+    fn is_fat_pointer() -> bool {
         true
     }
 }
@@ -548,10 +556,6 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.arg.codegen(ctx)
     }
-
-    fn var_id(&self) -> Option<usize> {
-        self.arg.var_id()
-    }
 }
 
 /// Convert a value into the exact staged marker required by a safe extern
@@ -673,7 +677,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
-        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new()))
+        emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
 }
 
@@ -713,7 +717,7 @@ where
         let mut args = Vec::new();
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
 
-        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -853,7 +857,7 @@ where
         push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
 
-        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -960,7 +964,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     ctx: &mut CompilationContext,
     func_ref: FuncRefId,
     mut args: Vec<ValueId>,
-) -> ValueId {
+) -> Value {
     let stack_slot = ctx.alloc_stack_slot(
         (Ret::size_of() as u32).max(1),
         Ret::align_of().trailing_zeros() as u8,
@@ -969,12 +973,14 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     args.push(output_ptr);
     ctx.call(func_ref, &args);
 
-    if Ret::is_copy_struct() {
-        output_ptr
+    if Ret::is_fat_pointer() {
+        ctx.load_fat(output_ptr)
+    } else if Ret::is_copy_struct() {
+        Value::scalar(output_ptr)
     } else if Ret::size_of() == 0 {
-        ctx.get_unit_value()
+        Value::scalar(ctx.get_unit_value())
     } else {
-        ctx.load(Ret::scalar_type(), output_ptr, 0)
+        Value::scalar(ctx.load(Ret::scalar_type(), output_ptr, 0))
     }
 }
 
@@ -1009,7 +1015,7 @@ where
         push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
 
-        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 
@@ -1107,7 +1113,7 @@ where
         push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
         push_extern_arg::<_, DType>(ctx, &mut args, &self.arg3);
 
-        Value::scalar(emit_extern_call::<S::Ret>(ctx, func_ref, args))
+        emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
 

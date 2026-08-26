@@ -189,7 +189,7 @@ where
 
         store_value::<<I as IndexedSource>::Item>(
             ctx,
-            first.leaf(),
+            first,
             slot_ptr,
             ZipItemType::__field_first::<
                 <I as IndexedSource>::Item,
@@ -198,7 +198,7 @@ where
         );
         store_value::<<S as IndexedSource>::Item>(
             ctx,
-            second.leaf(),
+            second,
             slot_ptr,
             ZipItemType::__field_second::<
                 <I as IndexedSource>::Item,
@@ -212,16 +212,12 @@ where
 
 fn store_value<T: StagedType>(
     ctx: &mut CompilationContext,
-    value: ValueId,
+    value: Value,
     ptr: ValueId,
     offset: i32,
 ) {
-    if T::is_copy_struct() {
-        let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
-        ctx.copy_nonoverlapping(destination, value, T::size_of(), T::align_of());
-    } else {
-        ctx.store(value, ptr, offset);
-    }
+    let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
+    ctx.store_value::<T>(destination, value);
 }
 
 impl<I, S> StagedIterator for Zip<I, S>

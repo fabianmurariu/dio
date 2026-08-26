@@ -33,8 +33,8 @@ pub struct ValueId(u32);
 /// - [`Scalar`](Value::Scalar) — one backend SSA leaf ([`ValueId`]); every non-slice value.
 /// - [`Fat`](Value::Fat) — a slice as **two** SSA leaves `(data ptr, len)` directly, instead
 ///   of a pointer to a `{ptr,len}` pair threaded through a side-channel. On Cranelift these
-///   are two registers; on LLVM two SSA values. Materialized to a memory `{ptr,len}` only at
-///   ABI boundaries.
+///   are two registers; on LLVM two SSA values. Materialized as `{ptr,len}` when canonical
+///   memory storage is required (for example at an ABI boundary or inside an aggregate).
 ///
 /// Backends still speak only in leaves — a `Value` is composed/destructured entirely in the
 /// neutral layer.
@@ -55,8 +55,8 @@ impl Value {
         Value::Fat { ptr, len }
     }
 
-    /// The backend leaf of a scalar value. Panics on a `Fat` value — a slice reached a
-    /// scalar op, which is a neutral-IR type error (the type system should make it impossible).
+    /// The backend leaf of a scalar value. Panics on a `Fat` value to report a neutral-IR
+    /// shape violation at the first scalar-only boundary.
     pub(crate) fn leaf(self) -> ValueId {
         match self {
             Value::Scalar(v) => v,
@@ -223,12 +223,12 @@ impl SigRefId {
 // Compilation Context
 // =============================================================================
 
-/// Optimized storage for slice parameters (ptr and len as separate variables).
-/// This avoids the need for stack slot loads in tight loops.
+/// Backend variables holding one neutral [`Value`]. Keeping the shape in the binding
+/// prevents scalar and fat variables from being split across unrelated maps.
 #[derive(Clone, Copy)]
-pub(crate) struct SliceVars {
-    pub(crate) ptr_var: VarHandle,
-    pub(crate) len_var: VarHandle,
+pub(crate) enum VariableValue {
+    Scalar(VarHandle),
+    Fat { ptr: VarHandle, len: VarHandle },
 }
 
 /// Context provided during code generation.
@@ -245,14 +245,11 @@ pub(crate) struct SliceVars {
 /// }
 /// ```
 pub struct CompilationContext<'c> {
-    /// The IR backend (Cranelift today; a second impl — LLVM/MLIR — plugs in here).
+    /// The active IR backend (Cranelift or LLVM/MLIR).
     /// `CompilationContext` derefs to this, so `ctx.<op>()` routes to the backend.
     pub(crate) backend: &'c mut dyn Backend,
-    /// Mapping from our variable IDs to backend variable handles.
-    pub(crate) var_map: &'c mut HashMap<usize, VarHandle>,
-    /// Optimized slice variable storage: var_id -> (ptr_var, len_var)
-    /// For slice parameters, this allows direct register access instead of stack loads
-    pub(crate) slice_vars: &'c mut HashMap<usize, SliceVars>,
+    /// Mapping from staged variable IDs to shape-aware backend variable bindings.
+    pub(crate) variables: &'c mut HashMap<usize, VariableValue>,
     /// Cached unit value (iconst.i8 0) - avoids creating duplicate dead values
     pub(crate) unit_value: Option<ValueId>,
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
@@ -412,58 +409,106 @@ impl<'c> CompilationContext<'c> {
         slice.codegen(self).parts()
     }
 
-    /// Resolve a variable to its [`Value`] by neutral type: a fat-pointer (slice) type reads
-    /// its `(ptr, len)` register pair from [`Self::slice_vars`] and yields a [`Value::Fat`];
-    /// every other type reads its single variable and yields a [`Value::Scalar`]. This is the
-    /// one place the variable model knows a slice occupies two registers.
-    pub(crate) fn resolve_var<T: StagedType>(&mut self, id: usize) -> Value {
+    /// Add the block parameters required to carry one staged value through a merge block.
+    pub(crate) fn append_value_block_params<T: StagedType>(&mut self, block: BlockHandle) {
         if T::is_fat_pointer() {
-            let sv = *self
-                .slice_vars
-                .get(&id)
-                .unwrap_or_else(|| panic!("fat variable {id} not found in slice_vars"));
-            let ptr = self.use_var(sv.ptr_var);
-            let len = self.use_var(sv.len_var);
-            Value::fat(ptr, len)
+            self.append_block_param(block, ScalarType::Ptr);
+            self.append_block_param(block, ScalarType::I64);
         } else {
-            let var = *self
-                .var_map
-                .get(&id)
-                .unwrap_or_else(|| panic!("Variable {id} not found in var_map"));
-            Value::scalar(self.use_var(var))
+            self.append_block_param(block, T::scalar_type());
         }
     }
 
-    /// Bind `value` to variable `id`, fat-aware. A fat-pointer (slice) type stores its
-    /// `(ptr, len)` into two variables recorded in [`Self::slice_vars`]; every other type
-    /// stores its single leaf into one variable in [`Self::var_map`]. `reuse` reuses the
-    /// existing variable(s) for `id` if present (for `bind`, which may run in a loop);
-    /// otherwise fresh ones are declared. The mirror of [`Self::resolve_var`].
-    pub(crate) fn assign_var<T: StagedType>(&mut self, id: usize, value: Value, reuse: bool) {
+    /// Jump to `target`, passing every SSA leaf in `value` as a block argument.
+    pub(crate) fn jump_value(&mut self, target: BlockHandle, value: Value) {
+        match value {
+            Value::Scalar(leaf) => self.jump(target, &[leaf]),
+            Value::Fat { ptr, len } => self.jump(target, &[ptr, len]),
+        }
+    }
+
+    /// Reconstruct a staged value from the parameters of a merge block.
+    pub(crate) fn block_value<T: StagedType>(&mut self, block: BlockHandle) -> Value {
         if T::is_fat_pointer() {
-            let (ptr, len) = value.parts();
-            let sv = match (reuse, self.slice_vars.get(&id).copied()) {
-                (true, Some(sv)) => sv,
-                _ => {
-                    let ptr_var = self.declare_var(ScalarType::Ptr);
-                    let len_var = self.declare_var(ScalarType::I64);
-                    let sv = SliceVars { ptr_var, len_var };
-                    self.slice_vars.insert(id, sv);
-                    sv
-                }
-            };
-            self.def_var(sv.ptr_var, ptr);
-            self.def_var(sv.len_var, len);
+            Value::fat(self.block_param(block, 0), self.block_param(block, 1))
         } else {
-            let cv = match (reuse, self.var_map.get(&id).copied()) {
-                (true, Some(cv)) => cv,
-                _ => {
-                    let cv = self.declare_var(T::scalar_type());
-                    self.var_map.insert(id, cv);
-                    cv
-                }
-            };
-            self.def_var(cv, value.leaf());
+            Value::scalar(self.block_param(block, 0))
+        }
+    }
+
+    /// Resolve a variable to its shape-aware neutral [`Value`]. The stored shape is checked
+    /// against `T`, so a missing `StagedType::is_fat_pointer` implementation fails at the
+    /// variable boundary instead of reaching an unrelated scalar operation.
+    pub(crate) fn resolve_var<T: StagedType>(&mut self, id: usize) -> Value {
+        let binding = *self
+            .variables
+            .get(&id)
+            .unwrap_or_else(|| panic!("staged variable {id} is not defined"));
+
+        match binding {
+            VariableValue::Scalar(var) if !T::is_fat_pointer() => Value::scalar(self.use_var(var)),
+            VariableValue::Fat { ptr, len } if T::is_fat_pointer() => {
+                let ptr = self.use_var(ptr);
+                let len = self.use_var(len);
+                Value::fat(ptr, len)
+            }
+            VariableValue::Scalar(_) => panic!(
+                "staged variable {id} has scalar storage, but {} declares a fat value",
+                std::any::type_name::<T>()
+            ),
+            VariableValue::Fat { .. } => panic!(
+                "staged variable {id} has fat storage, but {} declares a scalar value",
+                std::any::type_name::<T>()
+            ),
+        }
+    }
+
+    /// Bind `value` to variable `id`, retaining its neutral shape. `reuse` reuses an
+    /// existing binding for loop-carried assignments. The value shape and `T` must agree.
+    pub(crate) fn assign_var<T: StagedType>(&mut self, id: usize, value: Value, reuse: bool) {
+        let existing = reuse.then(|| self.variables.get(&id).copied()).flatten();
+
+        match value {
+            Value::Scalar(leaf) if !T::is_fat_pointer() => {
+                let var = match existing {
+                    Some(VariableValue::Scalar(var)) => var,
+                    Some(VariableValue::Fat { .. }) => {
+                        panic!("cannot assign a scalar value to fat staged variable {id}")
+                    }
+                    None => self.declare_var(T::scalar_type()),
+                };
+                self.def_var(var, leaf);
+                self.variables.insert(id, VariableValue::Scalar(var));
+            }
+            Value::Fat { ptr, len } if T::is_fat_pointer() => {
+                let (ptr_var, len_var) = match existing {
+                    Some(VariableValue::Fat { ptr, len }) => (ptr, len),
+                    Some(VariableValue::Scalar(_)) => {
+                        panic!("cannot assign a fat value to scalar staged variable {id}")
+                    }
+                    None => (
+                        self.declare_var(ScalarType::Ptr),
+                        self.declare_var(ScalarType::I64),
+                    ),
+                };
+                self.def_var(ptr_var, ptr);
+                self.def_var(len_var, len);
+                self.variables.insert(
+                    id,
+                    VariableValue::Fat {
+                        ptr: ptr_var,
+                        len: len_var,
+                    },
+                );
+            }
+            Value::Scalar(_) => panic!(
+                "{} declares a fat value but codegen produced a scalar",
+                std::any::type_name::<T>()
+            ),
+            Value::Fat { .. } => panic!(
+                "{} declares a scalar value but codegen produced a fat value",
+                std::any::type_name::<T>()
+            ),
         }
     }
 
@@ -477,11 +522,37 @@ impl<'c> CompilationContext<'c> {
         Value::fat(ptr, len)
     }
 
+    /// Load a staged value from its canonical in-memory representation.
+    pub(crate) fn load_value<T: StagedType>(&mut self, base: ValueId) -> Value {
+        if T::is_fat_pointer() {
+            self.load_fat(base)
+        } else if T::is_copy_struct() {
+            Value::scalar(base)
+        } else if T::size_of() == 0 {
+            Value::scalar(self.get_unit_value())
+        } else {
+            Value::scalar(self.load(T::scalar_type(), base, 0))
+        }
+    }
+
+    /// Store a staged value in its canonical in-memory representation.
+    pub(crate) fn store_value<T: StagedType>(&mut self, base: ValueId, value: Value) {
+        if T::is_fat_pointer() {
+            let (ptr, len) = value.parts();
+            self.store(ptr, base, 0);
+            self.store(len, base, 8);
+        } else if T::is_copy_struct() {
+            self.copy_nonoverlapping(base, value.leaf(), T::size_of(), T::align_of());
+        } else if T::size_of() != 0 {
+            self.store(value.leaf(), base, 0);
+        }
+    }
+
     /// Materialize a [`Value`] to a single ABI leaf (a storage pointer for aggregates).
     /// Scalars pass through; a [`Value::Fat`] slice is written to a fresh 16-byte
     /// `{ptr, len}` stack slot and its pointer returned — the storage-pointer ABI form used
-    /// when a slice crosses a call/extern boundary. This is the *only* place a fat value
-    /// becomes memory in-kernel (the mirror of the param-input load in `emit_function_body`).
+    /// when a slice crosses a call/extern boundary. Other canonical memory locations use
+    /// [`Self::store_value`] directly.
     pub(crate) fn materialize_value(&mut self, value: Value) -> ValueId {
         match value {
             Value::Scalar(leaf) => leaf,
@@ -509,9 +580,8 @@ impl<'c> CompilationContext<'c> {
 ///
 /// [`Self::codegen`] must return a value whose IR type and runtime encoding
 /// exactly match `Self::Out`. Any emitted memory access, call, or control flow
-/// must uphold the contracts of the staged operands it consumes. If `var_id`
-/// returns an ID, it must identify a compiler variable containing that same
-/// output representation. An implementation whose `Out` is not [`CopyType`]
+/// must uphold the contracts of the staged operands it consumes. An implementation
+/// whose `Out` is not [`CopyType`]
 /// must not offer a safe `Copy` or `Clone` implementation that duplicates the
 /// staged value's ownership capability.
 ///
@@ -537,12 +607,6 @@ pub unsafe trait Staged {
 
     /// Generate Cranelift IR code for this computation
     fn codegen(&self, ctx: &mut CompilationContext) -> Value;
-
-    /// Return the variable ID if this is a direct Var reference.
-    /// Used for optimized slice access to bypass stack loads.
-    fn var_id(&self) -> Option<usize> {
-        None
-    }
 }
 
 // =============================================================================
@@ -620,10 +684,6 @@ unsafe impl<T: StagedType> Staged for Var<T> {
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.resolve_var::<T>(self.id)
     }
-
-    fn var_id(&self) -> Option<usize> {
-        Some(self.id)
-    }
 }
 
 unsafe impl<T: StagedType> Staged for VarUse<T> {
@@ -631,10 +691,6 @@ unsafe impl<T: StagedType> Staged for VarUse<T> {
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         ctx.resolve_var::<T>(self.id)
-    }
-
-    fn var_id(&self) -> Option<usize> {
-        Some(self.id)
     }
 }
 
@@ -1018,17 +1074,7 @@ where
         // Generate code for the initialization value
         let value = self.init.codegen(ctx);
 
-        // Get or declare the Cranelift Variable
-        let var = if let Some(&var) = ctx.var_map.get(&self.var.id) {
-            var
-        } else {
-            // First assignment to this variable - declare it
-            let var = ctx.declare_var(T::scalar_type());
-            ctx.var_map.insert(self.var.id, var);
-            var
-        };
-
-        ctx.def_var(var, value.leaf());
+        ctx.assign_var::<T>(self.var.id, value, true);
 
         // Return cached unit value
         Value::scalar(ctx.get_unit_value())

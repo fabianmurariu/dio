@@ -183,7 +183,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        Value::scalar(ctx.load(T::scalar_type(), ptr_val.leaf(), 0))
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -223,7 +223,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        Value::scalar(ctx.load(T::scalar_type(), ptr_val.leaf(), 0))
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -264,7 +264,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        Value::scalar(ctx.load(T::scalar_type(), ptr_val.leaf(), 0))
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -329,7 +329,7 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
-        Value::scalar(ctx.load(T::scalar_type(), ptr_val.leaf(), 0))
+        ctx.load_value::<T>(ptr_val.leaf())
     }
 }
 
@@ -370,7 +370,7 @@ where
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
 
-        ctx.store(value.leaf(), ptr_val.leaf(), 0);
+        ctx.store_value::<T>(ptr_val.leaf(), value);
 
         Value::scalar(ctx.get_unit_value())
     }
@@ -407,7 +407,7 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let ptr_val = self.ptr.codegen(ctx);
         let value = self.val.codegen(ctx);
-        ctx.store(value.leaf(), ptr_val.leaf(), 0);
+        ctx.store_value::<T>(ptr_val.leaf(), value);
         Value::scalar(ctx.get_unit_value())
     }
 }

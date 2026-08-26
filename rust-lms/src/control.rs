@@ -48,8 +48,7 @@ where
         let else_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        // Add block parameter to merge_block to receive the result (phi node)
-        ctx.append_block_param(merge_block, T::scalar_type());
+        ctx.append_value_block_params::<T>(merge_block);
 
         // Branch based on condition
         ctx.brif(cond_val.leaf(), then_block, &[], else_block, &[]);
@@ -58,20 +57,19 @@ where
         ctx.switch_to_block(then_block);
         ctx.seal_block(then_block); // Single predecessor (entry block)
         let then_val = self.then_branch.codegen(ctx);
-        ctx.jump(merge_block, &[then_val.leaf()]);
+        ctx.jump_value(merge_block, then_val);
 
         // Generate else branch
         ctx.switch_to_block(else_block);
         ctx.seal_block(else_block); // Single predecessor (entry block)
         let else_val = self.else_branch.codegen(ctx);
-        ctx.jump(merge_block, &[else_val.leaf()]);
+        ctx.jump_value(merge_block, else_val);
 
         // Continue in merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block); // Two predecessors now known
 
-        // Return the block parameter (the merged value)
-        Value::scalar(ctx.block_param(merge_block, 0))
+        ctx.block_value::<T>(merge_block)
     }
 }
 

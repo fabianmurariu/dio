@@ -25,7 +25,6 @@ fn set_null_clears_bits_standalone() {
     clear.call(validity.descriptor_mut());
 
     assert_eq!(validity.null_count(), 3);
-    drop(validity);
     // bits 1, 3, 6 cleared
     assert_eq!(bitmap[0], 0b1011_0101);
 }
@@ -50,7 +49,6 @@ fn set_valid_sets_bits_standalone() {
     mark.call(validity.descriptor_mut());
 
     assert_eq!(validity.null_count(), 5);
-    drop(validity);
     // bits 0, 2, 5 set
     assert_eq!(bitmap[0], 0b0010_0101);
 }

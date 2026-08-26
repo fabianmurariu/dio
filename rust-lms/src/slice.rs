@@ -17,21 +17,10 @@
 //!
 //! # Canonical Staged representation
 //!
-//! Within the staged graph a slice's `codegen` value is always a single `i64`,
-//! resolved one of two ways (see [`CompilationContext::slice_data_ptr`] /
-//! [`CompilationContext::slice_len`], which are the only code that knows this):
-//!
-//! - **register-resolved** — slice *parameters* load the descriptor into two
-//!   Cranelift variables (`ptr_var`, `len_var`) kept in
-//!   `ctx.slice_vars` keyed by `var_id`. Slice ops read those registers
-//!   directly, with no memory access (the fast path for tight loops).
-//! - **memory-resolved** — subslices (and any operand without a `var_id`) have
-//!   a `codegen` value that is a *pointer to* a `(ptr, len)` pair on a stack
-//!   slot: `ptr` at offset 0, `len` at offset 8.
-//!
-//! So `Slice<T>` really is just "ptr + len"; the indirection only exists
-//! because `Staged::codegen` returns a single `Value`, so an anonymous slice
-//! needs somewhere (the stack slot) to hold its two halves.
+//! Within the staged graph, a slice's `codegen` value is `Value::Fat { ptr, len }`.
+//! Both leaves remain in SSA registers through variables, sub-slicing, and slice ops.
+//! The pair is materialized as a descriptor only when it crosses the private function or
+//! extern ABI, and loaded back into a fat value on entry.
 //!
 //! # Example
 //!
@@ -758,7 +747,7 @@ where
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
-        Value::scalar(ctx.load(ElemOf::<S>::scalar_type(), element_ptr, 0))
+        ctx.load_value::<ElemOf<S>>(element_ptr)
     }
 }
 
@@ -789,7 +778,7 @@ where
         let value = self.value.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         let element_ptr = element_addr::<S>(ctx, data_ptr, index.leaf());
-        ctx.store(value.leaf(), element_ptr, 0);
+        ctx.store_value::<ElemOf<S>>(element_ptr, value);
         Value::scalar(ctx.get_unit_value())
     }
 }
@@ -824,11 +813,10 @@ where
         let addr_i = element_addr::<S>(ctx, data_ptr, i.leaf());
         let addr_j = element_addr::<S>(ctx, data_ptr, j.leaf());
 
-        let ty = ElemOf::<S>::scalar_type();
-        let vi = ctx.load(ty, addr_i, 0);
-        let vj = ctx.load(ty, addr_j, 0);
-        ctx.store(vj, addr_i, 0);
-        ctx.store(vi, addr_j, 0);
+        let vi = ctx.load_value::<ElemOf<S>>(addr_i);
+        let vj = ctx.load_value::<ElemOf<S>>(addr_j);
+        ctx.store_value::<ElemOf<S>>(addr_i, vj);
+        ctx.store_value::<ElemOf<S>>(addr_j, vi);
         Value::scalar(ctx.get_unit_value())
     }
 }
@@ -841,8 +829,7 @@ where
 ///
 /// Reports `Out = S::Out`, so sub-slicing a `&[T]` yields a `&[T]` and
 /// sub-slicing a `&mut [T]` yields a `&mut [T]` — slices stay closed under
-/// this operation. Materializes a fresh `(ptr, len)` pair on a stack slot
-/// (the memory-resolved encoding; see the module docs).
+/// this operation. The result stays as a `(ptr, len)` SSA pair.
 #[derive(Clone, Copy)]
 pub struct SliceSliceUnchecked<S, START, END> {
     slice: S,
@@ -1427,9 +1414,4 @@ where
     END: Staged<Out = u64>,
     T: StagedType + 'a,
 {
-}
-
-#[cfg(test)]
-mod tests {
-    // Tests will be added in a separate file
 }

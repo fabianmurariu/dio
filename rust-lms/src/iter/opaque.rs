@@ -49,8 +49,8 @@ pub type OpaqueHandle = SMutPtr<()>;
 /// `Next` and `Drop` must operate on the same handle representation. `Next`
 /// may only read or mutate the handle and `Drop` must consume it exactly once.
 pub unsafe trait OpaqueIterKind: 'static {
-    /// The element type (an integer ≤ 64 bits for the `next` register path).
-    type Item: RegisterScalar;
+    /// The element type returned by `next`.
+    type Item: OpaqueIterItem;
     /// `next(it) -> COption<Item>`.
     type Next: ExternFn<Args = (OpaqueHandle,), Ret = COptionType<Self::Item>>;
     /// `drop(it)`.
@@ -274,29 +274,38 @@ where
 //
 // The library supplies the `next`/`drop`/`len`/`next_value` extern fns
 // generically (monomorphized per item type), so a user only writes the
-// domain-specific producer that boxes their iterator. Scalar items only: the
-// loop loads the `COption<Item>` payload into one SSA value.
+// domain-specific producer that boxes their iterator. Structured values such as
+// fat slices are reconstructed from the `COption<Item>` payload by the neutral layer.
 
-/// Staged scalar item supported by the direct `COption` payload-load path.
-mod register_scalar_sealed {
-    pub trait Sealed {}
-}
-
-pub trait RegisterScalar:
-    StagedType<RuntimeValue = Self> + CopyType + register_scalar_sealed::Sealed + 'static
+/// A copyable staged item that can cross an opaque iterator's storage-pointer ABI.
+pub trait OpaqueIterItem: StagedType + CopyType + Copy + 'static
+where
+    Self::RuntimeValue: Copy,
 {
 }
 
-macro_rules! impl_register_scalar {
-    ($($ty:ty),+ $(,)?) => {
-        $(
-            impl register_scalar_sealed::Sealed for $ty {}
-            impl RegisterScalar for $ty {}
-        )+
-    };
+impl<T> OpaqueIterItem for T
+where
+    T: StagedType + CopyType + Copy + 'static,
+    T::RuntimeValue: Copy,
+{
 }
 
-impl_register_scalar!(u64, i64, u32, i32, u16, i16, u8, i8, f32, f64, bool);
+/// Compatibility bound retaining the former scalar-only API name.
+#[deprecated(note = "use OpaqueIterItem; opaque iterators now support structured copy values")]
+pub trait RegisterScalar: OpaqueIterItem
+where
+    Self::RuntimeValue: Copy,
+{
+}
+
+#[allow(deprecated)]
+impl<T> RegisterScalar for T
+where
+    T: OpaqueIterItem,
+    T::RuntimeValue: Copy,
+{
+}
 
 /// RAII owner for a thin, double-boxed dynamic iterator handle.
 ///
@@ -465,7 +474,10 @@ dyn_extern!(DynNextValue, dyn_next_value, dyn_next_value_thunk, T);
 /// Kind for a `Box<dyn Iterator<Item = T>>` (scalar `T`). Drive it with
 /// [`Compiler::opaque_iter_fns`] over the producer's handle.
 pub struct DynIter<T>(PhantomData<T>);
-unsafe impl<T: RegisterScalar> OpaqueIterKind for DynIter<T> {
+unsafe impl<T: OpaqueIterItem> OpaqueIterKind for DynIter<T>
+where
+    T::RuntimeValue: Copy,
+{
     type Item = T;
     type Next = DynNext<T>;
     type Drop = DynDrop<T>;
@@ -475,12 +487,18 @@ unsafe impl<T: RegisterScalar> OpaqueIterKind for DynIter<T> {
 /// loop and O(1) `count` via [`Compiler::exact_opaque_iter_fns`] (also usable via
 /// the plain next/drop path).
 pub struct DynExactIter<T>(PhantomData<T>);
-unsafe impl<T: RegisterScalar> OpaqueIterKind for DynExactIter<T> {
+unsafe impl<T: OpaqueIterItem> OpaqueIterKind for DynExactIter<T>
+where
+    T::RuntimeValue: Copy,
+{
     type Item = T;
     type Next = DynExactNext<T>;
     type Drop = DynExactDrop<T>;
 }
-unsafe impl<T: RegisterScalar> ExactSizeOpaqueIterKind for DynExactIter<T> {
+unsafe impl<T: OpaqueIterItem> ExactSizeOpaqueIterKind for DynExactIter<T>
+where
+    T::RuntimeValue: Copy,
+{
     type Len = DynLen<T>;
     type NextValue = DynNextValue<T>;
 }
@@ -582,8 +600,8 @@ where
 /// slot field must be initialized and the stored iterator must remain valid
 /// until the generated traversal calls its drop thunk exactly once.
 pub unsafe trait ReusedOpaqueIterKind: 'static {
-    /// Element type (scalar; `T == T::RuntimeValue`).
-    type Item: RegisterScalar;
+    /// Copyable element type yielded by the erased iterator.
+    type Item: OpaqueIterItem;
     /// `init(args.., slot: *mut ())` — calls [`emplace_iter`].
     type Init: ExternFn<Ret = ()>;
 }
@@ -613,7 +631,8 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
             args: Box::new(move |c| {
                 let value = a.codegen(c);
                 let mut args = Vec::with_capacity(1);
-                crate::ffi::push_extern_value::<AType>(c, &mut args, value.leaf());
+                let value = c.materialize_value(value);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, value);
                 args
             }),
         }
@@ -634,8 +653,10 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
                 let a = a.codegen(c);
                 let b = b.codegen(c);
                 let mut args = Vec::with_capacity(2);
-                crate::ffi::push_extern_value::<AType>(c, &mut args, a.leaf());
-                crate::ffi::push_extern_value::<BType>(c, &mut args, b.leaf());
+                let a = c.materialize_value(a);
+                let b = c.materialize_value(b);
+                crate::ffi::push_extern_value::<AType>(c, &mut args, a);
+                crate::ffi::push_extern_value::<BType>(c, &mut args, b);
                 args
             }),
         }

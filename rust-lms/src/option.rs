@@ -17,7 +17,7 @@
 //! # Niche-Optimized Reference Options
 //!
 //! For pointer types, we use niche optimization:
-//! - `OptRefType<T>` / `OptMutRefType<T>` are single i64 values
+//! - `OptRefType<T>` / `OptMutRefType<T>` are single pointer values
 //! - null (0) = None
 //! - non-null = Some(pointer)
 
@@ -263,13 +263,7 @@ unsafe impl<T: StagedType, E: Staged<Out = T>> Staged for CSome<T, E> {
         let payload_offset = COptionType::<T>::payload_offset() as i64;
         let payload_ptr = ctx.ptr_offset_const(ptr, payload_offset);
 
-        // Store the payload at its actual aligned offset.
-        if T::is_copy_struct() {
-            // Aggregate staged values are addresses of their storage.
-            ctx.copy_nonoverlapping(payload_ptr, value.leaf(), T::size_of(), T::align_of());
-        } else {
-            ctx.store(value.leaf(), payload_ptr, 0);
-        }
+        ctx.store_value::<T>(payload_ptr, value);
 
         Value::scalar(ptr)
     }
@@ -585,9 +579,7 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        // Add block parameter for the result
-        let result_type = T::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<T>(merge_block);
 
         // Branch: if discriminant != 0, go to some_block, else none_block
         ctx.brif(discriminant, some_block, &[], none_block, &[]);
@@ -597,25 +589,21 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>, D: Staged<Out = T>> 
         // Some block: load the aligned payload.
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
-        let some_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset)
-        } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
-            ctx.load(T::scalar_type(), payload_ptr, 0)
-        };
-        ctx.jump(merge_block, &[some_val]);
+        let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
+        let some_val = ctx.load_value::<T>(payload_ptr);
+        ctx.jump_value(merge_block, some_val);
 
         // None block: use default
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let default_val = self.default.codegen(ctx);
-        ctx.jump(merge_block, &[default_val.leaf()]);
+        ctx.jump_value(merge_block, default_val);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        Value::scalar(ctx.block_param(merge_block, 0))
+        ctx.block_value::<T>(merge_block)
     }
 }
 
@@ -672,8 +660,7 @@ where
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
         // Branch based on discriminant
         ctx.brif(discriminant, some_block, &[], none_block, &[]);
@@ -684,33 +671,24 @@ where
 
         let payload_offset = COptionType::<T>::payload_offset() as i64;
 
-        // Load the value and bind it to the variable.
-        let bound_val = if T::is_copy_struct() {
-            ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset)
-        } else {
-            let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
-            ctx.load(T::scalar_type(), payload_ptr, 0)
-        };
-
-        // Declare and define the bound variable
-        let bound_var = ctx.declare_var(T::scalar_type());
-        ctx.def_var(bound_var, bound_val);
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        let payload_ptr = ctx.ptr_offset_const(opt_ptr.leaf(), payload_offset);
+        let bound_val = ctx.load_value::<T>(payload_ptr);
+        ctx.assign_var::<T>(self.bound_var_id, bound_val, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result.leaf()]);
+        ctx.jump_value(merge_block, some_result);
 
         // None block: execute none_body
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result.leaf()]);
+        ctx.jump_value(merge_block, none_result);
 
         // Merge block
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        Value::scalar(ctx.block_param(merge_block, 0))
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -793,8 +771,7 @@ where
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
         // Branch: if ptr != null, it's Some
         ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
@@ -803,25 +780,22 @@ where
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        // Bind the pointer as SRef<T>
-        let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr.leaf());
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        ctx.assign_var::<SRef<'a, T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result.leaf()]);
+        ctx.jump_value(merge_block, some_result);
 
         // None block
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result.leaf()]);
+        ctx.jump_value(merge_block, none_result);
 
         // Merge
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        Value::scalar(ctx.block_param(merge_block, 0))
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -884,30 +858,27 @@ where
         let none_block = ctx.create_block();
         let merge_block = ctx.create_block();
 
-        let result_type = OUT::scalar_type();
-        ctx.append_block_param(merge_block, result_type);
+        ctx.append_value_block_params::<OUT>(merge_block);
 
         ctx.brif(ptr.leaf(), some_block, &[], none_block, &[]);
 
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        let bound_var = ctx.declare_var(ScalarType::I64);
-        ctx.def_var(bound_var, ptr.leaf());
-        ctx.var_map.insert(self.bound_var_id, bound_var);
+        ctx.assign_var::<SRefMut<'a, T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
-        ctx.jump(merge_block, &[some_result.leaf()]);
+        ctx.jump_value(merge_block, some_result);
 
         ctx.switch_to_block(none_block);
         ctx.seal_block(none_block);
         let none_result = self.none_body.codegen(ctx);
-        ctx.jump(merge_block, &[none_result.leaf()]);
+        ctx.jump_value(merge_block, none_result);
 
         ctx.switch_to_block(merge_block);
         ctx.seal_block(merge_block);
 
-        Value::scalar(ctx.block_param(merge_block, 0))
+        ctx.block_value::<OUT>(merge_block)
     }
 }
 
@@ -1042,7 +1013,7 @@ mod tests {
         let check = is_some(some_expr);
 
         let compiled = compiler.compile(check).expect("compilation failed");
-        assert_eq!(compiled.run(), true);
+        assert!(compiled.run());
     }
 
     #[test]
@@ -1053,7 +1024,7 @@ mod tests {
         let check = is_none(none_expr);
 
         let compiled = compiler.compile(check).expect("compilation failed");
-        assert_eq!(compiled.run(), true);
+        assert!(compiled.run());
     }
 
     #[test]

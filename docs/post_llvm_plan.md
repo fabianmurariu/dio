@@ -368,3 +368,31 @@ Findings, i.e. "is it as clean as the `ValueId` flip?":
 **Verdict: green-light `A′`.** The rails are in. Increment 2 — add `Value::Fat(ptr, len)`, move
 slices off `slice_vars`, then opaque-iters off the `u64` vtable — is where the payoff (deleting
 the side-channels) lands; this increment proved the contract change is safe and mechanical.
+
+### A′ increment 2 — DONE, green
+
+Completed the structured-value migration started by `d05e6ad`:
+
+- `Value::Fat { ptr, len }` is now the canonical in-kernel slice representation. Slice
+  parameters, locals, sub-slices, block merges, internal calls, extern calls, option
+  payloads, fields, and memory loads/stores preserve that shape.
+- The separate `var_map` / `slice_vars` stores are one shape-aware variable map. The unused
+  `Staged::var_id` escape hatch and the old register-vs-memory slice resolution path are gone.
+- Generic value transport is centralized in `load_value`, `store_value`, block-value helpers,
+  and ABI materialization. This closes scalar-only assumptions that were latent in function
+  returns, `if_then_else`, option matching, references, slice elements, and zip items.
+- Opaque iterator vtable/data fields are loaded as `Ptr`, not `I64`. Opaque iterators can now
+  carry structured copy items; `RegisterScalar` remains only as a deprecated source-compatible
+  bound over the broader `OpaqueIterItem` contract.
+- Regression coverage includes internal and extern fat-slice returns, fat values through
+  conditionals and `COption`, slices containing fat-slice elements, and opaque iterators
+  yielding fat slices.
+
+Verification: `cargo test --workspace`, `cargo test -p rust-lms --features llvm`, and
+`cargo test -p sql-gen --features llvm` all pass. Plain workspace clippy completes with the
+existing warning baseline; `-D warnings` remains blocked by pre-existing lints.
+
+**Still pending in Root A:** replace bare `ValueId` leaves with `(backend id, ScalarType)` and
+enable neutral-layer type assertions operation by operation. Increment 2 makes value *shape*
+explicit; typed leaves are the remaining step that makes pointer-vs-integer mistakes
+construction-time errors on both backends.

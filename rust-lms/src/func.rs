@@ -18,7 +18,9 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarHandle};
+use crate::staged::{
+    assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VariableValue,
+};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
 use cranelift_codegen::settings::{self, Configurable};
@@ -281,7 +283,6 @@ impl Ctx {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
         let handle_id = handle.id;
-        let item_cty = Item::scalar_type();
 
         // Build the body into a child Ctx (same shape as `while_loop`).
         let mut child = Ctx::new(self.next_var_id);
@@ -298,19 +299,22 @@ impl Ctx {
 
             // header: call the canonical thunk and branch on the stored tag.
             ctx.switch_to_block(header);
-            let it = ctx.var_map[&handle_id];
-            let it_val = ctx.use_var(it);
+            let it_val = ctx
+                .resolve_var::<crate::refer::SMutPtr<()>>(handle_id)
+                .leaf();
             let next_ref = ctx.declare_extern_func(next_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
             let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
                 ctx, next_ref, args,
-            );
+            )
+            .leaf();
             let tag = ctx.load(ScalarType::I64, option_ptr, 0);
             // Single source of truth for the COption payload offset (see
             // COptionType::payload_offset); do not re-derive align_up(8, align) here.
-            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i32;
-            let val = ctx.load(item_cty, option_ptr, payload_offset);
+            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i64;
+            let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
+            let val = ctx.load_value::<Item>(payload_ptr);
             ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register (already the element's ABI type,
@@ -318,9 +322,7 @@ impl Ctx {
             // consumer, loop.
             ctx.switch_to_block(body);
             ctx.seal_block(body);
-            let elem_cv = ctx.declare_var(item_cty);
-            ctx.var_map.insert(elem_id, elem_cv);
-            ctx.def_var(elem_cv, val);
+            ctx.assign_var::<Item>(elem_id, val, false);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
@@ -332,7 +334,9 @@ impl Ctx {
             // exit: free the iterator (reached by None and by break_loop).
             ctx.switch_to_block(exit);
             ctx.seal_block(exit);
-            let it_val2 = ctx.use_var(it);
+            let it_val2 = ctx
+                .resolve_var::<crate::refer::SMutPtr<()>>(handle_id)
+                .leaf();
             let drop_ref = ctx.declare_extern_func(drop_id);
             let mut args = Vec::with_capacity(1);
             crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
@@ -372,7 +376,6 @@ impl Ctx {
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
-        let item_cty = Item::scalar_type();
 
         let mut child = Ctx::new(self.next_var_id);
         consumer(&mut child, elem);
@@ -411,23 +414,22 @@ impl Ctx {
 
             // header: load data + next ptr, call it, branch on the tag register.
             ctx.switch_to_block(header);
-            let data = ctx.load(ScalarType::I64, slot_ptr, data_off);
-            let next_fn = ctx.load(ScalarType::I64, slot_ptr, next_off);
+            let data = ctx.load(ScalarType::Ptr, slot_ptr, data_off);
+            let next_fn = ctx.load(ScalarType::Ptr, slot_ptr, next_off);
             ctx.store(data, data_ptr, 0);
             ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
             let tag = ctx.load(ScalarType::I64, option_ptr, 0);
             // Single source of truth for the COption payload offset (see
             // COptionType::payload_offset); do not re-derive align_up(8, align) here.
-            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i32;
-            let val = ctx.load(item_cty, option_ptr, payload_offset);
+            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i64;
+            let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
+            let val = ctx.load_value::<Item>(payload_ptr);
             ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register, replay consumer, loop.
             ctx.switch_to_block(body);
             ctx.seal_block(body);
-            let elem_cv = ctx.declare_var(item_cty);
-            ctx.var_map.insert(elem_id, elem_cv);
-            ctx.def_var(elem_cv, val);
+            ctx.assign_var::<Item>(elem_id, val, false);
             ctx.loop_exit_stack.push(exit);
             for action in body_actions {
                 action(ctx);
@@ -439,8 +441,8 @@ impl Ctx {
             // exit: drop the iterator (frees only if it was heap-boxed).
             ctx.switch_to_block(exit);
             ctx.seal_block(exit);
-            let data2 = ctx.load(ScalarType::I64, slot_ptr, data_off);
-            let drop_fn = ctx.load(ScalarType::I64, slot_ptr, drop_off);
+            let data2 = ctx.load(ScalarType::Ptr, slot_ptr, data_off);
+            let drop_fn = ctx.load(ScalarType::Ptr, slot_ptr, drop_off);
             ctx.store(data2, data_ptr, 0);
             ctx.call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
         }));
@@ -559,7 +561,7 @@ pub(crate) struct ExternFnDef {
 ///
 /// The ABI is uniform: `params` is one storage pointer per logical argument followed by a
 /// single output pointer, and the function returns `void`. This unpacks each argument from
-/// its storage pointer into a variable (a fat-pointer slice into its `slice_vars` pair),
+/// its storage pointer into a shape-aware variable binding,
 /// runs `body` to produce the result, and writes the result back through the output pointer.
 /// Every step goes through the neutral [`Backend`](crate::staged::Backend) ops on `ctx`, so
 /// the same code drives Cranelift and MLIR; the caller supplies the (backend-specific)
@@ -587,13 +589,19 @@ pub(crate) fn emit_function_body(
             let len_var = ctx.declare_var(ScalarType::I64);
             ctx.def_var(ptr_var, ptr_value);
             ctx.def_var(len_var, len_value);
-            ctx.slice_vars
-                .insert(var_id, crate::staged::SliceVars { ptr_var, len_var });
+            ctx.variables.insert(
+                var_id,
+                VariableValue::Fat {
+                    ptr: ptr_var,
+                    len: len_var,
+                },
+            );
         } else if info.is_aggregate {
             // A non-slice aggregate is represented by a pointer to its storage.
             let param_var = ctx.declare_var(ScalarType::Ptr);
             ctx.def_var(param_var, storage_ptr);
-            ctx.var_map.insert(var_id, param_var);
+            ctx.variables
+                .insert(var_id, VariableValue::Scalar(param_var));
         } else {
             let param_value = if info.size == 0 {
                 ctx.iconst(ScalarType::I8, 0)
@@ -602,7 +610,8 @@ pub(crate) fn emit_function_body(
             };
             let param_var = ctx.declare_var(info.repr);
             ctx.def_var(param_var, param_value);
-            ctx.var_map.insert(var_id, param_var);
+            ctx.variables
+                .insert(var_id, VariableValue::Scalar(param_var));
         }
     }
 
@@ -1244,10 +1253,7 @@ impl<'a> Compiler<'a> {
                     builder.switch_to_block(entry_block);
                     builder.seal_block(entry_block);
 
-                    // Create var_map for this function
-                    let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
-                    // Optimized slice storage: var_id -> (ptr_var, len_var)
-                    let mut slice_vars = HashMap::new();
+                    let mut variables = HashMap::new();
 
                     // Storage pointers (N args + output) as neutral handles.
                     let params: Vec<ValueId> = builder
@@ -1267,8 +1273,7 @@ impl<'a> Compiler<'a> {
                         };
                         let mut ctx = CompilationContext {
                             backend: &mut backend,
-                            var_map: &mut var_map,
-                            slice_vars: &mut slice_vars,
+                            variables: &mut variables,
                             unit_value: None,
                             loop_exit_stack: Vec::new(),
                         };
@@ -1313,8 +1318,7 @@ impl<'a> Compiler<'a> {
                 builder.switch_to_block(entry_block);
                 builder.seal_block(entry_block);
 
-                let mut var_map: HashMap<usize, VarHandle> = HashMap::new();
-                let mut slice_vars = HashMap::new();
+                let mut variables = HashMap::new();
 
                 // `__main__` is a zero-argument function under the storage-pointer ABI: its
                 // one parameter is the output pointer.
@@ -1336,8 +1340,7 @@ impl<'a> Compiler<'a> {
                     };
                     let mut ctx = CompilationContext {
                         backend: &mut backend,
-                        var_map: &mut var_map,
-                        slice_vars: &mut slice_vars,
+                        variables: &mut variables,
                         unit_value: None,
                         loop_exit_stack: Vec::new(),
                     };

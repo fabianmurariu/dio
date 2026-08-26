@@ -676,6 +676,7 @@ where
 }
 
 /// Branchless minimum.
+#[allow(clippy::type_complexity)]
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
     T: Num,
@@ -697,6 +698,7 @@ where
 }
 
 /// Branchless maximum.
+#[allow(clippy::type_complexity)]
 pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
     T: Num,
