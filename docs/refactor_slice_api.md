@@ -517,7 +517,7 @@ row begins.
 
 | Order | Deliverable | Goal | Role in the bigger picture | Exit criterion |
 |---:|---|---|---|---|
-| 0 | Characterization matrix | Capture current behavior for shared/mutable parameters, raw FFI values, nested slices, sub-slices, and both backends before changing names. | Prevents the redesign from losing ABI or typed-leaf behavior that already works. | Tests cover each current origin and pass on both backends. |
+| 0 | Characterization matrix | ~~Capture current behavior~~ **DONE 2026-08-27** — `rust-lms/tests/slice_characterization.rs`, 15 cells over 4 origins, both backends. | Prevents the redesign from losing ABI or typed-leaf behavior that already works; surfaced three gaps (G6a/G6b/G10) that now have explicit exit criteria. | **Met.** 368 Cranelift / LLVM green, clippy `-D warnings` clean. |
 | 0.5 | **Staged lifetime removal (D1)** | ~~Strip `'a` from staged reference types~~ **DONE 2026-08-27.** `SRef<T>`, `SRefMut<T>`, `SRef<Slice<T>>`, `OptRefType<T>`, `OptMutRefType<T>`, and the `LoadRef`/`LoadMutRef`/`StoreRef`/`IntoMutRef` helpers; the four slice op traits lose their `'a`; reference `RuntimeValue` becomes a typed raw pointer. | Stops the taxonomy being written with lifetimes and then stripped. | **Met.** 137 -> 0 explicit lifetime args, 6 -> 0 vacuous `'a: 'static` bounds, `impl<'a>` 68 -> 21; 353 Cranelift / 372 LLVM, clippy `-D warnings` clean. |
 | 1 | Lifetime viability spike | ~~Run S1-S10~~ **DONE 2026-08-27.** Results and revised criteria recorded above. | Determined that Rust borrows *can* found `SVec` views, with read-xor-grow; and that a stage-0 dynamic alternative exists. | **Met.** Spike code is in the tree, uncommitted, green on both backends. |
 | 2 | ~~Lifetime-aware deferred graph~~ | **STRUCK.** Superseded by the §3 decision: validity is dynamic, so the `'static` graph stays and no `'stage` parameter is introduced. | — | Spike code removed; tree back to baseline. |
@@ -534,19 +534,42 @@ row begins.
 
 ## Detailed milestone guidance
 
-### Characterization before refactoring
+### Characterization before refactoring — **DONE**
 
-Build one test matrix instead of adding isolated tests during each rename:
+`rust-lms/tests/slice_characterization.rs` holds one matrix rather than isolated
+tests added during each rename. Every runtime cell runs through
+`for_each_backend`.
 
-| Source | Shared read | Mutable write | Sub-slice | Nested sub-slice | Internal call/return | FFI call/return | Iterator |
+| Origin | shared read | mut write | sub-slice | nested sub-slice | internal call/ret | FFI call/ret | iterator |
 |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
-| function parameter | required | required | required | required | required | required | required |
-| `SVec` view | required | required | required | required | decide in spike | required | required |
-| raw FFI result before promotion | forbidden | forbidden | raw only | raw only | raw only | required | forbidden |
-| promoted FFI result | required | required where exclusive | required | required | required | required | required |
-| descriptor field (`arrow-lms`) | required after witness | required after mutable witness | required | required | optional | required | required |
+| shared parameter `SRef<Slice<T>>`     | OK | n/a | OK | OK | OK | OK / **G6a** | OK |
+| mutable parameter `SRefMut<Slice<T>>` | OK | OK  | OK | OK | OK | **G6a**      | **G10** |
+| raw descriptor `FatSliceType<T>`      | OK | **G6b** | OK | OK | OK | OK      | **G10** |
+| descriptor field (`SliceRepr`)        | OK | OK  | OK | OK | OK | OK          | OK |
 
-Each runtime cell that applies must run through the shared both-backends harness.
+`OK` = a passing test locks the behaviour in; `n/a` = not meaningful; `Gn` = not
+expressible today, closed by the plan row named below.
+
+#### Gaps the matrix surfaced
+
+These are now the concrete exit criteria for rows 6 and 10.
+
+- **G6a — a slice *parameter* cannot reach a `FatSlice`-declared extern.**
+  `UncheckedExternArg` witnesses `FatSliceType<T> -> SRef<Slice<T>>` and
+  `FatSliceMutType<T> -> SRefMut<Slice<T>>`, but neither reverse direction, even
+  though both lower to the identical `(ptr, len)` argument pair. Today a kernel
+  must declare its parameter as `Var<FatSliceType<T>>` to call such an extern.
+  Corroboration: `ext_double_slice` in `test_extern_fn.rs` is declared but called
+  by no test — the mutable half was never reachable. Row 6 must add the missing
+  witnesses (and a test that actually calls a mutable-slice extern).
+- **G6b — `FatSliceMutType<T>` implements no `SliceType`,** so a mutable raw
+  descriptor supports *no* slice operation at all, not even `len`. Row 6.
+- **G10 — `SliceIter` is bound to `SRef<Slice<T>>`,** so neither a mutable
+  parameter nor a raw descriptor can be iterated. Row 10.
+
+Cells for `SVec` views are deliberately absent: they do not exist until rows 7/8,
+so there is no current behaviour to characterize. The matrix gains that row when
+they land.
 
 ### API naming pass
 
