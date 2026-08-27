@@ -13,11 +13,11 @@ struct CountedSharedSlice<S> {
     inner: S,
 }
 
-unsafe impl<'a, S> Staged for CountedSharedSlice<S>
+unsafe impl<S> Staged for CountedSharedSlice<S>
 where
-    S: Staged<Out = SRef<'a, Slice<i64>>>,
+    S: Staged<Out = SRef<Slice<i64>>>,
 {
-    type Out = SRef<'a, Slice<i64>>;
+    type Out = SRef<Slice<i64>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
         CHECKED_GET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
@@ -29,11 +29,11 @@ struct CountedMutSlice<S> {
     inner: S,
 }
 
-unsafe impl<'a, S> Staged for CountedMutSlice<S>
+unsafe impl<S> Staged for CountedMutSlice<S>
 where
-    S: Staged<Out = SRefMut<'a, Slice<i64>>>,
+    S: Staged<Out = SRefMut<Slice<i64>>>,
 {
-    type Out = SRefMut<'a, Slice<i64>>;
+    type Out = SRefMut<Slice<i64>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
         CHECKED_SET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
@@ -41,10 +41,7 @@ where
     }
 }
 
-impl<'a, S> SliceMutOps<'a, i64> for CountedMutSlice<S> where
-    S: Staged<Out = SRefMut<'a, Slice<i64>>>
-{
-}
+impl<S> SliceMutOps<i64> for CountedMutSlice<S> where S: Staged<Out = SRefMut<Slice<i64>>> {}
 
 #[test]
 fn test_slice_len() {

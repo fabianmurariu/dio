@@ -13,20 +13,19 @@ use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, St
 
 /// Iterator over elements of a staged slice reference.
 #[derive(Clone)]
-pub struct SliceIter<'a, T, S>
+pub struct SliceIter<T, S>
 where
     T: StagedType,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>>,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>>,
 {
     pub(crate) slice: S,
-    _phantom: PhantomData<&'a T>,
+    _phantom: PhantomData<T>,
 }
 
-impl<'a, T, S> SliceIter<'a, T, S>
+impl<T, S> SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>> + Clone + 'static,
-    'a: 'static,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
 {
     pub fn new(slice: S) -> Self {
         SliceIter {
@@ -36,11 +35,10 @@ where
     }
 }
 
-impl<'a, T, S> StagedIterator for SliceIter<'a, T, S>
+impl<T, S> StagedIterator for SliceIter<T, S>
 where
-    'a: 'static,
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>> + Clone + 'static,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
     T::RuntimeValue: Default,
 {
     type Item = T;
@@ -64,11 +62,10 @@ where
     }
 }
 
-impl<'a, T, S> IndexedStagedIterator for SliceIter<'a, T, S>
+impl<T, S> IndexedStagedIterator for SliceIter<T, S>
 where
-    'a: 'static,
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>> + Clone + 'static,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
     T::RuntimeValue: Default,
 {
     type LenExpr = SliceLen<S>;
@@ -78,11 +75,10 @@ where
     }
 }
 
-impl<'a, T, S> IndexedSource for SliceIter<'a, T, S>
+impl<T, S> IndexedSource for SliceIter<T, S>
 where
-    'a: 'static,
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>> + Clone + 'static,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
     T::RuntimeValue: Default,
 {
     type Item = T;
@@ -103,9 +99,8 @@ where
 // IndexedSource for Slice Variable references (secondary source in zip)
 // =============================================================================
 
-impl<'a, T> IndexedSource for Var<SRef<'a, Slice<T>>>
+impl<T> IndexedSource for Var<SRef<Slice<T>>>
 where
-    'a: 'static,
     T: StagedType + CopyType + ConstantType + 'static,
 {
     type Item = T;
@@ -126,14 +121,13 @@ where
 // IntoStagedIterator
 // =============================================================================
 
-impl<'a, T, S> IntoStagedIterator for S
+impl<T, S> IntoStagedIterator for S
 where
-    'a: 'static,
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<'a, Slice<T>>> + Clone + 'static,
+    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
     T::RuntimeValue: Default,
 {
-    type Iter = SliceIter<'a, T, S>;
+    type Iter = SliceIter<T, S>;
 
     fn staged_iter(self) -> Self::Iter {
         SliceIter::new(self)

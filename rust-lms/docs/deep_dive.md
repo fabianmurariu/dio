@@ -285,8 +285,8 @@ Four pointer flavors, all i64 at the IR level, distinguished by type tags so the
 
 | Staged type | Runtime | Tag |
 |-------------|---------|-----|
-| `SRef<'a, T>`    | `&T`       | `RustRef` |
-| `SRefMut<'a, T>` | `&mut T`   | `RustRef` |
+| `SRef<T>`        | `&T`       | `RustRef` |
+| `SRefMut<T>`     | `&mut T`   | `RustRef` |
 | `SPtr<T>`        | `*const T` | `RustPtr` |
 | `SMutPtr<T>`     | `*mut T`   | `RustPtr` |
 

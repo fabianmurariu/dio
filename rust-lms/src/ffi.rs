@@ -582,22 +582,22 @@ where
     }
 }
 
-impl<'stage, T> IntoExternArg<SRefMut<'stage, T>> for &mut Var<SRefMut<'stage, T>>
+impl<T> IntoExternArg<SRefMut<T>> for &mut Var<SRefMut<T>>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
 {
-    type Staged = VarUse<SRefMut<'stage, T>>;
+    type Staged = VarUse<SRefMut<T>>;
 
     fn into_extern_arg(self) -> Self::Staged {
         self.use_once()
     }
 }
 
-impl<'stage, T> IntoExternArg<SRef<'stage, T>> for &mut Var<SRefMut<'stage, T>>
+impl<T> IntoExternArg<SRef<T>> for &mut Var<SRefMut<T>>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
 {
-    type Staged = ExternArgCast<VarUse<SRefMut<'stage, T>>, SRef<'stage, T>>;
+    type Staged = ExternArgCast<VarUse<SRefMut<T>>, SRef<T>>;
 
     fn into_extern_arg(self) -> Self::Staged {
         ExternArgCast {
@@ -607,22 +607,22 @@ where
     }
 }
 
-impl<'stage, T> IntoExternArg<SRefMut<'stage, Slice<T>>> for &mut Var<SRefMut<'stage, Slice<T>>>
+impl<T> IntoExternArg<SRefMut<Slice<T>>> for &mut Var<SRefMut<Slice<T>>>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
 {
-    type Staged = VarUse<SRefMut<'stage, Slice<T>>>;
+    type Staged = VarUse<SRefMut<Slice<T>>>;
 
     fn into_extern_arg(self) -> Self::Staged {
         self.use_once()
     }
 }
 
-impl<'stage, T> IntoExternArg<SRef<'stage, Slice<T>>> for &mut Var<SRefMut<'stage, Slice<T>>>
+impl<T> IntoExternArg<SRef<Slice<T>>> for &mut Var<SRefMut<Slice<T>>>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
 {
-    type Staged = ExternArgCast<VarUse<SRefMut<'stage, Slice<T>>>, SRef<'stage, Slice<T>>>;
+    type Staged = ExternArgCast<VarUse<SRefMut<Slice<T>>>, SRef<Slice<T>>>;
 
     fn into_extern_arg(self) -> Self::Staged {
         ExternArgCast {
@@ -644,24 +644,15 @@ pub unsafe trait UncheckedExternArg<Expected: StagedType>: StagedType {}
 
 unsafe impl<T: StagedType> UncheckedExternArg<T> for T {}
 
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SPtr<T> {}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SMutPtr<T> {}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRefMut<'stage, T>> for SMutPtr<T> {}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, T>> for SRefMut<'stage, T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<T>> for SPtr<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<T>> for SMutPtr<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<T>> for SMutPtr<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<T>> for SRefMut<T> {}
 
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>> for FatSliceType<T> {}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>>
-    for FatSliceMutType<T>
-{
-}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRefMut<'stage, Slice<T>>>
-    for FatSliceMutType<T>
-{
-}
-unsafe impl<'stage, T: StagedType> UncheckedExternArg<SRef<'stage, Slice<T>>>
-    for SRefMut<'stage, Slice<T>>
-{
-}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for FatSliceType<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for FatSliceMutType<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<Slice<T>>> for FatSliceMutType<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for SRefMut<Slice<T>> {}
 
 /// Call an external function with 0 arguments. `Out` is the function's own
 /// return type (`S::Ret`), so callers never restate it.

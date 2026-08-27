@@ -57,7 +57,7 @@ where
 }
 
 /// View a single `&FfiArray` as a typed column.
-pub trait FfiArrayOps<'r>: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {
+pub trait FfiArrayOps<'r>: Staged<Out = SRef<FfiArray>> + Sized + Clone {
     /// Interpret this erased descriptor's values as `M`.
     ///
     /// # Safety
@@ -74,7 +74,7 @@ pub trait FfiArrayOps<'r>: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {
     }
 }
 
-impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {}
+impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<FfiArray>> + Sized + Clone {}
 
 // =============================================================================
 // PrimitiveArrayView: read methods

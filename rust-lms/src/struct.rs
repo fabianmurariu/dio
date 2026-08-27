@@ -113,17 +113,17 @@ pub trait PointerLike: StagedType + pointer_like_sealed::Sealed {
     type Pointee: StagedType;
 }
 
-impl<'a, P: StagedType> PointerLike for SRef<'a, P> {
+impl<P: StagedType> PointerLike for SRef<P> {
     type Pointee = P;
 }
 
-impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRef<'a, P> {}
+impl<P: StagedType> pointer_like_sealed::Sealed for SRef<P> {}
 
-impl<'a, P: StagedType> PointerLike for SRefMut<'a, P> {
+impl<P: StagedType> PointerLike for SRefMut<P> {
     type Pointee = P;
 }
 
-impl<'a, P: StagedType> pointer_like_sealed::Sealed for SRefMut<'a, P> {}
+impl<P: StagedType> pointer_like_sealed::Sealed for SRefMut<P> {}
 
 // Raw-pointer flavors — so field access works on *baked* pointers
 // (`const_ptr`/`const_mut_ptr`), not just Rust references. A field of a `*const T`
@@ -150,17 +150,17 @@ mod reference_like_sealed {
 /// pointers; raw field loads must use `load_field_unchecked`.
 pub trait ReferenceLike: PointerLike + reference_like_sealed::Sealed {}
 
-impl<'a, P: StagedType> reference_like_sealed::Sealed for SRef<'a, P> {}
-impl<'a, P: StagedType> ReferenceLike for SRef<'a, P> {}
-impl<'a, P: StagedType> reference_like_sealed::Sealed for SRefMut<'a, P> {}
-impl<'a, P: StagedType> ReferenceLike for SRefMut<'a, P> {}
+impl<P: StagedType> reference_like_sealed::Sealed for SRef<P> {}
+impl<P: StagedType> ReferenceLike for SRef<P> {}
+impl<P: StagedType> reference_like_sealed::Sealed for SRefMut<P> {}
+impl<P: StagedType> ReferenceLike for SRefMut<P> {}
 
 /// Maps a parent pointer onto a pointer-to-field of the *same flavor*.
 ///
 /// This is the field-access analogue of [`crate::slice::SliceType`]: a single
 /// field-address op ([`FieldAddr`]) serves immutable and mutable references
 /// because the result type is encoded here. A field `Out` of a `&T` becomes
-/// `SRef<'a, Out>`; of a `&mut T`, `SRefMut<'a, Out>`. The `Out: 'a` bound
+/// `SRef<Out>`; of a `&mut T`, `SRefMut<Out>`. The `Out: 'a` bound
 /// (expressible because `'a` is in scope on the impl) is what a plain GAT
 /// could not state.
 pub trait FieldRefOf<Out: StagedType>: PointerLike {
@@ -168,12 +168,12 @@ pub trait FieldRefOf<Out: StagedType>: PointerLike {
     type Ref: StagedType;
 }
 
-impl<'a, P: StagedType, Out: StagedType + 'a> FieldRefOf<Out> for SRef<'a, P> {
-    type Ref = SRef<'a, Out>;
+impl<P: StagedType, Out: StagedType> FieldRefOf<Out> for SRef<P> {
+    type Ref = SRef<Out>;
 }
 
-impl<'a, P: StagedType, Out: StagedType + 'a> FieldRefOf<Out> for SRefMut<'a, P> {
-    type Ref = SRefMut<'a, Out>;
+impl<P: StagedType, Out: StagedType> FieldRefOf<Out> for SRefMut<P> {
+    type Ref = SRefMut<Out>;
 }
 
 impl<P: StagedType, Out: StagedType> FieldRefOf<Out> for SPtr<P> {
@@ -260,7 +260,7 @@ where
 /// A reference to a struct field, computed as `base + OFFSET`.
 ///
 /// The reference flavor follows the parent: addressing a field of a `&T`
-/// produces `SRef<'a, F>`, of a `&mut T` produces `SRefMut<'a, F>` — and the
+/// produces `SRef<F>`, of a `&mut T` produces `SRefMut<F>` — and the
 /// input lifetime flows through, so the result can be returned. This single op
 /// replaces the former `FieldRef`/`FieldMutRef`/`FieldPtr`/`FieldMutPtr`
 /// quartet (they all emitted identical address arithmetic).
@@ -308,22 +308,21 @@ pub fn field_addr<S, F>(base: S, _field: F) -> FieldAddr<S, F> {
 /// The token borrows its parent staged capability and exposes only terminal
 /// operations. It cannot yield an independent `SRefMut` that could overlap a
 /// later use of the parent.
-pub struct MutField<'borrow, 'stage, T, F>
+pub struct MutField<'borrow, T, F>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
     F: Field<Parent = T>,
 {
-    base: &'borrow mut Var<SRefMut<'stage, T>>,
+    base: &'borrow mut Var<SRefMut<T>>,
     field: F,
 }
 
-impl<'borrow, 'stage, T, F> MutField<'borrow, 'stage, T, F>
+impl<'borrow, T, F> MutField<'borrow, T, F>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
     F: Field<Parent = T>,
-    F::Out: 'stage,
 {
-    pub(crate) fn use_once(&mut self) -> FieldAddr<VarUse<SRefMut<'stage, T>>, F> {
+    pub(crate) fn use_once(&mut self) -> FieldAddr<VarUse<SRefMut<T>>, F> {
         FieldAddr {
             base: self.base.use_once(),
             _field: PhantomData,
@@ -331,7 +330,7 @@ where
     }
 
     /// Load this `Copy` field without allowing its mutable reference to escape.
-    pub fn load(&mut self) -> LoadField<VarUse<SRefMut<'stage, T>>, F>
+    pub fn load(&mut self) -> LoadField<VarUse<SRefMut<T>>, F>
     where
         F::Out: CopyType,
     {
@@ -340,10 +339,7 @@ where
 
     /// Store through this field without allowing its mutable reference to
     /// escape.
-    pub fn store<V>(
-        &mut self,
-        value: V,
-    ) -> StoreRef<'stage, FieldAddr<VarUse<SRefMut<'stage, T>>, F>, V::Staged>
+    pub fn store<V>(&mut self, value: V) -> StoreRef<FieldAddr<VarUse<SRefMut<T>>, F>, V::Staged>
     where
         V: IntoStaged<F::Out>,
     {
@@ -365,28 +361,27 @@ where
 ///     right: i64,
 /// }
 ///
-/// fn overlapping(mut pair: Var<SRefMut<'static, Pair>>) {
+/// fn overlapping(mut pair: Var<SRefMut<Pair>>) {
 ///     let mut left = field_mut(&mut pair, PairType::left());
 ///     let _right = load_field_mut(&mut pair, PairType::right());
 ///     let _left = left.load();
 /// }
 /// ```
-pub fn field_mut<'borrow, 'stage, T, F>(
-    base: &'borrow mut Var<SRefMut<'stage, T>>,
+pub fn field_mut<'borrow, T, F>(
+    base: &'borrow mut Var<SRefMut<T>>,
     field: F,
-) -> MutField<'borrow, 'stage, T, F>
+) -> MutField<'borrow, T, F>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
     F: Field<Parent = T>,
-    F::Out: 'stage,
 {
     MutField { base, field }
 }
 
 /// Pair of disjoint mutable field projections returned by [`split_fields_mut`].
-pub type SplitFieldsMut<'stage, T, Left, Right> = (
-    FieldAddr<VarUse<SRefMut<'stage, T>>, Left>,
-    FieldAddr<VarUse<SRefMut<'stage, T>>, Right>,
+pub type SplitFieldsMut<T, Left, Right> = (
+    FieldAddr<VarUse<SRefMut<T>>, Left>,
+    FieldAddr<VarUse<SRefMut<T>>, Right>,
 );
 
 /// Consume a unique staged struct reference and split it into two statically
@@ -405,21 +400,19 @@ pub type SplitFieldsMut<'stage, T, Left, Right> = (
 ///     right: i64,
 /// }
 ///
-/// fn duplicate_left(pair: Var<SRefMut<'static, Pair>>) {
+/// fn duplicate_left(pair: Var<SRefMut<Pair>>) {
 ///     let _ = split_fields_mut(pair, PairType::left(), PairType::left());
 /// }
 /// ```
-pub fn split_fields_mut<'stage, T, Left, Right>(
-    base: Var<SRefMut<'stage, T>>,
+pub fn split_fields_mut<T, Left, Right>(
+    base: Var<SRefMut<T>>,
     _left: Left,
     _right: Right,
-) -> SplitFieldsMut<'stage, T, Left, Right>
+) -> SplitFieldsMut<T, Left, Right>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
     Left: DisjointField<Right, Parent = T>,
     Right: Field<Parent = T>,
-    Left::Out: 'stage,
-    Right::Out: 'stage,
 {
     (
         FieldAddr {
@@ -434,12 +427,12 @@ where
 }
 
 /// Load a `CopyType` field through a unique staged mutable-reference variable.
-pub fn load_field_mut<'a, T, F>(
-    base: &mut Var<SRefMut<'a, T>>,
+pub fn load_field_mut<T, F>(
+    base: &mut Var<SRefMut<T>>,
     _field: F,
-) -> LoadField<VarUse<SRefMut<'a, T>>, F>
+) -> LoadField<VarUse<SRefMut<T>>, F>
 where
-    T: StagedType + 'a,
+    T: StagedType,
     F: Field<Parent = T>,
     F::Out: CopyType,
 {
@@ -576,10 +569,10 @@ pub trait OwnedFieldAccess<T: StagedType>: Sized + Staged {
 impl<T: StagedType> CopyFieldAccess<T> for Var<T> where Var<T>: Staged {}
 
 // Immutable reference
-impl<'a, T: StagedType> CopyFieldAccess<T> for Var<SRef<'a, T>> where Var<SRef<'a, T>>: Staged {}
+impl<T: StagedType> CopyFieldAccess<T> for Var<SRef<T>> where Var<SRef<T>>: Staged {}
 
 // Mutable reference
-impl<'a, T: StagedType> CopyFieldAccess<T> for Var<SRefMut<'a, T>> where Var<SRefMut<'a, T>>: Staged {}
+impl<T: StagedType> CopyFieldAccess<T> for Var<SRefMut<T>> where Var<SRefMut<T>>: Staged {}
 
 // Chained Rust reference: load a field of the struct it points at. Raw
 // `FieldAddr` expressions are excluded by `ReferenceLike`.
@@ -606,9 +599,9 @@ where
 // RefFieldAccess (pointer/reference receivers only)
 // -----------------------------------------------------------------------------
 
-impl<'a, T: StagedType> RefFieldAccess<T> for Var<SRef<'a, T>> where Var<SRef<'a, T>>: Staged {}
+impl<T: StagedType> RefFieldAccess<T> for Var<SRef<T>> where Var<SRef<T>>: Staged {}
 
-impl<'a, T: StagedType> RefFieldAccess<T> for Var<SRefMut<'a, T>> where Var<SRefMut<'a, T>>: Staged {}
+impl<T: StagedType> RefFieldAccess<T> for Var<SRefMut<T>> where Var<SRefMut<T>>: Staged {}
 
 // Chaining: a FieldAddr is itself a reference, so it can take a sub-field ref.
 impl<S, F2> RefFieldAccess<F2::Out> for FieldAddr<S, F2>

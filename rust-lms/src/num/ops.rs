@@ -948,13 +948,13 @@ impl_rem_op_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
 impl_bit_ops_for!([S, I] crate::slice::SliceGetUnchecked<S, I>);
 
 // Reference-load carriers.
-impl_num_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);
-impl_rem_op_for!(['a, P] crate::refer::LoadRef<'a, P>);
-impl_bit_ops_for!(['a, P] crate::refer::LoadRef<'a, P>);
+impl_num_ops_for!([P] crate::refer::LoadRef<P>);
+impl_rem_op_for!([P] crate::refer::LoadRef<P>);
+impl_bit_ops_for!([P] crate::refer::LoadRef<P>);
 
-impl_num_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
-impl_rem_op_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
-impl_bit_ops_for!(['a, P] crate::refer::LoadMutRef<'a, P>);
+impl_num_ops_for!([P] crate::refer::LoadMutRef<P>);
+impl_rem_op_for!([P] crate::refer::LoadMutRef<P>);
+impl_bit_ops_for!([P] crate::refer::LoadMutRef<P>);
 
 impl_num_ops_for!([P, I] crate::refer::ArrayIndex<P, I>);
 impl_rem_op_for!([P, I] crate::refer::ArrayIndex<P, I>);

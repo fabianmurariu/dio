@@ -131,19 +131,19 @@ fn test_extern_marker_carries_the_complete_signature() {
 
     fn assert_ref_signature<S>()
     where
-        S: ExternFn<Args = (SRef<'static, Opaque<i64>>,), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (SRef<Opaque<i64>>,), Ret = i64> + SafeExternFn,
     {
     }
 
     fn assert_mut_ref_signature<S>()
     where
-        S: ExternFn<Args = (SRefMut<'static, Opaque<i64>>, i64), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (SRefMut<Opaque<i64>>, i64), Ret = i64> + SafeExternFn,
     {
     }
 
     fn assert_ref_slice_signature<S>()
     where
-        S: ExternFn<Args = (SRef<'static, Slice<i64>>,), Ret = u64>,
+        S: ExternFn<Args = (SRef<Slice<i64>>,), Ret = u64>,
     {
     }
 

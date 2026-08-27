@@ -1130,7 +1130,7 @@ pub unsafe trait Staged {
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn duplicate(reference: Var<SRefMut<'_, i64>>) {
+/// fn duplicate(reference: Var<SRefMut<i64>>) {
 ///     let first = reference;
 ///     let second = reference;
 ///     let _ = (first, second);

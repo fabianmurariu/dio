@@ -201,13 +201,13 @@ impl<P: Clone, T> Clone for AsSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsSlice<P, T> {}
 
-unsafe impl<'a, P, R, T> Staged for AsSlice<P, T>
+unsafe impl<P, R, T> Staged for AsSlice<P, T>
 where
-    P: Staged<Out = SRef<'a, R>>,
-    R: SliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    P: Staged<Out = SRef<R>>,
+    R: SliceRepr<T>,
+    T: StagedType,
 {
-    type Out = SRef<'a, Slice<T>>;
+    type Out = SRef<Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -224,13 +224,13 @@ where
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<'_, i64>>) {
+/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<i64>>) {
 ///     let _ = unsafe { value.as_slice::<u8>() };
 /// }
 /// ```
-pub trait ReprSliceOps<'a, R>: Staged<Out = SRef<'a, R>> + Sized
+pub trait ReprSliceOps<R>: Staged<Out = SRef<R>> + Sized
 where
-    R: StagedType + 'a,
+    R: StagedType,
 {
     /// Reinterpret the pointed-to representation as a staged slice of `T`.
     ///
@@ -240,7 +240,7 @@ where
     /// reads of `len` values of `T` for the duration of generated execution.
     unsafe fn into_slice<T>(self) -> AsSlice<Self, T>
     where
-        T: StagedType + 'a,
+        T: StagedType,
         R: SliceRepr<T>,
     {
         AsSlice {
@@ -250,10 +250,10 @@ where
     }
 }
 
-impl<'a, R, S> ReprSliceOps<'a, R> for S
+impl<R, S> ReprSliceOps<R> for S
 where
-    R: StagedType + 'a,
-    S: Staged<Out = SRef<'a, R>> + Sized,
+    R: StagedType,
+    S: Staged<Out = SRef<R>> + Sized,
 {
 }
 
@@ -261,9 +261,9 @@ where
 ///
 /// The mutable twin of [`ReprSliceOps`]: given a `&mut` to an FFI descriptor
 /// whose first two fields are `ptr`/`len`, reinterpret it as a `&mut [T]`.
-pub trait ReprSliceMutOps<'a, R>: Staged<Out = SRefMut<'a, R>> + Sized
+pub trait ReprSliceMutOps<R>: Staged<Out = SRefMut<R>> + Sized
 where
-    R: StagedType + 'a,
+    R: StagedType,
 {
     /// Reinterpret the pointed-to representation as a staged *mutable* slice.
     ///
@@ -274,7 +274,7 @@ where
     /// generated execution.
     unsafe fn into_mut_slice<T>(self) -> AsMutSlice<Self, T>
     where
-        T: StagedType + 'a,
+        T: StagedType,
         R: MutSliceRepr<T>,
     {
         AsMutSlice {
@@ -284,10 +284,10 @@ where
     }
 }
 
-impl<'a, R, S> ReprSliceMutOps<'a, R> for S
+impl<R, S> ReprSliceMutOps<R> for S
 where
-    R: StagedType + 'a,
-    S: Staged<Out = SRefMut<'a, R>> + Sized,
+    R: StagedType,
+    S: Staged<Out = SRefMut<R>> + Sized,
 {
 }
 
@@ -310,13 +310,13 @@ impl<P: Clone, T> Clone for AsMutSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
 
-unsafe impl<'a, P, R, T> Staged for AsMutSlice<P, T>
+unsafe impl<P, R, T> Staged for AsMutSlice<P, T>
 where
-    P: Staged<Out = SRefMut<'a, R>>,
-    R: MutSliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    P: Staged<Out = SRefMut<R>>,
+    R: MutSliceRepr<T>,
+    T: StagedType,
 {
-    type Out = SRefMut<'a, Slice<T>>;
+    type Out = SRefMut<Slice<T>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -329,9 +329,10 @@ where
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================
 
-unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
-    /// Runtime type is `&[T::RuntimeValue]`
-    type RuntimeValue = &'a [T::RuntimeValue];
+unsafe impl<T: StagedType> StagedType for SRef<Slice<T>> {
+    /// A staged slice reference is a `(ptr, len)` descriptor at runtime; the
+    /// safe, lifetime-bounded view is `RuntimeResult::Output<'call>`.
+    type RuntimeValue = *const [T::RuntimeValue];
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
@@ -354,9 +355,9 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     }
 }
 
-unsafe impl<'a, T: StagedType> CopyType for SRef<'a, Slice<T>> {}
+unsafe impl<T: StagedType> CopyType for SRef<Slice<T>> {}
 
-unsafe impl<'stage, T> RuntimeParam for SRef<'stage, Slice<T>>
+unsafe impl<T> RuntimeParam for SRef<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -364,7 +365,7 @@ where
     type Arg<'call> = &'call [T::RuntimeValue];
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRef<'stage, Slice<T>>
+unsafe impl<T> RuntimeResult for SRef<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -376,9 +377,8 @@ where
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
 
-unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
-    /// Runtime type is `&mut [T::RuntimeValue]`
-    type RuntimeValue = &'a mut [T::RuntimeValue];
+unsafe impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
+    type RuntimeValue = *mut [T::RuntimeValue];
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
@@ -401,7 +401,7 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     }
 }
 
-unsafe impl<'stage, T> RuntimeParam for SRefMut<'stage, Slice<T>>
+unsafe impl<T> RuntimeParam for SRefMut<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -409,7 +409,7 @@ where
     type Arg<'call> = &'call mut [T::RuntimeValue];
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRefMut<'stage, Slice<T>>
+unsafe impl<T> RuntimeResult for SRefMut<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -465,21 +465,21 @@ pub trait SliceType: StagedType + slice_type_sealed::Sealed {
     type DataPtr: StagedType;
 }
 
-impl<'a, T: StagedType> SliceType for SRef<'a, Slice<T>> {
+impl<T: StagedType> SliceType for SRef<Slice<T>> {
     type Elem = T;
-    type ElemRef = SRef<'a, T>;
+    type ElemRef = SRef<T>;
     type DataPtr = SPtr<T>;
 }
 
-impl<'a, T: StagedType> slice_type_sealed::Sealed for SRef<'a, Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::Sealed for SRef<Slice<T>> {}
 
-impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
+impl<T: StagedType> SliceType for SRefMut<Slice<T>> {
     type Elem = T;
-    type ElemRef = SRefMut<'a, T>;
+    type ElemRef = SRefMut<T>;
     type DataPtr = SMutPtr<T>;
 }
 
-impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::Sealed for SRefMut<Slice<T>> {}
 
 impl<T: StagedType> SliceType for FatSliceType<T> {
     type Elem = T;
@@ -493,8 +493,8 @@ impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
 /// (`set_unchecked`) so they cannot be called on an immutable slice.
 pub trait MutSliceType: SliceType + slice_type_sealed::MutableSealed {}
 
-impl<'a, T: StagedType> MutSliceType for SRefMut<'a, Slice<T>> {}
-impl<'a, T: StagedType> slice_type_sealed::MutableSealed for SRefMut<'a, Slice<T>> {}
+impl<T: StagedType> MutSliceType for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
 
 /// Convenience accessor for `S`'s element type inside generic op impls.
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
@@ -865,9 +865,7 @@ where
 // =============================================================================
 
 /// Extension trait for immutable slice operations.
-pub trait SliceRefOps<'a, T: StagedType + 'a>:
-    Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone
-{
+pub trait SliceRefOps<T: StagedType>: Staged<Out = SRef<Slice<T>>> + Sized + Clone {
     /// Get the length of the slice.
     fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
@@ -952,10 +950,7 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
     }
 }
 
-impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where
-    S: Staged<Out = SRef<'a, Slice<T>>> + Clone
-{
-}
+impl<T: StagedType, S> SliceRefOps<T> for S where S: Staged<Out = SRef<Slice<T>>> + Clone {}
 
 // =============================================================================
 // Extension trait for lifetime-free FatSliceType<T> operations
@@ -1010,17 +1005,16 @@ pub trait RawSliceOps<T: StagedType>: Staged<Out = FatSliceType<T>> + Sized + Cl
 
 impl<T: StagedType, S> RawSliceOps<T> for S where S: Staged<Out = FatSliceType<T>> + Sized + Clone {}
 
-type MutFieldSlice<'stage, T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<'stage, T>>, F>, E>;
+type MutFieldSlice<T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<T>>, F>, E>;
 
-impl<'borrow, 'stage, T, F> MutField<'borrow, 'stage, T, F>
+impl<'borrow, T, F> MutField<'borrow, T, F>
 where
-    T: StagedType + 'stage,
+    T: StagedType,
     F: Field<Parent = T>,
-    F::Out: 'stage,
 {
-    fn as_mut_slice_once<E>(&mut self) -> MutFieldSlice<'stage, T, F, E>
+    fn as_mut_slice_once<E>(&mut self) -> MutFieldSlice<T, F, E>
     where
-        E: StagedType + 'stage,
+        E: StagedType,
         F::Out: MutSliceRepr<E>,
     {
         AsMutSlice {
@@ -1035,9 +1029,9 @@ where
     ///
     /// The descriptor must contain a live, aligned, exclusively owned buffer
     /// for its recorded element count.
-    pub unsafe fn slice_len<E>(&mut self) -> SliceLen<MutFieldSlice<'stage, T, F, E>>
+    pub unsafe fn slice_len<E>(&mut self) -> SliceLen<MutFieldSlice<T, F, E>>
     where
-        E: StagedType + 'stage,
+        E: StagedType,
         F::Out: MutSliceRepr<E>,
     {
         SliceLen {
@@ -1054,9 +1048,9 @@ where
     pub unsafe fn slice_get_unchecked<E, I>(
         &mut self,
         index: I,
-    ) -> SliceGetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged>
+    ) -> SliceGetUnchecked<MutFieldSlice<T, F, E>, I::Staged>
     where
-        E: CopyType + 'stage,
+        E: CopyType,
         I: IntoStaged<u64>,
         F::Out: MutSliceRepr<E>,
     {
@@ -1076,9 +1070,9 @@ where
         &mut self,
         index: I,
         value: V,
-    ) -> SliceSetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged, V::Staged>
+    ) -> SliceSetUnchecked<MutFieldSlice<T, F, E>, I::Staged, V::Staged>
     where
-        E: StagedType + 'stage,
+        E: StagedType,
         I: IntoStaged<u64>,
         V: IntoStaged<E>,
         F::Out: MutSliceRepr<E>,
@@ -1095,9 +1089,9 @@ where
 // Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
 // =============================================================================
 
-impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
+impl<T: StagedType> Var<SRefMut<Slice<T>>> {
     /// Reborrow this unique slice handle to read its length.
-    pub fn len(&self) -> SliceLen<VarUse<SRefMut<'a, Slice<T>>>> {
+    pub fn len(&self) -> SliceLen<VarUse<SRefMut<Slice<T>>>> {
         SliceLen {
             slice: self.use_once(),
         }
@@ -1108,7 +1102,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
         &self,
         index: I,
         default: D,
-    ) -> SliceGetOr<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, D::Staged>
+    ) -> SliceGetOr<VarUse<SRefMut<Slice<T>>>, I::Staged, D::Staged>
     where
         I: IntoStaged<u64>,
         D: IntoStaged<T>,
@@ -1126,7 +1120,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
         &mut self,
         index: I,
         value: V,
-    ) -> SliceSet<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
+    ) -> SliceSet<VarUse<SRefMut<Slice<T>>>, I::Staged, V::Staged>
     where
         I: IntoStaged<u64>,
         V: IntoStaged<T>,
@@ -1162,7 +1156,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
     pub unsafe fn get_unchecked<I>(
         &self,
         index: I,
-    ) -> SliceGetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged>
+    ) -> SliceGetUnchecked<VarUse<SRefMut<Slice<T>>>, I::Staged>
     where
         I: IntoStaged<u64>,
         T: CopyType,
@@ -1182,7 +1176,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
         &mut self,
         index: I,
         value: V,
-    ) -> SliceSetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
+    ) -> SliceSetUnchecked<VarUse<SRefMut<Slice<T>>>, I::Staged, V::Staged>
     where
         I: IntoStaged<u64>,
         V: IntoStaged<T>,
@@ -1203,7 +1197,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
         &mut self,
         i: I,
         j: J,
-    ) -> SliceSwapUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, J::Staged>
+    ) -> SliceSwapUnchecked<VarUse<SRefMut<Slice<T>>>, I::Staged, J::Staged>
     where
         I: IntoStaged<u64>,
         J: IntoStaged<u64>,
@@ -1226,7 +1220,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
     /// ```compile_fail
     /// use rust_lms::prelude::*;
     ///
-    /// fn overlapping(slice: Var<SRefMut<'static, Slice<i64>>>) {
+    /// fn overlapping(slice: Var<SRefMut<Slice<i64>>>) {
     ///     let sub = unsafe { slice.slice_mut_unchecked(0u64, 1u64) };
     ///     let _parent_len = slice.len();
     ///     let _ = sub;
@@ -1255,7 +1249,7 @@ impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
 /// build the same unified op structs as [`SliceRefOps`]; the associated
 /// `ElemRef`/`Out` keep their mutable flavor automatically. `set_unchecked` is
 /// gated on `MutSliceType`, so it only exists here.
-pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized {
+pub trait SliceMutOps<T: StagedType>: Staged<Out = SRefMut<Slice<T>>> + Sized {
     /// Get the length of the slice.
     fn count(self) -> SliceLen<Self> {
         SliceLen { slice: self }
@@ -1399,19 +1393,19 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     }
 }
 
-impl<'a, P, R, T> SliceMutOps<'a, T> for AsMutSlice<P, T>
+impl<P, R, T> SliceMutOps<T> for AsMutSlice<P, T>
 where
-    P: Staged<Out = SRefMut<'a, R>>,
-    R: MutSliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    P: Staged<Out = SRefMut<R>>,
+    R: MutSliceRepr<T>,
+    T: StagedType,
 {
 }
 
-impl<'a, S, START, END, T> SliceMutOps<'a, T> for SliceSliceUnchecked<S, START, END>
+impl<S, START, END, T> SliceMutOps<T> for SliceSliceUnchecked<S, START, END>
 where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
+    S: Staged<Out = SRefMut<Slice<T>>>,
     START: Staged<Out = u64>,
     END: Staged<Out = u64>,
-    T: StagedType + 'a,
+    T: StagedType,
 {
 }

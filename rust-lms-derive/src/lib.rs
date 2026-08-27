@@ -468,11 +468,11 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 
                 if type_ref.mutability.is_some() {
                     return Ok(quote! {
-                        ::rust_lms::refer::SRefMut<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                        ::rust_lms::refer::SRefMut<::rust_lms::slice::Slice<#inner_staged>>
                     });
                 } else {
                     return Ok(quote! {
-                        ::rust_lms::refer::SRef<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                        ::rust_lms::refer::SRef<::rust_lms::slice::Slice<#inner_staged>>
                     });
                 }
             }
@@ -481,11 +481,11 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
             // value, so retain its reference kind over an opaque pointee.
             if type_ref.mutability.is_some() {
                 Ok(quote! {
-                    ::rust_lms::refer::SRefMut<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRefMut<::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             } else {
                 Ok(quote! {
-                    ::rust_lms::refer::SRef<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRef<::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             }
         }

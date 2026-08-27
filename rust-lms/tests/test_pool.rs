@@ -8,7 +8,7 @@ use rust_lms::prelude::*;
 mod common;
 use common::for_each_backend;
 
-type PoolRef<'stage> = SRefMut<'stage, Opaque<BytesPool>>;
+type PoolRef<'stage> = SRefMut<Opaque<BytesPool>>;
 
 /// Build a `FatSlice<u8>` of literal bytes baked into the kernel frame.
 fn lit(ctx: &mut Ctx, bytes: &[u8]) -> impl Staged<Out = FatSliceType<u8>> {

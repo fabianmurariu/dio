@@ -13,7 +13,7 @@ use crate::ffi::{FfiValidityMut, FfiValidityMutType};
 
 fn bit_location_mut(
     ctx: &mut Ctx,
-    validity: &mut Var<SRefMut<'static, FfiValidityMut>>,
+    validity: &mut Var<SRefMut<FfiValidityMut>>,
     index: Var<u64>,
 ) -> (Var<u64>, Var<u64>) {
     let bit_offset = ctx.bind(load_field_mut(validity, FfiValidityMutType::bit_offset()));
@@ -27,7 +27,7 @@ fn bit_location_mut(
 /// They live on [`ValidityView`] (the staged counterpart of `FfiValidity`), so a
 /// bitmap can be updated independently of any primitive array, and share
 /// `bit_location` with `is_valid` so the bit arithmetic exists in one place.
-impl ValidityView<Var<SRefMut<'static, FfiValidityMut>>> {
+impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
     /// Mark row `i` null (clear its validity bit): `byte &= ~mask`.
     ///
     /// # Safety

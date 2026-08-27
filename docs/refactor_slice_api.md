@@ -1,0 +1,670 @@
+# Slice API refactor plan
+
+**Status:** proposed; **lifetime spike (row 1) executed — see "Spike results"**  
+**Written:** 2026-08-26  
+**Spike run:** 2026-08-27
+
+## Purpose
+
+Rethink the staged slice API around one representation and one operation
+vocabulary while preserving the safety differences between:
+
+- function parameters represented by `SRef<Slice<T>>` and
+  `SRefMut<Slice<T>>`;
+- shared and mutable views borrowed from `SVec<T>`;
+- raw `(ptr, len)` descriptors received from FFI calls or descriptor fields;
+- sub-slices derived from any of the above.
+
+The desired user experience is that, once a value is established as a valid
+shared or mutable slice, its storage origin is irrelevant. It should support the
+same `len`, checked access, unchecked access, sub-slicing, pointer access, and
+staged iteration operations as every other slice with the same capability.
+
+This is an API and ownership refactor, not a backend representation refactor.
+Both backends already use the canonical internal form:
+
+```text
+Value::Fat { ptr: Ptr, len: I64 }
+```
+
+## Executive decisions
+
+1. **One representation does not mean one Rust type.** Shared, unique mutable,
+   and raw descriptors have the same two-word representation but different
+   validity and aliasing contracts. The type system must retain those contracts.
+2. **Operations are unified by capability, not origin.** A function parameter
+   and an `SVec` borrow should use the same trusted slice traits. An FFI result
+   joins those traits only after an explicit provenance/validity conversion.
+3. **`SVec` view validity is tracked dynamically at stage 0.** `as_slice(&self)` /
+   `as_mut_slice(&mut self)` still take ordinary Rust borrows of the *handle*, but
+   the reallocation hazard is enforced by an `Rc<Cell<i64>>` counter checked in
+   emission order — the timeline the hazard actually lives on. `SVec` mutation
+   requires `&mut self`, and the owning handle is not `Copy`. See §3.
+4. **Sub-slicing is closed.** A shared slice produces a shared slice; a mutable
+   slice produces a mutable slice without duplicating the unique capability;
+   a raw slice produces a raw slice until it is validated.
+5. **Do not expose Rust slice references directly as a C ABI.** `FfiSlice<T>`
+   and `FfiSliceMut<T>` remain explicit ABI transport structs. The staged API
+   decides separately whether their contents have trusted provenance.
+6. ~~**Prove the lifetime design before migrating the API.**~~ **DONE
+   2026-08-27.** The spike showed borrowed staged expressions *can* be retained
+   (S1-S5, S7, S8, S10), but that S6 is unreachable under any retained-graph
+   design. Decision 3 supersedes it: the `'static` graph stays and validity is
+   dynamic. See "Lifetime viability spike" for the recorded evidence.
+
+## Current state
+
+| Origin or role | Current staged type/API | Current issue |
+|---|---|---|
+| Shared function parameter | `Var<SRef<Slice<T>>>`, `SliceRefOps` | Good capability, but operation names and traits differ from raw and mutable slices. |
+| Mutable function parameter | `Var<SRefMut<Slice<T>>>`, inherent methods plus `SliceMutOps` | Correctly non-`Copy`, but behavior is split between inherent and extension methods. |
+| FFI descriptor value | `FatSliceType<T>` / `FatSliceMutType<T>` | ABI transport and slice capability are conflated; mutable descriptors do not participate fully in `SliceType`. |
+| Raw parts | `slice_from_raw_parts`, producing `FatSliceType<T>` | Immutable-only constructor and a separate operation surface. |
+| Descriptor reinterpretation | `AsSlice`, `AsMutSlice`, `AsRawSlice` and three conversion traits | Necessary safety witnesses are spread over several similarly named wrappers. |
+| `SVec<T>` | Direct `len`, `get`, `set`, and `push`; no staged slice view | `SVec` is `Copy`, and `push(&self)` can reallocate, so a safe persistent slice view cannot currently exist. |
+| Sub-slice | `SliceSliceUnchecked<S, ...>` | Correctly preserves `S::Out`, but public construction is split between three operation traits and is unchecked only. |
+| Staged iteration | `SliceIter` hard-coded to `SRef<Slice<T>>` and `'static` | Raw, mutable-read, and future `SVec` views cannot use the same iterator entry point. |
+| Backend lowering | `Value::Fat { ptr, len }` | Already canonical; no replacement is needed. |
+
+## Target model
+
+### 1. Representation umbrella
+
+Keep a sealed staged-output trait describing the two-leaf representation. It can
+evolve from the current `SliceType` rather than introducing another parallel
+abstraction:
+
+```rust
+pub trait SliceType: StagedType + sealed::Sealed {
+    type Elem: StagedType;
+    type DataPtr: StagedType;
+}
+```
+
+Add sealed capability traits instead of encoding safety indirectly in a growing
+set of associated types:
+
+```rust
+pub trait TrustedSliceType: SliceType {}
+pub trait MutableSliceType: TrustedSliceType {}
+pub trait RawSliceType: SliceType {}
+```
+
+The exact names are subject to the API sketch milestone, but the separation is
+not: representation, trusted readability, trusted writability, and raw
+provenance are different facts.
+
+Planned classification:
+
+| Staged type | Representation | Capability |
+|---|---|---|
+| `SRef<Slice<T>>` | `(ptr, len)` | trusted shared read |
+| `SRefMut<Slice<T>>` | `(ptr, len)` | trusted unique read/write |
+| `SVecSlice<T>` deref target | `(ptr, len)`, reloading | trusted shared read while the guard is held |
+| `SVecSliceMut<T>` deref target | `(ptr, len)`, reloading | trusted unique read/write while the guard is held |
+| FFI/raw shared descriptor | `(ptr, len)` | raw until explicitly validated |
+| FFI/raw mutable descriptor | `(ptr, len)` | raw and unique only under an explicit unsafe contract |
+
+`FatSlice<T>` and `FatSliceMut<T>` remain the runtime `#[repr(C)]` transport
+types. During the naming pass, their staged markers should receive names that
+make raw provenance obvious, for example `RawSlice<T>` and `RawSliceMut<T>`,
+with compatibility aliases for `FatSliceType<T>` and `FatSliceMutType<T>`.
+
+### 2. Operation umbrella
+
+Expose one read API for every trusted slice expression and one extension for
+trusted mutable expressions:
+
+```rust
+pub trait SliceOps: Staged + Sized
+where
+    Self::Out: TrustedSliceType,
+{
+    fn len(self) -> ...;
+    fn get_or(self, index: ..., default: ...) -> ...;
+    unsafe fn get_unchecked(self, index: ...) -> ...;
+    unsafe fn get_ref_unchecked(self, index: ...) -> ...;
+    unsafe fn subslice_unchecked(self, range: ...) -> ...;
+    fn staged_iter(self) -> ...;
+}
+
+pub trait SliceMutOps: SliceOps
+where
+    Self::Out: MutableSliceType,
+{
+    fn set(self, index: ..., value: ...) -> ...;
+    unsafe fn set_unchecked(self, index: ..., value: ...) -> ...;
+    unsafe fn subslice_mut_unchecked(self, range: ...) -> ...;
+}
+```
+
+The final receiver choices must preserve unique capabilities. In particular,
+mutable projection may need to consume a value or borrow it through `&mut self`;
+it must never clone or recreate the same `Var<SRefMut<_>>` ID.
+
+Raw descriptors get a deliberately small API:
+
+- inspect `len` and the raw data pointer;
+- derive another raw descriptor through an unsafe range operation;
+- cross an explicit unsafe `assume_valid`/`borrowed_from` boundary into a
+  trusted shared or mutable view.
+
+Rust cannot make one trait method safe for trusted implementations and unsafe
+for raw implementations. Keeping the raw promotion explicit is therefore
+simpler and safer than either making every slice access unsafe or pretending
+that every FFI-returned pointer is a reference.
+
+### 3. `SVec` borrowing — **DECIDED: stage-0 dynamic tracking**
+
+The type-level borrowed-view route is **rejected**. It cannot express S6 (grow
+after a view is released), and it would force a `'stage` parameter through the
+whole iterator trait family for no other gain. Validity is tracked at stage 0
+with an `Rc<Cell<i64>>`, the standard Rust mechanism, checked in emission order.
+
+Two properties make it sound, and both already exist in the codebase:
+
+1. **Reloading views.** The view's `codegen` reloads `{ptr, len}` from the control
+   block, so a *retained* view expression is never stale (`AsRawSlice` already
+   does exactly this, and `SVec::data()` already follows the discipline).
+2. **The guard rides inside the view.** No tuple at the call site — the view is a
+   `Ref`-style guard that `Deref`s to a `Copy`, lifetime-free slice expression.
+
+```rust
+/// Stage-0 only; never reaches codegen. >0 = shared views, -1 = exclusive.
+#[derive(Clone, Default)]
+struct StageBorrow(Rc<Cell<i64>>);
+
+/// A `Copy`, lifetime-free, reloading slice expression.
+pub struct SliceExpr<T> { ctl: *mut RawVec, _t: PhantomData<T> }
+
+/// The borrow guard. Not `Copy`; `Drop` releases the borrow.
+pub struct SVecSlice<T>    { expr: SliceExpr<T>,    guard: SharedGuard }
+pub struct SVecSliceMut<T> { expr: SliceExprMut<T>, guard: ExclusiveGuard }
+
+impl<T> Deref for SVecSlice<T> {
+    type Target = SliceExpr<T>;          // Copy -> by-value ops reach it
+    fn deref(&self) -> &SliceExpr<T> { &self.expr }
+}
+
+impl<T> SVec<T> {
+    pub fn as_slice(&self) -> SVecSlice<T>;
+    pub fn as_mut_slice(&mut self) -> SVecSliceMut<T>;
+    pub fn push(&mut self, ctx: &mut Ctx, value: Var<T>);  // asserts unborrowed
+}
+```
+
+Because `SliceExpr<T>` is `Copy`, method resolution on `slice.get_unchecked(i)`
+autoderefs and *copies* the inner expression out; the guard stays in the view.
+Verified: a by-value trait method reached through `Deref` does not move the
+guard, and the count drops only at scope end. So:
+
+- one value at the call site, no tuple;
+- retained nodes hold only the `Copy` expression, which reloads — never stale;
+- `drop(view)` (or end of scope) releases the borrow, so **S6 works**;
+- the `Deref` target is an ordinary staged slice, so the view gets the whole
+  common trait family with no lifetime parameter of its own.
+
+Requirements:
+
+- `SVec` is not `Copy`; cloning must not duplicate the reallocation capability;
+- shared views may be cloned (the `Rc` count rises), matching `&[T]`;
+- mutable views are neither `Copy` nor `Clone`;
+- `push` and every capacity-changing operation require `&mut SVec` **and** assert
+  the borrow count is zero, panicking at kernel-build time otherwise;
+- the raw SQL construction path stays unsafe and must not manufacture a second
+  handle to the same control block while a view is live.
+
+**Open (D2): the snapshot hole.** `ctx.bind` of a view's fat `(ptr, len)` yields a
+`Var` that outlives the guard and goes stale across a growth. `Var` is `Copy`
+with no `Drop`, so it cannot carry a guard. Either withhold the safe API that
+materialises a view's fat value into a `Var`, or mark that one path `unsafe`.
+Every other op reloads, so this is the sole residual hazard.
+
+### 4. FFI results and provenance
+
+An arbitrary safe Rust function can return a dangling `FatSlice<T>` without
+using unsafe code because `FatSlice` itself is only a pair of public fields and
+does not carry a lifetime. Therefore an FFI result cannot automatically become
+`SRef<Slice<T>>`.
+
+The initial contract is:
+
+```text
+extern result -> raw staged slice -> explicit unsafe provenance conversion
+              -> ordinary trusted SliceOps
+```
+
+The unsafe conversion must state:
+
+- which owner keeps the allocation alive;
+- the maximum lifetime of the view;
+- alignment and initialized element count;
+- whether mutation is excluded or exclusive;
+- whether the producer may reallocate the storage.
+
+Future work may add annotated extern return relationships such as "borrowed
+from argument 0" or an owned FFI buffer with drop glue. Those are not required
+to complete this refactor and must not be guessed by the macro.
+
+Rust `&[T]` and `&mut [T]` remain unsupported on the safe `extern "C"` path
+because Rust slice references do not have a stable C ABI. The thunk may know how
+to transport them internally, but that is not a public ABI guarantee.
+
+### 5. Sub-slicing
+
+`SliceSliceUnchecked` already has the essential rule `Out = S::Out`. Preserve
+that rule in the consolidated API:
+
+| Source | Sub-slice result |
+|---|---|
+| trusted shared | trusted shared, same borrow lifetime |
+| trusted mutable | trusted mutable, with the parent consumed or reborrowed |
+| raw shared | raw shared |
+| raw mutable | raw mutable without duplicating uniqueness |
+
+Add two range operations:
+
+1. `get_range(start..end)` returns a staged optional slice and performs
+   `start <= end && end <= len` checks.
+2. `subslice_unchecked(start..end)` remains the proof-carrying fast path.
+
+A Rust-indexing-style trapping operation can be added only after the project
+defines one backend-independent trap/runtime-failure contract. Clamping is not
+acceptable because it does not match Rust semantics.
+
+## Lifetime viability spike (executed; route not adopted)
+
+The lifetime proposal must be tested before production types or downstream
+crates are migrated. The spike should change the smallest possible internal
+surface and may be discarded after its findings are recorded here.
+
+### Hypothesis
+
+Replace the hard-coded `'static` deferred graph with a graph lifetime:
+
+```rust
+type CodegenAction<'stage> =
+    Box<dyn FnOnce(&mut CompilationContext) + 'stage>;
+
+pub struct Ctx<'stage> {
+    actions: Vec<CodegenAction<'stage>>,
+}
+
+struct FunDef<'stage> { /* body: ... + 'stage */ }
+```
+
+Propagate the same lifetime through `VarBuilder`, `Compiler`, function
+definition helpers, and only the combinators that retain staged expressions.
+Do not change `Value::Fat`, either backend, or the private storage-pointer ABI.
+
+`Compiler<'a>` and `Compiled<'a, T>` already contain lifetime parameters, but
+they are not evidence that this works: `FunDef` and `CodegenAction` currently
+remain `'static`. The spike must determine what those lifetimes actually own
+and whether build-time borrows and runtime storage lifetimes need to be
+separate.
+
+### Spike experiments — RESULTS
+
+Executed 2026-08-27 against a `'stage`-parameterised deferred graph
+(`CodegenAction<'stage>`, `Ctx<'stage>`, `FunDef<'stage>`,
+`Compiler.functions: Vec<Option<FunDef<'a>>>`, `BODY: … + 'a`).
+**93 lines across 3 files** (`func.rs`, `func_def.rs`, `llvm/mod.rs`) and
+**zero changes** in `rust-lms-std`, `arrow-lms`, or `sql-gen` — all 73 downstream
+`&mut Ctx` signatures elide to `&mut Ctx<'_>` unchanged.
+
+Evidence lives in `rust-lms/tests/spike_lifetime.rs` and
+`rust-lms/tests/spike_dyn_borrow.rs`, plus the `compile_fail` doctest on
+[`Compiled`] in `func.rs` (in `src/`, so cargo actually enforces it — a
+`compile_fail` block inside `tests/` is never run).
+
+| # | Experiment | Result | Finding |
+|---:|---|:---:|---|
+| S1 | Retain a borrow of non-`'static` host storage, compile, run | **PASS** | Works on Cranelift and LLVM, no `transmute`, no erasure. |
+| S2 | The borrow through `bind`/`var`/`store`/`while_loop`/`if_then_else` | **PASS** | The graph lifetime propagates through every retention point. |
+| S3 | Two simultaneous shared views | **PASS** | Shared views are `Copy` and coexist. |
+| S4 | `push` while a shared view is used later | **PASS** (rejected) | Ordinary `E0502`. |
+| S5 | Second mutable view / read while a mutable view is live | **PASS** (rejected) | Ordinary borrow conflict. |
+| S6 | Stop using a view, then `push` | **FAILS — and cannot pass** | See below. |
+| S7 | Derive a sub-slice, including a mutable sub-slice | inherits S1/S2 | No new lifetime machinery required. |
+| S8 | Drop host storage before invoking compiled code | **PASS** (rejected) | Falls out for free; see "One lifetime, not two". |
+| S9 | Return a captured `SVec` slice from a generated function | not run | Deferred; rejected in the first API. |
+| S10 | Two functions sharing one host owner | **PASS** | Both retained in the same `Compiler<'a>`. |
+
+#### One lifetime, not two — Risk #2 dissolves
+
+The document worried that build-time and runtime lifetimes are different, and
+that `Compiled` might need a separate owner lifetime or an unsafe constructor.
+It does not. Threading **one** `'stage` lifetime through
+`Ctx → FunDef → Compiler.functions → Compiled` makes `Compiled<'a, T>`'s
+already-present `PhantomData<&'a T>` load-bearing for the first time, and S8
+follows automatically:
+
+```text
+error[E0597]: `host` does not live long enough
+   |         -------- borrow later stored here
+   |         `host` dropped here while still borrowed
+```
+
+Before the spike, `Compiler<'a>`/`Compiled<'a, T>` were **pure decoration**: `'a`
+was an unconstrained phantom, so `Compiler::new()` inferred whatever the caller
+wanted (which is why `tests/common/mod.rs` can write `Compiler<'static>`).
+
+This answers the open question in §3: `'borrow` and `'host` collapse into one
+lifetime, and it does not appear in common signatures.
+
+#### S6 cannot pass — staging borrows are whole-`'stage`, never lexical
+
+The original plan expected NLL to restore the mutable capability once a view
+stopped being used. It cannot. A view emitted into the graph is captured by a
+`'stage`-bounded closure, so its shared borrow lives for the entire staging
+scope; NLL has nothing to release:
+
+```text
+error[E0502]: cannot borrow `v` as mutable because it is also borrowed as immutable
+41 |     let view = v.as_slice();      - immutable borrow occurs here
+42 |     let bound = ctx.bind(view);   // consumed into the graph...
+43 |     v.push(ctx, 5);               ^^ mutable borrow occurs here
+```
+
+Type-level borrowed views therefore imply **read-xor-grow per kernel**. This is
+a property of any retained-graph design, not a defect in the implementation.
+
+#### The stage lifetime on a slice *parameter* is inert
+
+`RuntimeParam::Arg<'call>` and `RuntimeResult::Output<'call>` decouple the staged
+type's lifetime from the invocation lifetime, so a parameter declared
+`Var<SRef<Slice<i64>>>` still accepts a short-lived `&data[..]` at call
+time (verified). **Only slices baked at staging time** — `SVec` views, descriptor
+fields — ever need a non-`'static` stage lifetime.
+
+Consequence for row 10: generalising the iterator family is *not* required to
+make slice parameters work. It is required only if stage-time-baked slices are
+given type-level lifetimes. If they instead use the dynamic scheme below, the
+`'static` bounds in `iter/traits.rs` cost nothing.
+
+#### Alternative validated: stage-0 dynamic borrow tracking
+
+Because staging *is* an ordinary Rust program, and it runs in exactly emission
+order — the timeline the reallocation hazard actually lives on — a
+`RefCell`-style counter checked at staging time is **more precise** than the
+borrow checker, which can only see the whole-`'stage` over-approximation.
+Violations panic while the kernel is being *built*, which for a staging library
+is a build-time failure, not a production one.
+
+Two properties make it work, and both are already available:
+
+1. **Reloading views.** `AsRawSlice::codegen` reloads `{ptr, len}` from the
+   control block at codegen, so a *retained* view expression is never stale.
+   The existing `into_raw_slice` → `FatSliceType<T>` path is exactly this.
+2. **Lifetime-free views.** With validity enforced dynamically, the view needs no
+   `'stage` parameter, so it joins the existing slice trait family untouched.
+
+Measured against the same experiments (`spike_dyn_borrow.rs`):
+
+| Experiment | Type-level borrows | Stage-0 dynamic tracking |
+|---|:---:|:---:|
+| S3 two shared views | pass | pass |
+| S4/S5 alias rejection | compile error | staging-time panic |
+| **S6 grow after view released** | **impossible** | **pass** |
+| View joins existing slice API | needs `'stage` on iterator traits | **no change needed** |
+| Failure surfaces at | compile time | kernel-build time |
+
+Residual hazard to close if this route is taken: *snapshotting*. A
+`ctx.bind` of a fat `(ptr, len)` value produces a `Var` that survives a later
+growth. The tracker must gate snapshot creation, not just view creation.
+
+### Revised go/no-go criteria
+
+Proceed with borrowed `SVec` views only if:
+
+- S1-S5, S7, S8, S10 pass without `transmute`, leaked allocations, global borrow
+  registries, or reverting borrowed slice markers to `'static` — **met**;
+- the error messages identify an ordinary Rust borrow conflict — **met**;
+- both backends still consume exactly the same neutral value graph — **met**
+  (361 Cranelift / 379 LLVM, clippy `-D warnings` and `fmt --check` clean);
+- common APIs do not require users to write lifetime parameters routinely —
+  **met** (zero downstream signature changes);
+- the lifetime of runtime storage used by compiled code is explicit and
+  enforceable — **met** via the single `'stage` lifetime.
+
+**S6 is struck from the criteria**: it is unachievable under any retained-graph
+design, and the original list would have produced a spurious no-go. The
+read-xor-grow consequence replaces it as an accepted design constraint of the
+type-level route.
+
+## Open decisions
+
+Everything else in this plan is settled. These four are not, and D1 is large
+enough to reorder the plan.
+
+### D1 — Do staged reference types keep their lifetime parameter?
+
+**Evidence.** With the `'static` deferred graph (now confirmed as the design),
+every staged lifetime is pinned to `'static`. `ctx.bind`/`var`/`store`/`emit` and
+`BODY: Staged + 'static` force it; the first spike reproduced the exact error
+(`argument requires that 'a must outlive 'static`). And the `'a: 'static` bounds
+in `slice_iter.rs` are not independently removable — they are consequences of
+`IndexedSource: Clone + 'static` and its `'static` associated-type bounds, which
+exist precisely because retained expressions must be `'static`.
+
+Separately, `RuntimeParam::Arg<'call>` / `RuntimeResult::Output<'call>` already
+carry the *real* invocation lifetime, and are independent of the staged type's
+`'a` — a `Var<SRef<'static, Slice<i64>>>` parameter accepts a short-lived
+`&data[..]` (verified).
+
+So `'a` in `SRef<'a, T>` / `SRefMut<'a, T>` / `SRef<'a, Slice<T>>` can only ever
+be `'static`, across roughly **137 mention sites and 68 `impl<'a>` blocks** in
+`rust-lms` alone. It is decoration that reads like a guarantee.
+
+**The one place it does work:** `StagedType::RuntimeValue = &'a T::RuntimeValue`,
+consumed by `Compiled::run() -> T::RuntimeValue`. Dropping `'a` means references
+need a lifetime-free `RuntimeValue` — the honest choice being a typed raw pointer
+(`*const T::RuntimeValue`), which pushes reference-returning kernels onto
+`as_fn().call()`, where `Output<'call>` gives a properly bounded `&'call T`.
+Note `Compiled<'a, T>`'s `'a` is an unconstrained phantom today, so `run()`'s
+current reference guarantee is not real anyway.
+
+**DECIDED 2026-08-27: (a) strip it everywhere. DONE — row 0.5.**
+
+Landed: `SRef<T>`, `SRefMut<T>`, `SRef<Slice<T>>`, `SRefMut<Slice<T>>`,
+`OptRefType<T>`, `OptMutRefType<T>` and its four constructors, plus the
+`LoadRef`/`LoadMutRef`/`StoreRef`/`IntoMutRef` helpers (which now match the
+already-lifetime-free `LoadPtr`/`LoadMutPtr` beside them). The four slice op
+traits (`SliceRefOps`, `SliceMutOps`, `ReprSliceOps`, `ReprSliceMutOps`) lose
+their `'a`. Reference `RuntimeValue` becomes a typed raw pointer — `*const T` /
+`*mut T`, and `*const [T]` / `*mut [T]` for slices, `*const T` (null = None) for
+the optional forms. Nothing referenced these through `run()`, so no call site
+changed. Safe reference results still go through `as_fn().call()`, where
+`Output<'call>` supplies the real bound.
+
+Corroboration found while doing it: `rust-lms-derive` was already hard-coding
+`SRef<'static, ..>` / `SRefMut<'static, ..>` in all four places it emits them —
+the macro had been writing the only lifetime that was ever possible.
+
+Measured: **137 -> 0** explicit lifetime arguments on staged reference types,
+**6 -> 0** vacuous `'a: 'static` bounds, `impl<'a>` blocks **68 -> 21** in
+`rust-lms`. 353 Cranelift / 372 LLVM tests, 23 doctests, clippy `-D warnings` and
+`fmt --check` clean on both backends.
+
+**Still decoration, not yet stripped:** `Compiler<'a>` and `Compiled<'a, T>` carry
+an unconstrained phantom `'a` (this is why `tests/common` can write
+`Compiler<'static>`). Same defect, but it is the *function* API rather than the
+slice API — left for a separate decision.
+
+### D2 — The snapshot hole in `SVec` views
+
+See §3. `ctx.bind` of a view's fat `(ptr, len)` produces a `Var` that outlives the
+guard. **Proposed: withhold the safe API** rather than add an `unsafe` escape —
+every other op reloads, so nothing else needs it. Open until contradicted.
+
+### D3 — Compatibility aliases during the rename
+
+**DECIDED 2026-08-27: clean break, no aliases.** Pre-1.0 with three in-tree
+consumers; rename outright and fix the call sites. Nothing carries two names.
+Strike the "deprecate then remove" half of row 12.
+
+### D4 — Optional type for `get_range`
+
+**DECIDED 2026-08-27: `StagedOpt`.** A checked sub-slice is branched on at the
+use site, so it should lower to control flow and never materialise a tag. If a
+stored/returned checked range is ever needed, add it then as a separate
+constructor rather than widening `get_range`.
+
+## Ordered implementation plan
+
+Every row is intended to be independently reviewable and green before the next
+row begins.
+
+| Order | Deliverable | Goal | Role in the bigger picture | Exit criterion |
+|---:|---|---|---|---|
+| 0 | Characterization matrix | Capture current behavior for shared/mutable parameters, raw FFI values, nested slices, sub-slices, and both backends before changing names. | Prevents the redesign from losing ABI or typed-leaf behavior that already works. | Tests cover each current origin and pass on both backends. |
+| 0.5 | **Staged lifetime removal (D1)** | ~~Strip `'a` from staged reference types~~ **DONE 2026-08-27.** `SRef<T>`, `SRefMut<T>`, `SRef<Slice<T>>`, `OptRefType<T>`, `OptMutRefType<T>`, and the `LoadRef`/`LoadMutRef`/`StoreRef`/`IntoMutRef` helpers; the four slice op traits lose their `'a`; reference `RuntimeValue` becomes a typed raw pointer. | Stops the taxonomy being written with lifetimes and then stripped. | **Met.** 137 -> 0 explicit lifetime args, 6 -> 0 vacuous `'a: 'static` bounds, `impl<'a>` 68 -> 21; 353 Cranelift / 372 LLVM, clippy `-D warnings` clean. |
+| 1 | Lifetime viability spike | ~~Run S1-S10~~ **DONE 2026-08-27.** Results and revised criteria recorded above. | Determined that Rust borrows *can* found `SVec` views, with read-xor-grow; and that a stage-0 dynamic alternative exists. | **Met.** Spike code is in the tree, uncommitted, green on both backends. |
+| 2 | ~~Lifetime-aware deferred graph~~ | **STRUCK.** Superseded by the §3 decision: validity is dynamic, so the `'static` graph stays and no `'stage` parameter is introduced. | — | Spike code removed; tree back to baseline. |
+| 3 | Capability taxonomy and names | Finalize the sealed representation, trusted-read, trusted-write, and raw capability traits; decide compatibility aliases for `FatSliceType`. | Gives all later APIs one vocabulary and makes provenance visible in signatures. | Compile-time trait assertions cover every staged slice marker. |
+| 4 | Consolidated core operations | Replace `SliceRefOps`, duplicated mutable inherent methods, and overlapping raw lowering with one internal implementation and capability-gated public traits. Standardize names such as `len`. | Removes the largest source of slice API duplication while retaining safety distinctions. | The same generic helper accepts all trusted shared origins; mutable helpers accept only unique origins. |
+| 5 | Function parameter migration | Move `SRef<Slice<T>>` and `SRefMut<Slice<T>>` call sites and tests to the consolidated traits without changing their ABI. | Establishes the simplest trusted origin as the reference implementation. | All current parameter, call, return, option, nested-slice, and both-backend tests pass. |
+| 6 | Raw/FFI descriptor boundary | Rename or alias raw staged markers, add shared and mutable raw constructors, consolidate representation witnesses, and add explicit unsafe promotion to trusted views. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | Raw values cannot dereference through safe code before promotion; promoted values use ordinary `SliceOps`. |
+| 7 | `SVec` unique capability | Remove `Copy`/unrestricted `Clone`, make mutation require `&mut self`, add the `Rc<Cell<i64>>` stage-0 borrow tracker, and retain one documented unsafe raw escape hatch for SQL dispatch. | Creates the owner whose tracked borrows prevent generated reallocation. | `#[should_panic]` alias tests pass; existing SVec growth and SQL output behavior remains green. |
+| 8 | `SVec` shared and mutable views | Add `SVecSlice`/`SVecSliceMut` as `Deref` guards over a `Copy`, reloading `SliceExpr`, lowering to `Value::Fat`. | Makes growable output storage readable/writable through the same API as function parameters. | A generic kernel helper operates unchanged on a parameter slice and each `SVec` view on both backends; an S6 test (view released, then grow) passes. |
+| 9 | Closed and checked sub-slicing | Consolidate range syntax, preserve capability/lifetime for every origin, and add `get_range`; keep a clearly unsafe unchecked primitive. | Makes "a slice of a slice is a slice" true across the entire public API. | Source-by-result compile assertions and runtime range tests pass for every origin/capability. |
+| 10 | Slice iteration adapter | Generalize `SliceIter`/`IndexedSource` from `SRef<Slice<T>>` to the trusted slice capability. **Scope settled by §3:** no `'stage` parameter on the iterator traits; their `'static` bounds stay. Do not redesign opaque iterators. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | Parameter, `SVec`, promoted FFI, and sub-slices all run the same iterator tests. |
+| 11 | Downstream migration | Migrate `arrow-lms`, `sql-gen`, pools, string byte views, and benchmarks; isolate unsafe FFI promotion at descriptor construction boundaries. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | Workspace tests pass with both backends; downstream code no longer chooses operations by slice origin. |
+| 12 | Compatibility removal and documentation | Deprecate then remove redundant wrappers/traits, update the prelude and examples, and document the final safety contracts. | Leaves an open-source API that is explainable without knowing its refactor history. | No internal use of deprecated APIs; rustdoc, compile-fail docs, Clippy, and the full workspace are green. |
+
+## Detailed milestone guidance
+
+### Characterization before refactoring
+
+Build one test matrix instead of adding isolated tests during each rename:
+
+| Source | Shared read | Mutable write | Sub-slice | Nested sub-slice | Internal call/return | FFI call/return | Iterator |
+|---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
+| function parameter | required | required | required | required | required | required | required |
+| `SVec` view | required | required | required | required | decide in spike | required | required |
+| raw FFI result before promotion | forbidden | forbidden | raw only | raw only | raw only | required | forbidden |
+| promoted FFI result | required | required where exclusive | required | required | required | required | required |
+| descriptor field (`arrow-lms`) | required after witness | required after mutable witness | required | required | optional | required | required |
+
+Each runtime cell that applies must run through the shared both-backends harness.
+
+### API naming pass
+
+Prefer conventional names and make safety visible in suffixes:
+
+| Current name | Direction |
+|---|---|
+| `count()` for slice length | standardize on `len()`; reserve `count()` for iterators |
+| `slice_unchecked(start, end)` | `subslice_unchecked(start..end)` or `get_unchecked(start..end)` after checking inference ergonomics |
+| `slice_mut_unchecked` | use the same range vocabulary with mutability expressed by the receiver capability |
+| `into_ptr` / `into_mut_ptr` | use `as_ptr` / `as_mut_ptr` only when the receiver is borrowed; use `into_*` only for consuming capability conversion |
+| `FatSliceType` | compatibility alias to a name that says raw/FFI descriptor if the migration remains readable |
+| `AsSlice`, `AsMutSlice`, `AsRawSlice` | consolidate behind provenance-oriented constructors; retain separate internal nodes only if lowering actually differs |
+
+Do not add a second family of convenience methods on `Var<T>`. Inherent methods
+should exist only where Rust borrowing of a non-`Copy` variable needs behavior
+that a blanket by-value trait cannot express.
+
+### FFI and `arrow-lms`
+
+`SliceRepr` and `MutSliceRepr` remain unsafe downstream extension points because
+`arrow-lms` implements them for descriptor layouts. Consolidation must preserve
+that external implementation capability. The plan should reduce three public
+conversion traits to one representation witness plus explicit shared/mutable
+promotion, not seal the witness inside `rust-lms`.
+
+The FFI macro must continue to distinguish:
+
+- runtime ABI carriers (`FfiSlice`, `FfiSliceMut`);
+- Rust reference parameters (`&[T]`, `&mut [T]`), which are not safe C ABI;
+- reference returns, whose provenance must not be invented;
+- raw descriptor returns, which remain raw in staged code.
+
+### `SVec` migration impact
+
+The main downstream changes should be mechanical:
+
+- bind reconstructed SQL output handles as mutable locals before `push`;
+- replace direct `SVec::get`/`set` loops with borrowed views where the buffer is
+  not growing;
+- keep `from_raw_unchecked` only at the runtime-selected SQL type boundary;
+- ensure no second handle is reconstructed while a shared or mutable view is
+  retained;
+- add a regression that grows first, creates a view second, and reads the
+  reallocated buffer through both backends.
+
+## Verification rules
+
+After every implementation row:
+
+```text
+cargo test --workspace --all-targets
+cargo test --workspace --features llvm
+```
+
+At phase boundaries also run:
+
+```text
+cargo test --workspace --doc
+cargo clippy --workspace --all-targets -- -D warnings
+cargo clippy --workspace --all-targets --features llvm -- -D warnings
+cargo fmt --all -- --check
+```
+
+Negative lifetime and capability claims require compile-fail tests. Runtime
+tests alone cannot prove that aliasing or escape is impossible.
+
+## Risks and limits
+
+- ~~**Lifetime propagation may be invasive.**~~ **RESOLVED (spike).** 93 lines
+  across three `rust-lms` files; zero downstream changes. The risk was the
+  iterator family instead — see below.
+- ~~**Build-time and runtime lifetimes are not automatically the same.**~~
+  **RESOLVED (spike).** One `'stage` lifetime threaded
+  `Ctx → FunDef → Compiler → Compiled` covers both, because `Compiled<'a, T>`'s
+  existing `PhantomData<&'a T>` becomes constrained. No separate owner lifetime
+  and no unsafe constructor are required (S8).
+- **The iterator trait family, not `Ctx`, is where `'static` is load-bearing.**
+  `iter/traits.rs` bakes `'static` into the *traits* (`fn for_each(self, ctx:
+  &mut Ctx, …) where F: … + 'static`, and `IndexedSource: Clone + 'static`), and
+  `SliceIter` carries explicit `'a: 'static` bounds. Relaxing them fails with
+  `E0308: method not compatible with trait` until the traits themselves take a
+  `'stage` parameter — roughly 90 `'static` occurrences over 11 files. Note this
+  work is only needed for *stage-time-baked* slices; slice parameters do not
+  need it.
+- **Staging borrows are whole-`'stage`.** Any type-level view retained in the
+  graph holds its borrow until compilation, so lexical reborrow recovery (S6) is
+  not available. Choose read-xor-grow, dynamic tracking, or a consuming handle.
+- **FFI cannot supply provenance by layout alone.** `(ptr, len)` compatibility
+  proves neither validity nor lifetime. Raw results need an unsafe witness or a
+  future owned/annotated return protocol.
+- **Rust-like mutable reborrowing is permanently conservative under the
+  type-level route.** Consuming a mutable parent when producing a sub-slice is
+  the sound first version. Restoring the parent after a lexical reborrow is *not*
+  a later ergonomic improvement — the spike shows it is unreachable (S6) unless
+  validity moves to stage-0 dynamic tracking.
+- **Safe indexing needs failure semantics.** `get_or` and optional range access
+  can land now. Exact Rust panic behavior waits for the neutral trap/runtime
+  status work.
+- **The project is intentionally 64-bit.** The canonical layout assumes a
+  pointer and `usize` are each eight bytes. The target contract must enforce
+  x86_64/aarch64 rather than letting this slice refactor imply portability to
+  other widths.
+
+## Definition of done
+
+The refactor is complete when:
+
+- one backend-neutral `(ptr, len)` implementation serves all slice operations;
+- trusted shared and mutable slices have one origin-independent public API;
+- function parameters, `SVec` borrows, promoted FFI results, and sub-slices are
+  accepted by the same generic helpers;
+- raw FFI values cannot perform safe memory access before an explicit validity
+  and provenance boundary;
+- `SVec` cannot be reallocated through safe staged code while a derived view is
+  live;
+- mutable slice capabilities cannot be copied or aliased through safe APIs;
+- sub-slicing preserves lifetime, mutability, and raw/trusted status;
+- redundant operation traits and wrapper nodes are removed or private;
+- both backend suites, downstream workspace tests, compile-fail tests, rustdoc,
+  formatting, and warning-denying Clippy pass.
