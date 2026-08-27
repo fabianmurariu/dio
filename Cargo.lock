@@ -2878,6 +2878,7 @@ dependencies = [
  "melior",
  "mlir-sys",
  "mlua",
+ "proptest",
  "rand 0.8.5",
  "rhai",
  "rust-lms-derive",

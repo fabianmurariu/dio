@@ -28,6 +28,7 @@ use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::sync::Arc;
 
 pub use crate::func_impl::*;
 
@@ -1141,8 +1142,11 @@ impl<'a> Compiler<'a> {
             move |ctx| expr.codegen(ctx),
         )?;
         Ok(Compiled {
-            executable: Some(Executable::Mlir(executable)),
-            main_ptr,
+            executable: Arc::new(FrozenExecutable::new(Executable::Mlir(executable))),
+            // SAFETY: MLIR emitted `__main__` with this exact storage-pointer ABI.
+            main: unsafe {
+                std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
+            },
             _phantom: PhantomData,
         })
     }
@@ -1388,8 +1392,13 @@ impl<'a> Compiler<'a> {
         let main_ptr = module.get_finalized_function(main_func_id);
 
         Ok(Compiled {
-            executable: Some(Executable::Cranelift(Box::new(module))),
-            main_ptr,
+            executable: Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
+                module,
+            )))),
+            // SAFETY: Cranelift emitted `__main__` with this exact storage-pointer ABI.
+            main: unsafe {
+                std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
+            },
             _phantom: PhantomData,
         })
     }
@@ -1424,27 +1433,53 @@ impl std::error::Error for CompileError {}
 /// A compiled expression that owns its JIT module and executable memory.
 ///
 /// Use [`run`](Self::run) for a plain expression or the arity-specific `call`
-/// methods for a compiled staged function. Executable memory is reclaimed when
-/// this value is dropped.
+/// methods for a compiled staged function. Executable memory is reclaimed after
+/// this value and every [`CompiledFn`] cloned from it have been dropped.
 pub struct Compiled<'a, T: StagedType> {
-    executable: Option<Executable>,
-    main_ptr: *const u8,
+    executable: Arc<FrozenExecutable>,
+    main: unsafe extern "C" fn(*mut u8),
     _phantom: PhantomData<&'a T>,
 }
 
-/// The backend-specific JIT resource a [`Compiled`] owns and frees on drop. `main_ptr`
-/// points into whichever variant is live; keeping the resource here keeps it valid.
+/// The backend-specific JIT resource kept alive by the shared frozen owner.
 enum Executable {
     Cranelift(Box<JITModule>),
     #[cfg(feature = "llvm")]
     Mlir(crate::llvm::MlirExecutable),
 }
 
-impl<'a, T: StagedType> Drop for Compiled<'a, T> {
+/// A finalized JIT resource. Once wrapped here, no module-building, symbol-registration,
+/// lookup, or packed-invocation API is accessible: callers can only execute already-resolved
+/// native entry points. The `Arc` shared by `Compiled` and `CompiledFn` prevents destruction
+/// while any entry point can still be called.
+struct FrozenExecutable {
+    executable: Option<Executable>,
+}
+
+impl FrozenExecutable {
+    fn new(executable: Executable) -> Self {
+        Self {
+            executable: Some(executable),
+        }
+    }
+}
+
+// SAFETY: publication happens only after finalization and native entry-point lookup. The
+// wrapped JIT objects are never accessed through `FrozenExecutable`; they solely own the
+// executable allocation until exclusive `Drop`. Calls go directly through immutable native
+// function pointers, and `Arc` ensures `Drop` cannot race a call. This additionally relies on
+// the Cranelift and LLVM/MLIR JIT destructors being valid on a thread other than the creator.
+// The parallel LLVM property test exercises concurrent execution and last-owner destruction
+// on worker threads; the full differential suite exercises the same wrapper for Cranelift.
+unsafe impl Send for FrozenExecutable {}
+// SAFETY: see the `Send` implementation. Sharing this wrapper does not share access to either
+// JIT API; it shares only ownership of finalized executable memory.
+unsafe impl Sync for FrozenExecutable {}
+
+impl Drop for FrozenExecutable {
     fn drop(&mut self) {
-        // SAFETY: safe entry points borrow this Compiled value, so no safe callable can
-        // remain when Drop obtains exclusive access. Escaped pointers are governed by
-        // `as_fn_unchecked`'s safety contract.
+        // `Arc` gives the last owner exclusive destruction, so no safe callable can remain.
+        // Escaped pointers are still governed by `as_fn_unchecked`'s safety contract.
         match self.executable.take() {
             Some(Executable::Cranelift(module)) => unsafe { (*module).free_memory() },
             #[cfg(feature = "llvm")]
@@ -1460,33 +1495,30 @@ impl<'a, T: StagedType> Compiled<'a, T> {
         let mut output = MaybeUninit::<T::RuntimeValue>::uninit();
         // SAFETY: `compile` creates `__main__` with the canonical one-output-
         // pointer signature and writes a valid `T::RuntimeValue` before return.
-        let function: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(self.main_ptr) };
         unsafe {
-            function(output.as_mut_ptr().cast());
+            (self.main)(output.as_mut_ptr().cast());
             output.assume_init()
         }
     }
 
     /// Read the generated function address returned by a function-valued
     /// `__main__` trampoline.
-    unsafe fn function_entry_ptr(&self) -> *const u8 {
-        let mut output = MaybeUninit::<*const u8>::uninit();
-        let get_ptr: unsafe extern "C" fn(*mut u8) = unsafe { std::mem::transmute(self.main_ptr) };
+    unsafe fn function_entry_ptr(&self) -> unsafe extern "C" fn() {
+        let mut output = MaybeUninit::<unsafe extern "C" fn()>::uninit();
         unsafe {
-            get_ptr(output.as_mut_ptr().cast());
+            (self.main)(output.as_mut_ptr().cast());
             output.assume_init()
         }
     }
 }
 
-/// A callable entry point tied to the lifetime of its owning [`Compiled`]
-/// module.
+/// A callable entry point that shares ownership of its finalized executable module.
 ///
-/// The function pointer is deliberately private and this type does not
-/// implement `Deref`: exposing the pointer would allow safe code to copy it and
-/// outlive the executable memory. Use [`call`](CompiledFn::call), or use
-/// `Compiled::as_fn_unchecked` when a foreign API genuinely requires a bare
-/// function pointer.
+/// Cloning this value clones an internal [`Arc`] lease, so it can be sent to worker threads
+/// and remains callable after the original [`Compiled`] is dropped. The function pointer is
+/// deliberately private and this type does not implement `Deref`; use the arity-specific
+/// `call` method, or `Compiled::as_fn_unchecked` when a foreign API genuinely requires a bare
+/// untracked pointer.
 ///
 /// Reference results are bounded by both the invocation arguments and the
 /// compiled module. They cannot escape a shorter-lived argument:
@@ -1504,19 +1536,21 @@ impl<'a, T: StagedType> Compiled<'a, T> {
 /// assert_eq!(*escaped, 42);
 /// ```
 #[must_use = "a compiled entry point does nothing until it is called"]
-pub struct CompiledFn<'compiled, F> {
-    function: *const u8,
+pub struct CompiledFn<F> {
+    function: unsafe extern "C" fn(),
+    executable: Arc<FrozenExecutable>,
     _signature: PhantomData<fn() -> F>,
-    _owner: PhantomData<&'compiled JITModule>,
 }
 
-impl<F> Clone for CompiledFn<'_, F> {
+impl<F> Clone for CompiledFn<F> {
     fn clone(&self) -> Self {
-        *self
+        Self {
+            function: self.function,
+            executable: Arc::clone(&self.executable),
+            _signature: PhantomData,
+        }
     }
 }
-
-impl<F> Copy for CompiledFn<'_, F> {}
 
 macro_rules! raw_argument_pointer {
     ($type:ident) => {
@@ -1524,16 +1558,13 @@ macro_rules! raw_argument_pointer {
     };
 }
 
-// Generate borrowed entry points and direct calls for every function arity.
+// Generate owning entry points and direct calls for every function arity.
 macro_rules! impl_compiled_fn {
     // Base case: zero parameters
     (0, $FunType:ident) => {
-        impl<'compiled, OUT: RuntimeResult> CompiledFn<'compiled, $FunType<OUT>> {
-            /// Invoke the entry point with a result lifetime bounded by its
-            /// owning module.
-            pub fn call<'call>(&self) -> OUT::Output<'call>
-            where
-                'compiled: 'call,
+        impl<OUT: RuntimeResult> CompiledFn<$FunType<OUT>> {
+            /// Invoke the entry point with a result lifetime bounded by this owning handle.
+            pub fn call<'call>(&'call self) -> OUT::Output<'call>
             {
                 let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
                 // SAFETY: RuntimeResult witnesses the output storage layout,
@@ -1548,40 +1579,49 @@ macro_rules! impl_compiled_fn {
         }
 
         impl<'a, OUT: RuntimeResult> Compiled<'a, $FunType<OUT>> {
-            /// Borrow the compiled function as a safe callable entry point.
+            /// Create an owning, cloneable callable entry point.
             ///
-            /// The borrow prevents this pattern from compiling:
+            /// The internal executable lease makes temporaries and worker-thread use safe:
             ///
-            /// ```compile_fail
+            /// ```
             /// use rust_lms::prelude::*;
             ///
             /// let mut compiler = Compiler::new();
-            /// let function = compiler.fun0("one", |_ctx| Const::new(1i64));
+            /// let function = compiler.fun0("one", |_ctx| Const::<i64>::new(1));
             /// let entry = compiler.compile(function).unwrap().as_fn();
             /// assert_eq!(entry.call(), 1);
             /// ```
-            pub fn as_fn(&self) -> CompiledFn<'_, $FunType<OUT>> {
+            pub fn as_fn(&self) -> CompiledFn<$FunType<OUT>> {
                 CompiledFn {
-                    // SAFETY: the returned wrapper borrows self and never
-                    // exposes the bare pointer.
+                    // SAFETY: the returned wrapper owns an executable lease and never exposes
+                    // the bare pointer.
                     function: unsafe { self.function_entry_ptr() },
+                    executable: Arc::clone(&self.executable),
                     _signature: PhantomData,
-                    _owner: PhantomData,
                 }
             }
 
             /// Invoke the compiled function while borrowing its owner.
             pub fn call<'call>(&'call self) -> OUT::Output<'call> {
-                self.as_fn().call()
+                let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
+                // SAFETY: `self` keeps the executable live for `'call`, and RuntimeResult
+                // witnesses the output storage layout.
+                let function: unsafe extern "C" fn(*mut u8) =
+                    unsafe { std::mem::transmute(self.function_entry_ptr()) };
+                unsafe {
+                    function(output.as_mut_ptr().cast());
+                    output.assume_init()
+                }
             }
 
             /// Extract the compiled function as an untracked function pointer.
             ///
             /// # Safety
             ///
-            /// The returned pointer must never be invoked after `self` is
-            /// dropped. Its argument must point to writable, properly aligned
-            /// storage for `OUT::RuntimeValue`.
+            /// The returned pointer must never be invoked after the executable allocation is
+            /// released; keeping `self` or an owning [`CompiledFn`] alive is sufficient. Its
+            /// argument must point to writable, properly aligned storage for
+            /// `OUT::RuntimeValue`.
             pub unsafe fn as_fn_unchecked(
                 &self,
             ) -> unsafe extern "C" fn(*mut u8) {
@@ -1591,15 +1631,13 @@ macro_rules! impl_compiled_fn {
     };
     // N parameters (N >= 1)
     ($n:tt, $FunType:ident, [$($T:ident : $arg:ident),+]) => {
-        impl<'compiled, $($T: RuntimeParam,)+ OUT: RuntimeResult>
-            CompiledFn<'compiled, $FunType<$($T,)+ OUT>>
+        impl<$($T: RuntimeParam,)+ OUT: RuntimeResult>
+            CompiledFn<$FunType<$($T,)+ OUT>>
         {
-            /// Invoke the entry point with one fresh lifetime shared by its
-            /// reference arguments and result.
+            /// Invoke the entry point with one fresh lifetime shared by its reference
+            /// arguments, result, and this owning handle.
             #[allow(clippy::too_many_arguments)]
-            pub fn call<'call>(&self, $($arg: $T::Arg<'call>),+) -> OUT::Output<'call>
-            where
-                'compiled: 'call,
+            pub fn call<'call>(&'call self, $($arg: $T::Arg<'call>),+) -> OUT::Output<'call>
             {
                 let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
                 // SAFETY: RuntimeParam and RuntimeResult witness the storage
@@ -1623,31 +1661,44 @@ macro_rules! impl_compiled_fn {
         impl<'a, $($T: RuntimeParam,)+ OUT: RuntimeResult>
             Compiled<'a, $FunType<$($T,)+ OUT>>
         {
-            /// Borrow the compiled function as a safe callable entry point.
-            pub fn as_fn(&self) -> CompiledFn<'_, $FunType<$($T,)+ OUT>> {
+            /// Create an owning, cloneable callable entry point.
+            pub fn as_fn(&self) -> CompiledFn<$FunType<$($T,)+ OUT>> {
                 CompiledFn {
-                    // SAFETY: the returned wrapper borrows self and never
-                    // exposes the bare pointer.
+                    // SAFETY: the returned wrapper owns an executable lease and never exposes
+                    // the bare pointer.
                     function: unsafe { self.function_entry_ptr() },
+                    executable: Arc::clone(&self.executable),
                     _signature: PhantomData,
-                    _owner: PhantomData,
                 }
             }
 
             /// Invoke the compiled function while borrowing its owner.
             #[allow(clippy::too_many_arguments)]
             pub fn call<'call>(&'call self, $($arg: $T::Arg<'call>),+) -> OUT::Output<'call> {
-                self.as_fn().call($($arg),+)
+                let mut output = MaybeUninit::<OUT::Output<'call>>::uninit();
+                // SAFETY: `self` keeps the executable live for `'call`; RuntimeParam and
+                // RuntimeResult witness the argument and output storage layouts.
+                let function: unsafe extern "C" fn(
+                    $(raw_argument_pointer!($T)),+,
+                    *mut u8,
+                ) = unsafe { std::mem::transmute(self.function_entry_ptr()) };
+                unsafe {
+                    function(
+                        $(std::ptr::from_ref(&$arg).cast::<u8>()),+,
+                        output.as_mut_ptr().cast(),
+                    );
+                    output.assume_init()
+                }
             }
 
             /// Extract the compiled function as an untracked function pointer.
             ///
             /// # Safety
             ///
-            /// The returned pointer must never be invoked after `self` is
-            /// dropped. Each input must point to the exact runtime
-            /// representation of its corresponding staged parameter, and the
-            /// final pointer must reference writable, properly aligned output
+            /// The returned pointer must never be invoked after the executable allocation is
+            /// released; keeping `self` or an owning [`CompiledFn`] alive is sufficient. Each
+            /// input must point to the exact runtime representation of its corresponding staged
+            /// parameter, and the final pointer must reference writable, properly aligned output
             /// storage.
             pub unsafe fn as_fn_unchecked(
                 &self,

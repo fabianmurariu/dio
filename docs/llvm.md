@@ -302,9 +302,9 @@ pub trait Module {
     fn register_extern(&mut self, name: &str, ptr: *const u8);
     fn finalize(self: Box<Self>) -> Result<Box<dyn Executable>, CompileError>;
 }
-// `Executable` owns the JIT resources (Cranelift JITModule, or MLIR
-// ExecutionEngine+Context+Module) and frees them on Drop. NOTE: the MLIR
-// ExecutionEngine is `!Send + !Sync` (§9), so the LLVM `Executable` is thread-affine.
+// `FrozenExecutable` owns the finalized JIT resource (Cranelift JITModule or MLIR
+// ExecutionEngine) behind an Arc and frees it when the last Compiled/CompiledFn drops.
+// It exposes no JIT mutation API after publication; its audited Send+Sync boundary is §9.
 ```
 
 `CompilationContext` keeps its backend-neutral maps (`var_map: HashMap<usize,
@@ -339,11 +339,11 @@ The right move preserves the Phase-3 ABI and all of `Compiled`/`CompiledFn` unch
    `as_fn_unchecked` already uses. **No packed wrapper, no extra indirection, ABI
    identical to Cranelift.** Reserve `invoke_packed` only for tests or an explicit
    adapter.
-5. The MLIR `Compiled` owns the `ExecutionEngine` (+ `Context`/`Module`) and drops them
-   together — the same "owns executable memory, frees on `Drop`" contract as the
-   Cranelift `JITModule`. **Caveat (§9): melior's `ExecutionEngine` is `!Send + !Sync`**,
-   so the LLVM `Compiled`/`CompiledFn` are thread-affine — an auto-trait change from the
-   Cranelift path that the ownership design must account for.
+5. The MLIR `Compiled` and each owning `CompiledFn` share an `Arc<FrozenExecutable>` whose
+   last drop destroys the `ExecutionEngine` — the same "owns executable memory, frees on
+   last `Drop`" contract as the Cranelift `JITModule`. The source MLIR `Module` and `Context`
+   are no longer retained after engine creation. `FrozenExecutable` is the deliberately small
+   unsafe `Send + Sync` boundary described in §9.
 
 Because the entry point is a plain function pointer with the by-pointer signature,
 `Compiled`/`CompiledFn` glue stays backend-neutral; only module finalize +
@@ -441,12 +441,15 @@ a `Bool` value, `brif`/`select` take one, and load/store of a `Bool` field inser
   optimizer is. Any "simplify the slice encoding" change should be judged on API/clarity, not
   perf: it can't beat what LLVM already does, and the Cranelift gap is its optimizer, not the
   `(ptr,len)` indirection. Verdict: **keep the current slice design.**
-- **`ExecutionEngine` is `!Send + !Sync`.** melior documents this. An LLVM `Compiled`/
-  `CompiledFn` that owns the engine therefore loses the `Send`/`Sync` the Cranelift
-  path may have. Decide deliberately: either LLVM-compiled functions are thread-affine
-  (document it), or the engine is isolated behind a different ownership design. This is
-  an auto-trait change on a public type and must be a conscious decision, not a
-  surprise.
+- **`ExecutionEngine` is `!Send + !Sync`; the finalized wrapper is deliberately not.**
+  melior's raw engine handle supplies no auto-trait guarantee, but generated native code is
+  called directly and the engine is never accessed again after symbol registration/lookup.
+  `FrozenExecutable` therefore exposes no engine methods, owns it behind an `Arc`, and has
+  audited unsafe `Send + Sync` implementations. `CompiledFn` owns an Arc lease rather than a
+  raw borrowed pointer. A parallel property test publishes each LLVM function to 2–8 worker
+  threads, performs concurrent calls, drops every compiler-thread owner before joining, and
+  consequently runs the final engine destructor on a worker thread. This is strong regression
+  evidence, though the unsafe contract still depends on LLVM/MLIR destructor behavior.
 - **Backend edge-case semantics are not automatically shared.** Division by zero,
   oversized/negative shifts, signed-division overflow, and float NaN handling differ:
   LLVM may produce **poison** where Cranelift **traps** or defines a result, and shift
@@ -826,8 +829,8 @@ feature-gated tests green; default 366 / clippy 27.
 `llvm.ptr` params, `void` return) through the **shared neutral `emit_function_body`** — the exact
 code the Cranelift path runs — resolving internal/extern calls via id-aligned symbol tables,
 `assemble_module` + `register_symbol` + JIT, and looks up `__main__`. `Compiled` is now backend-
-neutral (`Executable` enum over `JITModule` | `MlirExecutable`; the MLIR one owns engine+context and
-is `!Send+!Sync`, §9). A capstone differential test runs the *public API*
+neutral (`Executable` enum over `JITModule` | `MlirExecutable`), with each finalized resource held
+through the shared `Arc<FrozenExecutable>` boundary described in §9. A capstone differential test runs the *public API*
 `Compiler::with_backend(Llvm).compile(expr).run()` against Cranelift and asserts equality for a
 plain expression, a `call0` helper, a `call1` helper (storage-pointer arg), and a data-dependent
 `while` loop in a helper. 16 feature-gated tests green; default 366 / clippy 27. **This is the
@@ -953,7 +956,8 @@ answer, §5) but pointer representation and getting the JIT ABI right:
 - **Backend edge-case semantics** (§9) — define and differential-test div-by-zero,
   shift overflow, signed-division overflow, NaN, and pointer offsets; don't assume the
   backends agree.
-- **`!Send`/`!Sync`** (§9) — decide the thread-affinity policy for the LLVM `Executable`.
+- **`!Send`/`!Sync` — resolved with a frozen Arc owner** (§9). Keep the parallel property
+  test as the regression/audit boundary when upgrading melior or LLVM.
 - **Two-backend maintenance tax.** Every new staged op needs a `Backend` method and two
   impls; the differential suite keeps them honest.
 - **Is it worth it?** If the goal is *faster* compilation or a pure-Rust build,
