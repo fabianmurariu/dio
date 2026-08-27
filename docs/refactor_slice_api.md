@@ -74,25 +74,36 @@ Keep a sealed staged-output trait describing the two-leaf representation. It can
 evolve from the current `SliceType` rather than introducing another parallel
 abstraction:
 
+**As built (row 3):**
+
 ```rust
 pub trait SliceType: StagedType + sealed::Sealed {
     type Elem: StagedType;
-    type DataPtr: StagedType;
+    type DataPtr: StagedType;      // SPtr<T> shared, SMutPtr<T> unique
 }
+
+pub trait TrustedSliceType: SliceType + sealed::TrustedSealed {
+    type ElemRef: StagedType;      // SRef<T> shared, SRefMut<T> unique
+}
+
+pub trait MutSliceType: TrustedSliceType + sealed::MutableSealed {}
+pub trait RawSliceType: SliceType + sealed::RawSealed {}
 ```
 
-Add sealed capability traits instead of encoding safety indirectly in a growing
-set of associated types:
+Two deviations from the sketch, both deliberate:
 
-```rust
-pub trait TrustedSliceType: SliceType {}
-pub trait MutableSliceType: TrustedSliceType {}
-pub trait RawSliceType: SliceType {}
-```
+- **`ElemRef` moved from `SliceType` to `TrustedSliceType`.** Only a trusted
+  slice can yield a *reference* to an element; a raw descriptor can offer no more
+  than a pointer. The old shape forced `FatSliceType` to declare
+  `ElemRef = SPtr<T>`, calling a pointer a reference. `ElemRef` had exactly one
+  consumer (`SliceGetRefUnchecked`), so the move cost one tightened bound.
+- **`MutSliceType`, not `MutableSliceType`.** The crate already spells this axis
+  `Mut` everywhere — `SRefMut`, `SMutPtr`, `MutSliceRepr`, `SliceMutOps`,
+  `AsMutSlice` — so `MutableSliceType` would have been the odd one out.
 
-The exact names are subject to the API sketch milestone, but the separation is
-not: representation, trusted readability, trusted writability, and raw
-provenance are different facts.
+`len` and the data pointer sit on `SliceType`: reading a descriptor you already
+hold dereferences nothing. Everything that touches memory needs
+`TrustedSliceType`; writing additionally needs `MutSliceType`.
 
 Planned classification:
 
@@ -521,7 +532,7 @@ row begins.
 | 0.5 | **Staged lifetime removal (D1)** | ~~Strip `'a` from staged reference types~~ **DONE 2026-08-27.** `SRef<T>`, `SRefMut<T>`, `SRef<Slice<T>>`, `OptRefType<T>`, `OptMutRefType<T>`, and the `LoadRef`/`LoadMutRef`/`StoreRef`/`IntoMutRef` helpers; the four slice op traits lose their `'a`; reference `RuntimeValue` becomes a typed raw pointer. | Stops the taxonomy being written with lifetimes and then stripped. | **Met.** 137 -> 0 explicit lifetime args, 6 -> 0 vacuous `'a: 'static` bounds, `impl<'a>` 68 -> 21; 353 Cranelift / 372 LLVM, clippy `-D warnings` clean. |
 | 1 | Lifetime viability spike | ~~Run S1-S10~~ **DONE 2026-08-27.** Results and revised criteria recorded above. | Determined that Rust borrows *can* found `SVec` views, with read-xor-grow; and that a stage-0 dynamic alternative exists. | **Met.** Spike code is in the tree, uncommitted, green on both backends. |
 | 2 | ~~Lifetime-aware deferred graph~~ | **STRUCK.** Superseded by the §3 decision: validity is dynamic, so the `'static` graph stays and no `'stage` parameter is introduced. | — | Spike code removed; tree back to baseline. |
-| 3 | Capability taxonomy and names | Finalize the sealed representation, trusted-read, trusted-write, and raw capability traits; decide compatibility aliases for `FatSliceType`. | Gives all later APIs one vocabulary and makes provenance visible in signatures. | Compile-time trait assertions cover every staged slice marker. |
+| 3 | Capability taxonomy and names | ~~Finalize the sealed traits~~ **DONE 2026-08-27.** Four traits: `SliceType` (representation) / `TrustedSliceType` (validity, owns `ElemRef`) / `MutSliceType` (trusted + writable) / `RawSliceType` (unknown provenance). `FatSliceMutType` classified for the first time (half of G6b). Aliases: none, per D3. | Gives all later APIs one vocabulary and makes provenance visible in signatures. | **Met.** `tests/slice_taxonomy.rs` asserts all 16 positive cells + associated-type projections + sub-slice closure; the four negative cells are `compile_fail` doctests that genuinely fail. |
 | 4 | Consolidated core operations | Replace `SliceRefOps`, duplicated mutable inherent methods, and overlapping raw lowering with one internal implementation and capability-gated public traits. Standardize names such as `len`. | Removes the largest source of slice API duplication while retaining safety distinctions. | The same generic helper accepts all trusted shared origins; mutable helpers accept only unique origins. |
 | 5 | Function parameter migration | Move `SRef<Slice<T>>` and `SRefMut<Slice<T>>` call sites and tests to the consolidated traits without changing their ABI. | Establishes the simplest trusted origin as the reference implementation. | All current parameter, call, return, option, nested-slice, and both-backend tests pass. |
 | 6 | Raw/FFI descriptor boundary | Rename or alias raw staged markers, add shared and mutable raw constructors, consolidate representation witnesses, and add explicit unsafe promotion to trusted views. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | Raw values cannot dereference through safe code before promotion; promoted values use ordinary `SliceOps`. |
@@ -562,8 +573,11 @@ These are now the concrete exit criteria for rows 6 and 10.
   Corroboration: `ext_double_slice` in `test_extern_fn.rs` is declared but called
   by no test — the mutable half was never reachable. Row 6 must add the missing
   witnesses (and a test that actually calls a mutable-slice extern).
-- **G6b — `FatSliceMutType<T>` implements no `SliceType`,** so a mutable raw
-  descriptor supports *no* slice operation at all, not even `len`. Row 6.
+- **G6b — a mutable raw descriptor supports no slice operation at all,** not even
+  `len`. **Half closed by row 3:** `FatSliceMutType<T>` is now
+  `SliceType + RawSliceType`, so every op *node* accepts it. The remaining half is
+  row 4 — the public `RawSliceOps<T>` trait is still hard-bound to
+  `Staged<Out = FatSliceType<T>>`, so no call site can reach those nodes.
 - **G10 — `SliceIter` is bound to `SRef<Slice<T>>`,** so neither a mutable
   parameter nor a raw descriptor can be iterated. Row 10.
 

@@ -26,8 +26,11 @@
 //!   must declare its parameter as `Var<FatSliceType<T>>` to reach such an
 //!   extern. (`ext_double_slice` in `test_extern_fn.rs` is declared but never
 //!   called by any test — this is why.)
-//! * **G6b** — `FatSliceMutType<T>` implements no `SliceType`, so a mutable raw
-//!   descriptor supports no slice operation at all, not even `len`.
+//! * **G6b** — a mutable raw descriptor supports no slice operation at all, not
+//!   even `len`. *Half closed by row 3*: `FatSliceMutType<T>` is now classified
+//!   `SliceType + RawSliceType`, so the op nodes accept it; but the public
+//!   `RawSliceOps<T>` trait is still hard-bound to `Staged<Out = FatSliceType<T>>`,
+//!   so nothing reaches those nodes. Row 4 generalizes it to `RawSliceType`.
 //! * **G10** — `SliceIter` is bound to `SRef<Slice<T>>`, so neither a mutable
 //!   parameter nor a raw descriptor can be iterated.
 

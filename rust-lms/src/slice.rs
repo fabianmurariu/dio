@@ -45,7 +45,7 @@
 //! });
 //! ```
 
-use crate::ffi::FatSliceType;
+use crate::ffi::{FatSliceMutType, FatSliceType};
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
@@ -418,26 +418,46 @@ where
 }
 
 // =============================================================================
-// SliceType: unify immutable and mutable slice fat pointers
+// Capability taxonomy: representation, trusted provenance, writability
 // =============================================================================
+//
+// Four *different facts* about a staged slice, each its own trait, because a
+// `(ptr, len)` pair alone proves none of the others:
+//
+// ```text
+//   SliceType            representation: two words, an element type, a data pointer
+//   |
+//   +-- TrustedSliceType validity + provenance established -> element access is safe
+//   |     |
+//   |     +-- MutSliceType   ... and writes are permitted and exclusive
+//   |
+//   +-- RawSliceType     provenance unknown -> element access stays `unsafe`
+// ```
+//
+// `len` and the data pointer are available on any `SliceType`: reading the
+// descriptor you already hold dereferences nothing. Everything that *touches
+// memory* requires `TrustedSliceType`, and writing additionally requires
+// `MutSliceType`. A raw descriptor reaches the trusted half only through an
+// explicit unsafe promotion — never implicitly.
 
 mod slice_type_sealed {
     pub trait Sealed {}
-    pub trait MutableSealed: Sealed {}
+    pub trait TrustedSealed: Sealed {}
+    pub trait MutableSealed: TrustedSealed {}
+    pub trait RawSealed: Sealed {}
 }
 
-/// A staged slice fat-pointer type. Implemented by both `SRef<Slice<T>>`
-/// (`&[T]`) and `SRefMut<Slice<T>>` (`&mut [T]`), so a *single* op impl can
-/// serve both — the mutability lives entirely in the associated `ElemRef`.
+/// A staged slice's **representation**: a `(ptr, len)` pair with an element
+/// type. Says nothing about whether the pointer is valid or writable — see
+/// [`TrustedSliceType`] and [`MutSliceType`].
 ///
-/// This is what keeps slices *closed under sub-slicing*: every op below is
-/// generic over `S::Out: SliceType`, and `SliceSliceUnchecked` reports
-/// `Out = S::Out`, so the result of `slice_unchecked` is itself a slice that
-/// supports `len`/`get`/`slice_unchecked`/… all over again — and a sub-slice
-/// of a `&mut [T]` stays mutable.
+/// This is what keeps slices *closed under sub-slicing*: the sub-slice node
+/// reports `Out = S::Out`, so slicing a `&mut [T]` yields a `&mut [T]` and
+/// slicing a raw descriptor yields a raw descriptor — capability and provenance
+/// are preserved rather than laundered.
 ///
-/// The trait is sealed; only the slice representations supplied by this crate
-/// may participate in slice lowering.
+/// The trait is sealed; only representations supplied by this crate participate
+/// in slice lowering.
 ///
 /// ```compile_fail
 /// use rust_lms::prelude::*;
@@ -451,50 +471,123 @@ mod slice_type_sealed {
 ///
 /// impl SliceType for FabricatedSlice {
 ///     type Elem = u8;
-///     type ElemRef = SPtr<u8>;
 ///     type DataPtr = SPtr<u8>;
 /// }
 /// ```
 pub trait SliceType: StagedType + slice_type_sealed::Sealed {
     /// Element type (`T`).
     type Elem: StagedType;
-    /// Reference-to-element produced by `get_ref_unchecked`:
-    /// `SRef<T>` for an immutable slice, `SRefMut<T>` for a mutable one.
-    type ElemRef: StagedType;
     /// Raw pointer produced by `as_ptr` / `as_mut_ptr`.
     type DataPtr: StagedType;
 }
 
-impl<T: StagedType> SliceType for SRef<Slice<T>> {
-    type Elem = T;
-    type ElemRef = SRef<T>;
-    type DataPtr = SPtr<T>;
+/// A slice whose pointer is **known valid** for its element count, so element
+/// access is an ordinary safe operation rather than an unsafe one.
+///
+/// Carries [`ElemRef`](TrustedSliceType::ElemRef) because only a trusted slice
+/// can yield a *reference* to an element; a raw descriptor can offer no more
+/// than a pointer.
+///
+/// A raw descriptor cannot be treated as trusted:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn trusted_only<S: TrustedSliceType>() {}
+///
+/// fn raw_is_not_trusted() {
+///     trusted_only::<FatSliceType<i64>>();
+/// }
+/// ```
+pub trait TrustedSliceType: SliceType + slice_type_sealed::TrustedSealed {
+    /// Reference-to-element produced by `get_ref_unchecked`:
+    /// `SRef<T>` for a shared slice, `SRefMut<T>` for a unique one.
+    type ElemRef: StagedType;
 }
 
+/// A trusted slice that is additionally **writable and exclusive**. Gates every
+/// mutating op (`set`, `set_unchecked`, `swap_unchecked`) so they cannot be
+/// reached from a shared slice.
+///
+/// Writability alone is not enough — a raw *mutable* descriptor is writable but
+/// not trusted, so it deliberately does not implement this:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn writable_only<S: MutSliceType>() {}
+///
+/// fn raw_mut_is_not_writable_through_the_slice_api() {
+///     writable_only::<FatSliceMutType<i64>>();
+/// }
+/// ```
+pub trait MutSliceType: TrustedSliceType + slice_type_sealed::MutableSealed {}
+
+/// A slice descriptor of **unknown provenance** — an FFI return, or a
+/// `(ptr, len)` read out of a foreign struct. It has a representation, so `len`,
+/// the data pointer, and sub-slicing all work, but nothing may dereference it
+/// without an explicit unsafe step.
+///
+/// Disjoint from [`TrustedSliceType`] in practice: both sit under private
+/// sealed super-traits, so only this crate could implement them, and no marker
+/// implements both. `tests/slice_taxonomy.rs` asserts the full classification.
+pub trait RawSliceType: SliceType + slice_type_sealed::RawSealed {}
+
+// --- `&[T]` — trusted, shared -------------------------------------------------
+
+impl<T: StagedType> SliceType for SRef<Slice<T>> {
+    type Elem = T;
+    type DataPtr = SPtr<T>;
+}
+impl<T: StagedType> TrustedSliceType for SRef<Slice<T>> {
+    type ElemRef = SRef<T>;
+}
 impl<T: StagedType> slice_type_sealed::Sealed for SRef<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for SRef<Slice<T>> {}
+
+// --- `&mut [T]` — trusted, unique, writable -----------------------------------
 
 impl<T: StagedType> SliceType for SRefMut<Slice<T>> {
     type Elem = T;
-    type ElemRef = SRefMut<T>;
     type DataPtr = SMutPtr<T>;
 }
-
+impl<T: StagedType> TrustedSliceType for SRefMut<Slice<T>> {
+    type ElemRef = SRefMut<T>;
+}
+impl<T: StagedType> MutSliceType for SRefMut<Slice<T>> {}
 impl<T: StagedType> slice_type_sealed::Sealed for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
+
+// --- raw shared descriptor ----------------------------------------------------
 
 impl<T: StagedType> SliceType for FatSliceType<T> {
     type Elem = T;
-    type ElemRef = SPtr<T>;
     type DataPtr = SPtr<T>;
 }
-
+impl<T: StagedType> RawSliceType for FatSliceType<T> {}
 impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for FatSliceType<T> {}
 
-/// Marker for *mutable* slices (`SRefMut<Slice<T>>`). Gates the writing ops
-/// (`set_unchecked`) so they cannot be called on an immutable slice.
-pub trait MutSliceType: SliceType + slice_type_sealed::MutableSealed {}
+// --- raw mutable descriptor ---------------------------------------------------
+//
+// Half of gap G6b from the row-0 characterization matrix: before the taxonomy
+// this marker implemented nothing, so a mutable raw descriptor supported no
+// slice operation at all — not even `len`. Classifying it here makes every op
+// *node* accept it; the other half is row 4, where `RawSliceOps` stops being
+// hard-bound to `FatSliceType<T>` so a call site can actually reach them.
+//
+// It is `RawSliceType`, not `MutSliceType`: the pointer permits writes, but
+// provenance is unproven, so writing goes through an explicit promotion to a
+// trusted slice rather than through the slice write API.
 
-impl<T: StagedType> MutSliceType for SRefMut<Slice<T>> {}
-impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
+impl<T: StagedType> SliceType for FatSliceMutType<T> {
+    type Elem = T;
+    type DataPtr = SMutPtr<T>;
+}
+impl<T: StagedType> RawSliceType for FatSliceMutType<T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for FatSliceMutType<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for FatSliceMutType<T> {}
 
 /// Convenience accessor for `S`'s element type inside generic op impls.
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
@@ -571,10 +664,12 @@ pub struct SliceGetRefUnchecked<S, I> {
 unsafe impl<S, I> Staged for SliceGetRefUnchecked<S, I>
 where
     S: Staged,
-    S::Out: SliceType,
+    // A *reference* to an element requires trusted provenance; a raw descriptor
+    // can only ever yield a pointer (`SliceGetPtrUnchecked`).
+    S::Out: TrustedSliceType,
     I: Staged<Out = u64>,
 {
-    type Out = <S::Out as SliceType>::ElemRef;
+    type Out = <S::Out as TrustedSliceType>::ElemRef;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
