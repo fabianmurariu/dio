@@ -656,7 +656,7 @@ pub enum JitBackend {
     Llvm,
 }
 
-pub struct Compiler<'a> {
+pub struct Compiler {
     /// Function definitions indexed by ID
     functions: Vec<Option<FunDef>>,
     /// External function definitions indexed by ID
@@ -665,16 +665,15 @@ pub struct Compiler<'a> {
     next_var_id: usize,
     /// Code-generation backend `compile` targets.
     backend: JitBackend,
-    _marker: PhantomData<&'a ()>,
 }
 
-impl<'a> Default for Compiler<'a> {
+impl Default for Compiler {
     fn default() -> Self {
         Self::new()
     }
 }
 
-impl<'a> Compiler<'a> {
+impl Compiler {
     /// Create a new compiler (targeting the default Cranelift backend).
     pub fn new() -> Self {
         Compiler {
@@ -682,7 +681,6 @@ impl<'a> Compiler<'a> {
             extern_functions: Vec::new(),
             next_var_id: 0,
             backend: JitBackend::Cranelift,
-            _marker: PhantomData,
         }
     }
 
@@ -1121,7 +1119,7 @@ impl<'a> Compiler<'a> {
     /// one caller-owned output pointer. This keeps aggregate classification out
     /// of the private JIT ABI.
     /// Compile the top-level expression to native code via the selected [`JitBackend`].
-    pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+    pub fn compile<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
         match self.backend {
             JitBackend::Cranelift => self.compile_cranelift(expr),
             #[cfg(feature = "llvm")]
@@ -1133,7 +1131,7 @@ impl<'a> Compiler<'a> {
     /// helper functions and JIT the module. The result reuses the same [`Compiled`]/`run`/
     /// `as_fn` machinery as Cranelift — only the `Executable` resource differs.
     #[cfg(feature = "llvm")]
-    fn compile_llvm<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+    fn compile_llvm<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
         let return_info = TypeInfo::from_staged_type::<S::Out>();
         let (executable, main_ptr) = crate::llvm::assemble(
             self.functions,
@@ -1147,11 +1145,11 @@ impl<'a> Compiler<'a> {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
-            _phantom: PhantomData,
+            _signature: PhantomData,
         })
     }
 
-    fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<'a, S::Out>, CompileError> {
+    fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -1399,7 +1397,7 @@ impl<'a> Compiler<'a> {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
-            _phantom: PhantomData,
+            _signature: PhantomData,
         })
     }
 }
@@ -1435,10 +1433,10 @@ impl std::error::Error for CompileError {}
 /// Use [`run`](Self::run) for a plain expression or the arity-specific `call`
 /// methods for a compiled staged function. Executable memory is reclaimed after
 /// this value and every [`CompiledFn`] cloned from it have been dropped.
-pub struct Compiled<'a, T: StagedType> {
+pub struct Compiled<T: StagedType> {
     executable: Arc<FrozenExecutable>,
     main: unsafe extern "C" fn(*mut u8),
-    _phantom: PhantomData<&'a T>,
+    _signature: PhantomData<T>,
 }
 
 /// The backend-specific JIT resource kept alive by the shared frozen owner.
@@ -1489,7 +1487,7 @@ impl Drop for FrozenExecutable {
     }
 }
 
-impl<'a, T: StagedType> Compiled<'a, T> {
+impl<T: StagedType> Compiled<T> {
     /// Execute the compiled code and return the result.
     pub fn run(&self) -> T::RuntimeValue {
         let mut output = MaybeUninit::<T::RuntimeValue>::uninit();
@@ -1539,7 +1537,7 @@ impl<'a, T: StagedType> Compiled<'a, T> {
 pub struct CompiledFn<F> {
     function: unsafe extern "C" fn(),
     executable: Arc<FrozenExecutable>,
-    _signature: PhantomData<fn() -> F>,
+    _signature: PhantomData<F>,
 }
 
 impl<F> Clone for CompiledFn<F> {
@@ -1578,7 +1576,7 @@ macro_rules! impl_compiled_fn {
             }
         }
 
-        impl<'a, OUT: RuntimeResult> Compiled<'a, $FunType<OUT>> {
+        impl<OUT: RuntimeResult> Compiled<$FunType<OUT>> {
             /// Create an owning, cloneable callable entry point.
             ///
             /// The internal executable lease makes temporaries and worker-thread use safe:
@@ -1658,8 +1656,8 @@ macro_rules! impl_compiled_fn {
             }
         }
 
-        impl<'a, $($T: RuntimeParam,)+ OUT: RuntimeResult>
-            Compiled<'a, $FunType<$($T,)+ OUT>>
+        impl<$($T: RuntimeParam,)+ OUT: RuntimeResult>
+            Compiled<$FunType<$($T,)+ OUT>>
         {
             /// Create an owning, cloneable callable entry point.
             pub fn as_fn(&self) -> CompiledFn<$FunType<$($T,)+ OUT>> {

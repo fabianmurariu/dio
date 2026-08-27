@@ -10,7 +10,7 @@ fn assert_send_sync_static<T: Send + Sync + 'static>() {}
 
 #[test]
 fn compiled_owners_and_entry_points_are_send_sync_static() {
-    assert_send_sync_static::<Compiled<'static, FunType1<i64, i64>>>();
+    assert_send_sync_static::<Compiled<FunType1<i64, i64>>>();
     assert_send_sync_static::<CompiledFn<FunType1<i64, i64>>>();
 }
 
