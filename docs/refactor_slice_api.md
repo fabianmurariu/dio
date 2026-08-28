@@ -562,7 +562,7 @@ row begins.
 | 2 | ~~Lifetime-aware deferred graph~~ | **STRUCK.** Superseded by the §3 decision: validity is dynamic, so the `'static` graph stays and no `'stage` parameter is introduced. | — | Spike code removed; tree back to baseline. |
 | 3 | Capability taxonomy and names | ~~Finalize the sealed traits~~ **DONE 2026-08-27.** Four traits: `SliceType` (representation) / `TrustedSliceType` (validity, owns `ElemRef`) / `MutSliceType` (trusted + writable) / `RawSliceType` (unknown provenance). `FatSliceMutType` classified for the first time (half of G6b). Aliases: none, per D3. | Gives all later APIs one vocabulary and makes provenance visible in signatures. | **Met.** `tests/slice_taxonomy.rs` asserts all 16 positive cells + associated-type projections + sub-slice closure; the four negative cells are `compile_fail` doctests that genuinely fail. |
 | 4 | Consolidated core operations | ~~Replace the overlapping op surfaces~~ **DONE 2026-08-27.** Four surfaces (`SliceRefOps`, `RawSliceOps`, `SliceMutOps`, the `Var<SRefMut<..>>` inherent family) collapse to three blanket-implemented traits mirroring the capability traits. Names standardized on `len`/`subslice_unchecked`/`into_ptr`. Closes the rest of G6b. | Removes the largest source of slice API duplication while retaining safety distinctions. | **Met.** 369 Cranelift / 388 LLVM, 25 doctests, clippy `-D warnings` clean. |
-| 5 | Function parameter migration | Move `SRef<Slice<T>>` and `SRefMut<Slice<T>>` call sites and tests to the consolidated traits without changing their ABI. | Establishes the simplest trusted origin as the reference implementation. | All current parameter, call, return, option, nested-slice, and both-backend tests pass. |
+| 5 | Function parameter migration | ~~Move call sites to the consolidated traits~~ **DONE 2026-08-28.** Largely pre-paid by row 4's fallout; the remaining work was collapsing `MutField`'s three bespoke `slice_*` methods onto the common traits behind one `as_mut_slice`, and adding origin-independence proofs. ABI untouched. | Establishes the simplest trusted origin as the reference implementation. | **Met.** 372 Cranelift / LLVM, 26 doctests, clippy `-D warnings` clean. |
 | 6 | Raw/FFI descriptor boundary | Rename or alias raw staged markers, add shared and mutable raw constructors, consolidate representation witnesses, and add explicit unsafe promotion to trusted views. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | Raw values cannot dereference through safe code before promotion; promoted values use ordinary `SliceOps`. |
 | 7 | `SVec` unique capability | Remove `Copy`/unrestricted `Clone`, make mutation require `&mut self`, add the `Rc<Cell<i64>>` stage-0 borrow tracker, and retain one documented unsafe raw escape hatch for SQL dispatch. | Creates the owner whose tracked borrows prevent generated reallocation. | `#[should_panic]` alias tests pass; existing SVec growth and SQL output behavior remains green. |
 | 8 | `SVec` shared and mutable views | Add `SVecSlice`/`SVecSliceMut` as `Deref` guards over a `Copy`, reloading `SliceExpr`, lowering to `Value::Fat`. | Makes growable output storage readable/writable through the same API as function parameters. | A generic kernel helper operates unchanged on a parameter slice and each `SVec` view on both backends; an S6 test (view released, then grow) passes. |
@@ -588,6 +588,32 @@ tests added during each rename. Every runtime cell runs through
 
 `OK` = a passing test locks the behaviour in; `n/a` = not meaningful; `Gn` = not
 expressible today, closed by the plan row named below.
+
+#### Origin independence (row 5)
+
+`slice_characterization.rs` carries two helpers written *once* against the
+capability traits, each driven by every origin that qualifies:
+
+- `total` (bounded on `TrustedSliceType<Elem = i64>`) is fed a function
+  parameter, a sub-slice of it, a witnessed descriptor field, *and* a unique
+  slice — one helper across both origins and both capabilities.
+- `fill` (bounded on `MutSliceType<Elem = i64>`) is fed a mutable parameter and
+  a mutable sub-slice, and a `compile_fail` doctest on `SliceMutOps` proves a
+  shared slice cannot reach it (the failure is "trait bounds were not
+  satisfied", not a missing method).
+
+**A generic slice helper must bind once and reborrow, not clone per use.**
+Unique slice expressions are deliberately not `Clone` — that *is* the uniqueness
+guarantee — so an `S: Clone` bound silently restricts a helper to shared
+origins. `ctx.bind` costs one use of the expression and every later use is a
+reborrow, which serves both capabilities; that is what let `total` drop its
+`Clone` bound and become capability-independent.
+
+Also folded in here: `MutField`'s `slice_len` / `slice_get_unchecked` /
+`slice_set_unchecked` are gone. They restated the same validity contract three
+times; one `unsafe fn as_mut_slice<E>(&mut self)` states it once and hands back
+an ordinary `MutSliceType` expression carrying the whole common op surface.
+(`slice_len` turned out to be dead code — nothing called it.)
 
 #### Gaps the matrix surfaced
 

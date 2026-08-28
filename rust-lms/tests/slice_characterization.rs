@@ -361,3 +361,105 @@ fn raw_mut_descriptor_has_representation_ops() {
         assert_eq!(c.as_fn().call(desc), 210);
     });
 }
+
+// =============================================================================
+// Origin independence — refactor plan row 5
+// =============================================================================
+//
+// The point of the consolidation: once a value is a trusted slice, its storage
+// origin is irrelevant. These helpers are written *once*, against the capability
+// traits, and every origin below feeds the same code.
+
+// A generic slice helper must **bind once and reborrow**, not clone per use.
+// Unique slice expressions are deliberately not `Clone` — that is the
+// uniqueness guarantee — so a `S: Clone` bound would silently restrict the
+// helper to shared origins. Binding the expression into a variable costs one
+// use, and every later use is a reborrow, which works for both capabilities.
+
+/// Sum a trusted `i64` slice, whatever it came from — shared *or* unique.
+fn total<S>(ctx: &mut Ctx, s: S) -> Var<i64>
+where
+    S: Staged + 'static,
+    S::Out: TrustedSliceType<Elem = i64>,
+{
+    let mut v = ctx.bind(s);
+    let n = ctx.bind(v.reborrow().len());
+    let acc = ctx.var(0i64);
+    let i = ctx.var(0u64);
+    ctx.while_loop(lt(i, n), move |ctx| {
+        // SAFETY: the loop condition proves `i < len`.
+        ctx.store(acc, add(acc, unsafe { v.reborrow().get_unchecked(i) }));
+        ctx.store(i, add(i, 1u64));
+    });
+    acc
+}
+
+/// Fill a *unique* `i64` slice, whatever it came from. Accepts only unique
+/// origins — `S::Out: MutSliceType`.
+fn fill<S>(ctx: &mut Ctx, s: S, value: i64)
+where
+    S: Staged + 'static,
+    S::Out: MutSliceType<Elem = i64>,
+{
+    let mut v = ctx.bind(s);
+    let n = ctx.bind(v.reborrow().len());
+    let i = ctx.var(0u64);
+    ctx.while_loop(lt(i, n), move |ctx| {
+        // SAFETY: the loop condition proves `i < len`.
+        ctx.emit(unsafe { v.reborrow().set_unchecked(i, value) });
+        ctx.store(i, add(i, 1u64));
+    });
+}
+
+/// One helper, three trusted shared origins: a function parameter, a sub-slice
+/// of it, and a witnessed descriptor field.
+#[test]
+fn one_helper_serves_every_trusted_shared_origin() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "origins",
+            |ctx, a: Var<SRef<Slice<i64>>>, d: Var<SRef<Desc>>| {
+                let from_param = total(ctx, a);
+                // SAFETY: the test calls this with at least 3 elements.
+                let sub = ctx.bind(unsafe { a.subslice_unchecked(1u64, 3u64) });
+                let from_subslice = total(ctx, sub);
+                // SAFETY: the test keeps the descriptor's buffer alive.
+                let view = ctx.bind(unsafe { d.into_slice::<i64>() });
+                let from_descriptor = total(ctx, view);
+                add(add(from_param, from_subslice), from_descriptor)
+            },
+        );
+        let c = compiler.compile(f).unwrap();
+        let data = [1i64, 2, 3, 4];
+        let other = [10i64, 20];
+        let desc = Desc {
+            ptr: other.as_ptr(),
+            len: other.len(),
+        };
+        // 10 (param) + 5 (sub [2,3]) + 30 (descriptor) = 45
+        assert_eq!(c.call(&data, &desc), 45);
+    });
+}
+
+/// The same for the unique side: a mutable parameter and a mutable sub-slice
+/// both drive one `fill`.
+#[test]
+fn one_helper_serves_every_unique_origin() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("fill_both", |ctx, mut a: Var<SRefMut<Slice<i64>>>| {
+            // SAFETY: the test calls this with 4 elements.
+            let sub = ctx.bind(unsafe { a.reborrow().subslice_unchecked(2u64, 4u64) });
+            fill(ctx, sub, 9i64);
+            fill(ctx, a.reborrow(), 7i64);
+            // `total` is capability-independent: the same helper that served the
+            // three shared origins above also takes a unique one.
+            let _ = total(ctx, a.reborrow());
+            a.len()
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [0i64; 4];
+        assert_eq!(c.call(&mut data), 4);
+        // the whole-slice fill runs second, so 7 wins everywhere
+        assert_eq!(data, [7i64, 7, 7, 7]);
+    });
+}

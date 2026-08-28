@@ -41,7 +41,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
         let old = {
             let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
             ctx.bind(int_cast::<u64, u8, _>(unsafe {
-                bytes.slice_get_unchecked::<u8, _>(byte_index)
+                bytes.as_mut_slice::<u8>().get_unchecked(byte_index)
             }))
         };
         let was_valid = ctx.bind(not(eq(bitand::<u64, _, _>(old, mask), 0u64)));
@@ -51,7 +51,11 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
         // the exclusively owned bitmap descriptor.
         {
             let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
-            ctx.emit(unsafe { bytes.slice_set_unchecked::<u8, _, _>(byte_index, cleared) });
+            ctx.emit(unsafe {
+                bytes
+                    .as_mut_slice::<u8>()
+                    .set_unchecked(byte_index, cleared)
+            });
         }
         ctx.if_then(was_valid, |ctx| {
             let count = ctx.bind(load_field_mut(
@@ -76,7 +80,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
         let old = {
             let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
             ctx.bind(int_cast::<u64, u8, _>(unsafe {
-                bytes.slice_get_unchecked::<u8, _>(byte_index)
+                bytes.as_mut_slice::<u8>().get_unchecked(byte_index)
             }))
         };
         let was_null = ctx.bind(eq(bitand::<u64, _, _>(old, mask), 0u64));
@@ -85,7 +89,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
         // the exclusively owned bitmap descriptor.
         {
             let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
-            ctx.emit(unsafe { bytes.slice_set_unchecked::<u8, _, _>(byte_index, set) });
+            ctx.emit(unsafe { bytes.as_mut_slice::<u8>().set_unchecked(byte_index, set) });
         }
         ctx.if_then(was_null, |ctx| {
             let count = ctx.bind(load_field_mut(

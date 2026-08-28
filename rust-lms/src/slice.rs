@@ -1127,6 +1127,17 @@ where
 }
 
 /// Writing operations, licensed by trusted **and exclusive** access.
+///
+/// A shared slice cannot reach them, so a generic helper bounded on
+/// `MutSliceType` accepts only unique origins:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn write_to_shared(slice: Var<SRef<Slice<i64>>>) {
+///     let _ = slice.set(0u64, 1i64);
+/// }
+/// ```
 pub trait SliceMutOps: TrustedSliceOps
 where
     Self::Out: MutSliceType,
@@ -1204,7 +1215,21 @@ where
     T: StagedType,
     F: Field<Parent = T>,
 {
-    fn as_mut_slice_once<E>(&mut self) -> MutFieldSlice<T, F, E>
+    /// Reinterpret this `(ptr, len)` descriptor field as a staged mutable
+    /// slice, reborrowing the parent for one use.
+    ///
+    /// The result is an ordinary [`MutSliceType`] expression, so it carries the
+    /// whole common op surface — [`SliceOps`], [`TrustedSliceOps`] and
+    /// [`SliceMutOps`] — rather than needing bespoke `slice_*` methods per
+    /// operation. The validity contract is stated once, here, instead of being
+    /// restated on every accessor.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live, aligned, and
+    /// exclusively writable for its recorded element count throughout generated
+    /// execution.
+    pub unsafe fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
     where
         E: StagedType,
         F::Out: MutSliceRepr<E>,
@@ -1212,67 +1237,6 @@ where
         AsMutSlice {
             repr: self.use_once(),
             _elem: PhantomData,
-        }
-    }
-
-    /// Read the length stored in a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer
-    /// for its recorded element count.
-    pub unsafe fn slice_len<E>(&mut self) -> SliceLen<MutFieldSlice<T, F, E>>
-    where
-        E: StagedType,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceLen {
-            slice: self.as_mut_slice_once(),
-        }
-    }
-
-    /// Read one element from a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer,
-    /// and `index` must be less than its recorded element count at execution.
-    pub unsafe fn slice_get_unchecked<E, I>(
-        &mut self,
-        index: I,
-    ) -> SliceGetUnchecked<MutFieldSlice<T, F, E>, I::Staged>
-    where
-        E: CopyType,
-        I: IntoStaged<u64>,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceGetUnchecked {
-            slice: self.as_mut_slice_once(),
-            index: index.into_staged(),
-        }
-    }
-
-    /// Write one element through a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer,
-    /// and `index` must be less than its recorded element count at execution.
-    pub unsafe fn slice_set_unchecked<E, I, V>(
-        &mut self,
-        index: I,
-        value: V,
-    ) -> SliceSetUnchecked<MutFieldSlice<T, F, E>, I::Staged, V::Staged>
-    where
-        E: StagedType,
-        I: IntoStaged<u64>,
-        V: IntoStaged<E>,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceSetUnchecked {
-            slice: self.as_mut_slice_once(),
-            index: index.into_staged(),
-            value: value.into_staged(),
         }
     }
 }
