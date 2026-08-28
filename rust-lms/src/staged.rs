@@ -1176,6 +1176,26 @@ impl<T: StagedType> Var<T> {
             _phantom: std::marker::PhantomData,
         }
     }
+
+    /// Reborrow this variable as a single-use occurrence, leaving the variable
+    /// itself usable afterwards.
+    ///
+    /// Staged operations consume the expression they are given. For a `Copy`
+    /// variable that is invisible, but a unique handle such as
+    /// `Var<SRefMut<Slice<T>>>` would be *moved* by an ordinary read. Reborrow
+    /// makes the distinction explicit, exactly as `&mut *x` does in Rust:
+    ///
+    /// ```ignore
+    /// ctx.store(n, arr.reborrow().len());       // arr still usable
+    /// let sub = unsafe { arr.subslice_unchecked(0u64, n) };  // arr consumed
+    /// ```
+    ///
+    /// Taking `&mut self` keeps projecting a unique capability behind unique
+    /// access to the handle. Needing the same value twice in one expression is
+    /// a sign it should be `ctx.bind`-ed once instead.
+    pub fn reborrow(&mut self) -> VarUse<T> {
+        self.use_once()
+    }
 }
 
 unsafe impl<T: StagedType> Staged for Var<T> {

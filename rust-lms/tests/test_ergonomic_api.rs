@@ -106,7 +106,7 @@ fn test_ergonomic_slice_operations() {
 fn test_ergonomic_slice_set() {
     for_each_backend(|mut compiler| {
         // fn set_first(arr: &mut [i64])
-        let set_first = compiler.fun1("set_first", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
+        let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
             // SAFETY: this test calls the kernel only with non-empty slices.
             unsafe { arr.set_unchecked(0u64, 999i64) } // Both arguments are ergonomic.
         });
@@ -129,8 +129,8 @@ fn test_ergonomic_slice_subslice() {
             let i = ctx.var(0u64);
             let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
-            let sub = unsafe { arr.slice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.count()), move |ctx| {
+            let sub = unsafe { arr.subslice_unchecked(1u64, 4u64) };
+            ctx.while_loop(lt(i, sub.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
                 ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);

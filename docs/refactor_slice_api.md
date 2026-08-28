@@ -126,28 +126,56 @@ with compatibility aliases for `FatSliceType<T>` and `FatSliceMutType<T>`.
 Expose one read API for every trusted slice expression and one extension for
 trusted mutable expressions:
 
+**As built (row 4).** Three traits, mirroring the three capability traits
+one-for-one, each adding exactly what its capability licenses:
+
 ```rust
-pub trait SliceOps: Staged + Sized
-where
-    Self::Out: TrustedSliceType,
-{
-    fn len(self) -> ...;
-    fn get_or(self, index: ..., default: ...) -> ...;
-    unsafe fn get_unchecked(self, index: ...) -> ...;
-    unsafe fn get_ref_unchecked(self, index: ...) -> ...;
-    unsafe fn subslice_unchecked(self, range: ...) -> ...;
-    fn staged_iter(self) -> ...;
+pub trait SliceOps: Staged + Sized where Self::Out: SliceType {
+    fn len(self) -> ...;                    // touches no memory
+    fn into_ptr(self) -> ...;               // DataPtr: SPtr or SMutPtr
+    unsafe fn get_unchecked(self, i) -> ...;
+    unsafe fn subslice_unchecked(self, start, end) -> ...;   // Out = Self::Out
 }
 
-pub trait SliceMutOps: SliceOps
-where
-    Self::Out: MutableSliceType,
-{
-    fn set(self, index: ..., value: ...) -> ...;
-    unsafe fn set_unchecked(self, index: ..., value: ...) -> ...;
-    unsafe fn subslice_mut_unchecked(self, range: ...) -> ...;
+pub trait TrustedSliceOps: SliceOps where Self::Out: TrustedSliceType {
+    fn get_or(self, i, default) -> ...;     // SAFE
+    unsafe fn get_ref_unchecked(self, i) -> ...;             // ElemRef
+}
+
+pub trait SliceMutOps: TrustedSliceOps where Self::Out: MutSliceType {
+    fn set(self, i, value) -> ...;          // SAFE
+    unsafe fn set_unchecked(self, i, value) -> ...;
+    unsafe fn swap_unchecked(self, i, j) -> ...;
 }
 ```
+
+The dividing line is **safety, not the type you hold**: the two safe,
+bounds-checked operations (`get_or`, `set`) are exactly the ones needing
+established provenance, so they sit above `TrustedSliceType`. Everything on
+`SliceOps` either touches no memory or is already `unsafe` — which is why
+**`RawSliceOps` was deleted outright**: a raw descriptor simply stops at
+`SliceOps` and needs no trait of its own.
+
+Consolidations the taxonomy paid for: `get_ref_unchecked` replaces
+`get_ref_unchecked`/`get_mut_unchecked` (mutability rides on `ElemRef`);
+`subslice_unchecked` replaces `slice_unchecked`/`slice_mut_unchecked`
+(`Out = Self::Out`); `into_ptr` replaces `into_ptr`/`into_mut_ptr` (`DataPtr`);
+`len` replaces four spellings across two names.
+
+Two findings from doing it:
+
+- **A by-value blanket trait silently shadows inherent `&self` methods.** Rust
+  probes the receiver type by value *before* autoref, so `SliceOps::len(self)`
+  beat the inherent `Var::<SRefMut<_>>::len(&self)` and moved the variable. This
+  is why the pre-refactor code had *no* blanket impl for the mutable trait — the
+  duplication was load-bearing. Resolved by deleting the inherent family entirely
+  and exposing `Var::reborrow(&mut self) -> VarUse<T>`, making the distinction
+  explicit exactly as `&mut *x` does in Rust: `arr.reborrow().len()` keeps the
+  variable, `arr.subslice_unchecked(..)` consumes it. That is also what §2's own
+  rule asks for — no second family of convenience methods on `Var<T>`.
+- **`as_ptr` was the wrong name.** Every op here consumes, and `as_*`
+  conventionally borrows (clippy's `wrong_self_convention` flags it). Kept
+  `into_ptr`.
 
 The final receiver choices must preserve unique capabilities. In particular,
 mutable projection may need to consume a value or borrow it through `&mut self`;
@@ -533,7 +561,7 @@ row begins.
 | 1 | Lifetime viability spike | ~~Run S1-S10~~ **DONE 2026-08-27.** Results and revised criteria recorded above. | Determined that Rust borrows *can* found `SVec` views, with read-xor-grow; and that a stage-0 dynamic alternative exists. | **Met.** Spike code is in the tree, uncommitted, green on both backends. |
 | 2 | ~~Lifetime-aware deferred graph~~ | **STRUCK.** Superseded by the §3 decision: validity is dynamic, so the `'static` graph stays and no `'stage` parameter is introduced. | — | Spike code removed; tree back to baseline. |
 | 3 | Capability taxonomy and names | ~~Finalize the sealed traits~~ **DONE 2026-08-27.** Four traits: `SliceType` (representation) / `TrustedSliceType` (validity, owns `ElemRef`) / `MutSliceType` (trusted + writable) / `RawSliceType` (unknown provenance). `FatSliceMutType` classified for the first time (half of G6b). Aliases: none, per D3. | Gives all later APIs one vocabulary and makes provenance visible in signatures. | **Met.** `tests/slice_taxonomy.rs` asserts all 16 positive cells + associated-type projections + sub-slice closure; the four negative cells are `compile_fail` doctests that genuinely fail. |
-| 4 | Consolidated core operations | Replace `SliceRefOps`, duplicated mutable inherent methods, and overlapping raw lowering with one internal implementation and capability-gated public traits. Standardize names such as `len`. | Removes the largest source of slice API duplication while retaining safety distinctions. | The same generic helper accepts all trusted shared origins; mutable helpers accept only unique origins. |
+| 4 | Consolidated core operations | ~~Replace the overlapping op surfaces~~ **DONE 2026-08-27.** Four surfaces (`SliceRefOps`, `RawSliceOps`, `SliceMutOps`, the `Var<SRefMut<..>>` inherent family) collapse to three blanket-implemented traits mirroring the capability traits. Names standardized on `len`/`subslice_unchecked`/`into_ptr`. Closes the rest of G6b. | Removes the largest source of slice API duplication while retaining safety distinctions. | **Met.** 369 Cranelift / 388 LLVM, 25 doctests, clippy `-D warnings` clean. |
 | 5 | Function parameter migration | Move `SRef<Slice<T>>` and `SRefMut<Slice<T>>` call sites and tests to the consolidated traits without changing their ABI. | Establishes the simplest trusted origin as the reference implementation. | All current parameter, call, return, option, nested-slice, and both-backend tests pass. |
 | 6 | Raw/FFI descriptor boundary | Rename or alias raw staged markers, add shared and mutable raw constructors, consolidate representation witnesses, and add explicit unsafe promotion to trusted views. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | Raw values cannot dereference through safe code before promotion; promoted values use ordinary `SliceOps`. |
 | 7 | `SVec` unique capability | Remove `Copy`/unrestricted `Clone`, make mutation require `&mut self`, add the `Rc<Cell<i64>>` stage-0 borrow tracker, and retain one documented unsafe raw escape hatch for SQL dispatch. | Creates the owner whose tracked borrows prevent generated reallocation. | `#[should_panic]` alias tests pass; existing SVec growth and SQL output behavior remains green. |

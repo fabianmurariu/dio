@@ -20,7 +20,7 @@ fn p99_01_last_element() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("p01_last", |ctx, arr: Var<SRef<Slice<i64>>>| {
             let n = ctx.var(0u64);
-            ctx.store(n, arr.count());
+            ctx.store(n, arr.len());
             let result = ctx.var(0i64);
             ctx.if_then(gt(n, 0u64), move |ctx| {
                 // SAFETY: this branch proves `n > 0`, so `n - 1 < n`.
@@ -47,7 +47,7 @@ fn p99_05_reverse_in_place() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("p05_reverse", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
             let n = ctx.var(0u64);
-            ctx.store(n, arr.len());
+            ctx.store(n, arr.reborrow().len());
             // Two-pointer swap. We track `lo` and `hi+1` so unsigned arithmetic
             // never underflows (the loop exits before they cross).
             let lo = ctx.var(0u64);
@@ -57,7 +57,7 @@ fn p99_05_reverse_in_place() {
                 let hi = ctx.var(0u64);
                 ctx.store(hi, hi_plus_1 - 1u64);
                 // SAFETY: the loop maintains `lo < hi < n`.
-                ctx.emit(unsafe { arr.swap_unchecked(lo, hi) });
+                ctx.emit(unsafe { arr.reborrow().swap_unchecked(lo, hi) });
                 ctx.store(lo, lo + 1u64);
                 ctx.store(hi_plus_1, hi);
             });

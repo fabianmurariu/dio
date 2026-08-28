@@ -23,7 +23,7 @@ use crate::join::{
 };
 use crate::scan::ScanNextExtern;
 
-/// The byte pointer of a `Utf8View` row: `arr.value(row).as_ptr()`. Valid for the
+/// The byte pointer of a `Utf8View` row: `arr.value(row).into_ptr()`. Valid for the
 /// life of the source array (points into its views/data buffers); the length
 /// comes free from the staged view (`lo & 0xFFFF_FFFF`), so it needs no extern.
 /// A null row reads as an empty inline view — safe, never out of bounds.

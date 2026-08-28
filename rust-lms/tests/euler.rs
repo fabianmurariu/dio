@@ -253,7 +253,7 @@ fn euler_08_largest_product_of_k_adjacent() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2("e08", |ctx, digits: Var<SRef<Slice<i64>>>, k: Var<u64>| {
             let n = ctx.var(0u64);
-            ctx.store(n, digits.count());
+            ctx.store(n, digits.len());
             let i = ctx.var(0u64);
             let best = ctx.var(0i64);
             ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
@@ -477,7 +477,7 @@ fn euler_21_amicable_sum() {
             let fill_sigma =
                 compiler.fun1("e21_sigma", |ctx, mut sigma: Var<SRefMut<Slice<u64>>>| {
                     let n = ctx.var(0u64);
-                    ctx.store(n, sigma.len());
+                    ctx.store(n, sigma.reborrow().len());
                     let i = ctx.var(2u64);
                     ctx.while_loop(lt(i, n), |ctx| {
                         let s = ctx.var(1u64);
@@ -493,7 +493,7 @@ fn euler_21_amicable_sum() {
                             });
                             ctx.store(d, d + 1u64);
                         });
-                        // SAFETY: the loop condition proves `i < sigma.len()`.
+                        // SAFETY: the loop condition proves `i < sigma.reborrow().len()`.
                         ctx.emit(unsafe { sigma.set_unchecked(i, s) });
                         ctx.store(i, i + 1u64);
                     });
@@ -506,16 +506,16 @@ fn euler_21_amicable_sum() {
             let mut compiler = make();
             let sum_amicable = compiler.fun1("e21_sum", |ctx, sigma: Var<SRef<Slice<u64>>>| {
                 let n = ctx.var(0u64);
-                ctx.store(n, sigma.count());
+                ctx.store(n, sigma.len());
                 let total = ctx.var(0u64);
                 let a = ctx.var(2u64);
                 ctx.while_loop(lt(a, n), move |ctx| {
                     let b = ctx.var(0u64);
-                    // SAFETY: the loop condition proves `a < sigma.len()`.
+                    // SAFETY: the loop condition proves `a < sigma.reborrow().len()`.
                     ctx.store(b, unsafe { sigma.get_unchecked(a) });
                     ctx.if_then(gt(b, a), move |ctx| {
                         ctx.if_then(lt(b, n), move |ctx| {
-                            // SAFETY: this branch proves `b < n == sigma.len()`.
+                            // SAFETY: this branch proves `b < n == sigma.reborrow().len()`.
                             ctx.if_then(eq(unsafe { sigma.get_unchecked(b) }, a), move |ctx| {
                                 ctx.store(total, total + a + b);
                             });
@@ -693,7 +693,7 @@ fn euler_67_max_path_sum_triangle() {
                     // SAFETY: callers supply a `num_rows` workspace and a complete
                     // triangular input; this loop bounds `i` to the bottom row.
                     let value = unsafe { tri.get_unchecked(last_row_offset + i) };
-                    ctx.emit(unsafe { workspace.set_unchecked(i, value) });
+                    ctx.emit(unsafe { workspace.reborrow().set_unchecked(i, value) });
                     ctx.store(i, i + 1u64);
                 });
 
@@ -712,20 +712,20 @@ fn euler_67_max_path_sum_triangle() {
                         let r = ctx.var(0i64);
                         // SAFETY: `j < row + 1 < num_rows`, so both frontier
                         // indices are within the workspace.
-                        ctx.store(l, unsafe { workspace.get_unchecked(j) });
-                        ctx.store(r, unsafe { workspace.get_unchecked(j + 1u64) });
+                        ctx.store(l, unsafe { workspace.reborrow().get_unchecked(j) });
+                        ctx.store(r, unsafe { workspace.reborrow().get_unchecked(j + 1u64) });
                         let best = ctx.var(0i64);
                         ctx.store(best, select(gt(l, r), l, r));
                         // SAFETY: `j` is within the workspace and `row_offset + j`
                         // is within the complete triangular input.
                         let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
-                        ctx.emit(unsafe { workspace.set_unchecked(j, value) });
+                        ctx.emit(unsafe { workspace.reborrow().set_unchecked(j, value) });
                         ctx.store(j, j + 1u64);
                     });
                     ctx.store(row_plus_1, row_plus_1 - 1u64);
                 });
                 // SAFETY: tested calls use at least one triangle row.
-                unsafe { workspace.get_unchecked(0u64) }
+                unsafe { workspace.reborrow().get_unchecked(0u64) }
             },
         );
 

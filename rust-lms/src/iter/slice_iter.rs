@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::refer::SRef;
-use crate::slice::{Slice, SliceGetUnchecked, SliceLen, SliceRefOps};
+use crate::slice::{Slice, SliceGetUnchecked, SliceLen, SliceOps};
 use crate::staged::Var;
 use crate::types::{ConstantType, CopyType, StagedType};
 
@@ -50,12 +50,12 @@ where
         let i = ctx.var(0u64);
         let slice = self.slice;
 
-        ctx.while_loop(lt(i, slice.clone().count()), move |ctx| {
+        ctx.while_loop(lt(i, slice.clone().len()), move |ctx| {
             // Bind the element *inside* the loop: no dead pre-loop init, and the
             // frontend resolves this single-def var to the loaded value with no
             // copy — so the emitted body matches a hand-written `while_loop`.
             // SAFETY: the loop condition proves `i < slice.len()`.
-            let elem = ctx.bind(unsafe { SliceRefOps::get_unchecked(slice.clone(), i) });
+            let elem = ctx.bind(unsafe { SliceOps::get_unchecked(slice.clone(), i) });
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
         });
@@ -71,7 +71,7 @@ where
     type LenExpr = SliceLen<S>;
 
     fn len(&self) -> Self::LenExpr {
-        self.slice.clone().count()
+        self.slice.clone().len()
     }
 }
 
@@ -86,12 +86,12 @@ where
     type GetExpr = SliceGetUnchecked<S, Var<u64>>;
 
     fn count(&self) -> Self::LenExpr {
-        self.slice.clone().count()
+        self.slice.clone().len()
     }
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         // SAFETY: forwarded from `IndexedSource::get_at`'s caller.
-        unsafe { SliceRefOps::get_unchecked(self.slice, index) }
+        unsafe { SliceOps::get_unchecked(self.slice, index) }
     }
 }
 
@@ -108,12 +108,12 @@ where
     type GetExpr = SliceGetUnchecked<Self, Var<u64>>;
 
     fn count(&self) -> Self::LenExpr {
-        SliceRefOps::count(*self)
+        SliceOps::len(*self)
     }
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         // SAFETY: forwarded from `IndexedSource::get_at`'s caller.
-        unsafe { SliceRefOps::get_unchecked(self, index) }
+        unsafe { SliceOps::get_unchecked(self, index) }
     }
 }
 

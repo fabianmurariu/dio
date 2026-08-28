@@ -1040,7 +1040,7 @@ mod tests {
         use crate::func::{Compiler, JitBackend};
         use crate::num::{add, lt};
         use crate::refer::SRef;
-        use crate::slice::{Slice, SliceRefOps};
+        use crate::slice::{Slice, SliceOps};
         use crate::staged::Var;
 
         let data = [10i64, 20, 30, 40, 50, -5, 7];
@@ -1050,7 +1050,7 @@ mod tests {
             let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
                 let i = ctx.var(0u64);
                 let total = ctx.var(0i64);
-                ctx.while_loop(lt(i, arr.count()), move |ctx| {
+                ctx.while_loop(lt(i, arr.len()), move |ctx| {
                     ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
                     ctx.store(i, add(i, 1u64));
                 });
@@ -1063,7 +1063,7 @@ mod tests {
             let sum = c.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
                 let i = ctx.var(0u64);
                 let total = ctx.var(0i64);
-                ctx.while_loop(lt(i, arr.count()), move |ctx| {
+                ctx.while_loop(lt(i, arr.len()), move |ctx| {
                     ctx.store(total, add(total, unsafe { arr.get_unchecked(i) }));
                     ctx.store(i, add(i, 1u64));
                 });

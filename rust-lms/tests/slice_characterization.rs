@@ -26,11 +26,12 @@
 //!   must declare its parameter as `Var<FatSliceType<T>>` to reach such an
 //!   extern. (`ext_double_slice` in `test_extern_fn.rs` is declared but never
 //!   called by any test — this is why.)
-//! * **G6b** — a mutable raw descriptor supports no slice operation at all, not
-//!   even `len`. *Half closed by row 3*: `FatSliceMutType<T>` is now classified
-//!   `SliceType + RawSliceType`, so the op nodes accept it; but the public
-//!   `RawSliceOps<T>` trait is still hard-bound to `Staged<Out = FatSliceType<T>>`,
-//!   so nothing reaches those nodes. Row 4 generalizes it to `RawSliceType`.
+//! * **G6b — CLOSED (rows 3 + 4).** A mutable raw descriptor supported no slice
+//!   operation at all, not even `len`. Row 3 classified `FatSliceMutType<T>` as
+//!   `SliceType + RawSliceType`; row 4 put the representation-only ops on
+//!   `SliceOps`, so it now reaches them. `mut write` reads `n/a` for both raw
+//!   rows because writing through a raw descriptor requires an explicit
+//!   promotion to a trusted slice rather than the slice write API (row 6).
 //! * **G10** — `SliceIter` is bound to `SRef<Slice<T>>`, so neither a mutable
 //!   parameter nor a raw descriptor can be iterated.
 
@@ -48,7 +49,7 @@ fn shared_param_read() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("r", |ctx, a: Var<SRef<Slice<i64>>>| {
             let first = ctx.bind(unsafe { a.get_unchecked(0u64) });
-            add(int_cast::<i64, u64, _>(mul(a.count(), 100u64)), first)
+            add(int_cast::<i64, u64, _>(mul(a.len(), 100u64)), first)
         });
         let c = compiler.compile(f).unwrap();
         assert_eq!(c.call(&[7i64, 8, 9]), 307);
@@ -71,12 +72,11 @@ fn shared_param_get_or_is_bounds_checked() {
 fn shared_param_subslice_and_nested_subslice() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("s", |ctx, a: Var<SRef<Slice<i64>>>| {
-            let outer = ctx.bind(unsafe { a.slice_unchecked(1u64, 6u64) }); // [1..6)
-            let inner = ctx.bind(unsafe { outer.slice_unchecked(1u64, 3u64) }); // [2..4)
-            add(
-                int_cast::<i64, u64, _>(mul(inner.count(), 1000u64)),
-                unsafe { inner.get_unchecked(0u64) },
-            )
+            let outer = ctx.bind(unsafe { a.subslice_unchecked(1u64, 6u64) }); // [1..6)
+            let inner = ctx.bind(unsafe { outer.subslice_unchecked(1u64, 3u64) }); // [2..4)
+            add(int_cast::<i64, u64, _>(mul(inner.len(), 1000u64)), unsafe {
+                inner.get_unchecked(0u64)
+            })
         });
         let c = compiler.compile(f).unwrap();
         // inner = [20, 30], len 2 -> 2000 + 20
@@ -89,11 +89,11 @@ fn shared_param_internal_call_and_fat_return() {
     for_each_backend(|mut compiler| {
         // A sub-slice crosses the private function ABI as a fat value and back.
         let tail = compiler.fun1("tail", |_c, a: Var<SRef<Slice<i64>>>| unsafe {
-            a.slice_unchecked(1u64, a.count())
+            a.subslice_unchecked(1u64, a.len())
         });
         let f = compiler.fun1("f", |ctx, a: Var<SRef<Slice<i64>>>| {
             let t = ctx.bind(call1(tail, a));
-            add(int_cast::<i64, u64, _>(mul(t.count(), 10u64)), unsafe {
+            add(int_cast::<i64, u64, _>(mul(t.len(), 10u64)), unsafe {
                 t.get_unchecked(0u64)
             })
         });
@@ -145,9 +145,9 @@ fn shared_param_iterator() {
 fn mut_param_read_and_write() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("w", |ctx, mut a: Var<SRefMut<Slice<i64>>>| {
-            let v = ctx.bind(unsafe { a.get_unchecked(0u64) });
-            ctx.emit(unsafe { a.set_unchecked(1u64, add(v, 5i64)) });
-            ctx.emit(unsafe { a.swap_unchecked(0u64, 2u64) });
+            let v = ctx.bind(unsafe { a.reborrow().get_unchecked(0u64) });
+            ctx.emit(unsafe { a.reborrow().set_unchecked(1u64, add(v, 5i64)) });
+            ctx.emit(unsafe { a.reborrow().swap_unchecked(0u64, 2u64) });
             a.len()
         });
         let c = compiler.compile(f).unwrap();
@@ -160,7 +160,7 @@ fn mut_param_read_and_write() {
 #[test]
 fn mut_param_set_is_bounds_checked() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun2("cs", |_c, mut a: Var<SRefMut<Slice<i64>>>, i: Var<u64>| {
+        let f = compiler.fun2("cs", |_c, a: Var<SRefMut<Slice<i64>>>, i: Var<u64>| {
             a.set(i, 42i64)
         });
         let c = compiler.compile(f).unwrap();
@@ -177,8 +177,8 @@ fn mut_param_set_is_bounds_checked() {
 fn mut_param_subslice_stays_mutable_and_nests() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("ms", |ctx, a: Var<SRefMut<Slice<i64>>>| {
-            let outer = unsafe { a.slice_mut_unchecked(1u64, 5u64) }; // [1..5)
-            let inner = unsafe { outer.slice_mut_unchecked(1u64, 3u64) }; // [2..4)
+            let outer = unsafe { a.subslice_unchecked(1u64, 5u64) }; // [1..5)
+            let inner = unsafe { outer.subslice_unchecked(1u64, 3u64) }; // [2..4)
             ctx.emit(unsafe { inner.set_unchecked(0u64, 99i64) }); // index 2
             Const::<i64>::new(0)
         });
@@ -193,7 +193,7 @@ fn mut_param_subslice_stays_mutable_and_nests() {
 fn mut_param_crosses_an_internal_call() {
     for_each_backend(|mut compiler| {
         let bump = compiler.fun1("bump", |ctx, mut a: Var<SRefMut<Slice<i64>>>| {
-            ctx.emit(unsafe { a.set_unchecked(0u64, 77i64) });
+            ctx.emit(unsafe { a.reborrow().set_unchecked(0u64, 77i64) });
             a.len()
         });
         let f = compiler.fun1("f", |_c, a: Var<SRefMut<Slice<i64>>>| call1(bump, a));
@@ -219,8 +219,8 @@ pub extern "C" fn charz_sum(data: FatSlice<i64>) -> i64 {
 fn raw_descriptor_read_subslice_and_nested() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("raw", |ctx, d: Var<FatSliceType<i64>>| {
-            let outer = ctx.bind(unsafe { d.slice_unchecked(1u64, 6u64) });
-            let inner = ctx.bind(unsafe { outer.slice_unchecked(1u64, 3u64) });
+            let outer = ctx.bind(unsafe { d.subslice_unchecked(1u64, 6u64) });
+            let inner = ctx.bind(unsafe { outer.subslice_unchecked(1u64, 3u64) });
             add(int_cast::<i64, u64, _>(mul(inner.len(), 1000u64)), unsafe {
                 inner.get_unchecked(0u64)
             })
@@ -302,11 +302,8 @@ fn descriptor_field_read_subslice_and_iterate() {
         let f = compiler.fun1("d", |ctx, d: Var<SRef<Desc>>| {
             // SAFETY: the test keeps `data` alive across the call.
             let s = ctx.bind(unsafe { d.into_slice::<i64>() });
-            let sub = ctx.bind(unsafe { s.slice_unchecked(1u64, 4u64) });
-            add(
-                sub.staged_iter().sum(ctx),
-                int_cast::<i64, u64, _>(s.count()),
-            )
+            let sub = ctx.bind(unsafe { s.subslice_unchecked(1u64, 4u64) });
+            add(sub.staged_iter().sum(ctx), int_cast::<i64, u64, _>(s.len()))
         });
         let c = compiler.compile(f).unwrap();
         let data = [1i64, 2, 3, 4, 5];
@@ -336,5 +333,31 @@ fn descriptor_field_mutable_write() {
         };
         c.call(&mut desc);
         assert_eq!(data, [1i64, 42, 3]);
+    });
+}
+
+/// **G6b closed (rows 3 + 4).** Before the taxonomy, `FatSliceMutType<T>`
+/// implemented nothing and supported no slice operation — not even `len`. Row 3
+/// classified it `SliceType + RawSliceType`; row 4 moved the representation-only
+/// ops onto `SliceOps`, so a mutable raw descriptor now reaches them.
+///
+/// It stays `RawSliceType`, so the *safe* accessors (`get_or`, `set`) remain out
+/// of reach until an explicit promotion — see `slice_taxonomy.rs`.
+#[test]
+fn raw_mut_descriptor_has_representation_ops() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("rm", |ctx, d: Var<FatSliceMutType<i64>>| {
+            let mut sub = ctx.bind(unsafe { d.subslice_unchecked(1u64, 3u64) });
+            let n = ctx.bind(sub.reborrow().len());
+            // SAFETY: the descriptor covers [1, 3), so index 0 of the sub-slice
+            // is in bounds, and the test passes a live buffer.
+            let first = ctx.bind(unsafe { sub.get_unchecked(0u64) });
+            add(int_cast::<i64, u64, _>(mul(n, 100u64)), first)
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [0i64, 10, 20, 30];
+        let desc = FatSliceMut::from_slice(&mut data);
+        // sub = [10, 20] -> len 2 => 200 + 10
+        assert_eq!(c.as_fn().call(desc), 210);
     });
 }
