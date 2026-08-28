@@ -11,7 +11,7 @@ use common::for_each_backend;
 type PoolRef<'stage> = SRefMut<Opaque<BytesPool>>;
 
 /// Build a `FatSlice<u8>` of literal bytes baked into the kernel frame.
-fn lit(ctx: &mut Ctx, bytes: &[u8]) -> impl Staged<Out = FatSliceType<u8>> {
+fn lit(ctx: &mut Ctx, bytes: &[u8]) -> impl Staged<Out = RawSlice<u8>> {
     let ptr = ctx.bind(stack_bytes(bytes));
     // SAFETY: `stack_bytes` materializes exactly this many initialized bytes in
     // the kernel frame, which remains live for the extern call.

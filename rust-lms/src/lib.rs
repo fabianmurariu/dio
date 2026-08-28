@@ -91,9 +91,8 @@ pub mod prelude {
         call_extern0, call_extern0_unchecked, call_extern1, call_extern1_unchecked, call_extern2,
         call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
         call_extern4_unchecked, slice_from_raw_parts, stack_alloc, stack_bytes, ExternArgs,
-        ExternFn, ExternRef, FatSlice, FatSliceMut, FatSliceMutType, FatSliceType, FfiSlice,
-        FfiSliceMut, FfiSliceMutType, FfiSliceType, IntoExternArg, SafeExternFn, SliceFromRawParts,
-        StackAlloc, StackBytes,
+        ExternFn, ExternRef, FatSlice, FatSliceMut, IntoExternArg, RawSlice, RawSliceMut,
+        SafeExternFn, SliceFromRawParts, StackAlloc, StackBytes,
     };
     pub use crate::func::{
         call0, call1, call2, call3, Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2,
@@ -136,8 +135,8 @@ pub mod prelude {
     };
     pub use crate::slice::{
         slice_get_ptr_unchecked, AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, MutSliceType,
-        RawSliceType, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetOr,
-        SliceGetPtrUnchecked, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet,
+        RawSliceOps, RawSliceType, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice,
+        SliceGetOr, SliceGetPtrUnchecked, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet,
         SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{

@@ -54,6 +54,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
             ctx.emit(unsafe {
                 bytes
                     .as_mut_slice::<u8>()
+                    .assume_unique()
                     .set_unchecked(byte_index, cleared)
             });
         }
@@ -89,7 +90,13 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
         // the exclusively owned bitmap descriptor.
         {
             let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
-            ctx.emit(unsafe { bytes.as_mut_slice::<u8>().set_unchecked(byte_index, set) });
+            // SAFETY: as above — owner-backed, live, exclusively ours.
+            ctx.emit(unsafe {
+                bytes
+                    .as_mut_slice::<u8>()
+                    .assume_unique()
+                    .set_unchecked(byte_index, set)
+            });
         }
         ctx.if_then(was_null, |ctx| {
             let count = ctx.bind(load_field_mut(

@@ -8,8 +8,8 @@
 //! |---|:---:|:---:|:---:|:---:|
 //! | `SRef<Slice<T>>`      | yes | yes | no  | no  |
 //! | `SRefMut<Slice<T>>`   | yes | yes | yes | no  |
-//! | `FatSliceType<T>`     | yes | no  | no  | yes |
-//! | `FatSliceMutType<T>`  | yes | no  | no  | yes |
+//! | `RawSlice<T>`     | yes | no  | no  | yes |
+//! | `RawSliceMut<T>`  | yes | no  | no  | yes |
 //!
 //! The `no` cells are the load-bearing half — they are proven by `compile_fail`
 //! doctests on the traits themselves in `slice.rs`, since a negative trait bound
@@ -30,8 +30,8 @@ fn assert_raw<S: RawSliceType>() {}
 fn _representation() {
     assert_slice::<SRef<Slice<i64>>>();
     assert_slice::<SRefMut<Slice<i64>>>();
-    assert_slice::<FatSliceType<i64>>();
-    assert_slice::<FatSliceMutType<i64>>();
+    assert_slice::<RawSlice<i64>>();
+    assert_slice::<RawSliceMut<i64>>();
 }
 
 /// Only the reference forms carry established validity.
@@ -48,8 +48,8 @@ fn _writable() {
 /// Both descriptor forms are raw — including the mutable one, which before the
 /// taxonomy implemented nothing at all (gap G6b from the row-0 matrix).
 fn _raw() {
-    assert_raw::<FatSliceType<i64>>();
-    assert_raw::<FatSliceMutType<i64>>();
+    assert_raw::<RawSlice<i64>>();
+    assert_raw::<RawSliceMut<i64>>();
 }
 
 // -----------------------------------------------------------------------------
@@ -63,15 +63,15 @@ fn assert_elem_ref<S: TrustedSliceType<ElemRef = R>, R>() {}
 fn _projections() {
     assert_elem::<SRef<Slice<i64>>, i64>();
     assert_elem::<SRefMut<Slice<f64>>, f64>();
-    assert_elem::<FatSliceType<u8>, u8>();
-    assert_elem::<FatSliceMutType<u8>, u8>();
+    assert_elem::<RawSlice<u8>, u8>();
+    assert_elem::<RawSliceMut<u8>, u8>();
 
     // A shared origin projects a const pointer, a unique one a mut pointer —
     // and that holds for raw descriptors too.
     assert_data_ptr::<SRef<Slice<i64>>, SPtr<i64>>();
     assert_data_ptr::<SRefMut<Slice<i64>>, SMutPtr<i64>>();
-    assert_data_ptr::<FatSliceType<i64>, SPtr<i64>>();
-    assert_data_ptr::<FatSliceMutType<i64>, SMutPtr<i64>>();
+    assert_data_ptr::<RawSlice<i64>, SPtr<i64>>();
+    assert_data_ptr::<RawSliceMut<i64>, SMutPtr<i64>>();
 
     // Only trusted slices yield a *reference* to an element.
     assert_elem_ref::<SRef<Slice<i64>>, SRef<i64>>();

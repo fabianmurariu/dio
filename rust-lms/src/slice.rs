@@ -45,7 +45,7 @@
 //! });
 //! ```
 
-use crate::ffi::{FatSliceMutType, FatSliceType};
+use crate::ffi::{RawSlice, RawSliceMut};
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, VarUse};
@@ -128,7 +128,7 @@ pub struct AsSlice<P, T> {
 }
 
 /// Re-types a raw pointer to a repr-compatible `(ptr, len)` descriptor as a
-/// lifetime-free staged [`FatSliceType<T>`].
+/// lifetime-free staged [`RawSlice<T>`].
 pub struct AsRawSlice<P, T> {
     repr: P,
     _elem: PhantomData<T>,
@@ -151,7 +151,7 @@ where
     R: SliceRepr<T>,
     T: StagedType,
 {
-    type Out = FatSliceType<T>;
+    type Out = RawSlice<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -207,7 +207,10 @@ where
     R: SliceRepr<T>,
     T: StagedType,
 {
-    type Out = SRef<Slice<T>>;
+    /// **Raw**, not trusted. Reading a `(ptr, len)` out of a valid `&R` is
+    /// sound, but says nothing about the buffer that pointer addresses — that
+    /// claim belongs to [`RawSliceOps::assume_shared`].
+    type Out = RawSlice<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -232,13 +235,13 @@ pub trait ReprSliceOps<R>: Staged<Out = SRef<R>> + Sized
 where
     R: StagedType,
 {
-    /// Reinterpret the pointed-to representation as a staged slice of `T`.
+    /// Read the descriptor as a **raw** slice of `T`.
     ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a pointer that is live and aligned for
-    /// reads of `len` values of `T` for the duration of generated execution.
-    unsafe fn into_slice<T>(self) -> AsSlice<Self, T>
+    /// Safe: the receiver is a valid reference, so loading its `(ptr, len)`
+    /// dereferences nothing unproven, and the result makes no claim about the
+    /// buffer. Crossing into a trusted slice is
+    /// [`RawSliceOps::assume_shared`], which is where the contract lives.
+    fn into_raw_slice<T>(self) -> AsSlice<Self, T>
     where
         T: StagedType,
         R: SliceRepr<T>,
@@ -265,14 +268,10 @@ pub trait ReprSliceMutOps<R>: Staged<Out = SRefMut<R>> + Sized
 where
     R: StagedType,
 {
-    /// Reinterpret the pointed-to representation as a staged *mutable* slice.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a pointer that is live, aligned, and
-    /// exclusively writable for `len` values of `T` for the duration of
-    /// generated execution.
-    unsafe fn into_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    /// Read the descriptor as a **raw mutable** slice of `T`. Safe for the
+    /// same reason as [`ReprSliceOps::into_raw_slice`]; promote with
+    /// [`RawSliceOps::assume_unique`].
+    fn into_raw_slice_mut<T>(self) -> AsMutSlice<Self, T>
     where
         T: StagedType,
         R: MutSliceRepr<T>,
@@ -316,7 +315,9 @@ where
     R: MutSliceRepr<T>,
     T: StagedType,
 {
-    type Out = SRefMut<Slice<T>>;
+    /// **Raw**, not trusted — see [`AsSlice`]. Promote with
+    /// [`RawSliceOps::assume_unique`].
+    type Out = RawSliceMut<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -496,7 +497,7 @@ pub trait SliceType: StagedType + slice_type_sealed::Sealed {
 /// fn trusted_only<S: TrustedSliceType>() {}
 ///
 /// fn raw_is_not_trusted() {
-///     trusted_only::<FatSliceType<i64>>();
+///     trusted_only::<RawSlice<i64>>();
 /// }
 /// ```
 pub trait TrustedSliceType: SliceType + slice_type_sealed::TrustedSealed {
@@ -518,7 +519,7 @@ pub trait TrustedSliceType: SliceType + slice_type_sealed::TrustedSealed {
 /// fn writable_only<S: MutSliceType>() {}
 ///
 /// fn raw_mut_is_not_writable_through_the_slice_api() {
-///     writable_only::<FatSliceMutType<i64>>();
+///     writable_only::<RawSliceMut<i64>>();
 /// }
 /// ```
 pub trait MutSliceType: TrustedSliceType + slice_type_sealed::MutableSealed {}
@@ -561,13 +562,13 @@ impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
 
 // --- raw shared descriptor ----------------------------------------------------
 
-impl<T: StagedType> SliceType for FatSliceType<T> {
+impl<T: StagedType> SliceType for RawSlice<T> {
     type Elem = T;
     type DataPtr = SPtr<T>;
 }
-impl<T: StagedType> RawSliceType for FatSliceType<T> {}
-impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
-impl<T: StagedType> slice_type_sealed::RawSealed for FatSliceType<T> {}
+impl<T: StagedType> RawSliceType for RawSlice<T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for RawSlice<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for RawSlice<T> {}
 
 // --- raw mutable descriptor ---------------------------------------------------
 //
@@ -575,19 +576,19 @@ impl<T: StagedType> slice_type_sealed::RawSealed for FatSliceType<T> {}
 // this marker implemented nothing, so a mutable raw descriptor supported no
 // slice operation at all — not even `len`. Classifying it here makes every op
 // *node* accept it; the other half is row 4, where `RawSliceOps` stops being
-// hard-bound to `FatSliceType<T>` so a call site can actually reach them.
+// hard-bound to `RawSlice<T>` so a call site can actually reach them.
 //
 // It is `RawSliceType`, not `MutSliceType`: the pointer permits writes, but
 // provenance is unproven, so writing goes through an explicit promotion to a
 // trusted slice rather than through the slice write API.
 
-impl<T: StagedType> SliceType for FatSliceMutType<T> {
+impl<T: StagedType> SliceType for RawSliceMut<T> {
     type Elem = T;
     type DataPtr = SMutPtr<T>;
 }
-impl<T: StagedType> RawSliceType for FatSliceMutType<T> {}
-impl<T: StagedType> slice_type_sealed::Sealed for FatSliceMutType<T> {}
-impl<T: StagedType> slice_type_sealed::RawSealed for FatSliceMutType<T> {}
+impl<T: StagedType> RawSliceType for RawSliceMut<T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for RawSliceMut<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for RawSliceMut<T> {}
 
 /// Convenience accessor for `S`'s element type inside generic op impls.
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
@@ -1208,6 +1209,126 @@ where
 {
 }
 
+// =============================================================================
+// The provenance boundary: raw -> trusted
+// =============================================================================
+
+/// Reinterprets a raw `(ptr, len)` descriptor as a *trusted* slice.
+///
+/// Emits nothing: the value is already a `Value::Fat` pair, and promotion is a
+/// statement about provenance, not about representation. All of the work is in
+/// the safety contract on the constructing method.
+pub struct AssumeTrusted<S, OUT> {
+    raw: S,
+    _out: PhantomData<OUT>,
+}
+
+impl<S: Clone, OUT> Clone for AssumeTrusted<S, OUT> {
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            _out: PhantomData,
+        }
+    }
+}
+
+impl<S: Copy, OUT> Copy for AssumeTrusted<S, OUT> {}
+
+unsafe impl<S, OUT> Staged for AssumeTrusted<S, OUT>
+where
+    S: Staged,
+    S::Out: RawSliceType,
+    OUT: TrustedSliceType<Elem = ElemOf<S>>,
+{
+    type Out = OUT;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.raw.codegen(ctx)
+    }
+}
+
+/// The one way a raw descriptor becomes a trusted slice.
+///
+/// An `extern "C"` function can return a dangling `FatSlice<T>` without writing
+/// a line of `unsafe` — the struct is two public fields and carries no lifetime.
+/// So an FFI result can never *become* `SRef<Slice<T>>` implicitly. The pipeline
+/// is deliberately three steps:
+///
+/// ```text
+/// extern result -> raw staged slice -> explicit unsafe promotion -> ordinary SliceOps
+/// ```
+///
+/// Before promotion a raw value stops at [`SliceOps`], where every accessor is
+/// `unsafe`; after it, the result is an ordinary trusted slice with the full
+/// safe surface. Nothing safe dereferences in between:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn safe_read_before_promotion(d: Var<RawSlice<i64>>) {
+///     let _ = d.get_or(0u64, 0i64);
+/// }
+/// ```
+///
+/// And a *shared* raw descriptor cannot launder itself into a writable view —
+/// `assume_unique` requires `DataPtr = SMutPtr<T>`:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn launder(d: Var<RawSlice<i64>>) {
+///     let _ = unsafe { d.assume_unique() };
+/// }
+/// ```
+pub trait RawSliceOps: SliceOps
+where
+    Self::Out: RawSliceType,
+{
+    /// Promote to a trusted **shared** slice (`&[T]`).
+    ///
+    /// # Safety
+    ///
+    /// The caller states, for the whole of generated execution:
+    /// * which owner keeps the allocation alive, and that it outlives every use;
+    /// * that the pointer is aligned and points at `len` initialized `T`;
+    /// * that the storage is not mutated while this shared view is live;
+    /// * that the producer cannot reallocate the storage.
+    unsafe fn assume_shared(self) -> AssumeTrusted<Self, SRef<Slice<ElemOf<Self>>>> {
+        AssumeTrusted {
+            raw: self,
+            _out: PhantomData,
+        }
+    }
+
+    /// Promote to a trusted **unique** slice (`&mut [T]`).
+    ///
+    /// Available only from a *mutable* raw descriptor: the method's bound
+    /// requires `DataPtr = SMutPtr<T>`, so a shared [`RawSlice`] cannot launder
+    /// itself into a writable view.
+    ///
+    /// # Safety
+    ///
+    /// As [`assume_shared`](Self::assume_shared), and additionally that access
+    /// through this view is *exclusive* — no other staged or host reference to
+    /// the storage is used while it is live.
+    unsafe fn assume_unique(self) -> AssumeTrusted<Self, SRefMut<Slice<ElemOf<Self>>>>
+    where
+        Self::Out: SliceType<DataPtr = SMutPtr<ElemOf<Self>>>,
+    {
+        AssumeTrusted {
+            raw: self,
+            _out: PhantomData,
+        }
+    }
+}
+
+impl<S> RawSliceOps for S
+where
+    S: Staged + Sized,
+    S::Out: RawSliceType,
+{
+}
+
 type MutFieldSlice<T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<T>>, F>, E>;
 
 impl<'borrow, T, F> MutField<'borrow, T, F>
@@ -1215,21 +1336,14 @@ where
     T: StagedType,
     F: Field<Parent = T>,
 {
-    /// Reinterpret this `(ptr, len)` descriptor field as a staged mutable
-    /// slice, reborrowing the parent for one use.
+    /// Read this `(ptr, len)` descriptor field as a **raw mutable** slice,
+    /// reborrowing the parent for one use.
     ///
-    /// The result is an ordinary [`MutSliceType`] expression, so it carries the
-    /// whole common op surface — [`SliceOps`], [`TrustedSliceOps`] and
-    /// [`SliceMutOps`] — rather than needing bespoke `slice_*` methods per
-    /// operation. The validity contract is stated once, here, instead of being
-    /// restated on every accessor.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a pointer that is live, aligned, and
-    /// exclusively writable for its recorded element count throughout generated
-    /// execution.
-    pub unsafe fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
+    /// Safe, and raw: the result carries the representation-only op surface
+    /// ([`SliceOps`]) and no claim about the buffer. Promote it with
+    /// [`RawSliceOps::assume_unique`] to reach the writing ops — that is where
+    /// the validity contract is stated, once, instead of on every accessor.
+    pub fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
     where
         E: StagedType,
         F::Out: MutSliceRepr<E>,

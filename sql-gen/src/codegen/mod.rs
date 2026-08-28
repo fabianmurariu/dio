@@ -199,8 +199,8 @@ impl Prim for f64 {
 
 /// A staged expression yielding one lifetime-free `(ptr, len)` descriptor array.
 /// The scan or join owner retains the pointed-to batch for the enclosing loop.
-pub trait BatchSource: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
-impl<T> BatchSource for T where T: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
+pub trait BatchSource: Staged<Out = RawSlice<FfiArray>> + Copy + 'static {}
+impl<T> BatchSource for T where T: Staged<Out = RawSlice<FfiArray>> + Copy + 'static {}
 
 /// Raw staged pointer derived from the kernel's real `&mut Inputs` parameter.
 /// It is threaded through the operator walk so [`gen_scan`] can call `scan_next`
@@ -383,7 +383,7 @@ pub(crate) fn gen_op<I: InputsSource>(
 }
 
 /// The staged raw slice descriptor received by a [`for_each_batch`] body.
-type ScanBatch = Var<FatSliceType<FfiArray>>;
+type ScanBatch = Var<RawSlice<FfiArray>>;
 
 /// Drive the OUTER batch loop of table `table`: pull batches from the stream
 /// (`scan_next`, null = exhausted → break), rebuild each `&[FfiArray]` batch, and

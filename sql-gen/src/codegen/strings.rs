@@ -31,7 +31,7 @@ pub(crate) fn resolve(
     }
 }
 
-fn resolved_bytes(ptr: Var<SPtr<u8>>, len: Var<u64>) -> impl Staged<Out = FatSliceType<u8>> + Copy {
+fn resolved_bytes(ptr: Var<SPtr<u8>>, len: Var<u64>) -> impl Staged<Out = RawSlice<u8>> + Copy {
     // SAFETY: every `StrVal` owner retains the resolved allocation for the
     // kernel call, and `len` is the byte length reported by that same value.
     unsafe { slice_from_raw_parts::<u8, _, _>(ptr, len) }

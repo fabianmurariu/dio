@@ -166,35 +166,32 @@ impl<T> From<&mut [T]> for FatSliceMut<T> {
     }
 }
 
-/// ABI-facing name for [`FatSlice`].
+// =============================================================================
+// Raw staged slice markers
+// =============================================================================
+
+/// Staged marker for a **raw** shared `(ptr, len)` descriptor — the staged view
+/// of a [`FatSlice<T>`] crossing the extern ABI.
 ///
-/// `FfiSlice<T>` is the concrete runtime `(ptr, len)` value passed across
-/// function boundaries. `SRef<Slice<T>>` is the staged view over the same
-/// representation inside generated code.
-pub type FfiSlice<T> = FatSlice<T>;
-
-/// ABI-facing name for [`FatSliceMut`].
-pub type FfiSliceMut<T> = FatSliceMut<T>;
-
-// =============================================================================
-// StagedType implementations for FatSlice
-// =============================================================================
-
-/// Staged type marker for FatSlice<T>
+/// Named for its *provenance*, not its layout: holding one proves nothing about
+/// the buffer it addresses, so it stops at
+/// [`SliceOps`](crate::slice::SliceOps), where every accessor is `unsafe`. Cross
+/// into a trusted slice with
+/// [`RawSliceOps::assume_shared`](crate::slice::RawSliceOps::assume_shared).
 #[derive(Debug)]
-pub struct FatSliceType<T> {
+pub struct RawSlice<T> {
     _phantom: PhantomData<T>,
 }
 
-impl<T> Clone for FatSliceType<T> {
+impl<T> Clone for RawSlice<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
 
-impl<T> Copy for FatSliceType<T> {}
+impl<T> Copy for RawSlice<T> {}
 
-unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
+unsafe impl<T: StagedType> StagedType for RawSlice<T> {
     type RuntimeValue = FatSlice<T::RuntimeValue>;
 
     fn scalar_type() -> ScalarType {
@@ -218,29 +215,25 @@ unsafe impl<T: StagedType> StagedType for FatSliceType<T> {
     }
 }
 
-unsafe impl<T: StagedType> CopyType for FatSliceType<T> {}
+unsafe impl<T: StagedType> CopyType for RawSlice<T> {}
 
-unsafe impl<T: StagedType> RuntimeParam for FatSliceType<T> {
+unsafe impl<T: StagedType> RuntimeParam for RawSlice<T> {
     type Arg<'call> = FatSlice<T::RuntimeValue>;
 }
 
-unsafe impl<T: StagedType> RuntimeResult for FatSliceType<T> {
+unsafe impl<T: StagedType> RuntimeResult for RawSlice<T> {
     type Output<'call> = FatSlice<T::RuntimeValue>;
 }
 
-/// Staged type marker for FatSliceMut<T>
+/// Staged marker for a **raw** mutable `(ptr, len)` descriptor — the staged
+/// view of a [`FatSliceMut<T>`]. Raw like [`RawSlice`]; promote with
+/// [`RawSliceOps::assume_unique`](crate::slice::RawSliceOps::assume_unique).
 #[derive(Clone, Copy, Debug)]
-pub struct FatSliceMutType<T> {
+pub struct RawSliceMut<T> {
     _phantom: PhantomData<T>,
 }
 
-/// Staged type marker for [`FfiSlice`].
-pub type FfiSliceType<T> = FatSliceType<T>;
-
-/// Staged type marker for [`FfiSliceMut`].
-pub type FfiSliceMutType<T> = FatSliceMutType<T>;
-
-unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
+unsafe impl<T: StagedType> StagedType for RawSliceMut<T> {
     type RuntimeValue = FatSliceMut<T::RuntimeValue>;
 
     fn scalar_type() -> ScalarType {
@@ -264,11 +257,11 @@ unsafe impl<T: StagedType> StagedType for FatSliceMutType<T> {
     }
 }
 
-unsafe impl<T: StagedType> RuntimeParam for FatSliceMutType<T> {
+unsafe impl<T: StagedType> RuntimeParam for RawSliceMut<T> {
     type Arg<'call> = FatSliceMut<T::RuntimeValue>;
 }
 
-unsafe impl<T: StagedType> RuntimeResult for FatSliceMutType<T> {
+unsafe impl<T: StagedType> RuntimeResult for RawSliceMut<T> {
     type Output<'call> = FatSliceMut<T::RuntimeValue>;
 }
 
@@ -279,31 +272,35 @@ unsafe impl<T: StagedType> RuntimeResult for FatSliceMutType<T> {
 /// Build a staged `FatSlice<T>` (`&[T]` at the ABI) from a typed pointer (`SPtr<T>`)
 /// and an element length — e.g. a baked host buffer handed to an extern `&[u8]`
 /// param. Materializes the `(ptr, len)` pair on a stack slot, like sub-slicing.
-pub struct SliceFromRawParts<P, L, T> {
+/// Parameterised by the *raw marker* `R` rather than the element type, so one
+/// node serves both the shared and mutable constructors: the taxonomy's
+/// [`SliceType::DataPtr`] already says which pointer flavour `R` demands
+/// (`SPtr<T>` for [`RawSlice`], `SMutPtr<T>` for [`RawSliceMut`]).
+pub struct SliceFromRawParts<P, L, R> {
     ptr: P,
     len: L,
-    _elem: PhantomData<T>,
+    _out: PhantomData<R>,
 }
 
-impl<P: Clone, L: Clone, T> Clone for SliceFromRawParts<P, L, T> {
+impl<P: Clone, L: Clone, R> Clone for SliceFromRawParts<P, L, R> {
     fn clone(&self) -> Self {
         Self {
             ptr: self.ptr.clone(),
             len: self.len.clone(),
-            _elem: PhantomData,
+            _out: PhantomData,
         }
     }
 }
 
-impl<P: Copy, L: Copy, T> Copy for SliceFromRawParts<P, L, T> {}
+impl<P: Copy, L: Copy, R> Copy for SliceFromRawParts<P, L, R> {}
 
-unsafe impl<P, L, T> Staged for SliceFromRawParts<P, L, T>
+unsafe impl<P, L, R> Staged for SliceFromRawParts<P, L, R>
 where
-    P: Staged<Out = SPtr<T>>,
+    R: crate::slice::RawSliceType,
+    P: Staged<Out = R::DataPtr>,
     L: Staged<Out = u64>,
-    T: StagedType + 'static,
 {
-    type Out = FatSliceType<T>;
+    type Out = R;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // A slice built from raw parts is a fat value directly — no stack slot.
@@ -313,23 +310,54 @@ where
     }
 }
 
-/// Build a staged `FatSlice<T>` from a typed pointer (`SPtr<T>`) and element length.
+/// Build a shared raw slice descriptor from a typed pointer and element length.
+///
+/// The result is a [`RawSlice<T>`] — a *raw* descriptor. It carries no
+/// provenance claim, so it stops at [`SliceOps`](crate::slice::SliceOps); use
+/// [`assume_shared`](crate::slice::RawSliceOps::assume_shared) to cross into a
+/// trusted slice.
 ///
 /// # Safety
 ///
 /// The pointer must be aligned and valid for `len` initialized elements for the
 /// full duration of every generated-code use. The memory must not be mutated
 /// while an extern call holds the resulting shared slice.
-pub unsafe fn slice_from_raw_parts<T, P, L>(ptr: P, len: L) -> SliceFromRawParts<P, L::Staged, T>
+pub unsafe fn slice_from_raw_parts<T, P, L>(
+    ptr: P,
+    len: L,
+) -> SliceFromRawParts<P, L::Staged, RawSlice<T>>
 where
-    T: StagedType + 'static,
+    T: StagedType,
     P: Staged<Out = SPtr<T>>,
     L: IntoStaged<u64>,
 {
     SliceFromRawParts {
         ptr,
         len: len.into_staged(),
-        _elem: PhantomData,
+        _out: PhantomData,
+    }
+}
+
+/// Build a *mutable* raw slice descriptor from a typed mutable pointer and
+/// element length — the mutable twin the shared constructor previously lacked.
+///
+/// # Safety
+///
+/// The pointer must be aligned and valid for `len` initialized elements, and
+/// exclusively writable, for the full duration of every generated-code use.
+pub unsafe fn slice_from_raw_parts_mut<T, P, L>(
+    ptr: P,
+    len: L,
+) -> SliceFromRawParts<P, L::Staged, RawSliceMut<T>>
+where
+    T: StagedType,
+    P: Staged<Out = SMutPtr<T>>,
+    L: IntoStaged<u64>,
+{
+    SliceFromRawParts {
+        ptr,
+        len: len.into_staged(),
+        _out: PhantomData,
     }
 }
 
@@ -649,10 +677,20 @@ unsafe impl<T: StagedType> UncheckedExternArg<SRef<T>> for SMutPtr<T> {}
 unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<T>> for SMutPtr<T> {}
 unsafe impl<T: StagedType> UncheckedExternArg<SRef<T>> for SRefMut<T> {}
 
-unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for FatSliceType<T> {}
-unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for FatSliceMutType<T> {}
-unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<Slice<T>>> for FatSliceMutType<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for RawSlice<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for RawSliceMut<T> {}
+unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<Slice<T>>> for RawSliceMut<T> {}
 unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for SRefMut<Slice<T>> {}
+
+// Gap G6a from the row-0 characterization matrix: the table above witnessed only
+// `Raw* -> SRef/SRefMut`, never the reverse, so a slice *parameter* could not be
+// handed to an extern declared with `FatSlice<T>`/`FatSliceMut<T>` even though
+// both lower to the identical `(ptr, len)` argument pair. (The tell:
+// `ext_double_slice` in `tests/test_extern_fn.rs` was declared but callable by no
+// test.) These complete the square.
+unsafe impl<T: StagedType> UncheckedExternArg<RawSlice<T>> for SRef<Slice<T>> {}
+unsafe impl<T: StagedType> UncheckedExternArg<RawSlice<T>> for SRefMut<Slice<T>> {}
+unsafe impl<T: StagedType> UncheckedExternArg<RawSliceMut<T>> for SRefMut<Slice<T>> {}
 
 /// Call an external function with 0 arguments. `Out` is the function's own
 /// return type (`S::Ret`), so callers never restate it.

@@ -422,7 +422,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                             let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::FatSliceType<#inner_staged> });
+                            return Ok(quote! { ::rust_lms::ffi::RawSlice<#inner_staged> });
                         }
                     }
                     return Err("FatSlice requires a type argument".to_string());
@@ -432,7 +432,7 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                     if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
                         if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
                             let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::FatSliceMutType<#inner_staged> });
+                            return Ok(quote! { ::rust_lms::ffi::RawSliceMut<#inner_staged> });
                         }
                     }
                     return Err("FatSliceMut requires a type argument".to_string());

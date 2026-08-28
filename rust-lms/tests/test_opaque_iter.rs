@@ -41,7 +41,7 @@ pub extern "C" fn graph_iter_slices(g: &SliceGraph) -> *mut () {
         .map(|row| FatSlice::from_slice(row))
         .collect::<Vec<_>>();
     // SAFETY: the generated traversal transfers this handle to the matching
-    // `DynIter<FatSliceType<i64>>` next/drop functions exactly once.
+    // `DynIter<RawSlice<i64>>` next/drop functions exactly once.
     unsafe { box_dyn_iter(rows.into_iter()).into_raw() }
 }
 
@@ -170,7 +170,7 @@ fn exact_size_count_is_o1_and_sum_works() {
 fn opaque_iterator_supports_fat_slice_items() {
     for_each_backend(|mut compiler| {
         let producer = compiler.extern_fn::<GraphIterSlicesExtern>();
-        let rows = compiler.opaque_iter_fns::<DynIter<FatSliceType<i64>>>();
+        let rows = compiler.opaque_iter_fns::<DynIter<RawSlice<i64>>>();
         let total_len = compiler.fun1(
             "total_row_len",
             move |ctx, graph: Var<SRef<Opaque<SliceGraph>>>| {

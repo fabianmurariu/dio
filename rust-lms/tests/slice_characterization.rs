@@ -9,7 +9,7 @@
 //! |---|:---:|:---:|:---:|:---:|:---:|:---:|:---:|
 //! | shared parameter `SRef<Slice<T>>`    | OK | n/a | OK | OK | OK | OK / **G6** | OK |
 //! | mutable parameter `SRefMut<Slice<T>>`| OK | OK  | OK | OK | OK | **G6**      | **G10** |
-//! | raw descriptor `FatSliceType<T>`     | OK | **G6** | OK | OK | OK | OK       | **G10** |
+//! | raw descriptor `RawSlice<T>`     | OK | **G6** | OK | OK | OK | OK       | **G10** |
 //! | descriptor field (`SliceRepr`)       | OK | OK  | OK | OK | OK | OK          | OK |
 //!
 //! Legend — `OK`: characterized by a test below. `n/a`: not meaningful for that
@@ -22,12 +22,12 @@
 //! * **G6a** — a slice *parameter* cannot be handed to an extern declared with
 //!   `FatSlice<T>`/`FatSliceMut<T>`, in either direction, even though both lower
 //!   to the same `(ptr, len)` argument pair. `UncheckedExternArg` witnesses
-//!   `FatSliceType<T> -> SRef<Slice<T>>` but not the reverse, so today a kernel
-//!   must declare its parameter as `Var<FatSliceType<T>>` to reach such an
+//!   `RawSlice<T> -> SRef<Slice<T>>` but not the reverse, so today a kernel
+//!   must declare its parameter as `Var<RawSlice<T>>` to reach such an
 //!   extern. (`ext_double_slice` in `test_extern_fn.rs` is declared but never
 //!   called by any test — this is why.)
 //! * **G6b — CLOSED (rows 3 + 4).** A mutable raw descriptor supported no slice
-//!   operation at all, not even `len`. Row 3 classified `FatSliceMutType<T>` as
+//!   operation at all, not even `len`. Row 3 classified `RawSliceMut<T>` as
 //!   `SliceType + RawSliceType`; row 4 put the representation-only ops on
 //!   `SliceOps`, so it now reaches them. `mut write` reads `n/a` for both raw
 //!   rows because writing through a raw descriptor requires an explicit
@@ -205,7 +205,7 @@ fn mut_param_crosses_an_internal_call() {
 }
 
 // =============================================================================
-// Origin 3: raw descriptor — `FatSliceType<T>`
+// Origin 3: raw descriptor — `RawSlice<T>`
 // =============================================================================
 
 #[extern_fn]
@@ -218,7 +218,7 @@ pub extern "C" fn charz_sum(data: FatSlice<i64>) -> i64 {
 #[test]
 fn raw_descriptor_read_subslice_and_nested() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun1("raw", |ctx, d: Var<FatSliceType<i64>>| {
+        let f = compiler.fun1("raw", |ctx, d: Var<RawSlice<i64>>| {
             let outer = ctx.bind(unsafe { d.subslice_unchecked(1u64, 6u64) });
             let inner = ctx.bind(unsafe { outer.subslice_unchecked(1u64, 3u64) });
             add(int_cast::<i64, u64, _>(mul(inner.len(), 1000u64)), unsafe {
@@ -235,7 +235,7 @@ fn raw_descriptor_read_subslice_and_nested() {
 fn raw_descriptor_ffi_round_trip() {
     for_each_backend(|mut compiler| {
         let ext = compiler.extern_fn::<CharzSumExtern>();
-        let f = compiler.fun1("fx", |_c, d: Var<FatSliceType<i64>>| call_extern1(ext, d));
+        let f = compiler.fun1("fx", |_c, d: Var<RawSlice<i64>>| call_extern1(ext, d));
         let c = compiler.compile(f).unwrap();
         let data = [1i64, 2, 3, 4];
         assert_eq!(c.as_fn().call(FatSlice::from_slice(&data)), 10);
@@ -245,8 +245,8 @@ fn raw_descriptor_ffi_round_trip() {
 #[test]
 fn raw_descriptor_crosses_an_internal_call() {
     for_each_backend(|mut compiler| {
-        let inner = compiler.fun1("il", |_c, d: Var<FatSliceType<i64>>| d.len());
-        let f = compiler.fun1("f", |_c, d: Var<FatSliceType<i64>>| call1(inner, d));
+        let inner = compiler.fun1("il", |_c, d: Var<RawSlice<i64>>| d.len());
+        let f = compiler.fun1("f", |_c, d: Var<RawSlice<i64>>| call1(inner, d));
         let c = compiler.compile(f).unwrap();
         let data = [1i64, 2, 3];
         assert_eq!(c.as_fn().call(FatSlice::from_slice(&data)), 3);
@@ -300,8 +300,8 @@ unsafe impl MutSliceRepr<i64> for DescMut {}
 fn descriptor_field_read_subslice_and_iterate() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("d", |ctx, d: Var<SRef<Desc>>| {
-            // SAFETY: the test keeps `data` alive across the call.
-            let s = ctx.bind(unsafe { d.into_slice::<i64>() });
+            // SAFETY: the test keeps `data` alive and unmutated across the call.
+            let s = ctx.bind(unsafe { d.into_raw_slice::<i64>().assume_shared() });
             let sub = ctx.bind(unsafe { s.subslice_unchecked(1u64, 4u64) });
             add(sub.staged_iter().sum(ctx), int_cast::<i64, u64, _>(s.len()))
         });
@@ -321,7 +321,7 @@ fn descriptor_field_mutable_write() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("dm", |ctx, d: Var<SRefMut<DescMut>>| {
             // SAFETY: the test keeps `data` alive and exclusive across the call.
-            let s = unsafe { d.into_mut_slice::<i64>() };
+            let s = unsafe { d.into_raw_slice_mut::<i64>().assume_unique() };
             ctx.emit(unsafe { s.set_unchecked(1u64, 42i64) });
             Const::<i64>::new(0)
         });
@@ -336,7 +336,7 @@ fn descriptor_field_mutable_write() {
     });
 }
 
-/// **G6b closed (rows 3 + 4).** Before the taxonomy, `FatSliceMutType<T>`
+/// **G6b closed (rows 3 + 4).** Before the taxonomy, `RawSliceMut<T>`
 /// implemented nothing and supported no slice operation — not even `len`. Row 3
 /// classified it `SliceType + RawSliceType`; row 4 moved the representation-only
 /// ops onto `SliceOps`, so a mutable raw descriptor now reaches them.
@@ -346,7 +346,7 @@ fn descriptor_field_mutable_write() {
 #[test]
 fn raw_mut_descriptor_has_representation_ops() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun1("rm", |ctx, d: Var<FatSliceMutType<i64>>| {
+        let f = compiler.fun1("rm", |ctx, d: Var<RawSliceMut<i64>>| {
             let mut sub = ctx.bind(unsafe { d.subslice_unchecked(1u64, 3u64) });
             let n = ctx.bind(sub.reborrow().len());
             // SAFETY: the descriptor covers [1, 3), so index 0 of the sub-slice
@@ -424,7 +424,7 @@ fn one_helper_serves_every_trusted_shared_origin() {
                 let sub = ctx.bind(unsafe { a.subslice_unchecked(1u64, 3u64) });
                 let from_subslice = total(ctx, sub);
                 // SAFETY: the test keeps the descriptor's buffer alive.
-                let view = ctx.bind(unsafe { d.into_slice::<i64>() });
+                let view = ctx.bind(unsafe { d.into_raw_slice::<i64>().assume_shared() });
                 let from_descriptor = total(ctx, view);
                 add(add(from_param, from_subslice), from_descriptor)
             },
@@ -461,5 +461,102 @@ fn one_helper_serves_every_unique_origin() {
         assert_eq!(c.call(&mut data), 4);
         // the whole-slice fill runs second, so 7 wins everywhere
         assert_eq!(data, [7i64, 7, 7, 7]);
+    });
+}
+
+// =============================================================================
+// Raw/FFI descriptor boundary — refactor plan row 6
+// =============================================================================
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn charz_g6a_sum(data: FatSlice<i64>) -> i64 {
+    // SAFETY: staged code passes a live `(ptr, len)` for the duration of the call.
+    unsafe { data.as_slice().iter().sum() }
+}
+
+#[extern_fn]
+#[no_mangle]
+pub extern "C" fn charz_g6a_double(mut data: FatSliceMut<i64>) {
+    // SAFETY: staged code passes a live, exclusively owned `(ptr, len)`.
+    unsafe {
+        for x in data.as_slice_mut() {
+            *x *= 2;
+        }
+    }
+}
+
+/// **G6a closed (row 6).** A shared slice *parameter* can now reach an extern
+/// declared with `FatSlice<T>`. Before row 6 the `UncheckedExternArg` table
+/// witnessed only `Raw* -> SRef/SRefMut`, never the reverse, so a kernel had to
+/// declare its parameter as `Var<RawSlice<T>>` to call such an extern.
+#[test]
+fn shared_param_reaches_a_fat_slice_extern() {
+    for_each_backend(|mut compiler| {
+        let ext = compiler.extern_fn::<CharzG6aSumExtern>();
+        let f = compiler.fun1("s", |_c, a: Var<SRef<Slice<i64>>>| {
+            // SAFETY: `a` is a live shared slice for the call; unchecked only
+            // because Rust slice references have no stable C ABI.
+            unsafe { call_extern1_unchecked(ext, a) }
+        });
+        let c = compiler.compile(f).unwrap();
+        assert_eq!(c.call(&[1i64, 2, 3]), 6);
+    });
+}
+
+/// **G6a closed, mutable half.** This is the case `ext_double_slice` in
+/// `test_extern_fn.rs` was written for and that no test could express — it was
+/// declared but callable by nothing.
+#[test]
+fn mut_param_reaches_a_fat_slice_mut_extern() {
+    for_each_backend(|mut compiler| {
+        let ext = compiler.extern_fn::<CharzG6aDoubleExtern>();
+        let f = compiler.fun1("m", |_c, a: Var<SRefMut<Slice<i64>>>| {
+            // SAFETY: `a` is a live, exclusively owned slice for the call.
+            unsafe { call_extern1_unchecked(ext, a) }
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [1i64, 2, 3];
+        c.call(&mut data);
+        assert_eq!(data, [2i64, 4, 6]);
+    });
+}
+
+/// The provenance boundary. A raw descriptor reaches the *safe* accessors only
+/// after an explicit promotion; `get_or` is unreachable before it, and a shared
+/// raw cannot promote to a unique view — both proven by `compile_fail` doctests
+/// on `RawSliceOps`.
+#[test]
+fn promotion_unlocks_the_safe_surface() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("p", |ctx, d: Var<RawSlice<i64>>| {
+            // SAFETY: the test owns `data`, keeps it alive and unmutated for the
+            // call, and never reallocates it.
+            let trusted = ctx.bind(unsafe { d.assume_shared() });
+            trusted.get_or(1u64, -1i64)
+        });
+        let c = compiler.compile(f).unwrap();
+        let data = [7i64, 8, 9];
+        assert_eq!(c.as_fn().call(FatSlice::from_slice(&data)), 8);
+    });
+}
+
+/// A *mutable* raw descriptor promotes to a unique slice and then writes
+/// through the ordinary `SliceMutOps` surface — the path that makes a raw
+/// mutable descriptor useful at all.
+#[test]
+fn mutable_promotion_reaches_the_write_surface() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("pm", |ctx, d: Var<RawSliceMut<i64>>| {
+            // SAFETY: the test owns the buffer and hands out no other reference.
+            let mut trusted = ctx.bind(unsafe { d.assume_unique() });
+            ctx.emit(unsafe { trusted.reborrow().set_unchecked(0u64, 99i64) });
+            trusted.len()
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [1i64, 2, 3];
+        let desc = FatSliceMut::from_slice(&mut data);
+        assert_eq!(c.as_fn().call(desc), 3);
+        assert_eq!(data, [99i64, 2, 3]);
     });
 }

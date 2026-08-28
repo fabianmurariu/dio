@@ -409,11 +409,11 @@ fn test_slice_return_subslice_len() {
 #[test]
 fn test_internal_call_preserves_fat_slice_return() {
     for_each_backend(|mut compiler| {
-        let head = compiler.fun1("head", |_ctx, arr: Var<FatSliceType<i64>>| {
+        let head = compiler.fun1("head", |_ctx, arr: Var<RawSlice<i64>>| {
             // SAFETY: the caller below always supplies at least two elements.
             unsafe { arr.subslice_unchecked(0u64, 2u64) }
         });
-        let head_len = compiler.fun1("head_len", move |_ctx, arr: Var<FatSliceType<i64>>| {
+        let head_len = compiler.fun1("head_len", move |_ctx, arr: Var<RawSlice<i64>>| {
             call1(head, arr).len()
         });
 
@@ -428,12 +428,11 @@ fn test_if_then_else_preserves_fat_slice_value() {
     for_each_backend(|mut compiler| {
         let choose_len = compiler.fun2(
             "choose_slice_len",
-            |ctx, choose_head: Var<bool>, arr: Var<FatSliceType<i64>>| {
+            |ctx, choose_head: Var<bool>, arr: Var<RawSlice<i64>>| {
                 // SAFETY: the caller below supplies four elements and both ranges are valid.
                 let head = unsafe { arr.subslice_unchecked(0u64, 1u64) };
                 let tail = unsafe { arr.subslice_unchecked(1u64, 4u64) };
-                let chosen: Var<FatSliceType<i64>> =
-                    ctx.bind(if_then_else(choose_head, head, tail));
+                let chosen: Var<RawSlice<i64>> = ctx.bind(if_then_else(choose_head, head, tail));
                 chosen.len()
             },
         );
@@ -448,8 +447,8 @@ fn test_if_then_else_preserves_fat_slice_value() {
 #[test]
 fn test_coption_preserves_fat_slice_payload() {
     for_each_backend(|mut compiler| {
-        let some_len = compiler.fun1("some_slice_len", |ctx, arr: Var<FatSliceType<i64>>| {
-            let value: Var<FatSliceType<i64>> = ctx.bind(unwrap_or(c_some(arr), arr));
+        let some_len = compiler.fun1("some_slice_len", |ctx, arr: Var<RawSlice<i64>>| {
+            let value: Var<RawSlice<i64>> = ctx.bind(unwrap_or(c_some(arr), arr));
             value.len()
         });
 
@@ -458,9 +457,8 @@ fn test_coption_preserves_fat_slice_payload() {
         assert_eq!(compiler.compile(some_len).unwrap().call(input), 4);
     });
     for_each_backend(|mut compiler| {
-        let none_len = compiler.fun1("none_slice_len", |ctx, arr: Var<FatSliceType<i64>>| {
-            let value: Var<FatSliceType<i64>> =
-                ctx.bind(unwrap_or(c_none::<FatSliceType<i64>>(), arr));
+        let none_len = compiler.fun1("none_slice_len", |ctx, arr: Var<RawSlice<i64>>| {
+            let value: Var<RawSlice<i64>> = ctx.bind(unwrap_or(c_none::<RawSlice<i64>>(), arr));
             value.len()
         });
 
@@ -475,9 +473,9 @@ fn test_slice_element_can_be_a_fat_slice() {
     for_each_backend(|mut compiler| {
         let inner_len = compiler.fun1(
             "inner_slice_len",
-            |ctx, outer: Var<FatSliceType<FatSliceType<i64>>>| {
+            |ctx, outer: Var<RawSlice<RawSlice<i64>>>| {
                 // SAFETY: the caller below supplies two descriptors.
-                let inner: Var<FatSliceType<i64>> = ctx.bind(unsafe { outer.get_unchecked(1u64) });
+                let inner: Var<RawSlice<i64>> = ctx.bind(unsafe { outer.get_unchecked(1u64) });
                 inner.len()
             },
         );

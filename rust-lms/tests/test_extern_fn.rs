@@ -125,7 +125,7 @@ fn test_extern_marker_carries_the_complete_signature() {
 
     fn assert_slice_signature<S>()
     where
-        S: ExternFn<Args = (FatSliceType<i64>,), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (RawSlice<i64>,), Ret = i64> + SafeExternFn,
     {
     }
 
@@ -307,7 +307,7 @@ fn test_extern_fn_sum_slice() {
         let sum_fn = compiler.extern_fn::<ExtSumSliceExtern>();
 
         // Function that takes a FatSlice and returns the sum
-        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<RawSlice<i64>>| {
             call_extern1(sum_fn, data)
         });
 
@@ -329,7 +329,7 @@ fn test_extern_fn_slice_len() {
     for_each_backend(|mut compiler| {
         let len_fn = compiler.extern_fn::<ExtSliceLenExtern>();
 
-        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<RawSlice<i64>>| {
             call_extern1(len_fn, data)
         });
 
@@ -350,8 +350,8 @@ fn test_extern_fn_slice_len() {
 fn test_extern_call_preserves_fat_slice_return() {
     for_each_backend(|mut compiler| {
         let identity = compiler.extern_fn::<ExtIdentitySliceExtern>();
-        let test_fn = compiler.fun1("identity_len", |ctx, data: Var<FatSliceType<i64>>| {
-            let returned: Var<FatSliceType<i64>> = ctx.bind(call_extern1(identity, data));
+        let test_fn = compiler.fun1("identity_len", |ctx, data: Var<RawSlice<i64>>| {
+            let returned: Var<RawSlice<i64>> = ctx.bind(call_extern1(identity, data));
             returned.len()
         });
 

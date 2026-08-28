@@ -99,7 +99,7 @@ impl<P: Clone, M> Clone for PrimitiveArrayView<P, M> {
 impl<P: Copy, M> Copy for PrimitiveArrayView<P, M> {}
 
 impl<P, M> PrimitiveArrayView<P, M> {
-    pub fn values(&self) -> impl Staged<Out = FatSliceType<M>> + Clone + use<P, M>
+    pub fn values(&self) -> impl Staged<Out = RawSlice<M>> + Clone + use<P, M>
     where
         P: ArraySource,
         M: StagedType,
@@ -193,7 +193,7 @@ impl<V> ValidityView<V> {
         Self { validity }
     }
 
-    pub fn bytes(&self) -> impl Staged<Out = FatSliceType<u8>> + Clone + use<V>
+    pub fn bytes(&self) -> impl Staged<Out = RawSlice<u8>> + Clone + use<V>
     where
         V: ValiditySource,
     {
