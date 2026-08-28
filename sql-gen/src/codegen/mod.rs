@@ -574,7 +574,7 @@ pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: 
             dispatch_prim!(field.data_type(), M => {
                 // SAFETY: the output owns this control block with element type
                 // `M` and retains it for the compiled kernel's lifetime.
-                let vals = unsafe { SVec::<M>::from_raw_unchecked(*values, cx.rt.svec_grow) };
+                let mut vals = unsafe { SVec::<M>::from_raw_unchecked(*values, cx.rt.svec_grow) };
                 let v = M::coerce(ctx, cv);
                 vals.push(ctx, v);
                 // A nullable column pushes a validity flag for *every* row (the

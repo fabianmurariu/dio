@@ -564,7 +564,7 @@ row begins.
 | 4 | Consolidated core operations | ~~Replace the overlapping op surfaces~~ **DONE 2026-08-27.** Four surfaces (`SliceRefOps`, `RawSliceOps`, `SliceMutOps`, the `Var<SRefMut<..>>` inherent family) collapse to three blanket-implemented traits mirroring the capability traits. Names standardized on `len`/`subslice_unchecked`/`into_ptr`. Closes the rest of G6b. | Removes the largest source of slice API duplication while retaining safety distinctions. | **Met.** 369 Cranelift / 388 LLVM, 25 doctests, clippy `-D warnings` clean. |
 | 5 | Function parameter migration | ~~Move call sites to the consolidated traits~~ **DONE 2026-08-28.** Largely pre-paid by row 4's fallout; the remaining work was collapsing `MutField`'s three bespoke `slice_*` methods onto the common traits behind one `as_mut_slice`, and adding origin-independence proofs. ABI untouched. | Establishes the simplest trusted origin as the reference implementation. | **Met.** 372 Cranelift / LLVM, 26 doctests, clippy `-D warnings` clean. |
 | 6 | Raw/FFI descriptor boundary | ~~Rename markers, add constructors, consolidate witnesses, add promotion~~ **DONE 2026-08-28.** `FatSliceType`/`FatSliceMutType` -> `RawSlice`/`RawSliceMut`; four dead `Ffi*` aliases deleted; one raw-parts node now serves both `slice_from_raw_parts` and the new `slice_from_raw_parts_mut`; every descriptor conversion yields **raw** with trust arriving only via `RawSliceOps::assume_shared`/`assume_unique`; G6a closed. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | **Met.** Two `compile_fail` doctests prove a raw value reaches no safe accessor before promotion and that a shared raw cannot promote to a unique view. |
-| 7 | `SVec` unique capability | Remove `Copy`/unrestricted `Clone`, make mutation require `&mut self`, add the `Rc<Cell<i64>>` stage-0 borrow tracker, and retain one documented unsafe raw escape hatch for SQL dispatch. | Creates the owner whose tracked borrows prevent generated reallocation. | `#[should_panic]` alias tests pass; existing SVec growth and SQL output behavior remains green. |
+| 7 | `SVec` unique capability | ~~Remove `Copy`, `&mut self` mutation, add the tracker~~ **DONE 2026-08-28.** `SVec<T>` is neither `Copy` nor `Clone`; `push`/`set` take `&mut self`; a `StageBorrows(Rc<Cell<i64>>)` counter gates growth; `as_slice`/`as_mut_slice` hand out `Drop` guards; `from_raw_unchecked` stays as the one documented escape hatch. | Creates the owner whose tracked borrows prevent generated reallocation. | **Met.** 3 `#[should_panic]` alias tests, `view_released_then_grow` (S6) passes, sql-gen 113/113 green. |
 | 8 | `SVec` shared and mutable views | Add `SVecSlice`/`SVecSliceMut` as `Deref` guards over a `Copy`, reloading `SliceExpr`, lowering to `Value::Fat`. | Makes growable output storage readable/writable through the same API as function parameters. | A generic kernel helper operates unchanged on a parameter slice and each `SVec` view on both backends; an S6 test (view released, then grow) passes. |
 | 9 | Closed and checked sub-slicing | Consolidate range syntax, preserve capability/lifetime for every origin, and add `get_range`; keep a clearly unsafe unchecked primitive. | Makes "a slice of a slice is a slice" true across the entire public API. | Source-by-result compile assertions and runtime range tests pass for every origin/capability. |
 | 10 | Slice iteration adapter | Generalize `SliceIter`/`IndexedSource` from `SRef<Slice<T>>` to the trusted slice capability. **Scope settled by §3:** no `'stage` parameter on the iterator traits; their `'static` bounds stay. Do not redesign opaque iterators. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | Parameter, `SVec`, promoted FFI, and sub-slices all run the same iterator tests. |
@@ -614,6 +614,35 @@ Also folded in here: `MutField`'s `slice_len` / `slice_get_unchecked` /
 times; one `unsafe fn as_mut_slice<E>(&mut self)` states it once and hands back
 an ordinary `MutSliceType` expression carrying the whole common op surface.
 (`slice_len` turned out to be dead code — nothing called it.)
+
+#### `SVec` ownership as built (row 7)
+
+`SVec<T>` is now a unique capability: neither `Copy` nor `Clone`, with `push`
+and `set` taking `&mut self`. Alongside the handle sits
+`StageBorrows(Rc<Cell<i64>>)` — `> 0` shared views, `-1` a unique view, `0`
+unborrowed. `as_slice`/`as_mut_slice` hand out `Drop` guards; `push` asserts the
+count is zero, because growth may move the buffer.
+
+The migration was two mechanical shapes:
+
+- `sql-gen` mints a fresh handle per output column and pushes immediately — only
+  needed `let mut`.
+- The `rust-lms-std` tests relied on `Copy` to use `svec` inside a `move` closure
+  *and* after it. Dropping the spurious `move` fixes them: `while_loop` calls its
+  body synchronously at staging time, so a borrowing closure's borrow ends when
+  `while_loop` returns. Arguably better code than before.
+
+**The tracker is per-handle**, which is the one aliasing rule stage-0 tracking
+cannot enforce: two handles over the same control block carry independent
+counters. That is now written into `from_raw_unchecked`'s safety contract —
+reconstructing a handle *to push* is fine (what `sql-gen` does); reconstructing
+one while a view from another is live is not.
+
+`view_released_then_grow` is the payoff and the reason the type-level route was
+rejected: take a view, finish with it, drop it, then grow. Under type-level
+borrows that is permanently rejected (the view's borrow is pinned to the whole
+staging region); under stage-0 tracking it passes, because the guard's `Drop`
+runs in emission order.
 
 #### The provenance boundary as built (row 6)
 
