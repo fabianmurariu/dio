@@ -1,0 +1,8 @@
+[env]
+# melior's mlir-sys dependency and melior-macro's tblgen dependency use different
+# prefix variables, but both ultimately execute <prefix>/bin/llvm-config. Point
+# them at the repository shim so a keg-only LLVM 22 install does not need shell
+# environment setup. Explicit user/CI values still win because `force` is false.
+MLIR_SYS_220_PREFIX = { value = "tools/llvm", relative = true, force = false }
+LLVM_SYS_220_PREFIX = { value = "tools/llvm", relative = true, force = false }
+TABLEGEN_220_PREFIX = { value = "tools/llvm", relative = true, force = false }
