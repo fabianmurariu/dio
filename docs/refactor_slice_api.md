@@ -592,7 +592,7 @@ row begins.
 | 5 | Function parameter migration | ~~Move call sites to the consolidated traits~~ **DONE 2026-08-28.** Largely pre-paid by row 4's fallout; the remaining work was collapsing `MutField`'s three bespoke `slice_*` methods onto the common traits behind one `as_mut_slice`, and adding origin-independence proofs. ABI untouched. | Establishes the simplest trusted origin as the reference implementation. | **Met.** 372 Cranelift / LLVM, 26 doctests, clippy `-D warnings` clean. |
 | 6 | Raw/FFI descriptor boundary | ~~Rename markers, add constructors, consolidate witnesses, add promotion~~ **DONE 2026-08-28.** `FatSliceType`/`FatSliceMutType` -> `RawSlice`/`RawSliceMut`; four dead `Ffi*` aliases deleted; one raw-parts node now serves both `slice_from_raw_parts` and the new `slice_from_raw_parts_mut`; every descriptor conversion yields **raw** with trust arriving only via `RawSliceOps::assume_shared`/`assume_unique`; G6a closed. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | **Met.** Two `compile_fail` doctests prove a raw value reaches no safe accessor before promotion and that a shared raw cannot promote to a unique view. |
 | 7 | `SVec` unique capability | ~~Remove `Copy`, `&mut self` mutation, add a tracker~~ **DONE 2026-08-28.** `SVec<T>` is neither `Copy` nor `Clone`; `push`/`set` take `&mut self`; `as_slice`/`as_mut_slice` return lifetime-carrying views, so ordinary Rust borrows enforce the discipline; `from_raw_unchecked` stays as the one documented escape hatch. No dynamic tracker — see the §3 revision. | Creates the owner whose borrows prevent generated reallocation. | **Met, and exceeded:** the three alias violations are *compile* errors (`compile_fail` doctests) rather than panics; `view_released_then_grow` (S6) passes; sql-gen 113/113 green. |
-| 8 | `SVec` shared and mutable views | Add `SVecSlice`/`SVecSliceMut` as `Deref` guards over a `Copy`, reloading `SliceExpr`, lowering to `Value::Fat`. | Makes growable output storage readable/writable through the same API as function parameters. | A generic kernel helper operates unchanged on a parameter slice and each `SVec` view on both backends; an S6 test (view released, then grow) passes. |
+| 8 | `SVec` shared and mutable views | ~~Add the `Deref` guards~~ **DONE 2026-08-28.** `SVecSlice<'a,T>`/`SVecSliceMut<'a,T>` deref to `Copy`, lifetime-free, reloading `SVecSliceExpr<T>`/`SVecSliceExprMut<T>` whose `Out` is `SRef<Slice<T>>`/`SRefMut<Slice<T>>`. Built by composing row 6's `slice_from_raw_parts_mut` + `assume_shared`/`assume_unique`. `rust-lms-std` gained an `llvm` feature and a `for_each_backend` harness. | Makes growable output storage readable/writable through the same API as function parameters. | **Met.** One generic helper drives a parameter slice and an `SVec` view unchanged; `view_released_then_grow` passes; all 9 SVec tests run on both backends. |
 | 9 | Closed and checked sub-slicing | Consolidate range syntax, preserve capability/lifetime for every origin, and add `get_range`; keep a clearly unsafe unchecked primitive. | Makes "a slice of a slice is a slice" true across the entire public API. | Source-by-result compile assertions and runtime range tests pass for every origin/capability. |
 | 10 | Slice iteration adapter | Generalize `SliceIter`/`IndexedSource` from `SRef<Slice<T>>` to the trusted slice capability. **Scope settled by §3:** no `'stage` parameter on the iterator traits; their `'static` bounds stay. Do not redesign opaque iterators. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | Parameter, `SVec`, promoted FFI, and sub-slices all run the same iterator tests. |
 | 11 | Downstream migration | Migrate `arrow-lms`, `sql-gen`, pools, string byte views, and benchmarks; isolate unsafe FFI promotion at descriptor construction boundaries. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | Workspace tests pass with both backends; downstream code no longer chooses operations by slice origin. |
@@ -641,6 +641,36 @@ Also folded in here: `MutField`'s `slice_len` / `slice_get_unchecked` /
 times; one `unsafe fn as_mut_slice<E>(&mut self)` states it once and hands back
 an ordinary `MutSliceType` expression carrying the whole common op surface.
 (`slice_len` turned out to be dead code — nothing called it.)
+
+#### `SVec` views as built (row 8)
+
+The views are guards that `Deref` to a `Copy`, **lifetime-free**, **reloading**
+staged expression whose `Out` is `SRef<Slice<T>>` / `SRefMut<Slice<T>>`. Because
+`Out` is an ordinary trusted marker, the views inherit the entire op surface from
+rows 3-6 with no new impls: `view.len()`, `view.get_or(..)`,
+`view.subslice_unchecked(..)`, `view.set_unchecked(..)` are the *same* methods a
+function parameter uses, reached through the deref.
+
+The expression is composed rather than hand-lowered — it is row 6's machinery
+applied to the control block:
+
+```text
+load ctrl.ptr / ctrl.len  ->  slice_from_raw_parts_mut  ->  RawSliceMut<T>
+                          ->  assume_shared / assume_unique  ->  trusted slice
+```
+
+Two properties carry over from the design notes and both matter:
+
+- **Lifetime-free**, so `ctx.bind`'s `'static` bound never reaches the guard's
+  borrow (the mistake behind the erroneous S6 result).
+- **Reloading**, so an expression copied out of a guard and used after a growth
+  has been emitted observes the *new* buffer. `view_expression_reloads_after_growth`
+  pushes past two reallocations and reads the full contents through a copy taken
+  before them.
+
+`rust-lms-std` had no `llvm` feature, so `SVec` codegen had never run on MLIR.
+It now has one plus a `for_each_backend` harness, and all nine SVec tests run on
+both backends.
 
 #### `SVec` ownership as built (row 7)
 
