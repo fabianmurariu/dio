@@ -119,89 +119,49 @@ fn set_overwrites() {
 }
 
 // =============================================================================
-// Stage-0 borrow tracking — refactor plan row 7
+// Borrow discipline — refactor plan row 7
 // =============================================================================
 //
-// Growth may move the buffer, so a view of an `SVec` and a `push` through it
-// cannot overlap. That hazard lives on the *emission* timeline, which is
-// exactly staging execution order — so the check is a stage-0 counter, and a
-// violation panics while the kernel is being built.
+// A view of an `SVec` and a `push` through it cannot overlap: growth may move
+// the buffer. The rule is enforced by an ordinary Rust borrow — `as_slice`
+// borrows the handle, `as_mut_slice` borrows it mutably, `push` takes
+// `&mut self` — so violations are *compile* errors, proven by `compile_fail`
+// doctests on `SVec::push`.
 //
-// A type-level borrow cannot do this job: a view retained in the `Ctx` graph
-// keeps its Rust borrow alive until compilation, so NLL never releases it and
-// "finish with the view, then grow" would be permanently rejected. That case is
-// `view_released_then_grow` below, and it passes.
-
-fn svec_fixture() -> (HostVec<i64>, Compiler<'static>) {
-    (HostVec::<i64>::new(), Compiler::new())
-}
-
-#[test]
-#[should_panic(expected = "cannot grow an SVec while a view of it is outstanding")]
-fn grow_while_shared_view_outstanding_panics() {
-    let (mut host, mut compiler) = svec_fixture();
-    let grow = compiler.extern_fn::<SvecGrowExtern>();
-    // SAFETY: `host` owns the control block and outlives this staging scope.
-    let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-    let _f = compiler.fun0("k", |ctx| {
-        let view = svec.as_slice();
-        let n = view.len(ctx);
-        let v = ctx.bind(int_cast::<i64, u64, _>(n));
-        svec.push(ctx, v); // view still live -> panics at kernel-build time
-        n
-    });
-}
-
-#[test]
-#[should_panic(expected = "cannot grow an SVec while a view of it is outstanding")]
-fn grow_while_unique_view_outstanding_panics() {
-    let (mut host, mut compiler) = svec_fixture();
-    let grow = compiler.extern_fn::<SvecGrowExtern>();
-    // SAFETY: as above.
-    let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-    let _f = compiler.fun0("k", |ctx| {
-        let view = svec.as_mut_slice();
-        let n = view.len(ctx);
-        let v = ctx.bind(int_cast::<i64, u64, _>(n));
-        svec.push(ctx, v);
-        n
-    });
-}
-
-#[test]
-#[should_panic(expected = "cannot take a unique view of an SVec while another view is outstanding")]
-fn unique_view_while_shared_outstanding_panics() {
-    let (mut host, mut compiler) = svec_fixture();
-    let grow = compiler.extern_fn::<SvecGrowExtern>();
-    // SAFETY: as above.
-    let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-    let shared = svec.as_slice();
-    let _unique = svec.as_mut_slice();
-    drop(shared);
-}
+// The two cases worth exercising at runtime are the ones that must *work*.
 
 #[test]
 fn shared_views_coexist() {
-    let (mut host, mut compiler) = svec_fixture();
+    let mut host = HostVec::<i64>::new();
+    let mut compiler = Compiler::new();
     let grow = compiler.extern_fn::<SvecGrowExtern>();
-    // SAFETY: as above.
+    // SAFETY: `host` owns the control block and outlives this staging scope.
     let svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
 
-    let a = svec.as_slice();
-    let b = svec.as_slice();
-    let c = a.clone();
-    drop((a, b, c));
-    // all released: a unique view is available again
-    let mut svec = svec;
-    let _unique = svec.as_mut_slice();
+    let f = compiler.fun0("three_views", |ctx| {
+        let a = svec.as_slice();
+        let b = svec.as_slice();
+        let c = a;
+        // All three are live at once, like three `&[T]`.
+        let total = add(add(a.len(ctx), b.len(ctx)), c.len(ctx));
+        ctx.bind(total)
+    });
+    let compiled = compiler.compile(f).expect("compile");
+    assert_eq!(compiled.call(), 0); // three views of an empty vec
+
+    // The shared borrows ended at their last use, so a unique view is available.
+    let mut host2 = HostVec::<i64>::new();
+    let mut compiler2 = Compiler::new();
+    let grow2 = compiler2.extern_fn::<SvecGrowExtern>();
+    // SAFETY: `host2` owns the control block and outlives this scope.
+    let mut svec2 = unsafe { SVec::<i64>::new(host2.handle(), grow2) };
+    let _unique = svec2.as_mut_slice();
 }
 
-/// **The case type-level borrows cannot express** (spike experiment S6): finish
-/// with a view, then grow. Precise because the guard's `Drop` runs in emission
-/// order rather than being pinned to the whole staging region.
+/// Take a view, finish with it, then grow. Non-lexical lifetimes end the borrow
+/// at the view's last use, so this is accepted — the case the original spike
+/// wrongly concluded was unreachable (it had made the *view itself* `Staged`,
+/// which forced `ctx.bind`'s `'static` bound onto the borrow).
 #[test]
 fn view_released_then_grow() {
     let mut host = HostVec::<i64>::new();
@@ -214,7 +174,7 @@ fn view_released_then_grow() {
         let n = {
             let view = svec.as_slice();
             view.len(ctx)
-        }; // view dropped here — the borrow is released
+        }; // borrow ends here
         let v = ctx.bind(add(int_cast::<i64, u64, _>(n), 7i64));
         svec.push(ctx, v); // allowed again
         svec.len(ctx)
