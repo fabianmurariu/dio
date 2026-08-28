@@ -150,7 +150,7 @@ impl<K: ExactSizeOpaqueIterKind> ExactSizeOpaqueIterFns<K> {
     }
 }
 
-impl Compiler<'_> {
+impl Compiler {
     /// Register a kind's `next`/`drop` externs and bundle their refs.
     pub fn opaque_iter_fns<K: OpaqueIterKind>(&mut self) -> OpaqueIterFns<K> {
         OpaqueIterFns {
@@ -663,7 +663,7 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     }
 }
 
-impl Compiler<'_> {
+impl Compiler {
     /// Register a reused-storage kind's `init` extern.
     pub fn reused_opaque_iter_fns<K: ReusedOpaqueIterKind>(&mut self) -> ReusedOpaqueIterFns<K> {
         ReusedOpaqueIterFns {

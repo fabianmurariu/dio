@@ -335,14 +335,14 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
     output
 }
 
-/// A JIT-compiled MLIR module and the resources that keep its native code alive: the
-/// `ExecutionEngine` (owns the executable memory) and the `Context` it was built in.
-/// Dropped in declaration order — engine first, then context — when the owning `Compiled`
-/// is dropped. **Thread-affine:** melior's `ExecutionEngine` is `!Send + !Sync` (docs/llvm.md
-/// §9), so an LLVM-compiled `Compiled` is too.
+/// A JIT-compiled MLIR module whose `ExecutionEngine` owns its native code.
+///
+/// The MLIR C API permits the source module to be destroyed once engine creation returns;
+/// the same applies to its source `Context`, so neither is retained here. `func` wraps this
+/// resource in its private post-finalization `FrozenExecutable`, which supplies the audited
+/// shared-ownership/threading boundary without exposing any engine methods.
 pub(crate) struct MlirExecutable {
     _engine: ExecutionEngine,
-    _context: Context,
 }
 
 /// Assemble a whole compilation — the `functions` (helpers) plus `__main__` — into one MLIR
@@ -406,13 +406,7 @@ pub(crate) fn assemble(
         .map(|e| (e.name.as_str(), e.fn_ptr))
         .collect();
     let (engine, pointer) = jit_lookup(&context, module, "__main__", &symbols);
-    Ok((
-        MlirExecutable {
-            _engine: engine,
-            _context: context,
-        },
-        pointer as *const u8,
-    ))
+    Ok((MlirExecutable { _engine: engine }, pointer as *const u8))
 }
 
 /// Build one function body (`name`) into a `func.func` op under the storage-pointer ABI:

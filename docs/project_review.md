@@ -225,8 +225,9 @@ The pointer API makes unchecked operations safe to construct:
 - `ConstPtr::from_addr` is safe (`rust-lms/src/refer.rs:465-475`), as are
   `const_opaque` and `const_opaque_mut` from raw pointers
   (`rust-lms/src/opaque.rs:125-134`).
-- The lifetime on `Compiler<'a>` is not derived from those raw pointer inputs
-  (`rust-lms/src/func.rs:615-623`).
+- The former lifetime on `Compiler<'a>` was not derived from those raw pointer inputs and
+  provided no safety constraint; it has since been removed. Reference validity must instead be
+  enforced by the staged reference constructors and per-invocation call API.
 
 This permits null, dangling, misaligned, or short-lived addresses to become
 staged Rust references and ultimately arguments to safe Rust `extern "C"`
