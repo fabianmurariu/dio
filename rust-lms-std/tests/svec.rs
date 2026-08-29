@@ -263,7 +263,8 @@ fn mutable_view_writes_through_the_common_api() {
                 let z = ctx.var(0i64);
                 svec.push(ctx, z);
             }
-            let n = {
+
+            {
                 let view = svec.as_mut_slice();
                 let mut m = ctx.bind(*view);
                 // SAFETY: three elements were pushed above.
@@ -271,8 +272,7 @@ fn mutable_view_writes_through_the_common_api() {
                 // SAFETY: as above.
                 ctx.emit(unsafe { m.reborrow().set_unchecked(2u64, 9i64) });
                 ctx.bind(m.len())
-            };
-            n
+            }
         });
 
         let compiled = compiler.compile(f).expect("compile");

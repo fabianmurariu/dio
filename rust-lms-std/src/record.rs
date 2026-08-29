@@ -198,7 +198,10 @@ impl DynamicRecord {
     fn field_ptr<T: StagedType + CopyType + 'static>(
         &self,
         offset: usize,
-    ) -> impl Staged<Out = SMutPtr<T>> {
+    ) -> impl Staged<Out = SMutPtr<T>> + use<T> {
+        // `use<T>` captures the type parameter but *not* `&self`: the returned
+        // expression holds a `Copy` `Var`, not a borrow, and Rust 2024 would
+        // otherwise capture the lifetime and make each call hold the borrow.
         // SAFETY: all `FieldId` offsets lie within the branded record layout.
         ptr_cast_mut::<T, u8, _>(unsafe {
             ptr_offset_mut(self.ptr, Const::<i64>::new(offset as i64))

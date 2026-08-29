@@ -4,7 +4,7 @@
 //! [`svec_grow`] extern) reallocs and writes the new pointer back. See the crate
 //! docs for the why.
 
-use std::alloc::{alloc, dealloc, handle_alloc_error, realloc, Layout};
+use std::alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc};
 use std::marker::PhantomData;
 use std::ops::Deref;
 
@@ -153,7 +153,7 @@ impl<R> Drop for HostVec<R> {
 /// [`SVec::push`] — the kernel calls this only when `len == cap`. Monomorphic
 /// (element size/align ride in the control block), so it serves any `SVec<T>`.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn svec_grow(v: &mut RawVec) {
     let new_cap = if v.cap == 0 {
         4
@@ -406,7 +406,9 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
 
     /// The buffer pointer, typed to `T` — reloaded from the control block so it
     /// reflects the latest growth. `*(ctrl.ptr) as *mut T`.
-    fn data(&self) -> impl Staged<Out = SMutPtr<T>> + Copy {
+    // `use<T>`: captures the element type but not `&self` — the returned
+    // expression holds a baked pointer, not a borrow.
+    fn data(&self) -> impl Staged<Out = SMutPtr<T>> + Copy + use<T> {
         // SAFETY: guaranteed by `SVec::new`; `ptr` is a field of the live
         // control block and has the declared staged type.
         ptr_cast_mut::<T, u8, _>(unsafe { load_field_unchecked(self.ctrl(), RawVecType::ptr()) })

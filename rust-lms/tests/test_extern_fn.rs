@@ -12,28 +12,28 @@ use common::for_each_backend;
 
 /// Simple addition function
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_add(x: i64, y: i64) -> i64 {
     x + y
 }
 
 /// Simple multiplication
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_mul(x: i64, y: i64) -> i64 {
     x * y
 }
 
 /// Square a number
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_square(x: i64) -> i64 {
     x * x
 }
 
 /// Function with no return value
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_noop() {
     // Do nothing
 }
@@ -41,21 +41,21 @@ pub extern "C" fn ext_noop() {
 /// # Safety
 /// An unsafe callback must use `call_extern1_unchecked`.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ext_read_i64(ptr: *const i64) -> i64 {
-    *ptr
+    unsafe { *ptr }
 }
 
 /// A safe shared-reference callback retains a staged `SRef` signature.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_read_ref(value: &i64) -> i64 {
     *value
 }
 
 /// A safe mutable-reference callback retains a staged `SRefMut` signature.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_add_assign(value: &mut i64, delta: i64) -> i64 {
     *value += delta;
     *value
@@ -65,7 +65,7 @@ pub extern "C" fn ext_add_assign(value: &mut i64, delta: i64) -> i64 {
 /// considered safe extern calls because Rust does not define their C ABI.
 #[allow(improper_ctypes_definitions)]
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_ref_slice_len(data: &[i64]) -> usize {
     data.len()
 }
@@ -76,27 +76,27 @@ pub extern "C" fn ext_ref_slice_len(data: &[i64]) -> usize {
 
 /// Sum elements of a slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_sum_slice(data: FatSlice<i64>) -> i64 {
     unsafe { data.as_slice().iter().sum() }
 }
 
 /// Get length of slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_slice_len(data: FatSlice<i64>) -> i64 {
     data.len as i64
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_identity_slice(data: FatSlice<i64>) -> FatSlice<i64> {
     data
 }
 
 /// Double each element in a mutable slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_double_slice(mut data: FatSliceMut<i64>) {
     unsafe {
         for x in data.as_slice_mut() {

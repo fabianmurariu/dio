@@ -44,7 +44,7 @@
 mod backend;
 pub use backend::MlirBackend;
 
-use melior::dialect::{arith, func, DialectRegistry};
+use melior::dialect::{DialectRegistry, arith, func};
 use melior::ir::attribute::{IntegerAttribute, StringAttribute, TypeAttribute};
 use melior::ir::block::BlockLike;
 use melior::ir::operation::{Operation, OperationLike};
@@ -745,7 +745,7 @@ mod tests {
         both(|| sub(mul(9i64, 9i64), 1i64)); // 80
         both(|| select(lt(3i64, 5i64), 100i64, 200i64)); // 100 (branchless)
         both(|| select(lt(5i64, 3i64), 100i64, 200i64)); // 200
-                                                         // Control flow: `cf` blocks + block-argument phi via the AST's `IfThenElse`.
+        // Control flow: `cf` blocks + block-argument phi via the AST's `IfThenElse`.
         both(|| if_then_else(lt(2i64, 9i64), Const::<i64>::new(1), Const::<i64>::new(2))); // 1
         both(|| if_then_else(lt(9i64, 2i64), Const::<i64>::new(1), Const::<i64>::new(2))); // 2
 
@@ -768,8 +768,8 @@ mod tests {
         both(|| max(3i64, 8i64)); // 8
         both(|| select(eq(5i64, 5i64), 1i64, 0i64)); // 1
         both(|| select(gt(5i64, 3i64), 1i64, 0i64)); // 1
-                                                     // Unsigned comparison: u64::MAX > 1 is true unsigned; it would be false if either
-                                                     // backend wrongly used a *signed* predicate (MAX as i64 == -1), so this discriminates.
+        // Unsigned comparison: u64::MAX > 1 is true unsigned; it would be false if either
+        // backend wrongly used a *signed* predicate (MAX as i64 == -1), so this discriminates.
         both(|| select(gt(u64::MAX, 1u64), 1i64, 0i64)); // 1
 
         // Integer casts: truncate i64->i32 then sign-extend back — positive and negative.
@@ -783,7 +783,7 @@ mod tests {
         // The §5 payoff: imperative `Ctx` bodies — mutable locals + `while` loops — lowered
         // *through the real AST* to entry-block alloca / `cf` loops / mem2reg on MLIR, and
         // asserted identical to Cranelift. `fn` bodies (Copy) run on both backends.
-        use crate::func::{call0, Compiler};
+        use crate::func::{Compiler, call0};
         use crate::num::{add, lt, mul};
         use crate::staged::Var;
 
@@ -847,12 +847,14 @@ mod tests {
             }
         }
 
-        fn square(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> {
+        // `use<>`: these capture nothing; Rust 2024 would otherwise capture the
+        // `&mut Ctx` lifetime and stop them unifying with `both`'s `fn` pointer.
+        fn square(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
             mul(x, x)
         }
         both(square, &[-3, 0, 5, 1000]);
 
-        fn poly(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> {
+        fn poly(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
             add(mul(x, 3i64), 7i64)
         }
         both(poly, &[-4, 0, 5, 100]);
@@ -912,7 +914,7 @@ mod tests {
         // .run()` — routed through MLIR, differential-tested against Cranelift. `setup`
         // defines any helper functions on the compiler and returns the top-level expression;
         // it runs once per backend.
-        use crate::func::{call0, call1, Compiler, JitBackend};
+        use crate::func::{Compiler, JitBackend, call0, call1};
         use crate::num::{add, lt, mul};
         use crate::staged::{Const, Var};
 
@@ -991,7 +993,7 @@ mod tests {
         // The high-level API on both backends: define a `fun1`, `compile().as_fn().call(x)`,
         // and assert Cranelift == MLIR across arguments. `define` (a `fn`, Copy) runs on each.
         use crate::control::if_then_else;
-        use crate::func::{call1, Compiler, FunRef1, JitBackend};
+        use crate::func::{Compiler, FunRef1, JitBackend, call1};
         use crate::num::{lt, mul, sub};
         use crate::staged::{Const, Var};
 

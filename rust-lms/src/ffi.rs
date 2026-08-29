@@ -88,7 +88,7 @@ impl<T> FatSlice<T> {
     /// The pointer must still be valid and the data must not have been modified
     /// in a way that violates Rust's aliasing rules.
     pub unsafe fn as_slice(&self) -> &[T] {
-        slice::from_raw_parts(self.ptr, self.len)
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
     }
 
     /// Returns true if the slice is empty.
@@ -143,7 +143,7 @@ impl<T> FatSliceMut<T> {
     /// The pointer must still be valid and the data must not have been modified
     /// in a way that violates Rust's aliasing rules.
     pub unsafe fn as_slice_mut(&mut self) -> &mut [T] {
-        slice::from_raw_parts_mut(self.ptr, self.len)
+        unsafe { slice::from_raw_parts_mut(self.ptr, self.len) }
     }
 
     /// Convert to an immutable slice.
@@ -151,7 +151,7 @@ impl<T> FatSliceMut<T> {
     /// # Safety
     /// Same requirements as `as_slice_mut`.
     pub unsafe fn as_slice(&self) -> &[T] {
-        slice::from_raw_parts(self.ptr, self.len)
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
     }
 
     /// Returns true if the slice is empty.

@@ -8,6 +8,7 @@
 //! id-based `declare_extern_func`/`declare_func` to resolve) stay inherent — they are the
 //! MLIR analogue of the `compile()` driver in `func.rs`, not `Backend` ops.
 
+use melior::Context;
 use melior::dialect::arith::{self, CmpfPredicate, CmpiPredicate};
 use melior::dialect::llvm::{self, AllocaOptions, LoadStoreOptions};
 use melior::dialect::{cf, func};
@@ -19,12 +20,11 @@ use melior::ir::block::BlockLike;
 use melior::ir::operation::{Operation, OperationBuilder};
 use melior::ir::r#type::{FunctionType, IntegerType};
 use melior::ir::{Block, Identifier, Location, Module, Region, RegionLike, Type, Value, ValueLike};
-use melior::Context;
 use mlir_sys::MlirValue;
 
 use crate::staged::{
-    expect_arguments, Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId,
-    VarHandle,
+    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    expect_arguments,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
 

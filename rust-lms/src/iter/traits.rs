@@ -2,7 +2,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{add, gt, lt, select, Num};
+use crate::num::{Num, add, gt, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
 use crate::types::{ConstantType, CopyType, StagedType};

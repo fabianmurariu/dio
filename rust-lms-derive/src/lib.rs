@@ -19,8 +19,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Fields, FnArg,
-    ItemFn, Meta, ReturnType, Token, Type,
+    Data, DeriveInput, Fields, FnArg, ItemFn, Meta, ReturnType, Token, Type, parse_macro_input,
+    parse_quote, punctuated::Punctuated,
 };
 
 fn is_path(ty: &Type, expected: &str) -> bool {
@@ -409,31 +409,31 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 let ident = &segment.ident;
 
                 if ident == "COption" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::option::COptionType<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::option::COptionType<#inner_staged> });
                     }
                     return Err("COption requires a type argument".to_string());
                 }
 
                 if ident == "FatSlice" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::RawSlice<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::ffi::RawSlice<#inner_staged> });
                     }
                     return Err("FatSlice requires a type argument".to_string());
                 }
 
                 if ident == "FatSliceMut" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::RawSliceMut<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::ffi::RawSliceMut<#inner_staged> });
                     }
                     return Err("FatSliceMut requires a type argument".to_string());
                 }

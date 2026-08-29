@@ -115,7 +115,7 @@ fn shared_param_internal_call_and_fat_return() {
 /// stable C ABI. The `FatSlice<T>`-declared half is **G6a**.
 #[allow(improper_ctypes_definitions)]
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn charz_ref_len(data: &[i64]) -> usize {
     data.len()
 }
@@ -216,7 +216,7 @@ fn mut_param_crosses_an_internal_call() {
 // =============================================================================
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn charz_sum(data: FatSlice<i64>) -> i64 {
     // SAFETY: staged code passes a live `(ptr, len)` for the duration of the call.
     unsafe { data.as_slice().iter().sum() }
@@ -476,14 +476,14 @@ fn one_helper_serves_every_unique_origin() {
 // =============================================================================
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn charz_g6a_sum(data: FatSlice<i64>) -> i64 {
     // SAFETY: staged code passes a live `(ptr, len)` for the duration of the call.
     unsafe { data.as_slice().iter().sum() }
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn charz_g6a_double(mut data: FatSliceMut<i64>) {
     // SAFETY: staged code passes a live, exclusively owned `(ptr, len)`.
     unsafe {

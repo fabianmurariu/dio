@@ -21,11 +21,13 @@ static ALLOCS: AtomicUsize = AtomicUsize::new(0);
 struct Counting;
 unsafe impl GlobalAlloc for Counting {
     unsafe fn alloc(&self, l: Layout) -> *mut u8 {
-        ALLOCS.fetch_add(1, Ordering::Relaxed);
-        System.alloc(l)
+        unsafe {
+            ALLOCS.fetch_add(1, Ordering::Relaxed);
+            System.alloc(l)
+        }
     }
     unsafe fn dealloc(&self, p: *mut u8, l: Layout) {
-        System.dealloc(p, l)
+        unsafe { System.dealloc(p, l) }
     }
 }
 #[global_allocator]
@@ -38,19 +40,23 @@ pub struct Nums {
 
 /// Outer producer: node ids `0..len`. `Range<u64>` (16 B) → lives inline.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nums_nodes(g: &Nums, slot: *mut ()) {
-    emplace_iter(slot as *mut OpaqueIterSlot<u64>, 0u64..g.adj.len() as u64);
+    unsafe {
+        emplace_iter(slot as *mut OpaqueIterSlot<u64>, 0u64..g.adj.len() as u64);
+    }
 }
 
 /// Inner producer: neighbours of `n`. `Copied<slice::Iter<u64>>` (16 B) → inline.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn nums_neighbours(g: &Nums, n: u64, slot: *mut ()) {
-    emplace_iter(
-        slot as *mut OpaqueIterSlot<u64>,
-        g.adj[n as usize].iter().copied(),
-    );
+    unsafe {
+        emplace_iter(
+            slot as *mut OpaqueIterSlot<u64>,
+            g.adj[n as usize].iter().copied(),
+        );
+    }
 }
 
 struct NodesK;

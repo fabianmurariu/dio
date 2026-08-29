@@ -625,7 +625,7 @@ row begins.
 | 8 | `SVec` shared and mutable views | ~~Add the `Deref` guards~~ **DONE 2026-08-28.** `SVecSlice<'a,T>`/`SVecSliceMut<'a,T>` deref to `Copy`, lifetime-free, reloading `SVecSliceExpr<T>`/`SVecSliceExprMut<T>` whose `Out` is `SRef<Slice<T>>`/`SRefMut<Slice<T>>`. Built by composing row 6's `slice_from_raw_parts_mut` + `assume_shared`/`assume_unique`. `rust-lms-std` gained an `llvm` feature and a `for_each_backend` harness. | Makes growable output storage readable/writable through the same API as function parameters. | **Met.** One generic helper drives a parameter slice and an `SVec` view unchanged; `view_released_then_grow` passes; all 9 SVec tests run on both backends. |
 | 9 | Closed and checked sub-slicing | ~~Consolidate range syntax, add `get_range`~~ **DONE 2026-08-29.** `get_range(start, end)` yields a `StagedOpt` (D4), safe and available on every origin; `subslice_unchecked` stays the proof-carrying primitive. Range syntax **rejected on the ergonomics check the doc asked for** — see below. | Makes "a slice of a slice is a slice" true across the entire public API. | **Met.** `SliceGetRange::Item = S::Out` asserted; range tests cover shared/unique/raw origins, nesting, and writing through a checked sub-slice. |
 | 10 | Slice iteration adapter | ~~Generalize `SliceIter`~~ **DONE 2026-08-29.** Keyed on `TrustedSliceType<Elem = T>`; `for_each` binds-once-and-reborrows instead of requiring `S: Clone`, which is what lets *unique* origins iterate. `IndexedSource` (zip) keeps `Clone`, so it stays shared-only. No `'stage` parameter; the `'static` bounds stay. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | **Met.** Mutable parameter, `SVec` view, promoted FFI, sub-slice and checked sub-slice all run the same iterator; raw stays non-iterable (`compile_fail`). **G10 closed — no gaps remain.** |
-| 11 | Downstream migration | Migrate `arrow-lms`, `sql-gen`, pools, string byte views, and benchmarks; isolate unsafe FFI promotion at descriptor construction boundaries. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | Workspace tests pass with both backends; downstream code no longer chooses operations by slice origin. |
+| 11 | Downstream migration | ~~Migrate downstream; isolate unsafe promotion~~ **DONE 2026-08-29.** `arrow-lms` promotes at the descriptor boundary (`values`/`bytes` now yield trusted slices); three duplicated batch-descriptor constructions folded into `batch_from_descs`; two duplicated byte-descriptor constructions folded into `resolved_bytes`; four inlined bitmap promotions folded into `bitmap_bytes`. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | **Met.** 391 Cranelift / 410 LLVM; sql-gen 113/113, arrow-lms 10/10; audit below. |
 | 12 | Compatibility removal and documentation | Deprecate then remove redundant wrappers/traits, update the prelude and examples, and document the final safety contracts. | Leaves an open-source API that is explainable without knowing its refactor history. | No internal use of deprecated APIs; rustdoc, compile-fail docs, Clippy, and the full workspace are green. |
 
 ## Detailed milestone guidance
@@ -743,14 +743,31 @@ extern result / descriptor field
   -> ordinary TrustedSliceOps / SliceMutOps
 ```
 
-The consolidation that made this work was moving the `unsafe` from
-*reinterpretation* to *promotion*. Previously `into_slice` / `into_mut_slice`
-were unsafe and produced a **trusted** slice directly — a second, parallel
-promotion path that bypassed the boundary. Now every conversion
-(`into_raw_slice`, `into_raw_slice_mut`, `MutField::as_mut_slice`) is **safe**
-and yields a raw descriptor: reading a `(ptr, len)` out of a valid reference
-dereferences nothing unproven, and the result makes no claim. The claim is made
-exactly once, at `assume_*`, where the contract is written down.
+The consolidation that made this work was removing the *second* promotion path.
+Previously `into_slice` / `into_mut_slice` produced a **trusted** slice directly,
+bypassing the boundary. Now every conversion (`into_raw_slice`,
+`into_raw_slice_mut`, `MutField::as_mut_slice`) yields a **raw** descriptor, and
+the trust claim is made exactly once, at `assume_*`, where the contract is
+written down.
+
+> **Correction (2026-08-29).** Those three conversions were briefly made *safe*,
+> on the reasoning that a raw descriptor claims nothing and every op that
+> dereferences one is itself `unsafe`. **That reasoning is wrong and the change
+> was a soundness hole.** An extern declared with a `FatSlice<T>` parameter is a
+> `SafeExternFn` — the derive marks any non-`unsafe` extern without reference
+> parameters safe, and a `#[repr(C)]` struct is not a reference — and such an
+> extern dereferences its argument. So a safe constructor completed a fully safe
+> path from an arbitrary descriptor to a dereference:
+>
+> ```rust,ignore
+> let raw = d.into_raw_slice::<i64>();   // was safe
+> call_extern1(ext, raw)                 // safe; the extern dereferences
+> ```
+>
+> The invariant is: **producing a `RawSlice` value is itself the unsafe act.**
+> That is why `slice_from_raw_parts` has always been `unsafe`, and the three
+> conversions are `unsafe` again. A `compile_fail` doctest on `ReprSliceOps`
+> holds the line. Found by asking why `batch_from_descs` needed `unsafe`.
 
 `assume_unique` is gated on `DataPtr = SMutPtr<T>`, so a shared `RawSlice`
 cannot launder itself into a writable view — the error is a concrete type
@@ -762,6 +779,59 @@ they are keyed on the *addressing form* of the receiver (`SRef<R>`,
 impls over distinct `Staged::Out` types even though the three are disjoint. The
 duplication the doc was actually pointing at — three different *notions of
 trust* — is gone: all three now produce raw and share one promotion.
+
+#### Downstream after migration (row 11)
+
+**Promotion is now isolated at descriptor-construction boundaries.** Every
+`assume_shared`/`assume_unique` in the workspace sits at one:
+`PrimitiveArrayView::values`, `ValidityView::bytes`,
+`ValidityView::bitmap_bytes`, and the two `SVec` view expressions. Nothing
+promotes mid-computation.
+
+`PrimitiveArrayView::values` is **safe** and returns a trusted slice. The
+obligation is not gone, it moved: both constructors
+(`ArrayBatchOps::primitive`, `FfiArrayOps::into_primitive`) are already
+`unsafe fn` requiring the Arrow buffer to be represented by `M` for every
+generated use — holding a `PrimitiveArrayView` *is* that proof, so re-asserting
+it per read was redundant. Consumers now get the whole slice surface (`len`,
+`get_or`, `get_range`, `staged_iter`, `subslice_unchecked`) where they
+previously had an unsafe read per element.
+
+**Repeated raw-parts plumbing collapsed**, three duplications in total:
+
+| was | now |
+|---|---|
+| `slice_from_raw_parts::<FfiArray,…>` x3 (scan, join build, join probe) | `batch_from_descs` |
+| `slice_from_raw_parts::<u8,…>` x2 (string equality, string append) | `resolved_bytes` |
+| `field_mut(..).as_mut_slice::<u8>()` x4 (bitmap read/write x2) | `bitmap_bytes` |
+
+Each carried its own near-identical SAFETY comment; each now states the contract
+once. Deduplicating the batch case removed the last direct `FfiArray` reference
+from `join.rs` — the descriptor layout is no longer a detail that module knows.
+
+**`batch_from_descs` returns a trusted slice.** Its safety contract — the array
+is retained for every generated use and holds exactly `ncols` entries — *is* the
+`assume_shared` contract, so it promotes there rather than handing back a proof
+it already has. Reading a *column* out of the batch stays `unsafe` via
+`ArrayBatchOps::primitive`, but for an unrelated obligation (the element type
+must match the Arrow buffer); those are two separate facts and conflating them
+was an error in the first draft of this row.
+
+**`resolved_bytes` stays raw — and the reason is the call path, not the contract.**
+The *safe* `call_externN` is bounded on `IntoExternArg`, which demands the
+extern's **exact** staged argument type; for a `FatSlice<u8>` parameter that is
+`RawSlice<u8>`. Only `call_externN_unchecked` accepts the `UncheckedExternArg`
+representation witness. So promoting `resolved_bytes` would force its call sites
+onto the unchecked path for no gain.
+
+> This also sharpens row 6's G6a claim. The witnesses added there let a slice
+> *parameter* reach a `FatSlice`-declared extern **via `call_externN_unchecked`**
+> — which is what the G6a tests use. The safe call path still requires an exact
+> type match, by design: it is what keeps `slice_from_raw_parts` being `unsafe`
+> sufficient to guard the safe extern path.
+
+No downstream code selects an operation by slice origin; the benchmarks needed no
+changes beyond the row-4 renames.
 
 #### Iteration as built (row 10)
 

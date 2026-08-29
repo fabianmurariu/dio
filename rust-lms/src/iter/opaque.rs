@@ -20,7 +20,7 @@
 
 use std::marker::PhantomData;
 
-use crate::ffi::{call_extern1_unchecked, ExternFn, ExternRef};
+use crate::ffi::{ExternFn, ExternRef, call_extern1_unchecked};
 use crate::func::{Compiler, Ctx};
 use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
@@ -396,28 +396,36 @@ pub fn box_dyn_exact_iter<'a, T: 'a>(
 // within the call window where the boxed iterator is alive.
 
 unsafe extern "C" fn dyn_next<T: Copy>(it: *mut ()) -> COption<T> {
-    (*(it as *mut Box<dyn Iterator<Item = T>>)).next().into()
+    unsafe { (*(it as *mut Box<dyn Iterator<Item = T>>)).next().into() }
 }
 unsafe extern "C" fn dyn_drop<T>(it: *mut ()) {
-    drop(Box::from_raw(it as *mut Box<dyn Iterator<Item = T>>));
+    unsafe {
+        drop(Box::from_raw(it as *mut Box<dyn Iterator<Item = T>>));
+    }
 }
 unsafe extern "C" fn dyn_exact_next<T: Copy>(it: *mut ()) -> COption<T> {
-    (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>))
-        .next()
-        .into()
+    unsafe {
+        (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>))
+            .next()
+            .into()
+    }
 }
 unsafe extern "C" fn dyn_len<T>(it: *mut ()) -> u64 {
-    (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>)).len() as u64
+    unsafe { (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>)).len() as u64 }
 }
 unsafe extern "C" fn dyn_next_value<T>(it: *mut ()) -> T {
-    (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>))
-        .next()
-        .expect("next_value called past len")
+    unsafe {
+        (*(it as *mut Box<dyn ExactSizeIterator<Item = T>>))
+            .next()
+            .expect("next_value called past len")
+    }
 }
 unsafe extern "C" fn dyn_exact_drop<T>(it: *mut ()) {
-    drop(Box::from_raw(
-        it as *mut Box<dyn ExactSizeIterator<Item = T>>,
-    ));
+    unsafe {
+        drop(Box::from_raw(
+            it as *mut Box<dyn ExactSizeIterator<Item = T>>,
+        ));
+    }
 }
 
 macro_rules! dyn_thunk {
@@ -551,43 +559,45 @@ where
     T: Copy,
     I: Iterator<Item = T>,
 {
-    // Monomorphic mini-vtable thunks for the concrete `I` (known here in the
-    // producer, type-erased on the staged side). Non-capturing → coerce to fn.
-    unsafe extern "C" fn next_thunk<T: Copy, I: Iterator<Item = T>>(
-        data: *const u8,
-        output: *mut u8,
-    ) {
-        let data = unsafe { data.cast::<*mut u8>().read() };
-        let result: COption<T> = unsafe { (*(data as *mut I)).next().into() };
-        unsafe { output.cast::<COption<T>>().write(result) };
-    }
-    unsafe extern "C" fn drop_inline<I>(data: *const u8, _output: *mut u8) {
-        let data = unsafe { data.cast::<*mut u8>().read() };
-        unsafe { std::ptr::drop_in_place(data as *mut I) };
-    }
-    unsafe extern "C" fn drop_heap<I>(data: *const u8, _output: *mut u8) {
-        let data = unsafe { data.cast::<*mut u8>().read() };
-        unsafe { drop(Box::from_raw(data as *mut I)) };
-    }
+    unsafe {
+        // Monomorphic mini-vtable thunks for the concrete `I` (known here in the
+        // producer, type-erased on the staged side). Non-capturing → coerce to fn.
+        unsafe extern "C" fn next_thunk<T: Copy, I: Iterator<Item = T>>(
+            data: *const u8,
+            output: *mut u8,
+        ) {
+            let data = unsafe { data.cast::<*mut u8>().read() };
+            let result: COption<T> = unsafe { (*(data as *mut I)).next().into() };
+            unsafe { output.cast::<COption<T>>().write(result) };
+        }
+        unsafe extern "C" fn drop_inline<I>(data: *const u8, _output: *mut u8) {
+            let data = unsafe { data.cast::<*mut u8>().read() };
+            unsafe { std::ptr::drop_in_place(data as *mut I) };
+        }
+        unsafe extern "C" fn drop_heap<I>(data: *const u8, _output: *mut u8) {
+            let data = unsafe { data.cast::<*mut u8>().read() };
+            unsafe { drop(Box::from_raw(data as *mut I)) };
+        }
 
-    // Treat the complete slot as uninitialized. Forming `&mut OpaqueIterSlot`
-    // here would falsely claim that its function pointers and data pointer were
-    // already initialized.
-    let slot = &mut *slot.cast::<MaybeUninit<OpaqueIterSlot<T>>>();
-    let slot = slot.as_mut_ptr();
-    std::ptr::addr_of_mut!((*slot)._item).write(PhantomData);
-    std::ptr::addr_of_mut!((*slot).next).write(Some(next_thunk::<T, I>));
-    if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
-        && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
-    {
-        let dst = std::ptr::addr_of_mut!((*slot).storage).cast::<I>();
-        std::ptr::write(dst, it);
-        std::ptr::addr_of_mut!((*slot).data).write(dst.cast());
-        std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_inline::<I>));
-    } else {
-        let data = Box::into_raw(Box::new(it)).cast();
-        std::ptr::addr_of_mut!((*slot).data).write(data);
-        std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_heap::<I>));
+        // Treat the complete slot as uninitialized. Forming `&mut OpaqueIterSlot`
+        // here would falsely claim that its function pointers and data pointer were
+        // already initialized.
+        let slot = &mut *slot.cast::<MaybeUninit<OpaqueIterSlot<T>>>();
+        let slot = slot.as_mut_ptr();
+        std::ptr::addr_of_mut!((*slot)._item).write(PhantomData);
+        std::ptr::addr_of_mut!((*slot).next).write(Some(next_thunk::<T, I>));
+        if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
+            && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
+        {
+            let dst = std::ptr::addr_of_mut!((*slot).storage).cast::<I>();
+            std::ptr::write(dst, it);
+            std::ptr::addr_of_mut!((*slot).data).write(dst.cast());
+            std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_inline::<I>));
+        } else {
+            let data = Box::into_raw(Box::new(it)).cast();
+            std::ptr::addr_of_mut!((*slot).data).write(data);
+            std::ptr::addr_of_mut!((*slot).drop).write(Some(drop_heap::<I>));
+        }
     }
 }
 

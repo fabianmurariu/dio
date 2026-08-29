@@ -18,13 +18,13 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{assign, CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarValue};
+use crate::staged::{CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarValue, assign};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
-use cranelift_codegen::ir::{types, AbiParam, InstBuilder};
+use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
-use cranelift_module::{default_libcall_names, FuncId, Linkage, Module};
+use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;

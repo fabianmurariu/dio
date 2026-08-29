@@ -47,10 +47,10 @@
 
 use crate::ffi::{RawSlice, RawSliceMut};
 use crate::func::Ctx;
-use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::staged_opt::StagedOpt;
+use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -224,6 +224,31 @@ where
 /// Extension trait for values that point at a witnessed `(ptr, len)`
 /// representation.
 ///
+/// Producing a raw slice is an `unsafe` act, so safe code cannot reach a
+/// dereference through the safe extern path:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[extern_fn]
+/// #[no_mangle]
+/// pub extern "C" fn doc_sum(data: FatSlice<i64>) -> i64 {
+///     unsafe { data.as_slice().iter().sum() }
+/// }
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// pub struct D { #[staged(SPtr<i64>)] ptr: *const i64, #[staged(u64)] len: usize }
+/// unsafe impl SliceRepr<i64> for D {}
+///
+/// fn chain(compiler: &mut Compiler<'static>) {
+///     let ext = compiler.extern_fn::<DocSumExtern>();
+///     let _f = compiler.fun1("h", |_c, d: Var<SRef<D>>| {
+///         call_extern1(ext, d.into_raw_slice::<i64>())
+///     });
+/// }
+/// ```
+///
 /// Ordinary staged references cannot be reinterpreted as slices:
 ///
 /// ```compile_fail
@@ -239,11 +264,20 @@ where
 {
     /// Read the descriptor as a **raw** slice of `T`.
     ///
-    /// Safe: the receiver is a valid reference, so loading its `(ptr, len)`
-    /// dereferences nothing unproven, and the result makes no claim about the
-    /// buffer. Crossing into a trusted slice is
-    /// [`RawSliceOps::assume_shared`], which is where the contract lives.
-    fn into_raw_slice<T>(self) -> AsSlice<Self, T>
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live and aligned for `len`
+    /// values of `T` for the duration of generated execution.
+    ///
+    /// It is tempting to think this could be safe, since a raw descriptor makes
+    /// no claim and every op that *dereferences* one is itself `unsafe`. It
+    /// cannot: an extern declared with a `FatSlice<T>` parameter is a
+    /// `SafeExternFn` (a plain `#[repr(C)]` struct is not a reference, so the
+    /// macro marks it safe), and such an extern dereferences its argument. A
+    /// safe constructor here would therefore complete a fully safe path from an
+    /// arbitrary descriptor to a dereference. **Producing a `RawSlice` value is
+    /// the unsafe act**; that is also why `slice_from_raw_parts` is `unsafe`.
+    unsafe fn into_raw_slice<T>(self) -> AsSlice<Self, T>
     where
         T: StagedType,
         R: SliceRepr<T>,
@@ -270,10 +304,14 @@ pub trait ReprSliceMutOps<R>: Staged<Out = SRefMut<R>> + Sized
 where
     R: StagedType,
 {
-    /// Read the descriptor as a **raw mutable** slice of `T`. Safe for the
-    /// same reason as [`ReprSliceOps::into_raw_slice`]; promote with
+    /// Read the descriptor as a **raw mutable** slice of `T`; promote with
     /// [`RawSliceOps::assume_unique`].
-    fn into_raw_slice_mut<T>(self) -> AsMutSlice<Self, T>
+    ///
+    /// # Safety
+    ///
+    /// As [`ReprSliceOps::into_raw_slice`], and the buffer must be exclusively
+    /// writable.
+    unsafe fn into_raw_slice_mut<T>(self) -> AsMutSlice<Self, T>
     where
         T: StagedType,
         R: MutSliceRepr<T>,
@@ -1427,13 +1465,16 @@ where
     F: Field<Parent = T>,
 {
     /// Read this `(ptr, len)` descriptor field as a **raw mutable** slice,
-    /// reborrowing the parent for one use.
+    /// reborrowing the parent for one use. Promote it with
+    /// [`RawSliceOps::assume_unique`] to reach the writing ops.
     ///
-    /// Safe, and raw: the result carries the representation-only op surface
-    /// ([`SliceOps`]) and no claim about the buffer. Promote it with
-    /// [`RawSliceOps::assume_unique`] to reach the writing ops — that is where
-    /// the validity contract is stated, once, instead of on every accessor.
-    pub fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live, aligned, and
+    /// exclusively writable for its recorded element count. See
+    /// [`ReprSliceOps::into_raw_slice`] for why producing a raw slice is itself
+    /// the unsafe step.
+    pub unsafe fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
     where
         E: StagedType,
         F::Out: MutSliceRepr<E>,

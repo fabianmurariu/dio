@@ -22,9 +22,9 @@ pub use array::{
     ValidityNullCount, ValiditySource, ValidityView,
 };
 pub use ffi::{
-    prepare_array_refs, prepare_arrays, prepare_dyn_arrays, prepare_record_batch,
-    prepare_validity_mut, FfiArray, FfiBuffer, FfiError, FfiValidity, FfiValidityMut,
-    PreparedFfiBatch, PreparedFfiValidityMut,
+    FfiArray, FfiBuffer, FfiError, FfiValidity, FfiValidityMut, PreparedFfiBatch,
+    PreparedFfiValidityMut, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
+    prepare_record_batch, prepare_validity_mut,
 };
 // `ffi_mut` now holds only the standalone `ValidityView` write ops (re-exported
 // from `array`); the host output path moved to the consumer.

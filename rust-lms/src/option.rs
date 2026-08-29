@@ -68,9 +68,11 @@ impl<T: Copy> COption<T> {
     /// # Safety
     /// Caller must ensure this is a Some variant.
     pub unsafe fn unwrap_unchecked(self) -> T {
-        match self {
-            COption::Some(v) => v,
-            COption::None => std::hint::unreachable_unchecked(),
+        unsafe {
+            match self {
+                COption::Some(v) => v,
+                COption::None => std::hint::unreachable_unchecked(),
+            }
         }
     }
 }

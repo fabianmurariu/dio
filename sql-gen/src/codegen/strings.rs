@@ -31,9 +31,26 @@ pub(crate) fn resolve(
     }
 }
 
-fn resolved_bytes(ptr: Var<SPtr<u8>>, len: Var<u64>) -> impl Staged<Out = RawSlice<u8>> + Copy {
-    // SAFETY: every `StrVal` owner retains the resolved allocation for the
-    // kernel call, and `len` is the byte length reported by that same value.
+/// A resolved string's bytes, for an extern declared with `FatSlice<u8>`.
+/// The one place `sql-gen` builds a byte descriptor from a resolved string.
+///
+/// Stays **raw**, unlike `batch_from_descs` which promotes. The reason is the
+/// call path, not the strength of the contract: the *safe* `call_externN` takes
+/// `IntoExternArg`, which demands the extern's exact staged argument type — for
+/// a `FatSlice<u8>` parameter that is `RawSlice<u8>`. Only
+/// `call_externN_unchecked` accepts the `UncheckedExternArg` representation
+/// witness that would let a trusted slice through. Promoting here would force
+/// every call site onto the unchecked path for no gain.
+///
+/// # Safety
+///
+/// The `StrVal` owner must retain the resolved allocation for the kernel call,
+/// and `len` must be the byte length reported by that same value.
+pub(crate) unsafe fn resolved_bytes(
+    ptr: Var<SPtr<u8>>,
+    len: Var<u64>,
+) -> impl Staged<Out = RawSlice<u8>> + Copy {
+    // SAFETY: forwarded from this function's own contract.
     unsafe { slice_from_raw_parts::<u8, _, _>(ptr, len) }
 }
 
@@ -83,8 +100,10 @@ pub(crate) fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Va
                     let (bp, bl) = resolve(ctx, r, str_ptr);
                     let eq = ctx.bind(call_extern2(
                         bytes_eq,
-                        resolved_bytes(ap, al),
-                        resolved_bytes(bp, bl),
+                        // SAFETY: both owners retain their resolved allocations
+                        // for this call, with the lengths they reported.
+                        unsafe { resolved_bytes(ap, al) },
+                        unsafe { resolved_bytes(bp, bl) },
                     ));
                     ctx.store(result, eq);
                 });
@@ -97,8 +116,9 @@ pub(crate) fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Va
             let (bp, bl) = resolve(ctx, r, str_ptr);
             ctx.bind(call_extern2(
                 bytes_eq,
-                resolved_bytes(ap, al),
-                resolved_bytes(bp, bl),
+                // SAFETY: as above — owners live, lengths theirs.
+                unsafe { resolved_bytes(ap, al) },
+                unsafe { resolved_bytes(bp, bl) },
             ))
         }
     }

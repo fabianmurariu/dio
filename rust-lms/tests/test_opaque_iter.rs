@@ -26,14 +26,14 @@ type NodeIter = std::vec::IntoIter<u64>;
 
 /// Producer: a fresh owned iterator over the node ids, boxed to a thin handle.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graph_iter_nodes(g: &Graph) -> *mut () {
     let it: Box<NodeIter> = Box::new(g.nodes.clone().into_iter());
     Box::into_raw(it) as *mut ()
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graph_iter_slices(g: &SliceGraph) -> *mut () {
     let rows = g
         .rows
@@ -46,29 +46,33 @@ pub extern "C" fn graph_iter_slices(g: &SliceGraph) -> *mut () {
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn graph_nodes_next(it: *mut ()) -> COption<u64> {
-    (*(it as *mut NodeIter)).next().into()
+    unsafe { (*(it as *mut NodeIter)).next().into() }
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn graph_nodes_next_value(it: *mut ()) -> u64 {
-    (*(it as *mut NodeIter))
-        .next()
-        .expect("next_value past len")
+    unsafe {
+        (*(it as *mut NodeIter))
+            .next()
+            .expect("next_value past len")
+    }
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn graph_nodes_len(it: *mut ()) -> u64 {
-    (*(it as *mut NodeIter)).len() as u64
+    unsafe { (*(it as *mut NodeIter)).len() as u64 }
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn graph_nodes_drop(it: *mut ()) {
-    drop(Box::from_raw(it as *mut NodeIter));
+    unsafe {
+        drop(Box::from_raw(it as *mut NodeIter));
+    }
 }
 
 /// The kind: bundles next/drop (and len/next_value for the ExactSize path).

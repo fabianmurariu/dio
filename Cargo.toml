@@ -4,7 +4,11 @@ members = ["rust-lms", "rust-lms-derive", "rust-lms-std", "arrow-lms", "sql-gen"
 # melior, which needs a system LLVM/MLIR 22 install, so it is kept OUT of the default
 # workspace build — build it explicitly, see mlir-spike/README.md.
 exclude = ["mlir-spike"]
-resolver = "2"
+resolver = "3"
+
+[workspace.package]
+version = "0.1.0"
+edition = "2024"
 
 [workspace.dependencies]
 rust-lms = { path = "rust-lms" }
