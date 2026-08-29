@@ -136,8 +136,8 @@ pub mod prelude {
     pub use crate::slice::{
         slice_get_ptr_unchecked, AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, MutSliceType,
         RawSliceOps, RawSliceType, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice,
-        SliceGetOr, SliceGetPtrUnchecked, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet,
-        SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
+        SliceGetOr, SliceGetPtrUnchecked, SliceGetRange, SliceLen, SliceMutOps, SliceOps,
+        SliceRepr, SliceSet, SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{
         assign, unit, Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged,

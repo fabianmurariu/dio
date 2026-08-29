@@ -46,9 +46,11 @@
 //! ```
 
 use crate::ffi::{RawSlice, RawSliceMut};
+use crate::func::Ctx;
 use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, VarUse};
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
+use crate::staged_opt::StagedOpt;
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -1030,6 +1032,35 @@ where
         }
     }
 
+    /// Derive a sub-slice over `[start, end)` **with bounds checking**,
+    /// yielding a [`StagedOpt`]: `Some` when `start <= end && end <= len`,
+    /// otherwise `None`.
+    ///
+    /// Safe, and available on every origin — checking bounds and adjusting a
+    /// `(ptr, len)` pair dereferences nothing, so a raw descriptor gets a
+    /// checked *raw* sub-slice just as a trusted slice gets a trusted one.
+    ///
+    /// Takes two arguments rather than a `start..end` range: `Range<Idx>` has a
+    /// single index type, so the common mixed form — a literal start with a
+    /// staged end, `0u64 .. len` — is a type error at the `..` itself. That is
+    /// 5 of the 25 sub-slice call sites in this workspace, and they are the
+    /// dynamic ones.
+    fn get_range<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceGetRange<Self, START::Staged, END::Staged>
+    where
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
+    {
+        SliceGetRange {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
+    }
+
     /// Derive a sub-slice over `[start, end)`.
     ///
     /// Closed under capability *and* provenance: the result reports
@@ -1074,6 +1105,65 @@ where
     S: Staged + Sized,
     S::Out: SliceType,
 {
+}
+
+/// A **checked** sub-slice: `Some(slice[start..end])` when
+/// `start <= end && end <= len`, otherwise `None`.
+///
+/// A [`StagedOpt`], not a [`Staged`] value — it never materializes a
+/// discriminant. The bounds test lowers to one branchless `select`, and the
+/// sub-slice is only built on the taken arm.
+///
+/// The slice expression is used *twice* (once for `len`, once for the
+/// sub-slice), which a unique origin cannot supply by cloning. It is therefore
+/// bound to a variable once and reborrowed — the same bind-once-and-reborrow
+/// idiom a generic slice helper needs, which is what lets this serve every
+/// capability rather than only shared ones.
+pub struct SliceGetRange<S, START, END> {
+    slice: S,
+    start: START,
+    end: END,
+}
+
+impl<S, START, END> StagedOpt for SliceGetRange<S, START, END>
+where
+    S: Staged + 'static,
+    S::Out: SliceType + 'static,
+    START: Staged<Out = u64> + 'static,
+    END: Staged<Out = u64> + 'static,
+{
+    type Item = S::Out;
+
+    fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
+    where
+        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
+        N: FnOnce(&mut Ctx) + 'static,
+    {
+        let mut slice = ctx.bind(self.slice);
+        let start = ctx.bind(self.start);
+        let end = ctx.bind(self.end);
+        let len = ctx.bind(slice.reborrow().len());
+
+        // `start <= end && end <= len`, branchless: there is no `le`/`and`, so
+        // read it as "if start > end then false, else end <= len".
+        let in_range = ctx.bind(crate::num::select(
+            crate::num::gt(start, end),
+            false,
+            crate::control::not(crate::num::gt(end, len)),
+        ));
+
+        // SAFETY: only codegen'd on the arm where `in_range` proved
+        // `start <= end <= len`.
+        let sub = unsafe { slice.subslice_unchecked(start, end) };
+        ctx.if_then_else(
+            in_range,
+            move |ctx| {
+                let bound = ctx.bind(sub);
+                on_some(ctx, bound);
+            },
+            on_none,
+        );
+    }
 }
 
 /// Operations licensed by **established provenance** — the two safe,

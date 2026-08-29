@@ -311,11 +311,41 @@ that rule in the consolidated API:
 | raw shared | raw shared |
 | raw mutable | raw mutable without duplicating uniqueness |
 
-Add two range operations:
+Two range operations, **both taking `(start, end)` rather than a range**:
 
-1. `get_range(start..end)` returns a staged optional slice and performs
-   `start <= end && end <= len` checks.
-2. `subslice_unchecked(start..end)` remains the proof-carrying fast path.
+1. `get_range(start, end)` returns a [`StagedOpt`] slice, `Some` when
+   `start <= end && end <= len`.
+2. `subslice_unchecked(start, end)` remains the proof-carrying fast path.
+
+**Range syntax was checked and rejected.** The naming pass said to adopt
+`start..end` "after checking inference ergonomics"; the check fails.
+`std::ops::Range<Idx>` has a *single* index type, so the common mixed form —
+a literal start with a staged end — is a type error at the `..` itself:
+
+```text
+error[E0308]: mismatched types
+  let _r = 0u64..len;      // len: Var<u64>
+                  ^^^ expected `u64`, found `Var<u64>`
+```
+
+That is 5 of the 25 sub-slice call sites in this workspace, and they are the
+dynamic ones (`0u64, len`, `1u64, a.len()`, …). Two arguments accept mixed
+`IntoStaged<u64>` types; a range cannot. Consolidation is therefore in the
+*vocabulary*, achieved in row 4 (`slice_unchecked`/`slice_mut_unchecked` ->
+one `subslice_unchecked`), with `get_range` sharing its argument shape.
+
+`get_range` is **safe and lives on `SliceOps`**, not on the trusted traits:
+bounds-checking and adjusting a `(ptr, len)` pair dereferences nothing, so a raw
+descriptor gets a checked *raw* sub-slice exactly as a trusted slice gets a
+trusted one. The bounds test lowers to one branchless `select` (there is no
+`le`/`and` op, so it reads as "if `start > end` then false, else `end <= len`"),
+and the sub-slice is only built on the taken arm.
+
+Implementation note: the slice expression is needed twice (once for `len`, once
+for the sub-slice), which a unique origin cannot supply by cloning. `get_range`
+therefore binds once and reborrows — the same idiom row 5 found for generic
+helpers — which is what lets one implementation serve every capability instead
+of only shared ones.
 
 A Rust-indexing-style trapping operation can be added only after the project
 defines one backend-independent trap/runtime-failure contract. Clamping is not
@@ -593,7 +623,7 @@ row begins.
 | 6 | Raw/FFI descriptor boundary | ~~Rename markers, add constructors, consolidate witnesses, add promotion~~ **DONE 2026-08-28.** `FatSliceType`/`FatSliceMutType` -> `RawSlice`/`RawSliceMut`; four dead `Ffi*` aliases deleted; one raw-parts node now serves both `slice_from_raw_parts` and the new `slice_from_raw_parts_mut`; every descriptor conversion yields **raw** with trust arriving only via `RawSliceOps::assume_shared`/`assume_unique`; G6a closed. | Lets FFI-returned and descriptor-backed slices join the common API without laundering raw pointers into safe references. | **Met.** Two `compile_fail` doctests prove a raw value reaches no safe accessor before promotion and that a shared raw cannot promote to a unique view. |
 | 7 | `SVec` unique capability | ~~Remove `Copy`, `&mut self` mutation, add a tracker~~ **DONE 2026-08-28.** `SVec<T>` is neither `Copy` nor `Clone`; `push`/`set` take `&mut self`; `as_slice`/`as_mut_slice` return lifetime-carrying views, so ordinary Rust borrows enforce the discipline; `from_raw_unchecked` stays as the one documented escape hatch. No dynamic tracker — see the §3 revision. | Creates the owner whose borrows prevent generated reallocation. | **Met, and exceeded:** the three alias violations are *compile* errors (`compile_fail` doctests) rather than panics; `view_released_then_grow` (S6) passes; sql-gen 113/113 green. |
 | 8 | `SVec` shared and mutable views | ~~Add the `Deref` guards~~ **DONE 2026-08-28.** `SVecSlice<'a,T>`/`SVecSliceMut<'a,T>` deref to `Copy`, lifetime-free, reloading `SVecSliceExpr<T>`/`SVecSliceExprMut<T>` whose `Out` is `SRef<Slice<T>>`/`SRefMut<Slice<T>>`. Built by composing row 6's `slice_from_raw_parts_mut` + `assume_shared`/`assume_unique`. `rust-lms-std` gained an `llvm` feature and a `for_each_backend` harness. | Makes growable output storage readable/writable through the same API as function parameters. | **Met.** One generic helper drives a parameter slice and an `SVec` view unchanged; `view_released_then_grow` passes; all 9 SVec tests run on both backends. |
-| 9 | Closed and checked sub-slicing | Consolidate range syntax, preserve capability/lifetime for every origin, and add `get_range`; keep a clearly unsafe unchecked primitive. | Makes "a slice of a slice is a slice" true across the entire public API. | Source-by-result compile assertions and runtime range tests pass for every origin/capability. |
+| 9 | Closed and checked sub-slicing | ~~Consolidate range syntax, add `get_range`~~ **DONE 2026-08-29.** `get_range(start, end)` yields a `StagedOpt` (D4), safe and available on every origin; `subslice_unchecked` stays the proof-carrying primitive. Range syntax **rejected on the ergonomics check the doc asked for** — see below. | Makes "a slice of a slice is a slice" true across the entire public API. | **Met.** `SliceGetRange::Item = S::Out` asserted; range tests cover shared/unique/raw origins, nesting, and writing through a checked sub-slice. |
 | 10 | Slice iteration adapter | Generalize `SliceIter`/`IndexedSource` from `SRef<Slice<T>>` to the trusted slice capability. **Scope settled by §3:** no `'stage` parameter on the iterator traits; their `'static` bounds stay. Do not redesign opaque iterators. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | Parameter, `SVec`, promoted FFI, and sub-slices all run the same iterator tests. |
 | 11 | Downstream migration | Migrate `arrow-lms`, `sql-gen`, pools, string byte views, and benchmarks; isolate unsafe FFI promotion at descriptor construction boundaries. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | Workspace tests pass with both backends; downstream code no longer chooses operations by slice origin. |
 | 12 | Compatibility removal and documentation | Deprecate then remove redundant wrappers/traits, update the prelude and examples, and document the final safety contracts. | Leaves an open-source API that is explainable without knowing its refactor history. | No internal use of deprecated APIs; rustdoc, compile-fail docs, Clippy, and the full workspace are green. |

@@ -97,6 +97,20 @@ where
     out_is::<SliceSliceUnchecked<S, START, END>, S::Out>();
 }
 
+/// The checked variant is closed the same way: `SliceGetRange::Item = S::Out`,
+/// so `get_range` on a raw descriptor yields a raw sub-slice and on a `&mut [T]`
+/// yields a writable one. Capability *and* provenance survive the bounds check.
+fn _checked_sub_slicing_is_closed<S, START, END>()
+where
+    S: Staged + 'static,
+    S::Out: SliceType + 'static,
+    START: Staged<Out = u64> + 'static,
+    END: Staged<Out = u64> + 'static,
+{
+    fn item_is<A: StagedOpt<Item = I>, I>() {}
+    item_is::<SliceGetRange<S, START, END>, S::Out>();
+}
+
 #[test]
 fn taxonomy_assertions_hold() {
     // The assertions above are compile-time; reaching this line means rustc

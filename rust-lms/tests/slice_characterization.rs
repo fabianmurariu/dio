@@ -560,3 +560,138 @@ fn mutable_promotion_reaches_the_write_surface() {
         assert_eq!(data, [99i64, 2, 3]);
     });
 }
+
+// =============================================================================
+// Checked sub-slicing — refactor plan row 9
+// =============================================================================
+//
+// `get_range` is the safe counterpart to `subslice_unchecked`: it yields a
+// `StagedOpt`, `Some` when `start <= end && end <= len`. Both take `(start,
+// end)` rather than a `start..end` range — `Range<Idx>` has a single index
+// type, so the common mixed form `0u64 .. len` (literal start, staged end) is a
+// type error at the `..`, and that is the dynamic third of the call sites.
+//
+// The result preserves its source's capability *and* provenance, because
+// `SliceGetRange::Item = S::Out` — asserted in `slice_taxonomy.rs`.
+
+/// Report the length of a checked sub-slice, or `-1` when the range is invalid.
+/// Written once and reused by the per-origin tests below.
+macro_rules! range_probe {
+    ($compiler:expr, $name:literal, $param:ty) => {
+        $compiler.fun3($name, |ctx, a: Var<$param>, s: Var<u64>, e: Var<u64>| {
+            let out = ctx.var(-1i64);
+            a.get_range(s, e).eliminate(
+                ctx,
+                move |ctx, sub| {
+                    ctx.store(out, int_cast::<i64, u64, _>(sub.len()));
+                },
+                move |ctx| ctx.store(out, -1i64),
+            );
+            out
+        })
+    };
+}
+
+/// Trusted shared origin: in range, empty range, and both ways of being out of
+/// range.
+#[test]
+fn get_range_on_a_shared_parameter() {
+    for_each_backend(|mut compiler| {
+        let f = range_probe!(compiler, "shared", SRef<Slice<i64>>);
+        let c = compiler.compile(f).unwrap();
+        let data = [10i64, 20, 30, 40];
+        assert_eq!(c.call(&data, 1, 3), 2, "in range");
+        assert_eq!(c.call(&data, 2, 2), 0, "empty range is valid");
+        assert_eq!(c.call(&data, 0, 4), 4, "full range is valid");
+        assert_eq!(c.call(&data, 3, 1), -1, "start > end");
+        assert_eq!(c.call(&data, 0, 5), -1, "end > len");
+        assert_eq!(c.call(&data, 5, 9), -1, "wholly past the end");
+    });
+}
+
+/// Trusted unique origin. The slice expression is needed twice (`len`, then the
+/// sub-slice) and a unique origin cannot clone, so this only works because
+/// `get_range` binds once and reborrows.
+#[test]
+fn get_range_on_a_mutable_parameter() {
+    for_each_backend(|mut compiler| {
+        let f = range_probe!(compiler, "unique", SRefMut<Slice<i64>>);
+        let c = compiler.compile(f).unwrap();
+        let mut data = [10i64, 20, 30, 40];
+        assert_eq!(c.call(&mut data, 1, 3), 2);
+        assert_eq!(c.call(&mut data, 3, 1), -1);
+        assert_eq!(c.call(&mut data, 0, 5), -1);
+    });
+}
+
+/// Raw origin: checked sub-slicing needs no provenance, so it is available
+/// before promotion — and the result is still raw.
+#[test]
+fn get_range_on_a_raw_descriptor() {
+    for_each_backend(|mut compiler| {
+        let f = range_probe!(compiler, "raw", RawSlice<i64>);
+        let c = compiler.compile(f).unwrap();
+        let data = [10i64, 20, 30, 40];
+        let fat = FatSlice::from_slice(&data);
+        assert_eq!(c.as_fn().call(fat, 1, 3), 2);
+        assert_eq!(c.as_fn().call(fat, 3, 1), -1);
+        assert_eq!(c.as_fn().call(fat, 0, 5), -1);
+    });
+}
+
+/// A checked sub-slice of a *unique* origin is still unique, so it reaches the
+/// writing ops — capability survives the round trip.
+#[test]
+fn checked_subslice_of_a_unique_origin_can_be_written() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("w", |ctx, a: Var<SRefMut<Slice<i64>>>| {
+            let wrote = ctx.var(0i64);
+            a.get_range(1u64, 3u64).eliminate(
+                ctx,
+                move |ctx, mut sub| {
+                    // SAFETY: `get_range` proved the sub-slice has two elements.
+                    ctx.emit(unsafe { sub.reborrow().set_unchecked(0u64, 99i64) });
+                    ctx.store(wrote, 1i64);
+                },
+                move |ctx| ctx.store(wrote, 0i64),
+            );
+            wrote
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [1i64, 2, 3, 4];
+        assert_eq!(c.call(&mut data), 1);
+        assert_eq!(
+            data,
+            [1i64, 99, 3, 4],
+            "wrote through the checked sub-slice"
+        );
+    });
+}
+
+/// Nested: a checked sub-slice of a checked sub-slice, still closed.
+#[test]
+fn checked_subslices_nest() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("n", |ctx, a: Var<SRef<Slice<i64>>>| {
+            let out = ctx.var(-1i64);
+            a.get_range(1u64, 6u64).eliminate(
+                ctx,
+                move |ctx, outer| {
+                    outer.get_range(1u64, 3u64).eliminate(
+                        ctx,
+                        move |ctx, inner| {
+                            // SAFETY: the inner range proved two elements.
+                            ctx.store(out, unsafe { inner.get_unchecked(0u64) });
+                        },
+                        move |ctx| ctx.store(out, -2i64),
+                    );
+                },
+                move |ctx| ctx.store(out, -1i64),
+            );
+            out
+        });
+        let c = compiler.compile(f).unwrap();
+        // a[1..6) = [10,20,30,40,50]; its [1..3) = [20,30]; first is 20
+        assert_eq!(c.call(&[0i64, 10, 20, 30, 40, 50, 60]), 20);
+    });
+}
