@@ -1,31 +1,63 @@
 //! Iterator over slice elements.
+//!
+//! Keyed on the *capability* ([`TrustedSliceType`]), not on one particular
+//! marker, so iteration is an operation of a slice rather than an accident of
+//! how the slice was obtained. A function parameter, a sub-slice, an `SVec`
+//! view, and a promoted FFI descriptor all drive the same iterator.
+//!
+//! A raw descriptor deliberately does *not* iterate: it is not
+//! `TrustedSliceType`, so nothing has vouched for the memory the loop would
+//! read. Promote it with `assume_shared` first.
 
 use std::marker::PhantomData;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
-use crate::refer::SRef;
-use crate::slice::{Slice, SliceGetUnchecked, SliceLen, SliceOps};
-use crate::staged::Var;
+use crate::slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType};
+use crate::staged::{Staged, Var};
 use crate::types::{ConstantType, CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
 
-/// Iterator over elements of a staged slice reference.
-#[derive(Clone)]
-pub struct SliceIter<T, S>
-where
-    T: StagedType,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>>,
-{
+/// Iterator over the elements of any trusted staged slice.
+///
+/// A raw descriptor cannot be iterated — it is not [`TrustedSliceType`], so
+/// nothing has vouched for the memory the loop would read:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn raw_cannot_iterate(d: Var<RawSlice<i64>>, ctx: &mut Ctx) {
+///     let _ = d.staged_iter().sum(ctx);
+/// }
+/// ```
+///
+/// Promote it first, and it iterates like any other slice:
+///
+/// ```ignore
+/// unsafe { d.assume_shared() }.staged_iter().sum(ctx)
+/// ```
+pub struct SliceIter<T, S> {
     pub(crate) slice: S,
     _phantom: PhantomData<T>,
 }
 
+// Hand-written so the derive does not demand `T: Clone` — `T` is a staged
+// *marker*, not a runtime value.
+impl<T, S: Clone> Clone for SliceIter<T, S> {
+    fn clone(&self) -> Self {
+        SliceIter {
+            slice: self.slice.clone(),
+            _phantom: PhantomData,
+        }
+    }
+}
+
 impl<T, S> SliceIter<T, S>
 where
-    T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
+    T: StagedType,
+    S: Staged,
+    S::Out: TrustedSliceType<Elem = T>,
 {
     pub fn new(slice: S) -> Self {
         SliceIter {
@@ -38,34 +70,49 @@ where
 impl<T, S> StagedIterator for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
+    S: Staged + 'static,
+    S::Out: TrustedSliceType<Elem = T> + 'static,
     T::RuntimeValue: Default,
 {
     type Item = T;
 
+    /// Binds the slice once and reborrows per use rather than requiring
+    /// `S: Clone`. A unique slice expression is deliberately not `Clone` — that
+    /// *is* its uniqueness guarantee — so a `Clone` bound here would silently
+    /// restrict iteration to shared origins.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
         F: FnOnce(&mut Ctx, Var<T>) + 'static,
     {
+        let mut slice = ctx.bind(self.slice);
+        // Hoisted: the length is loop-invariant (a view's borrow forbids growth
+        // while it is live), so this reads the descriptor once instead of once
+        // per iteration.
+        let n = ctx.bind(slice.reborrow().len());
         let i = ctx.var(0u64);
-        let slice = self.slice;
 
-        ctx.while_loop(lt(i, slice.clone().len()), move |ctx| {
+        ctx.while_loop(lt(i, n), move |ctx| {
             // Bind the element *inside* the loop: no dead pre-loop init, and the
             // frontend resolves this single-def var to the loaded value with no
             // copy — so the emitted body matches a hand-written `while_loop`.
-            // SAFETY: the loop condition proves `i < slice.len()`.
-            let elem = ctx.bind(unsafe { SliceOps::get_unchecked(slice.clone(), i) });
+            // SAFETY: the loop condition proves `i < len`.
+            let elem = ctx.bind(unsafe { slice.reborrow().get_unchecked(i) });
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
         });
     }
 }
 
+// The indexed paths (`zip`, and anything needing the length without consuming
+// the source) do keep `S: Clone`: `IndexedSource` takes `&self` and its
+// supertrait requires `Clone`, so a unique origin cannot participate. Shared
+// origins — which is every origin `zip` is used with — are unaffected.
+
 impl<T, S> IndexedStagedIterator for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
+    S: Staged + Clone + 'static,
+    S::Out: TrustedSliceType<Elem = T> + 'static,
     T::RuntimeValue: Default,
 {
     type LenExpr = SliceLen<S>;
@@ -78,7 +125,8 @@ where
 impl<T, S> IndexedSource for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
+    S: Staged + Clone + 'static,
+    S::Out: TrustedSliceType<Elem = T> + 'static,
     T::RuntimeValue: Default,
 {
     type Item = T;
@@ -96,12 +144,16 @@ where
 }
 
 // =============================================================================
-// IndexedSource for Slice Variable references (secondary source in zip)
+// IndexedSource for slice variables (secondary source in zip)
 // =============================================================================
 
-impl<T> IndexedSource for Var<SRef<Slice<T>>>
+/// Any `Copy` trusted slice variable is a random-access source. `CopyType`
+/// bounds it to shared slices, which is what `IndexedSource: Clone` requires
+/// anyway.
+impl<T, R> IndexedSource for Var<R>
 where
     T: StagedType + CopyType + ConstantType + 'static,
+    R: TrustedSliceType<Elem = T> + CopyType + 'static,
 {
     type Item = T;
     type LenExpr = SliceLen<Self>;
@@ -121,10 +173,13 @@ where
 // IntoStagedIterator
 // =============================================================================
 
+/// Every trusted slice expression iterates — no `Clone` required, so a unique
+/// slice works as well as a shared one.
 impl<T, S> IntoStagedIterator for S
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: crate::staged::Staged<Out = SRef<Slice<T>>> + Clone + 'static,
+    S: Staged + 'static,
+    S::Out: TrustedSliceType<Elem = T> + 'static,
     T::RuntimeValue: Default,
 {
     type Iter = SliceIter<T, S>;

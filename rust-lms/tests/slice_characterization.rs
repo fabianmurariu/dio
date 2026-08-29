@@ -13,9 +13,12 @@
 //! | descriptor field (`SliceRepr`)       | OK | OK  | OK | OK | OK | OK          | OK |
 //!
 //! Legend — `OK`: characterized by a test below. `n/a`: not meaningful for that
-//! origin. `Gn`: **not expressible today**, closed by plan row *n*. The `OK`
-//! cells are behaviour the refactor must preserve; the `Gn` cells are the
-//! checklist of what it must make possible.
+//! origin (a raw descriptor does not iterate by design: nothing has vouched for
+//! the memory, so it must be promoted first).
+//!
+//! **All three gaps the matrix originally surfaced are now closed** — G6a and
+//! G6b in row 6, G10 in row 10. They are recorded below because the reason each
+//! existed is worth keeping.
 //!
 //! ## Gaps found while building this matrix
 //!
@@ -32,8 +35,12 @@
 //!   `SliceOps`, so it now reaches them. `mut write` reads `n/a` for both raw
 //!   rows because writing through a raw descriptor requires an explicit
 //!   promotion to a trusted slice rather than the slice write API (row 6).
-//! * **G10** — `SliceIter` is bound to `SRef<Slice<T>>`, so neither a mutable
-//!   parameter nor a raw descriptor can be iterated.
+//! * **G10 — CLOSED (row 10).** `SliceIter` was bound to `SRef<Slice<T>>`, so a
+//!   mutable parameter could not be iterated. Row 10 keyed it on
+//!   `TrustedSliceType` instead — but the bound alone was not enough: `for_each`
+//!   required `S: Clone`, and a unique slice expression deliberately is not
+//!   `Clone`. It now binds once and reborrows, which also hoists the length out
+//!   of the loop. Raw descriptors still do not iterate, by design.
 
 use rust_lms::prelude::*;
 
@@ -693,5 +700,89 @@ fn checked_subslices_nest() {
         let c = compiler.compile(f).unwrap();
         // a[1..6) = [10,20,30,40,50]; its [1..3) = [20,30]; first is 20
         assert_eq!(c.call(&[0i64, 10, 20, 30, 40, 50, 60]), 20);
+    });
+}
+
+// =============================================================================
+// Iteration is an operation of a slice — refactor plan row 10
+// =============================================================================
+//
+// `SliceIter` is keyed on `TrustedSliceType`, so every trusted origin drives the
+// same iterator. A *raw* descriptor deliberately does not iterate — it is not
+// trusted, and nothing has vouched for the memory the loop would read; that
+// negative is a `compile_fail` doctest on `SliceIter`.
+
+/// **G10 closed.** A mutable parameter iterates. This needs more than a relaxed
+/// bound: a unique slice expression is not `Clone`, so `for_each` had to bind
+/// once and reborrow rather than clone per use.
+#[test]
+fn mutable_parameter_iterates() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("mi", |ctx, a: Var<SRefMut<Slice<i64>>>| {
+            a.staged_iter().sum(ctx)
+        });
+        let c = compiler.compile(f).unwrap();
+        let mut data = [1i64, 2, 3, 4];
+        assert_eq!(c.call(&mut data), 10);
+    });
+}
+
+/// **G10 closed.** A promoted FFI descriptor iterates — after `assume_shared`,
+/// it is an ordinary trusted slice and nothing else changes.
+#[test]
+fn promoted_raw_descriptor_iterates() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("pi", |ctx, d: Var<RawSlice<i64>>| {
+            // SAFETY: the test owns the buffer and keeps it alive and unmutated.
+            unsafe { d.assume_shared() }.staged_iter().sum(ctx)
+        });
+        let c = compiler.compile(f).unwrap();
+        let data = [5i64, 6, 7];
+        assert_eq!(c.as_fn().call(FatSlice::from_slice(&data)), 18);
+    });
+}
+
+/// A sub-slice iterates, and so does a sub-slice of a *mutable* parent — the
+/// capability survives both the sub-slicing and the iteration.
+#[test]
+fn sub_slices_iterate() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "si",
+            |ctx, a: Var<SRef<Slice<i64>>>, m: Var<SRefMut<Slice<i64>>>| {
+                // SAFETY: the test passes at least four elements to each.
+                let shared_sub = ctx.bind(unsafe { a.subslice_unchecked(1u64, 3u64) });
+                let unique_sub = ctx.bind(unsafe { m.subslice_unchecked(0u64, 2u64) });
+                let x = shared_sub.staged_iter().sum(ctx);
+                let y = unique_sub.staged_iter().sum(ctx);
+                add(x, y)
+            },
+        );
+        let c = compiler.compile(f).unwrap();
+        let mut mdata = [100i64, 200, 300, 400];
+        // shared [20,30] = 50, unique [100,200] = 300
+        assert_eq!(c.call(&[10i64, 20, 30, 40], &mut mdata), 350);
+    });
+}
+
+/// A checked sub-slice iterates too: `get_range` hands back the same trusted
+/// capability, so the `Some` arm is an ordinary iterable slice.
+#[test]
+fn checked_sub_slices_iterate() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("ci", |ctx, a: Var<SRef<Slice<i64>>>| {
+            let out = ctx.var(-1i64);
+            a.get_range(1u64, 4u64).eliminate(
+                ctx,
+                move |ctx, sub| {
+                    let s = sub.staged_iter().sum(ctx);
+                    ctx.store(out, s);
+                },
+                move |ctx| ctx.store(out, -1i64),
+            );
+            out
+        });
+        let c = compiler.compile(f).unwrap();
+        assert_eq!(c.call(&[10i64, 20, 30, 40, 50]), 90); // 20+30+40
     });
 }

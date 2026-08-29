@@ -624,7 +624,7 @@ row begins.
 | 7 | `SVec` unique capability | ~~Remove `Copy`, `&mut self` mutation, add a tracker~~ **DONE 2026-08-28.** `SVec<T>` is neither `Copy` nor `Clone`; `push`/`set` take `&mut self`; `as_slice`/`as_mut_slice` return lifetime-carrying views, so ordinary Rust borrows enforce the discipline; `from_raw_unchecked` stays as the one documented escape hatch. No dynamic tracker — see the §3 revision. | Creates the owner whose borrows prevent generated reallocation. | **Met, and exceeded:** the three alias violations are *compile* errors (`compile_fail` doctests) rather than panics; `view_released_then_grow` (S6) passes; sql-gen 113/113 green. |
 | 8 | `SVec` shared and mutable views | ~~Add the `Deref` guards~~ **DONE 2026-08-28.** `SVecSlice<'a,T>`/`SVecSliceMut<'a,T>` deref to `Copy`, lifetime-free, reloading `SVecSliceExpr<T>`/`SVecSliceExprMut<T>` whose `Out` is `SRef<Slice<T>>`/`SRefMut<Slice<T>>`. Built by composing row 6's `slice_from_raw_parts_mut` + `assume_shared`/`assume_unique`. `rust-lms-std` gained an `llvm` feature and a `for_each_backend` harness. | Makes growable output storage readable/writable through the same API as function parameters. | **Met.** One generic helper drives a parameter slice and an `SVec` view unchanged; `view_released_then_grow` passes; all 9 SVec tests run on both backends. |
 | 9 | Closed and checked sub-slicing | ~~Consolidate range syntax, add `get_range`~~ **DONE 2026-08-29.** `get_range(start, end)` yields a `StagedOpt` (D4), safe and available on every origin; `subslice_unchecked` stays the proof-carrying primitive. Range syntax **rejected on the ergonomics check the doc asked for** — see below. | Makes "a slice of a slice is a slice" true across the entire public API. | **Met.** `SliceGetRange::Item = S::Out` asserted; range tests cover shared/unique/raw origins, nesting, and writing through a checked sub-slice. |
-| 10 | Slice iteration adapter | Generalize `SliceIter`/`IndexedSource` from `SRef<Slice<T>>` to the trusted slice capability. **Scope settled by §3:** no `'stage` parameter on the iterator traits; their `'static` bounds stay. Do not redesign opaque iterators. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | Parameter, `SVec`, promoted FFI, and sub-slices all run the same iterator tests. |
+| 10 | Slice iteration adapter | ~~Generalize `SliceIter`~~ **DONE 2026-08-29.** Keyed on `TrustedSliceType<Elem = T>`; `for_each` binds-once-and-reborrows instead of requiring `S: Clone`, which is what lets *unique* origins iterate. `IndexedSource` (zip) keeps `Clone`, so it stays shared-only. No `'stage` parameter; the `'static` bounds stay. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | **Met.** Mutable parameter, `SVec` view, promoted FFI, sub-slice and checked sub-slice all run the same iterator; raw stays non-iterable (`compile_fail`). **G10 closed — no gaps remain.** |
 | 11 | Downstream migration | Migrate `arrow-lms`, `sql-gen`, pools, string byte views, and benchmarks; isolate unsafe FFI promotion at descriptor construction boundaries. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | Workspace tests pass with both backends; downstream code no longer chooses operations by slice origin. |
 | 12 | Compatibility removal and documentation | Deprecate then remove redundant wrappers/traits, update the prelude and examples, and document the final safety contracts. | Leaves an open-source API that is explainable without knowing its refactor history. | No internal use of deprecated APIs; rustdoc, compile-fail docs, Clippy, and the full workspace are green. |
 
@@ -762,6 +762,31 @@ they are keyed on the *addressing form* of the receiver (`SRef<R>`,
 impls over distinct `Staged::Out` types even though the three are disjoint. The
 duplication the doc was actually pointing at — three different *notions of
 trust* — is gone: all three now produce raw and share one promotion.
+
+#### Iteration as built (row 10)
+
+`SliceIter` is keyed on the **capability** (`S::Out: TrustedSliceType<Elem = T>`)
+rather than on `SRef<Slice<T>>`, so a parameter, a sub-slice, a checked
+sub-slice, an `SVec` view and a promoted FFI descriptor all drive one iterator.
+
+Relaxing the bound was not enough on its own. `for_each` required `S: Clone`
+(it cloned the slice for the loop condition and again per element), and a unique
+slice expression deliberately is not `Clone` — so a mutable parameter would still
+not have iterated. It now uses the same **bind-once-and-reborrow** idiom rows 5
+and 9 needed, which as a side effect hoists the length out of the loop: one
+descriptor read instead of one per iteration.
+
+`IndexedSource`/`IndexedStagedIterator` (the `zip` path) keep `S: Clone` — the
+trait takes `&self` and its supertrait requires `Clone`, so unique origins cannot
+participate. Every origin `zip` is actually used with is shared, so nothing is
+lost. `IndexedSource` for slice *variables* generalized to any
+`R: TrustedSliceType + CopyType`, `CopyType` being exactly the shared-only
+restriction the supertrait already implies.
+
+Raw descriptors still do not iterate, by design: they are not
+`TrustedSliceType`, so nothing has vouched for the memory a loop would read.
+Promotion first, then iteration — a `compile_fail` doctest on `SliceIter` holds
+the line.
 
 #### Gaps the matrix surfaced
 

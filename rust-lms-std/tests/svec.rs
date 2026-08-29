@@ -314,3 +314,26 @@ fn view_expression_reloads_after_growth() {
         assert_eq!(host.len(), 8);
     });
 }
+
+/// **G10, `SVec` half.** A view iterates through exactly the same
+/// `staged_iter` a function parameter uses — no `SVec`-specific iterator.
+#[test]
+fn svec_view_iterates() {
+    for_each_backend(|mut compiler| {
+        let mut host = HostVec::<i64>::new();
+        let grow = compiler.extern_fn::<SvecGrowExtern>();
+        // SAFETY: `host` outlives compilation and the call below.
+        let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
+
+        let f = compiler.fun0("sum_view", |ctx| {
+            for k in 1..=5i64 {
+                let v = ctx.var(k);
+                svec.push(ctx, v);
+            }
+            let view = svec.as_slice();
+            (*view).staged_iter().sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        assert_eq!(compiled.call(), 15); // 1+2+3+4+5
+    });
+}
