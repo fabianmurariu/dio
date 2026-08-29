@@ -185,12 +185,10 @@ pub extern "C" fn svec_grow(v: &mut RawVec) {
 /// The borrow is an ordinary Rust one: holding this blocks growth through the
 /// owning handle until non-lexical lifetimes end it at the view's last use.
 ///
-/// The lifetime lives on the *view*, never on the staged expression it hands
-/// out. That separation is what makes this work at all: `Ctx` retains staged
-/// expressions under a `'static` bound, so a view that itself implemented
-/// `Staged` would have its borrow pinned to `'static` and could never be
-/// released. Row 8 gives this a `Deref` to a lifetime-free, reloading slice
-/// expression; for now it carries the length read the borrow licenses.
+/// The lifetime lives on the *view*, never on the staged expression it derefs
+/// to: `Ctx` retains staged expressions under a `'static` bound, so a view that
+/// itself implemented `Staged` would have its borrow pinned to `'static` and
+/// could never be released.
 pub struct SVecSlice<'a, T> {
     expr: SVecSliceExpr<T>,
     _borrow: PhantomData<&'a T>,
@@ -406,8 +404,6 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
 
     /// The buffer pointer, typed to `T` — reloaded from the control block so it
     /// reflects the latest growth. `*(ctrl.ptr) as *mut T`.
-    // `use<T>`: captures the element type but not `&self` — the returned
-    // expression holds a baked pointer, not a borrow.
     fn data(&self) -> impl Staged<Out = SMutPtr<T>> + Copy + use<T> {
         // SAFETY: guaranteed by `SVec::new`; `ptr` is a field of the live
         // control block and has the declared staged type.

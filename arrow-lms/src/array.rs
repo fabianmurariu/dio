@@ -43,7 +43,7 @@ where
     {
         PrimitiveArrayView {
             // SAFETY: forwarded from `ArrayBatchOps::primitive`'s caller.
-            array: unsafe { slice_get_ptr_unchecked(self, index as u64) },
+            array: unsafe { self.get_ptr_unchecked(index as u64) },
             _elem: PhantomData,
         }
     }

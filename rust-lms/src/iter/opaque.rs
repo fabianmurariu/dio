@@ -291,22 +291,6 @@ where
 {
 }
 
-/// Compatibility bound retaining the former scalar-only API name.
-#[deprecated(note = "use OpaqueIterItem; opaque iterators now support structured copy values")]
-pub trait RegisterScalar: OpaqueIterItem
-where
-    Self::RuntimeValue: Copy,
-{
-}
-
-#[allow(deprecated)]
-impl<T> RegisterScalar for T
-where
-    T: OpaqueIterItem,
-    T::RuntimeValue: Copy,
-{
-}
-
 /// RAII owner for a thin, double-boxed dynamic iterator handle.
 ///
 /// Dropping this value releases an iterator that was never transferred to

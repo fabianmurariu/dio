@@ -2,7 +2,7 @@
 //! [`scan_next`] extern until each table's stream is exhausted.
 //!
 //! One [`ScanStream`] per table owns a `Box<dyn Iterator<Item = RecordBatch>>` and
-//! the lifecycle of the single live batch: each [`next_batch`](ScanStream::next_batch)
+//! the lifecycle of the single live batch: each `next_batch`
 //! drops the previous `RecordBatch` (freeing its Arrow buffers) before pulling the
 //! next, so a scan over a huge table keeps only **one input batch resident** at a
 //! time. `next_batch` returns a pointer to a reused descriptor buffer (or null at

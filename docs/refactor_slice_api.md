@@ -626,7 +626,7 @@ row begins.
 | 9 | Closed and checked sub-slicing | ~~Consolidate range syntax, add `get_range`~~ **DONE 2026-08-29.** `get_range(start, end)` yields a `StagedOpt` (D4), safe and available on every origin; `subslice_unchecked` stays the proof-carrying primitive. Range syntax **rejected on the ergonomics check the doc asked for** — see below. | Makes "a slice of a slice is a slice" true across the entire public API. | **Met.** `SliceGetRange::Item = S::Out` asserted; range tests cover shared/unique/raw origins, nesting, and writing through a checked sub-slice. |
 | 10 | Slice iteration adapter | ~~Generalize `SliceIter`~~ **DONE 2026-08-29.** Keyed on `TrustedSliceType<Elem = T>`; `for_each` binds-once-and-reborrows instead of requiring `S: Clone`, which is what lets *unique* origins iterate. `IndexedSource` (zip) keeps `Clone`, so it stays shared-only. No `'stage` parameter; the `'static` bounds stay. | Ensures iteration is an operation of a slice rather than an accident of parameter type. | **Met.** Mutable parameter, `SVec` view, promoted FFI, sub-slice and checked sub-slice all run the same iterator; raw stays non-iterable (`compile_fail`). **G10 closed — no gaps remain.** |
 | 11 | Downstream migration | ~~Migrate downstream; isolate unsafe promotion~~ **DONE 2026-08-29.** `arrow-lms` promotes at the descriptor boundary (`values`/`bytes` now yield trusted slices); three duplicated batch-descriptor constructions folded into `batch_from_descs`; two duplicated byte-descriptor constructions folded into `resolved_bytes`; four inlined bitmap promotions folded into `bitmap_bytes`. | Proves the umbrella works outside `rust-lms` and reduces repeated raw-parts plumbing. | **Met.** 391 Cranelift / 410 LLVM; sql-gen 113/113, arrow-lms 10/10; audit below. |
-| 12 | Compatibility removal and documentation | Deprecate then remove redundant wrappers/traits, update the prelude and examples, and document the final safety contracts. | Leaves an open-source API that is explainable without knowing its refactor history. | No internal use of deprecated APIs; rustdoc, compile-fail docs, Clippy, and the full workspace are green. |
+| 12 | Compatibility removal and documentation | ~~Remove redundant wrappers/traits, update the prelude, document the contracts~~ **DONE 2026-08-29.** Deleted `RegisterScalar` (deprecated, zero users) and the three `#[allow(deprecated)]` sites it needed, the `VarBuilder` alias, and the free `slice_get_ptr_unchecked` (now a `SliceOps` method). Stripped refactor-history and stale claims from rustdoc. | Leaves an API explainable without knowing its refactor history. | **Met.** No deprecated APIs remain; rustdoc **0 warnings** (was 11); 391 Cranelift / 410 LLVM, 32 doctests, clippy `-D warnings` + `fmt` clean. |
 
 ## Detailed milestone guidance
 
@@ -987,6 +987,26 @@ tests alone cannot prove that aliasing or escape is impossible.
   pointer and `usize` are each eight bytes. The target contract must enforce
   x86_64/aarch64 rather than letting this slice refactor imply portability to
   other widths.
+
+## Row 12 notes
+
+Removed: `RegisterScalar` (a `#[deprecated]` compatibility bound with no users,
+which was keeping three `#[allow(deprecated)]` attributes alive), the
+`VarBuilder` type alias for `Ctx`, and the free `slice_get_ptr_unchecked` —
+folded into `SliceOps::get_ptr_unchecked` so every slice operation is reached the
+same way.
+
+Kept: `let_var`/`LetVar`. Its doc called it a back-compat shim, but it has 23 live
+call sites and serves the expression-tree authoring style, which is a supported
+style rather than a legacy one. The doc comment was the stale part, not the API.
+
+Documentation swept for claims that had gone stale as later rows landed — the op
+umbrella still said "there is no `RawSliceOps`" (row 6 added one) and described
+inherent `Var<SRefMut<_>>` methods that row 4 deleted; `ScalarType` still
+described the MLIR backend as future work and referenced a removed
+`cranelift_type`. Refactor-history references (row numbers, gap identifiers) were
+removed from `src` and left in the tests, where the characterization matrix is the
+point.
 
 ## Definition of done
 

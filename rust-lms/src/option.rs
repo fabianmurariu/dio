@@ -21,7 +21,7 @@
 //! - null (0) = None
 //! - non-null = Some(pointer)
 
-use crate::func::VarBuilder;
+use crate::func::Ctx;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var};
 use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
@@ -687,7 +687,7 @@ where
 
 /// Pattern match on a `COption`, binding the value in the Some branch.
 ///
-/// The `some_fn` closure receives a `VarBuilder` context and a `Var<T>` bound
+/// The `some_fn` closure receives a `Ctx` context and a `Var<T>` bound
 /// to the unwrapped value, similar to how `fun1` works.
 ///
 /// # Example
@@ -700,7 +700,7 @@ where
 /// );
 /// ```
 pub fn match_opt<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -709,16 +709,16 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = COptionType<T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<T>) -> SomeBody,
+    SomeFn: FnOnce(&mut Ctx, Var<T>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
     // Allocate variable for bound value
-    let bound_var: Var<T> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<T> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
 
     // Build the some_body by calling the closure
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOpt {
         opt,
@@ -793,7 +793,7 @@ where
 
 /// Pattern match on an `Option<&T>`.
 pub fn match_opt_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -802,13 +802,13 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptRefType<T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<SRef<T>>) -> SomeBody,
+    SomeFn: FnOnce(&mut Ctx, Var<SRef<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
-    let bound_var: Var<SRef<T>> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<SRef<T>> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOptRef {
         opt,
@@ -876,7 +876,7 @@ where
 
 /// Pattern match on an `Option<&mut T>`.
 pub fn match_opt_mut_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -885,13 +885,13 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptMutRefType<T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<SRefMut<T>>) -> SomeBody,
+    SomeFn: FnOnce(&mut Ctx, Var<SRefMut<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
-    let bound_var: Var<SRefMut<T>> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<SRefMut<T>> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOptMutRef {
         opt,

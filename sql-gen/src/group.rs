@@ -2,7 +2,7 @@
 //! indices, driven from the JIT kernel.
 //!
 //! The kernel keeps the *hot* aggregation loop: per input row it computes the
-//! group key, calls [`group_find_or_insert`] to get a group index, and JIT-folds each
+//! group key, calls `group_find_or_insert` to get a group index, and JIT-folds each
 //! accumulator into an output array slot at that index. This struct owns only the
 //! `key -> index` map; the accumulator storage and group-key column are ordinary
 //! JIT-written output arrays (sized to the row count, so indices never overflow).
@@ -347,7 +347,7 @@ fn group_next_index(state: &GroupState) -> Result<u32> {
 /// record's leading field (offset 0), so the kernel only folds aggregates. The
 /// returned pointer is valid until the next `group_upsert*` (which may grow and move
 /// the buffer) — the fold uses it immediately, so this holds. Returns null (with the
-/// error recorded) if the group count would exceed `u32` (see [`upsert_guard`]).
+/// error recorded) if the group count would exceed `u32` (see `upsert_guard`).
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn group_upsert(state: &mut GroupState, key: u64) -> *mut u8 {
@@ -364,7 +364,7 @@ pub extern "C" fn group_upsert(state: &mut GroupState, key: u64) -> *mut u8 {
 }
 
 /// Find-or-insert the **null-key** group and return its record pointer. The null key
-/// bypasses the hash table (see [`GroupState::null_gidx`]); it just gets a record slot
+/// bypasses the hash table (see `GroupState::null_gidx`); it just gets a record slot
 /// like any other group. No key is written — the emit path reads the record's
 /// key-valid cell to know it is null.
 #[extern_fn]

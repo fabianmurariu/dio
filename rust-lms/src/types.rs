@@ -16,10 +16,8 @@ use crate::staged::{CompilationContext, Value};
 
 /// Backend-neutral IR type representation.
 ///
-/// This is the abstraction a future non-Cranelift backend (LLVM/MLIR) selects its
-/// own type from — the source of truth that replaces raw `cranelift ... Type` in the
-/// staged type system. During Phase 0 it is derived from the existing
-/// [`StagedType::cranelift_type`]; later, `cranelift_type` becomes the derived one.
+/// The backend-neutral source of truth: each backend lowers it to its own IR
+/// type ([`ScalarType::to_cranelift`] for Cranelift, `scalar_to_mlir` for MLIR).
 ///
 /// Note `Bool` and `Ptr` are distinct from `I8`/`I64` even though both *currently*
 /// lower to the same Cranelift type: an MLIR backend needs `Bool`→`i1` at

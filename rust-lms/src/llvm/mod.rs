@@ -847,8 +847,6 @@ mod tests {
             }
         }
 
-        // `use<>`: these capture nothing; Rust 2024 would otherwise capture the
-        // `&mut Ctx` lifetime and stop them unifying with `both`'s `fn` pointer.
         fn square(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
             mul(x, x)
         }

@@ -2,9 +2,9 @@
 //!
 //! Replaces the pre-sized `PreparedOutput`: a streaming query has no total row
 //! count up front, so each output column is a *growable* host buffer the kernel
-//! appends into. The fixed-width columns are [`SVec`]s (`rust-lms-std`), so the
+//! appends into. The fixed-width columns are `SVec`s (`rust-lms-std`), so the
 //! per-value append is **inline JIT code** — `if len==cap { grow }; data[len]=v;
-//! len++` — with the only FFI call ([`svec_grow`]) on the amortized-rare grow.
+//! len++` — with the only FFI call (`svec_grow`) on the amortized-rare grow.
 //! Strings stay on the existing `StringViewBuilder` append extern (variable
 //! length). See `docs/table_scan.md` §4.
 //!
@@ -151,7 +151,7 @@ impl OutCols {
 }
 
 /// The kernel-side handle: one baked pointer set per output column. Consumed by
-/// `codegen::write_col`, which reconstructs a typed [`SVec`](rust_lms_std::SVec)
+/// `codegen::write_col`, which reconstructs a typed `SVec`(rust_lms_std::SVec)
 /// (fixed) or an opaque `&mut StringViewBuilder` (string) from these addresses.
 pub struct OutputHandle {
     pub cols: Vec<OutColHandle>,

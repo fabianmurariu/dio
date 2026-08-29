@@ -4,7 +4,7 @@
 //! (`SVec`-backed growable columns; see `docs/table_scan.md` §4), so there is no
 //! host `PreparedOutput` here anymore. What remains is the staged twin of the
 //! read-side `is_valid`: [`ValidityView`]'s `set_null` / `set_valid`, usable on
-//! any mutable [`FfiValidity`] bitmap independently of a particular array.
+//! any mutable `FfiValidity` bitmap independently of a particular array.
 
 use rust_lms::prelude::*;
 
@@ -40,10 +40,6 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
     ///
     /// The `FfiValidityMut::bytes` descriptor must address a live byte buffer
     /// that generated code owns exclusively for the duration of the call.
-    /// `use<>` captures nothing: the returned expression is lifetime-free (it
-    /// holds a `VarUse`, not a borrow of `self`), but Rust 2024 would otherwise
-    /// capture `&mut self` into the opaque type and make every call hold the
-    /// borrow.
     unsafe fn bitmap_bytes(&mut self) -> impl Staged<Out = SRefMut<Slice<u8>>> + use<> {
         let mut bytes = field_mut(&mut self.validity, FfiValidityMutType::bytes());
         // SAFETY: forwarded from this method's own contract.

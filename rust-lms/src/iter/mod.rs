@@ -32,13 +32,11 @@ mod zip;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use map::Map;
-#[allow(deprecated)]
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
     ExactSizeOpaqueIterKind, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns,
-    OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, RegisterScalar,
-    ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, box_dyn_exact_iter, box_dyn_iter,
-    emplace_iter,
+    OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, ReusedOpaqueIter,
+    ReusedOpaqueIterFns, ReusedOpaqueIterKind, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
 };
 pub use range_iter::{RangeIter, RangeStep, range, range_step};
 pub use scan::Scan;

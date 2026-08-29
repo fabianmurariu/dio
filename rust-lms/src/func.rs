@@ -539,9 +539,6 @@ impl Ctx {
     }
 }
 
-/// Backward-compatible alias. Prefer `Ctx`.
-pub type VarBuilder = Ctx;
-
 // =============================================================================
 // Compiler: Owns everything, coordinates compilation
 // =============================================================================
@@ -729,7 +726,7 @@ impl<'a> Compiler<'a> {
     /// The body function is called immediately to build the expression tree.
     /// No Cranelift calls happen until `compile()` is called.
     ///
-    /// The body function receives a `VarBuilder` context that allows creating
+    /// The body function receives a [`Ctx`] that allows creating
     /// local variables within the function.
     ///
     /// # Struct Pass-by-Value
@@ -741,7 +738,7 @@ impl<'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder, Var<A>) -> BODY,
+        F: FnOnce(&mut Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun1(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -751,7 +748,7 @@ impl<'a> Compiler<'a> {
     ///
     /// Similar to `fun1`, but the body function receives a reference to itself,
     /// allowing for recursive calls. The function reference is passed as the first
-    /// argument to the body closure, followed by the VarBuilder and parameter.
+    /// argument to the body closure, followed by the [`Ctx`] and parameter.
     ///
     /// # Example
     /// ```ignore
@@ -766,7 +763,7 @@ impl<'a> Compiler<'a> {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef1<A, OUT>, &mut VarBuilder, Var<A>) -> BODY,
+        F: FnOnce(FunRef1<A, OUT>, &mut Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun1_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -776,7 +773,7 @@ impl<'a> Compiler<'a> {
     pub fn fun0<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
     where
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder) -> BODY,
+        F: FnOnce(&mut Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun0(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -786,7 +783,7 @@ impl<'a> Compiler<'a> {
     pub fn fun0_rec<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
     where
         OUT: StagedType,
-        F: FnOnce(FunRef0<OUT>, &mut VarBuilder) -> BODY,
+        F: FnOnce(FunRef0<OUT>, &mut Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun0_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -798,7 +795,7 @@ impl<'a> Compiler<'a> {
         A: StagedType,
         B: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>) -> BODY,
+        F: FnOnce(&mut Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun2(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -810,7 +807,7 @@ impl<'a> Compiler<'a> {
         A: StagedType,
         B: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef2<A, B, OUT>, &mut VarBuilder, Var<A>, Var<B>) -> BODY,
+        F: FnOnce(FunRef2<A, B, OUT>, &mut Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun2_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -823,7 +820,7 @@ impl<'a> Compiler<'a> {
         B: StagedType,
         C: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
+        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun3(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -840,7 +837,7 @@ impl<'a> Compiler<'a> {
         B: StagedType,
         C: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef3<A, B, C, OUT>, &mut VarBuilder, Var<A>, Var<B>, Var<C>) -> BODY,
+        F: FnOnce(FunRef3<A, B, C, OUT>, &mut Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun3_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -858,7 +855,7 @@ impl<'a> Compiler<'a> {
         C: StagedType,
         D: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun4(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -876,14 +873,7 @@ impl<'a> Compiler<'a> {
         C: StagedType,
         D: StagedType,
         OUT: StagedType,
-        F: FnOnce(
-            FunRef4<A, B, C, D, OUT>,
-            &mut VarBuilder,
-            Var<A>,
-            Var<B>,
-            Var<C>,
-            Var<D>,
-        ) -> BODY,
+        F: FnOnce(FunRef4<A, B, C, D, OUT>, &mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun4_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -902,7 +892,7 @@ impl<'a> Compiler<'a> {
         D: StagedType,
         E: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
+        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun5(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -923,7 +913,7 @@ impl<'a> Compiler<'a> {
         OUT: StagedType,
         F: FnOnce(
             FunRef5<A, B, C, D, E, OUT>,
-            &mut VarBuilder,
+            &mut Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -949,7 +939,7 @@ impl<'a> Compiler<'a> {
         E: StagedType,
         FF: StagedType,
         OUT: StagedType,
-        FN: FnOnce(&mut VarBuilder, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
+        FN: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun6(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -971,7 +961,7 @@ impl<'a> Compiler<'a> {
         OUT: StagedType,
         FN: FnOnce(
             FunRef6<A, B, C, D, E, FF, OUT>,
-            &mut VarBuilder,
+            &mut Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -999,16 +989,7 @@ impl<'a> Compiler<'a> {
         FF: StagedType,
         G: StagedType,
         OUT: StagedType,
-        FN: FnOnce(
-            &mut VarBuilder,
-            Var<A>,
-            Var<B>,
-            Var<C>,
-            Var<D>,
-            Var<E>,
-            Var<FF>,
-            Var<G>,
-        ) -> BODY,
+        FN: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun7(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1031,7 +1012,7 @@ impl<'a> Compiler<'a> {
         OUT: StagedType,
         FN: FnOnce(
             FunRef7<A, B, C, D, E, FF, G, OUT>,
-            &mut VarBuilder,
+            &mut Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -1062,7 +1043,7 @@ impl<'a> Compiler<'a> {
         H: StagedType,
         OUT: StagedType,
         FN: FnOnce(
-            &mut VarBuilder,
+            &mut Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -1095,7 +1076,7 @@ impl<'a> Compiler<'a> {
         OUT: StagedType,
         FN: FnOnce(
             FunRef8<A, B, C, D, E, FF, G, H, OUT>,
-            &mut VarBuilder,
+            &mut Ctx,
             Var<A>,
             Var<B>,
             Var<C>,

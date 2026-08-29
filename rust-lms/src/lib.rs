@@ -99,16 +99,14 @@ pub mod prelude {
         Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3, FunType0,
         FunType1, FunType2, FunType3, JitBackend, call0, call1, call2, call3,
     };
-    #[allow(deprecated)]
     pub use crate::iter::{
         DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
         ExactSizeOpaqueIterKind, Filter, FilterMap, IndexedSource, IndexedStagedIterator,
         IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter,
         OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, RangeIter,
-        RangeStep, RegisterScalar, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind,
-        Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt, ZipItem,
-        ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, range,
-        range_step,
+        RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan, SkipWhile,
+        SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType,
+        ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step,
     };
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, FloatNum, IntCast, IntNum, IntToFloat, Num, Shl, Shr, add,
@@ -133,7 +131,7 @@ pub mod prelude {
         AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, MutSliceType, RawSliceOps, RawSliceType,
         ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
         SliceGetRange, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet, SliceSliceUnchecked,
-        SliceType, TrustedSliceOps, TrustedSliceType, slice_get_ptr_unchecked,
+        SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{
         Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged, Value,

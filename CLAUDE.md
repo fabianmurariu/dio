@@ -94,7 +94,7 @@ RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms <name> -- --nocapture
 - **Compiler & functions** (`src/func.rs`, `func_impl.rs`, `func_def.rs`) —
   `Compiler` owns definitions; `fun0..8`(`_rec`) define functions; `compile`
   performs ABI lowering and JIT; `Compiled::run()`/`as_fn()` execute.
-- **Authoring styles** — imperative `Ctx`/`VarBuilder` (`ctx.var`/`store`/`if_then`/
+- **Authoring styles** — imperative `Ctx` (`ctx.var`/`store`/`if_then`/
   `while_loop`/`break_loop`, preferred) and expression-tree (tuples + `assign` +
   `while_loop`/`if_then_else`).
 - **Control flow** (`src/control.rs`) — `IfThenElse` (merge block param = phi),

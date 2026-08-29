@@ -203,7 +203,7 @@ pub trait BatchSource: Staged<Out = SRef<Slice<FfiArray>>> + Copy + 'static {}
 impl<T> BatchSource for T where T: Staged<Out = SRef<Slice<FfiArray>>> + Copy + 'static {}
 
 /// Raw staged pointer derived from the kernel's real `&mut Inputs` parameter.
-/// It is threaded through the operator walk so [`gen_scan`] can call `scan_next`
+/// It is threaded through the operator walk so `gen_scan` can call `scan_next`
 /// without fabricating an internal reference lifetime.
 pub trait InputsSource: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
 impl<T> InputsSource for T where T: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
@@ -214,7 +214,7 @@ pub(crate) type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
 
 /// Emit a kernel that appends `plan`'s emitted rows into the baked output columns
 /// (`cx.out`) and returns the row count. The single entry point — a scalar
-/// `Aggregate` is just a push operator that emits one row (see [`gen_op`]).
+/// `Aggregate` is just a push operator that emits one row (see `gen_op`).
 pub fn gen_collect<I: InputsSource>(
     ctx: &mut Ctx,
     inputs: I,
@@ -552,7 +552,7 @@ fn gen_read_str<B: BatchSource>(
     let hi = ctx.bind(unsafe { views.value_unchecked(add(base, 1u64)) });
     // SAFETY: `col` is schema-validated and the current batch retains this
     // descriptor and its originating `StringViewArray` for the row loop.
-    let descriptor = unsafe { slice_get_ptr_unchecked(batch, col as u64) };
+    let descriptor = unsafe { batch.get_ptr_unchecked(col as u64) };
     let array = ctx.bind(ptr_cast::<Opaque<StringViewArray>, u8, _>(unsafe {
         load_field_unchecked(descriptor, FfiArrayType::array())
     }));

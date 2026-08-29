@@ -274,7 +274,7 @@ unsafe impl<T: StagedType> RuntimeResult for RawSliceMut<T> {
 /// param. Materializes the `(ptr, len)` pair on a stack slot, like sub-slicing.
 /// Parameterised by the *raw marker* `R` rather than the element type, so one
 /// node serves both the shared and mutable constructors: the taxonomy's
-/// [`SliceType::DataPtr`] already says which pointer flavour `R` demands
+/// [`crate::slice::SliceType::DataPtr`] already says which pointer flavour `R` demands
 /// (`SPtr<T>` for [`RawSlice`], `SMutPtr<T>` for [`RawSliceMut`]).
 pub struct SliceFromRawParts<P, L, R> {
     ptr: P,
@@ -682,12 +682,9 @@ unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for RawSliceMut<T>
 unsafe impl<T: StagedType> UncheckedExternArg<SRefMut<Slice<T>>> for RawSliceMut<T> {}
 unsafe impl<T: StagedType> UncheckedExternArg<SRef<Slice<T>>> for SRefMut<Slice<T>> {}
 
-// Gap G6a from the row-0 characterization matrix: the table above witnessed only
-// `Raw* -> SRef/SRefMut`, never the reverse, so a slice *parameter* could not be
-// handed to an extern declared with `FatSlice<T>`/`FatSliceMut<T>` even though
-// both lower to the identical `(ptr, len)` argument pair. (The tell:
-// `ext_double_slice` in `tests/test_extern_fn.rs` was declared but callable by no
-// test.) These complete the square.
+// The reverse direction: a slice reference handed to an extern declared with
+// `FatSlice<T>`/`FatSliceMut<T>`. Both lower to the identical `(ptr, len)`
+// argument pair.
 unsafe impl<T: StagedType> UncheckedExternArg<RawSlice<T>> for SRef<Slice<T>> {}
 unsafe impl<T: StagedType> UncheckedExternArg<RawSlice<T>> for SRefMut<Slice<T>> {}
 unsafe impl<T: StagedType> UncheckedExternArg<RawSliceMut<T>> for SRefMut<Slice<T>> {}

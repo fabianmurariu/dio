@@ -84,7 +84,7 @@ pub struct Slice<T: StagedType> {
 ///
 /// This trait witnesses only the representation layout. A particular
 /// descriptor's pointer validity, alignment, element count, and lifetime are
-/// checked by the caller of [`ReprSliceOps::as_slice`].
+/// checked by the caller of [`ReprSliceOps::into_raw_slice`].
 ///
 /// # Safety
 ///
@@ -741,28 +741,6 @@ where
     }
 }
 
-/// Get a raw element pointer from any staged slice representation.
-///
-/// # Safety
-///
-/// At execution, `index` must be less than `slice`'s element count. Any later
-/// dereference must also satisfy the source storage's lifetime and aliasing
-/// requirements.
-pub unsafe fn slice_get_ptr_unchecked<S, I>(
-    slice: S,
-    index: I,
-) -> SliceGetPtrUnchecked<S, I::Staged>
-where
-    S: Staged,
-    S::Out: SliceType,
-    I: IntoStaged<u64>,
-{
-    SliceGetPtrUnchecked {
-        slice,
-        index: index.into_staged(),
-    }
-}
-
 // =============================================================================
 // SliceGetUnchecked: Get element by value (no bounds check, CopyType only)
 // =============================================================================
@@ -1000,29 +978,25 @@ where
 // Operation umbrella: one op surface per capability
 // =============================================================================
 //
-// The op traits mirror the capability traits above one-for-one, and each adds
-// exactly what its capability licenses:
+// The op traits mirror the capability traits one-for-one, each adding what its
+// capability licenses:
 //
 // ```text
-//   SliceOps         : SliceType         len, as_ptr, subslice_unchecked, get_unchecked
-//   TrustedSliceOps  : TrustedSliceType  get_or (SAFE), get_ref_unchecked
-//   SliceMutOps      : MutSliceType      set (SAFE), set_unchecked, swap_unchecked
+//   SliceOps        : SliceType         len, into_ptr, get_unchecked,
+//                                       get_ptr_unchecked, get_range, subslice_unchecked
+//   TrustedSliceOps : TrustedSliceType  get_or, get_ref_unchecked
+//   SliceMutOps     : MutSliceType      set, set_unchecked, swap_unchecked
+//   RawSliceOps     : RawSliceType      assume_shared, assume_unique
 // ```
 //
-// The dividing line is *safety*, not merely which type you hold: the two safe,
-// bounds-checked operations (`get_or`, `set`) are precisely the ones that need
-// established provenance, so they sit above `TrustedSliceType`. Everything on
-// `SliceOps` either touches no memory (`len`, `as_ptr`, `subslice_unchecked`) or
-// is already `unsafe`, which is why a raw descriptor can have it without a
-// separate trait — there is no `RawSliceOps`; raw types simply stop at
-// `SliceOps`.
+// The dividing line is safety: the safe, bounds-checked accessors (`get_or`,
+// `set`) are exactly the ones needing established provenance, so they sit above
+// `TrustedSliceType`. Everything on `SliceOps` either touches no memory or is
+// already `unsafe`.
 //
-// Every method takes `self` by value: a staged expression *is* a value, and
+// Every method takes `self` by value — a staged expression *is* a value, and
 // consuming it is what stops a unique `Var<SRefMut<_>>` being reused after it
-// has been projected. Where reborrowing a non-`Copy` variable is wanted instead,
-// `Var<SRefMut<Slice<T>>>` carries inherent `&self`/`&mut self` methods that a
-// by-value blanket trait cannot express; inherent methods win method resolution,
-// so `var.len()` reborrows while `expr.len()` consumes.
+// has been projected. Use `Var::reborrow` where the variable must survive.
 
 /// Operations available from a slice's **representation** alone.
 ///
@@ -1065,6 +1039,26 @@ where
         ElemOf<Self>: CopyType,
     {
         SliceGetUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
+    }
+
+    /// A raw pointer to element `index`.
+    ///
+    /// Mutability follows the slice, via [`SliceType::DataPtr`]. Available on
+    /// every origin: computing an element address dereferences nothing.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length, and any
+    /// later dereference must satisfy the source storage's lifetime and
+    /// aliasing requirements.
+    unsafe fn get_ptr_unchecked<I>(self, index: I) -> SliceGetPtrUnchecked<Self, I::Staged>
+    where
+        I: IntoStaged<u64>,
+    {
+        SliceGetPtrUnchecked {
             slice: self,
             index: index.into_staged(),
         }
