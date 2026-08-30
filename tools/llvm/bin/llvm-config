@@ -1,0 +1,72 @@
+#!/bin/sh
+
+# Locate an LLVM 22 installation for the Rust LLVM/MLIR build dependencies.
+# Homebrew keeps LLVM keg-only, so its bin directory is normally absent from
+# PATH. This shim is used as <prefix>/bin/llvm-config by repository-local Cargo
+# configuration and delegates every argument to the real executable.
+
+set -u
+
+try_llvm_config() {
+    candidate=$1
+    shift
+
+    if [ ! -x "$candidate" ]; then
+        return 1
+    fi
+
+    version=$("$candidate" --version 2>/dev/null) || return 1
+    case "$version" in
+        22.*)
+            exec "$candidate" "$@"
+            ;;
+    esac
+
+    return 1
+}
+
+# An explicit executable override is useful for non-standard installations.
+if [ -n "${LLVM_CONFIG_REAL:-}" ]; then
+    try_llvm_config "$LLVM_CONFIG_REAL" "$@"
+fi
+
+# Prefer an already configured PATH, including common versioned binary names.
+for name in llvm-config llvm-config-22 llvm-config22; do
+    candidate=$(command -v "$name" 2>/dev/null || true)
+    if [ -n "$candidate" ]; then
+        try_llvm_config "$candidate" "$@"
+    fi
+done
+
+# Check both default Homebrew installations explicitly. This also handles a
+# shell whose PATH selects an Intel Homebrew while LLVM is installed by the
+# Apple Silicon Homebrew (or vice versa).
+for brew_executable in /opt/homebrew/bin/brew /usr/local/bin/brew; do
+    if [ ! -x "$brew_executable" ]; then
+        continue
+    fi
+
+    for formula in llvm@22 llvm; do
+        prefix=$($brew_executable --prefix "$formula" 2>/dev/null || true)
+        if [ -n "$prefix" ]; then
+            try_llvm_config "$prefix/bin/llvm-config" "$@"
+        fi
+    done
+done
+
+# Standard Homebrew and Linux package-manager locations, usable even when the
+# corresponding package manager executable is unavailable.
+for candidate in \
+    /opt/homebrew/opt/llvm@22/bin/llvm-config \
+    /opt/homebrew/opt/llvm/bin/llvm-config \
+    /usr/local/opt/llvm@22/bin/llvm-config \
+    /usr/local/opt/llvm/bin/llvm-config \
+    /usr/lib/llvm-22/bin/llvm-config \
+    /usr/local/llvm-22/bin/llvm-config; do
+    try_llvm_config "$candidate" "$@"
+done
+
+echo "error: could not find llvm-config for LLVM 22" >&2
+echo "Install it with 'brew install llvm@22' (macOS) or install the LLVM/MLIR 22 development packages." >&2
+echo "For a custom install, set LLVM_CONFIG_REAL=/absolute/path/to/llvm-config." >&2
+exit 127

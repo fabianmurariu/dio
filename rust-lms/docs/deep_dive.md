@@ -240,14 +240,15 @@ the body can call itself.
   finalizes the JIT module, and returns `Compiled<OUT>`.
 - `Compiled::run()` executes a nullary computation and returns its value.
 - `Compiled::as_fn()` returns a **`CompiledFn`** — a typed, owner-checked callable
-  you invoke with `.call(args)` as many times as you like. It *borrows* the
-  `Compiled`, so the executable memory can't be freed while a callable exists, and
-  its argument / return types are the `RuntimeParam` / `RuntimeResult` types from
-  [§3](#3-the-type-system). When you must hold a bare pointer past that borrow,
+  you invoke with `.call(args)` as many times as you like. It owns an internal
+  `Arc` lease on the frozen executable, so it can be cloned into worker threads and
+  the executable memory can't be freed while a callable exists. Its argument /
+  return types are the `RuntimeParam` / `RuntimeResult` types from
+  [§3](#3-the-type-system). When a foreign API requires a bare pointer without the lease,
   `unsafe { Compiled::as_fn_unchecked() }` hands out the raw `extern "C"` entry
   point under a uniform **by-pointer** convention (each argument as `*const`, the
   result written through an out-`*mut`) — and you then owe the "keep `Compiled`
-  alive" contract yourself.
+  or an owning `CompiledFn` lease alive" contract yourself.
 
 ### `Compiled` owns the JIT module
 

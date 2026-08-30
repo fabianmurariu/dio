@@ -52,12 +52,11 @@ and the files they touch (`codegen/expr.rs`, `iter/range_iter.rs`, `grouping.rs`
 The trusted-computing-base is now actually trusted-by-the-compiler, not by
 convention:
 
-- **PR-01** `Compiled::as_fn` returns `CompiledFn<'compiled, F>` with a *private*
-  code pointer and a `PhantomData<&'compiled JITModule>` — the entry point cannot
-  outlive the module. `Compiled` gained a real `Drop` that frees the JIT memory,
-  so the "unbounded code-memory leak" the review called out is closed, not just
-  the escape. `as_fn_unchecked` is the `unsafe` hatch. Pinned by `compile_fail`
-  doctests.
+- **PR-01** `Compiled::as_fn` originally returned a borrowed
+  `CompiledFn<'compiled, F>`; it now returns an owning `CompiledFn<F>` with a private
+  code pointer and an `Arc` lease on the frozen executable. The entry point can move
+  to worker threads but cannot outlive its executable allocation. The final Arc drop
+  frees the JIT memory; `as_fn_unchecked` remains the unsafe untracked hatch.
 - **PR-02** `StagedType`, `Staged`, `CopyType`, `ConstantType`, `RuntimeParam`,
   `RuntimeResult` are all `unsafe trait`; `CompilationContext` and its fields
   dropped to `pub(crate)`; `DirectValue` is sealed. Crucially the derive now emits

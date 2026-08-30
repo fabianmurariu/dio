@@ -1,9 +1,5 @@
 [workspace]
 members = ["rust-lms", "rust-lms-derive", "rust-lms-std", "arrow-lms", "sql-gen"]
-# `mlir-spike` is the Phase -1 MLIR de-risking spike (docs/llvm.md). It depends on
-# melior, which needs a system LLVM/MLIR 22 install, so it is kept OUT of the default
-# workspace build — build it explicitly, see mlir-spike/README.md.
-exclude = ["mlir-spike"]
 resolver = "3"
 
 [workspace.package]
@@ -33,18 +29,17 @@ cranelift-native = "0.134"
 arrow = "58.3.0"
 datafusion-sql = "54.1.0"
 
-# Graph algorithms for SSA
-petgraph = "0.6"
-
 # Performance utilities
 ahash = "0.8"
-hashbrown = "0.15"
+hashbrown = "0.17"
 
 # Testing
-either = "=1.15.0"
-proptest = "1.4"
+either = "=1.18.0"
+proptest = "1.11"
 serde = { version = "1.0", features = ["derive"] }
 serde_json = "1.0"
+criterion = { version = "0.8.2", features = ["html_reports"] }
+rand = "0.9"
 
 # sql
 datafusion-common = "54.1.0"

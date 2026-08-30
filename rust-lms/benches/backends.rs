@@ -14,9 +14,10 @@
 //!     PATH="$MLIR_SYS_220_PREFIX/bin:$PATH" DYLD_LIBRARY_PATH="$MLIR_SYS_220_PREFIX/lib" \
 //!     cargo bench --bench backends --features llvm      # + LLVM/MLIR
 
-use criterion::{BenchmarkId, Criterion, Throughput, black_box, criterion_group, criterion_main};
+use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
+use std::hint::black_box;
 use std::time::Duration;
 
 use rust_lms::func::JitBackend;
@@ -33,9 +34,13 @@ type SumAboveMedian = Box<dyn Fn(&[i64], &[i64]) -> i64>;
 
 fn generate(size: usize, seed: u64) -> (Vec<i64>, Vec<i64>) {
     let mut rng = StdRng::seed_from_u64(seed);
-    let mut a: Vec<i64> = (0..size).map(|_| rng.gen_range(-1_000i64..1_000)).collect();
+    let mut a: Vec<i64> = (0..size)
+        .map(|_| rng.random_range(-1_000i64..1_000))
+        .collect();
     a.sort_unstable();
-    let b: Vec<i64> = (0..size).map(|_| rng.gen_range(-1_000i64..1_000)).collect();
+    let b: Vec<i64> = (0..size)
+        .map(|_| rng.random_range(-1_000i64..1_000))
+        .collect();
     (a, b)
 }
 

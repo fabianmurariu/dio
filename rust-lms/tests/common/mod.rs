@@ -52,7 +52,7 @@ pub fn for_each_backend(mut body: impl FnMut(Compiler)) {
 ///     ...
 /// });
 /// ```
-pub fn with_backends(mut body: impl FnMut(&dyn Fn() -> Compiler<'static>)) {
+pub fn with_backends(mut body: impl FnMut(&dyn Fn() -> Compiler)) {
     body(&|| Compiler::new());
     #[cfg(feature = "llvm")]
     body(&|| Compiler::new().with_backend(JitBackend::Llvm));
