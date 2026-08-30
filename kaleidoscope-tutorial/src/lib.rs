@@ -5,6 +5,7 @@
 //! AST to staged `rust-lms` computations and JIT-compiles them to native code.
 //! Chapter 4 adds typed host externs and an interactive session while leaving
 //! low-level optimization to the rust-lms backends.
+//! Chapter 5 adds value-producing conditionals and `for` loops.
 
 pub mod ast;
 pub mod codegen;

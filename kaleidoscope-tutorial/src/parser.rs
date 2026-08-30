@@ -137,6 +137,8 @@ fn parse_primary(pair: Pair<'_, Rule>) -> Expr {
             span,
         },
         Rule::identifier_expression => parse_identifier_expression(pair),
+        Rule::if_expression => parse_if_expression(pair),
+        Rule::for_expression => parse_for_expression(pair),
         Rule::parenthesized => {
             let expression = pair
                 .into_inner()
@@ -147,6 +149,59 @@ fn parse_primary(pair: Pair<'_, Rule>) -> Expr {
             expression
         }
         _ => unreachable!("the Pratt parser only receives primary expressions"),
+    }
+}
+
+fn parse_if_expression(pair: Pair<'_, Rule>) -> Expr {
+    debug_assert_eq!(pair.as_rule(), Rule::if_expression);
+    let span = span_from_pest(pair.as_span());
+    let mut expressions = pair
+        .into_inner()
+        .filter(|pair| pair.as_rule() == Rule::expression)
+        .map(parse_expression);
+    let condition = expressions.next().expect("if has a condition");
+    let then_branch = expressions.next().expect("if has a then branch");
+    let else_branch = expressions.next().expect("if has an else branch");
+    debug_assert!(expressions.next().is_none());
+    Expr {
+        kind: ExprKind::If {
+            condition: Box::new(condition),
+            then_branch: Box::new(then_branch),
+            else_branch: Box::new(else_branch),
+        },
+        span,
+    }
+}
+
+fn parse_for_expression(pair: Pair<'_, Rule>) -> Expr {
+    debug_assert_eq!(pair.as_rule(), Rule::for_expression);
+    let span = span_from_pest(pair.as_span());
+    let mut inner = pair.into_inner();
+    let keyword = inner.next().expect("for expression starts with for");
+    debug_assert_eq!(keyword.as_rule(), Rule::keyword_for);
+    let variable = inner
+        .next()
+        .expect("for expression has an induction variable")
+        .as_str()
+        .to_owned();
+    let mut expressions = inner
+        .filter(|pair| pair.as_rule() == Rule::expression)
+        .map(parse_expression)
+        .collect::<Vec<_>>();
+    let body = expressions.pop().expect("for expression has a body");
+    let start = expressions.remove(0);
+    let end = expressions.remove(0);
+    let step = expressions.pop().map(Box::new);
+    debug_assert!(expressions.is_empty());
+    Expr {
+        kind: ExprKind::For {
+            variable,
+            start: Box::new(start),
+            end: Box::new(end),
+            step,
+            body: Box::new(body),
+        },
+        span,
     }
 }
 
@@ -243,6 +298,47 @@ mod tests {
         assert_eq!(arguments[0].kind, ExprKind::Number(1.0));
         assert_eq!(arguments[1].kind, ExprKind::Variable("x".into()));
         assert!(matches!(arguments[2].kind, ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn parses_if_then_else_expressions() {
+        let expression = one_expression("if x < 3 then 1 else fib(x - 1)");
+        let ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } = expression.kind
+        else {
+            panic!("expected an if expression")
+        };
+        assert_eq!(binary(&condition).0, BinaryOp::LessThan);
+        assert_eq!(then_branch.kind, ExprKind::Number(1.0));
+        assert!(matches!(else_branch.kind, ExprKind::Call { .. }));
+    }
+
+    #[test]
+    fn parses_for_loops_with_optional_steps() {
+        let expression = one_expression("for i = 1, i < n, 2 in putchard(42)");
+        let ExprKind::For {
+            variable,
+            start,
+            end,
+            step,
+            body,
+        } = expression.kind
+        else {
+            panic!("expected a for expression")
+        };
+        assert_eq!(variable, "i");
+        assert_eq!(start.kind, ExprKind::Number(1.0));
+        assert_eq!(binary(&end).0, BinaryOp::LessThan);
+        assert_eq!(step.unwrap().kind, ExprKind::Number(2.0));
+        assert!(matches!(body.kind, ExprKind::Call { .. }));
+
+        let ExprKind::For { step, .. } = one_expression("for i = 1, i < 2 in i").kind else {
+            panic!("expected a for expression")
+        };
+        assert!(step.is_none());
     }
 
     #[test]

@@ -40,7 +40,7 @@ pub struct Expr {
     pub span: Span,
 }
 
-/// The expression forms introduced in Chapter 2.
+/// The expression forms introduced through Chapter 5.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     Number(f64),
@@ -53,6 +53,18 @@ pub enum ExprKind {
     Call {
         callee: String,
         arguments: Vec<Expr>,
+    },
+    If {
+        condition: Box<Expr>,
+        then_branch: Box<Expr>,
+        else_branch: Box<Expr>,
+    },
+    For {
+        variable: String,
+        start: Box<Expr>,
+        end: Box<Expr>,
+        step: Option<Box<Expr>>,
+        body: Box<Expr>,
     },
 }
 

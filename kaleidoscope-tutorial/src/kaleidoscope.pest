@@ -3,17 +3,38 @@ COMMENT = _{ "#" ~ (!("\n" | "\r") ~ ANY)* }
 
 // Chapter 1: expose the grammar as a flat token stream.
 token_stream = { SOI ~ token* ~ EOI }
-token = _{ keyword_def | keyword_extern | number | identifier | character }
+token = _{
+    keyword_def
+    | keyword_extern
+    | keyword_if
+    | keyword_then
+    | keyword_else
+    | keyword_for
+    | keyword_in
+    | number
+    | identifier
+    | character
+}
 
 // Atomic keyword rules prevent Pest's implicit whitespace skipping from
 // occurring before the identifier-boundary check.
 keyword_def = @{ "def" ~ !ASCII_ALPHANUMERIC }
 keyword_extern = @{ "extern" ~ !ASCII_ALPHANUMERIC }
+keyword_if = @{ "if" ~ !ASCII_ALPHANUMERIC }
+keyword_then = @{ "then" ~ !ASCII_ALPHANUMERIC }
+keyword_else = @{ "else" ~ !ASCII_ALPHANUMERIC }
+keyword_for = @{ "for" ~ !ASCII_ALPHANUMERIC }
+keyword_in = @{ "in" ~ !ASCII_ALPHANUMERIC }
 
 // Keep Chapter 1's identifier syntax deliberately small and predictable.
 identifier = @{
     !("def" ~ !ASCII_ALPHANUMERIC)
     ~ !("extern" ~ !ASCII_ALPHANUMERIC)
+    ~ !("if" ~ !ASCII_ALPHANUMERIC)
+    ~ !("then" ~ !ASCII_ALPHANUMERIC)
+    ~ !("else" ~ !ASCII_ALPHANUMERIC)
+    ~ !("for" ~ !ASCII_ALPHANUMERIC)
+    ~ !("in" ~ !ASCII_ALPHANUMERIC)
     ~ ASCII_ALPHA
     ~ ASCII_ALPHANUMERIC*
 }
@@ -37,8 +58,15 @@ top_level_expression = { expression ~ ";"? }
 prototype = { identifier ~ "(" ~ identifier* ~ ")" }
 
 expression = { primary ~ (binary_operator ~ primary)* }
-primary = _{ number | parenthesized | identifier_expression }
+primary = _{ number | parenthesized | if_expression | for_expression | identifier_expression }
 parenthesized = { "(" ~ expression ~ ")" }
+if_expression = {
+    keyword_if ~ expression ~ keyword_then ~ expression ~ keyword_else ~ expression
+}
+for_expression = {
+    keyword_for ~ identifier ~ "=" ~ expression ~ "," ~ expression
+    ~ ("," ~ expression)? ~ keyword_in ~ expression
+}
 identifier_expression = { identifier ~ call_suffix? }
 call_suffix = { "(" ~ argument_list? ~ ")" }
 argument_list = { expression ~ ("," ~ expression)* }

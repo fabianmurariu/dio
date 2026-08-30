@@ -1,4 +1,4 @@
-//! Chapter 3: specialize the owned AST into a typed `rust-lms` computation.
+//! Chapter 3 and later: specialize the owned AST into typed `rust-lms` computations.
 
 use std::collections::{HashMap, HashSet};
 use std::fmt;
@@ -7,7 +7,7 @@ use rust_lms::func::{
     CompileError, CompiledFn, Ctx, FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6,
     FunRef7, FunRef8, FunType0, call0, call1, call2, call3, call4, call5, call6, call7, call8,
 };
-use rust_lms::prelude::{Compiler, Const, Var, lt, select};
+use rust_lms::prelude::{Compiler, Const, Var, eq, lt, not, select};
 
 use crate::ast::{BinaryOp, Expr, ExprKind, Function, Item, Program, Prototype};
 use crate::lexer::Span;
@@ -393,6 +393,31 @@ fn validate_expr(
             }
             Ok(())
         }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            validate_expr(condition, variables, signatures)?;
+            validate_expr(then_branch, variables, signatures)?;
+            validate_expr(else_branch, variables, signatures)
+        }
+        ExprKind::For {
+            variable,
+            start,
+            end,
+            step,
+            body,
+        } => {
+            validate_expr(start, variables, signatures)?;
+            let mut loop_variables = variables.clone();
+            loop_variables.insert(variable);
+            validate_expr(end, &loop_variables, signatures)?;
+            if let Some(step) = step {
+                validate_expr(step, &loop_variables, signatures)?;
+            }
+            validate_expr(body, &loop_variables, signatures)
+        }
     }
 }
 
@@ -527,6 +552,80 @@ fn lower_expr(
                 host_functions[callee].emit_call(ctx, arguments[0])
             }
         }
+        ExprKind::If {
+            condition,
+            then_branch,
+            else_branch,
+        } => {
+            let condition = lower_expr(condition, ctx, variables, function_refs, host_functions);
+            let result = ctx.var(0.0f64);
+            ctx.if_then_else(
+                not(eq(condition, 0.0f64)),
+                |then_ctx| {
+                    let value = lower_expr(
+                        then_branch,
+                        then_ctx,
+                        variables,
+                        function_refs,
+                        host_functions,
+                    );
+                    then_ctx.store(result, value);
+                },
+                |else_ctx| {
+                    let value = lower_expr(
+                        else_branch,
+                        else_ctx,
+                        variables,
+                        function_refs,
+                        host_functions,
+                    );
+                    else_ctx.store(result, value);
+                },
+            );
+            result
+        }
+        ExprKind::For {
+            variable,
+            start,
+            end,
+            step,
+            body,
+        } => {
+            let start = lower_expr(start, ctx, variables, function_refs, host_functions);
+            let induction = ctx.var(start);
+            let mut loop_variables = variables.clone();
+            loop_variables.insert(variable.clone(), induction);
+
+            ctx.while_loop(true, |loop_ctx| {
+                let _body_value = lower_expr(
+                    body,
+                    loop_ctx,
+                    &loop_variables,
+                    function_refs,
+                    host_functions,
+                );
+                let step = match step {
+                    Some(step) => lower_expr(
+                        step,
+                        loop_ctx,
+                        &loop_variables,
+                        function_refs,
+                        host_functions,
+                    ),
+                    None => loop_ctx.bind(Const::<f64>::new(1.0)),
+                };
+                let end = lower_expr(
+                    end,
+                    loop_ctx,
+                    &loop_variables,
+                    function_refs,
+                    host_functions,
+                );
+                loop_ctx.store(induction, induction + step);
+                loop_ctx.if_then(eq(end, 0.0f64), |break_ctx| break_ctx.break_loop());
+            });
+            ctx.bind(Const::<f64>::new(0.0))
+        }
     }
 }
 
@@ -559,6 +658,44 @@ mod tests {
     #[test]
     fn comparison_produces_kaleidoscope_numbers() {
         assert_eq!(values("2 < 3; 3 < 2;").unwrap(), vec![1.0, 0.0]);
+    }
+
+    #[test]
+    fn compiles_value_producing_conditionals() {
+        assert_eq!(values("if 1 then 11 else 22").unwrap(), vec![11.0]);
+        assert_eq!(values("if 0 then 11 else 22").unwrap(), vec![22.0]);
+        assert_eq!(values("if 2 then 11 else 22").unwrap(), vec![11.0]);
+        assert_eq!(
+            values("1 + if 1 then if 0 then 2 else 3 else 4").unwrap(),
+            vec![4.0]
+        );
+    }
+
+    #[test]
+    fn executes_only_the_selected_branch() {
+        let source = "def forever() forever(); if 1 then 42 else forever();";
+        assert_eq!(values(source).unwrap(), vec![42.0]);
+    }
+
+    #[test]
+    fn compiles_recursive_fibonacci() {
+        let source = "def fib(x) if x < 3 then 1 else fib(x-1) + fib(x-2); fib(10);";
+        assert_eq!(values(source).unwrap(), vec![55.0]);
+    }
+
+    #[test]
+    fn compiles_for_loops_and_the_default_step() {
+        assert_eq!(values("for i = 1, i < 4 in i;").unwrap(), vec![0.0]);
+        assert_eq!(values("for i = 1, i < 5, 2 in i;").unwrap(), vec![0.0]);
+    }
+
+    #[test]
+    fn loop_variables_shadow_but_do_not_escape() {
+        assert_eq!(
+            values("def f(i) (for i = 1, i < 2 in i) + i; f(9);").unwrap(),
+            vec![9.0]
+        );
+        assert!(error("(for i = 1, i < 2 in i) + i").contains("unknown variable 'i'"));
     }
 
     #[test]

@@ -26,6 +26,11 @@ pub struct Span {
 pub enum TokenKind {
     Def,
     Extern,
+    If,
+    Then,
+    Else,
+    For,
+    In,
     Identifier(String),
     Number(f64),
     Character(char),
@@ -62,6 +67,11 @@ impl fmt::Display for TokenKind {
         match self {
             Self::Def => formatter.write_str("def"),
             Self::Extern => formatter.write_str("extern"),
+            Self::If => formatter.write_str("if"),
+            Self::Then => formatter.write_str("then"),
+            Self::Else => formatter.write_str("else"),
+            Self::For => formatter.write_str("for"),
+            Self::In => formatter.write_str("in"),
             Self::Identifier(name) => write!(formatter, "identifier({name})"),
             Self::Number(value) => write!(formatter, "number({value})"),
             Self::Character(character) => write!(formatter, "'{character}'"),
@@ -98,6 +108,11 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
         let kind = match pair.as_rule() {
             Rule::keyword_def => TokenKind::Def,
             Rule::keyword_extern => TokenKind::Extern,
+            Rule::keyword_if => TokenKind::If,
+            Rule::keyword_then => TokenKind::Then,
+            Rule::keyword_else => TokenKind::Else,
+            Rule::keyword_for => TokenKind::For,
+            Rule::keyword_in => TokenKind::In,
             Rule::identifier => TokenKind::Identifier(text.to_owned()),
             Rule::number => TokenKind::Number(
                 text.parse()
@@ -223,12 +238,24 @@ mod tests {
     #[test]
     fn only_exact_keywords_are_reserved() {
         assert_eq!(
-            kinds("def define extern external"),
+            kinds(
+                "def define extern external if iffy then then2 else elsewhere for format in inside"
+            ),
             vec![
                 TokenKind::Def,
                 TokenKind::Identifier("define".into()),
                 TokenKind::Extern,
                 TokenKind::Identifier("external".into()),
+                TokenKind::If,
+                TokenKind::Identifier("iffy".into()),
+                TokenKind::Then,
+                TokenKind::Identifier("then2".into()),
+                TokenKind::Else,
+                TokenKind::Identifier("elsewhere".into()),
+                TokenKind::For,
+                TokenKind::Identifier("format".into()),
+                TokenKind::In,
+                TokenKind::Identifier("inside".into()),
                 TokenKind::Eof,
             ]
         );

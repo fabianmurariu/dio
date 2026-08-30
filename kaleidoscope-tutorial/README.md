@@ -2,7 +2,7 @@
 
 This crate follows LLVM's [My First Language Frontend](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/) tutorial, replacing the hand-written C++ frontend with Rust and Pest. Starting in Chapter 3, the parsed AST is specialized into a `rust-lms` staged computation and JIT-compiled to native code.
 
-Chapters 1 through 4 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, compile functions through rust-lms's optimized backends, call a typed host library, and retain definitions in an interactive session.
+Chapters 1 through 5 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, compile functions through rust-lms's optimized backends, call a typed host library, retain definitions in an interactive session, and generate native conditional and loop control flow.
 
 ## The route to native code
 
@@ -599,6 +599,189 @@ Chapter 4's tests verify:
 
 At this point Kaleidoscope is an optimized, user-driven native language with functions and controlled access to host services. Chapter 5 adds conditional expressions and loops, where rust-lms's staged control-flow builders replace manual basic-block and phi-node construction.
 
+# Chapter 5: control flow
+
+LLVM's Chapter 5 extends Kaleidoscope with two expression forms: `if/then/else` and `for/in`. This is where the rust-lms version starts saving substantial backend work. The frontend specifies expression semantics and lexical scope; rust-lms constructs blocks, branches, loop backedges, and merged SSA values for either backend.
+
+## 5.1 Grammar and AST additions
+
+Five words become reserved keywords: `if`, `then`, `else`, `for`, and `in`. They are recognized by the Chapter 1 token mode as dedicated tokens, while names such as `iffy`, `format`, and `inside` remain identifiers.
+
+The Pest grammar adds both constructs as primary expressions:
+
+```pest
+if_expression = {
+    keyword_if ~ expression ~ keyword_then ~ expression
+    ~ keyword_else ~ expression
+}
+
+for_expression = {
+    keyword_for ~ identifier ~ "=" ~ expression ~ "," ~ expression
+    ~ ("," ~ expression)? ~ keyword_in ~ expression
+}
+```
+
+Making them primaries means they compose with the existing precedence parser. An `if` can appear inside arithmetic, in a call argument, or in either branch of another `if` without adding special cases to binary parsing.
+
+[`ExprKind`](src/ast.rs) gains direct representations of the constituent expressions:
+
+```rust
+If {
+    condition: Box<Expr>,
+    then_branch: Box<Expr>,
+    else_branch: Box<Expr>,
+}
+
+For {
+    variable: String,
+    start: Box<Expr>,
+    end: Box<Expr>,
+    step: Option<Box<Expr>>,
+    body: Box<Expr>,
+}
+```
+
+The `end` field follows the LLVM tutorial's name, although it is a continuation expression rather than a numeric upper bound.
+
+## 5.2 Value-producing `if`
+
+Every Kaleidoscope construct is an expression, so both branches produce an `f64`:
+
+```text
+if condition then value_when_true else value_when_false
+```
+
+The condition is false when it equals `0.0`; any other numeric value is true. Only the selected branch executes. That last rule matters now that calls such as `putchard` can have effects, and it rules out lowering an `if` to the branchless `select` used for the `<` result in Chapter 3.
+
+The lowering in [`src/codegen.rs`](src/codegen.rs) uses the imperative `Ctx::if_then_else` builder:
+
+```text
+condition = lower(condition)
+result    = ctx.var(0.0)
+
+ctx.if_then_else(condition != 0.0,
+    then_ctx => result = lower(then_branch, then_ctx),
+    else_ctx => result = lower(else_branch, else_ctx))
+
+return result
+```
+
+Each branch is lowered into a child context. Operations and host calls recorded in the unselected child therefore never execute. Both children store their value into the same staged `result` variable; when that variable is read after the merge, rust-lms's SSA variable machinery supplies the appropriate merged value.
+
+With `RUST_LMS_DEBUG_IR=1`, a function such as:
+
+```text
+def choose(x) if x then 11 else 22;
+```
+
+shows the essential control-flow shape:
+
+```text
+             entry
+             /   \
+          then   else
+             \   /
+           merge(value: f64)
+```
+
+The merge block parameter is the Cranelift equivalent of the LLVM phi node built manually in the original tutorial. Kaleidoscope's lowering never creates or wires that phi node itself.
+
+## 5.3 Conditional recursion
+
+The function predeclarations introduced in Chapter 3 become practically useful now:
+
+```text
+def fib(x)
+  if x < 3 then
+    1
+  else
+    fib(x - 1) + fib(x - 2);
+```
+
+Both recursive call references are resolved while the static AST is staged. At runtime, the condition selects either the base case or the recursive native calls. `fib(10)` evaluates to `55`.
+
+## 5.4 The `for/in` expression
+
+The loop syntax is:
+
+```text
+for variable = start, continuation, optional_step in body
+```
+
+For example:
+
+```text
+for i = 1, i < n, 1 in putchard(42)
+```
+
+The step defaults to `1.0` when omitted. The induction variable is visible in the body, step, and continuation expressions, but not in its own start expression. It may shadow an outer variable, and the outer binding is visible again after the loop.
+
+The LLVM tutorial's precise evaluation order is post-tested:
+
+```text
+evaluate start
+repeat:
+    evaluate body using current variable
+    evaluate step using current variable
+    evaluate continuation using current variable
+    advance variable
+    continue if continuation != 0.0
+```
+
+Consequently the body executes at least once. `for i = 1, i < 5 in ...` executes for `i` values 1 through 5, matching the tutorial's `printstar` example.
+
+`Ctx::while_loop` is a pre-tested builder, so the lowering expresses the post-test explicitly: it creates an unconditional staged loop and emits `break_loop` when the continuation becomes false. The step and continuation are bound before updating the induction variable, ensuring both observe the current iteration's value.
+
+The loop body value is discarded, and the complete `for` expression returns `0.0`, as specified by Kaleidoscope. Chapter 7's mutable variables will make loops useful for computations in addition to effects.
+
+## 5.5 Scope and validation
+
+Semantic validation mirrors runtime scope before staging:
+
+1. Validate `start` in the outer variable environment.
+2. Add the induction variable to a cloned environment.
+3. Validate `end`, optional `step`, and `body` in that loop environment.
+4. Discard the cloned environment after the loop.
+
+The lowering pass performs the same scoped clone with `HashMap<String, Var<f64>>`. No runtime name table is emitted, and shadowing needs no machine-code lookup.
+
+Both branches of an `if` are validated even though only one executes. This ensures that every possible runtime path is a well-formed program.
+
+## 5.6 Run the example
+
+The included example computes Fibonacci and prints five stars through the Chapter 4 host binding:
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --run kaleidoscope-tutorial/examples/chapter5.ks
+*****Evaluated to 55.000000
+Evaluated to 0.000000
+```
+
+`putchard` writes to standard error, while evaluation results use standard output, so their visual ordering can vary when output is redirected.
+
+The line-oriented REPL accepts the same constructs when each complete definition is kept on one line:
+
+```console
+ready> def fib(x) if x < 3 then 1 else fib(x-1)+fib(x-2);
+ready> fib(10);
+Evaluated to 55.000000
+```
+
+## 5.7 What the tests establish
+
+Chapter 5's parser and native execution tests cover:
+
+- nested `if` parsing and expression precedence;
+- `for` parsing with explicit and default steps;
+- `0.0`, nonzero, and comparison-based conditions;
+- lazy branch execution using an unselected nonterminating recursive call;
+- native recursive Fibonacci;
+- explicit and default-step loops;
+- loop-variable shadowing and restoration;
+- rejection of loop variables used outside their scope.
+
+Chapter 6 will make binary and unary operators user-definable and move operator precedence from a fixed parser table into language state.
+
 ## Progress
 
 | Chapter | Topic | Status |
@@ -607,6 +790,6 @@ At this point Kaleidoscope is an optimized, user-driven native language with fun
 | 2 | Parser and AST | Implemented |
 | 3 | AST specialization and native code | Implemented |
 | 4 | JIT, host externs, and backend optimization | Implemented |
-| 5 | Control flow | Next |
-| 6 | User-defined operators | Planned |
+| 5 | Control flow | Implemented |
+| 6 | User-defined operators | Next |
 | 7 | Mutable variables | Planned |
