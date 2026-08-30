@@ -932,11 +932,6 @@ impl_num_ops_for!([C, T, F] Select<C, T, F>);
 impl_rem_op_for!([C, T, F] Select<C, T, F>);
 impl_bit_ops_for!([C, T, F] Select<C, T, F>);
 
-// LetVar acts like a Var when used in expressions.
-impl_num_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
-impl_rem_op_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
-impl_bit_ops_for!([T: StagedType, E] crate::staged::LetVar<T, E>);
-
 // Slice access carriers (length, element reads). The carriers are now unified
 // across immutable and mutable slices, so one impl each covers both.
 impl_num_ops_for!([S] crate::slice::SliceLen<S>);

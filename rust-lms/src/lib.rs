@@ -72,7 +72,6 @@ pub mod slice;
 pub mod staged;
 pub mod staged_opt;
 pub mod r#struct;
-pub mod tuple;
 pub mod types;
 
 /// Internal utilities used by proc macros.
@@ -134,8 +133,8 @@ pub mod prelude {
         SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{
-        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LetVar, Staged, Value,
-        ValueId, Var, assign, unit,
+        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, Staged, Value, ValueId, Var,
+        assign, unit,
     };
     pub use crate::staged_opt::{SNone, SSome, StagedOpt, ThenSome, When, s_none, s_some};
     pub use crate::r#struct::{

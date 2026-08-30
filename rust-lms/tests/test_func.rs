@@ -1,5 +1,5 @@
 //! Functions and control flow: constants and arithmetic, `fun1`/`call`, recursion,
-//! `if_then_else`/`seq`/`let_var`/`assign`, `while_loop`, multi-parameter functions,
+//! `if_then_else`/`assign`, `while_loop`, multi-parameter functions,
 //! and owner-checked vs unchecked compiled function pointers.
 
 use rust_lms::func::*;
@@ -190,20 +190,9 @@ fn test_if_then_else_clamp() {
 }
 
 #[test]
-fn test_seq_basic() {
-    for_each_backend(|compiler| {
-        // (5, 10) => 10 (first value ignored, second returned)
-        let expr = (Const::<i64>::new(5), Const::<i64>::new(10));
-
-        let compiled = compiler.compile(expr).expect("compilation failed");
-        assert_eq!(compiled.run(), 10);
-    });
-}
-
-#[test]
-fn test_let_var() {
+fn test_local_var() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun0("let_var_test", |ctx| {
+        let f = compiler.fun0("local_var", |ctx| {
             let x = ctx.var(42i64);
             let y = ctx.var(8i64);
             add::<i64, _, _>(x, y)
@@ -371,33 +360,15 @@ fn test_local_variables_in_fun1() {
         // Function that sums elements > 5 using local variables
         // fn sum_gt_5(arr: &[i64]) -> i64
         let sum_gt_5 = compiler.fun1("sum_gt_5", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            // Create local variables inside the function using ctx
-            let i = ctx.let_var(0u64);
-            let sum = ctx.let_var(0i64);
-            let v = ctx.let_var(0i64);
-
-            (
-                (i, sum, v),
-                while_loop(
-                    lt(*i, arr.len()),
-                    (
-                        // v = arr.get_unchecked(i)
-                        // SAFETY: the surrounding loop proves `i < arr.len()`.
-                        assign(*v, unsafe { arr.get_unchecked(*i) }),
-                        // sum = if v > 5 then sum + v else sum
-                        assign(
-                            *sum,
-                            if_then_else(
-                                lt(5, *v), // v > 5
-                                add(*sum, *v),
-                                *sum,
-                            ),
-                        ),
-                        assign(*i, add(*i, 1u64)),
-                    ),
-                ),
-                *sum,
-            )
+            let i = ctx.var(0u64);
+            let sum = ctx.var(0i64);
+            ctx.while_loop(lt(i, arr.len()), move |ctx| {
+                // SAFETY: the loop condition proves `i < arr.len()`.
+                let v = ctx.bind(unsafe { arr.get_unchecked(i) });
+                ctx.store(sum, select(gt(v, 5i64), add(sum, v), sum));
+                ctx.store(i, add(i, 1u64));
+            });
+            sum
         });
 
         let compiled = compiler.compile(sum_gt_5).expect("compilation failed");

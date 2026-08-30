@@ -57,8 +57,7 @@ type CodegenAction = Box<dyn FnOnce(&mut CompilationContext) + 'static>;
 /// Imperative context for building staged function bodies.
 ///
 /// Passed to closures in `fun1`, `fun2`, etc. Call methods to emit code in
-/// declaration order — no expression tree, no `Clone` constraints, no tuple
-/// sequencing boilerplate.
+/// declaration order.
 ///
 /// # Example
 /// ```ignore
@@ -119,29 +118,6 @@ impl Ctx {
         let id = self.next_var_id;
         self.next_var_id += 1;
         Var::new(id)
-    }
-
-    /// Declare a variable with an initial value.
-    ///
-    /// Returns a `LetVar<T, E::Staged>` for backward compatibility with old
-    /// tuple-sequencing code. The initialization is automatically registered as
-    /// an action in the `Ctx`; including the returned `LetVar` in a tuple
-    /// sequence double-inits (harmlessly). Prefer `Ctx::var()` for new code.
-    pub fn let_var<T, E>(&mut self, init: E) -> crate::staged::LetVar<T, E::Staged>
-    where
-        T: StagedType + 'static,
-        E: crate::staged::IntoStaged<T>,
-        E::Staged: Clone + 'static,
-    {
-        let init_staged = init.into_staged();
-        let v = self.alloc::<T>();
-        let id = v.id;
-        let init_for_action = init_staged.clone();
-        self.actions.push(Box::new(move |ctx| {
-            let value = init_for_action.codegen(ctx);
-            ctx.assign_var::<T>(id, value, false);
-        }));
-        crate::staged::LetVar::new(v, init_staged)
     }
 
     /// Declare a new variable initialized to `init` at this point in the body.
@@ -723,7 +699,7 @@ impl<'a> Compiler<'a> {
 
     /// Define a unary function.
     ///
-    /// The body function is called immediately to build the expression tree.
+    /// The body function is called immediately to build the staged graph.
     /// No Cranelift calls happen until `compile()` is called.
     ///
     /// The body function receives a [`Ctx`] that allows creating
@@ -754,7 +730,7 @@ impl<'a> Compiler<'a> {
     /// ```ignore
     /// let factorial = compiler.fun1_rec("factorial", |f, ctx, x: Var<i64>| {
     ///     // Can create local variables
-    ///     let temp = ctx.let_var(0i64);
+    ///     let temp = ctx.var(0i64);
     ///     // Recursive call: f(x - 1)
     ///     call1(f, sub(x, Const::<i64>::new(1)))
     /// });

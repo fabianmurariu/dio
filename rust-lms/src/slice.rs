@@ -26,22 +26,12 @@
 //!
 //! ```ignore
 //! // Sum all elements in a slice
-//! let sum = compiler.fun1("sum", |arr: Var<SRef<Slice<i64>>>| {
-//!     let i = compiler.let_var(0u64);
-//!     let total = compiler.let_var(0i64);
-//!
-//!     (
-//!         i,
-//!         total,
-//!         while_loop(
-//!             lt(i, arr.len()),
-//!             (
-//!                 assign(total, add(total, arr.get_unchecked(i))),
-//!                 assign(i, add(i, 1u64)),
-//!             )
-//!         ),
-//!         total
-//!     )
+//! let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
+//!     let total = ctx.var(0i64);
+//!     arr.staged_iter().for_each(ctx, move |ctx, elem| {
+//!         ctx.store(total, add(total, elem));
+//!     });
+//!     total
 //! });
 //! ```
 

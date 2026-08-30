@@ -818,11 +818,9 @@ mod tests {
     fn test_load_store_i64() {
         let mut compiler = Compiler::new();
 
-        let write_fn = compiler.fun1("write_42", |_ctx, mut ptr: Var<SRefMut<i64>>| {
-            (
-                store_ref(&mut ptr, Const::<i64>::new(42)),
-                load_ref_mut(&mut ptr),
-            )
+        let write_fn = compiler.fun1("write_42", |ctx, mut ptr: Var<SRefMut<i64>>| {
+            ctx.emit(store_ref(&mut ptr, Const::<i64>::new(42)));
+            load_ref_mut(&mut ptr)
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
@@ -855,10 +853,12 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Using raw pointer types (SPtr/SMutPtr)
-        let write_fn = compiler.fun1("write_ptr", |_ctx, ptr: Var<SMutPtr<i64>>| {
+        let write_fn = compiler.fun1("write_ptr", |ctx, ptr: Var<SMutPtr<i64>>| {
             // SAFETY: the generated function is called with a valid, aligned
             // pointer to the live `value` below.
-            unsafe { (store(ptr, Const::<i64>::new(99)), load_mut(ptr)) }
+            ctx.emit(unsafe { store(ptr, Const::<i64>::new(99)) });
+            // SAFETY: as above.
+            unsafe { load_mut(ptr) }
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");

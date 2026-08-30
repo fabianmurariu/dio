@@ -17,8 +17,8 @@ use common::for_each_backend;
 fn test_ergonomic_arithmetic() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun0("arith", |ctx| {
-            let x = ctx.let_var(10i64);
-            (x, *x + 5i64)
+            let x = ctx.var(10i64);
+            x + 5i64
         });
 
         let compiled = compiler.compile(call0(f)).expect("compilation failed");
@@ -27,9 +27,9 @@ fn test_ergonomic_arithmetic() {
 }
 
 #[test]
-fn test_ergonomic_let_var() {
+fn test_ergonomic_local_var() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun0("let_var_test", |ctx| {
+        let f = compiler.fun0("local_var", |ctx| {
             let x = ctx.var(42i64);
             let y = ctx.var(8i64);
             x + y
@@ -183,7 +183,6 @@ fn test_ergonomic_f64_operations() {
 #[test]
 fn test_imperative_basic_var() {
     for_each_backend(|mut compiler| {
-        // ctx.var() declares + inits inline; no tuple sequencing needed.
         let f = compiler.fun0("imp_basic", |ctx| {
             let x = ctx.var(42i64);
             let y = ctx.var(8i64);
