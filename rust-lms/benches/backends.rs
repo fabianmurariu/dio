@@ -83,7 +83,7 @@ fn build_filtered_sum(backend: JitBackend) -> FilteredSum {
         |ctx, a: Var<SRef<Slice<i64>>>, z: Var<i64>| {
             let acc = ctx.var(0i64);
             let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, a.count()), move |ctx| {
+            ctx.while_loop(lt(i, a.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < a.len()`.
                 let v = ctx.bind(unsafe { a.get_unchecked(i) });
                 ctx.if_then(gt(v, z), move |ctx| {
@@ -103,7 +103,7 @@ fn build_sum_above_median(backend: JitBackend) -> SumAboveMedian {
     let f = compiler.fun2(
         "sum_above_median",
         |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
-            let n = ctx.bind(a.count());
+            let n = ctx.bind(a.len());
             let mid = ctx.bind(div(n, 2u64));
             // Median of the (pre-sorted) first array.
             let m = ctx.bind(unsafe { a.get_unchecked(mid) });

@@ -13,11 +13,11 @@ struct CountedSharedSlice<S> {
     inner: S,
 }
 
-unsafe impl<'a, S> Staged for CountedSharedSlice<S>
+unsafe impl<S> Staged for CountedSharedSlice<S>
 where
-    S: Staged<Out = SRef<'a, Slice<i64>>>,
+    S: Staged<Out = SRef<Slice<i64>>>,
 {
-    type Out = SRef<'a, Slice<i64>>;
+    type Out = SRef<Slice<i64>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
         CHECKED_GET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
@@ -29,11 +29,11 @@ struct CountedMutSlice<S> {
     inner: S,
 }
 
-unsafe impl<'a, S> Staged for CountedMutSlice<S>
+unsafe impl<S> Staged for CountedMutSlice<S>
 where
-    S: Staged<Out = SRefMut<'a, Slice<i64>>>,
+    S: Staged<Out = SRefMut<Slice<i64>>>,
 {
-    type Out = SRefMut<'a, Slice<i64>>;
+    type Out = SRefMut<Slice<i64>>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
         CHECKED_SET_SLICE_CODEGENS.fetch_add(1, Ordering::SeqCst);
@@ -41,15 +41,10 @@ where
     }
 }
 
-impl<'a, S> SliceMutOps<'a, i64> for CountedMutSlice<S> where
-    S: Staged<Out = SRefMut<'a, Slice<i64>>>
-{
-}
-
 #[test]
 fn test_slice_len() {
     for_each_backend(|mut compiler| {
-        let get_len = compiler.fun1("get_len", |_ctx, arr: Var<SRef<Slice<i64>>>| arr.count());
+        let get_len = compiler.fun1("get_len", |_ctx, arr: Var<SRef<Slice<i64>>>| arr.len());
         let compiled = compiler.compile(get_len).expect("compilation failed");
         let f = compiled.as_fn();
         let data: [i64; 5] = [10, 20, 30, 40, 50];
@@ -60,7 +55,7 @@ fn test_slice_len() {
 #[test]
 fn test_slice_len_empty() {
     for_each_backend(|mut compiler| {
-        let get_len = compiler.fun1("get_len", |_ctx, arr: Var<SRef<Slice<i64>>>| arr.count());
+        let get_len = compiler.fun1("get_len", |_ctx, arr: Var<SRef<Slice<i64>>>| arr.len());
         let compiled = compiler.compile(get_len).expect("compilation failed");
         let f = compiled.as_fn();
         assert_eq!(f.call(&[][..]), 0);
@@ -87,7 +82,7 @@ fn test_slice_sum() {
         let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
             let i = ctx.var(0u64);
             let total = ctx.var(0i64);
-            ctx.while_loop(lt(i, arr.count()), |ctx| {
+            ctx.while_loop(lt(i, arr.len()), |ctx| {
                 // SAFETY: the loop condition proves `i < arr.len()`.
                 ctx.store(total, total + unsafe { arr.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
@@ -104,7 +99,7 @@ fn test_slice_sum() {
 #[test]
 fn test_slice_mutable_set() {
     for_each_backend(|mut compiler| {
-        let set_first = compiler.fun1("set_first", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
+        let set_first = compiler.fun1("set_first", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
             // SAFETY: this test calls the kernel only with non-empty slices.
             unsafe { arr.set_unchecked(0u64, 999i64) }
         });
@@ -122,7 +117,7 @@ fn test_slice_mutable_fill() {
     for_each_backend(|mut compiler| {
         let fill = compiler.fun1("fill", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
             let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, arr.len()), move |ctx| {
+            ctx.while_loop(lt(i, arr.reborrow().len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < arr.len()`.
                 ctx.emit(unsafe { arr.set_unchecked(i, 42i64) });
                 ctx.store(i, i + 1u64);
@@ -144,8 +139,8 @@ fn test_slice_subslice() {
             let i = ctx.var(0u64);
             let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
-            let sub = unsafe { arr.slice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.count()), move |ctx| {
+            let sub = unsafe { arr.subslice_unchecked(1u64, 4u64) };
+            ctx.while_loop(lt(i, sub.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
                 ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
@@ -164,7 +159,7 @@ fn test_slice_swap() {
     for_each_backend(|mut compiler| {
         let swap = compiler.fun1("swap_ends", |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
             // swap arr[0] and arr[last]
-            let last = arr.len() - 1u64;
+            let last = arr.reborrow().len() - 1u64;
             // SAFETY: this test calls the kernel only with non-empty slices.
             unsafe { arr.swap_unchecked(0u64, last) }
         });
@@ -186,8 +181,11 @@ fn test_slice_of_slice() {
             // arr[1..5] then [1..3] of that == arr[2..4]
             // SAFETY: this test uses slices of length >= 5, and both ranges are
             // ordered and within their respective source slices.
-            let sub = unsafe { arr.slice_unchecked(1u64, 5u64).slice_unchecked(1u64, 3u64) };
-            ctx.while_loop(lt(i, sub.count()), move |ctx| {
+            let sub = unsafe {
+                arr.subslice_unchecked(1u64, 5u64)
+                    .subslice_unchecked(1u64, 3u64)
+            };
+            ctx.while_loop(lt(i, sub.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
                 ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
@@ -210,7 +208,7 @@ fn test_mut_subslice_stays_mutable() {
             // SAFETY: this test uses slices of length >= 3; both the range and
             // element index are within bounds and no overlapping view is used.
             unsafe {
-                arr.slice_mut_unchecked(1u64, 3u64)
+                arr.subslice_unchecked(1u64, 3u64)
                     .set_unchecked(1u64, 777i64)
             }
         });
@@ -244,7 +242,7 @@ fn test_checked_slice_operations_evaluate_the_slice_once() {
         CHECKED_GET_SLICE_CODEGENS.store(0, Ordering::SeqCst);
         let get = compiler.fun1("checked_get_once", |_ctx, arr: Var<SRef<Slice<i64>>>| {
             // SAFETY: the full range is ordered and bounded by `arr.len()`.
-            let full = unsafe { arr.slice_unchecked(0u64, arr.count()) };
+            let full = unsafe { arr.subslice_unchecked(0u64, arr.len()) };
             CountedSharedSlice { inner: full }.get_or(0u64, -1i64)
         });
         let compiled = compiler.compile(get).expect("compilation failed");
@@ -253,12 +251,15 @@ fn test_checked_slice_operations_evaluate_the_slice_once() {
 
         CHECKED_SET_SLICE_CODEGENS.store(0, Ordering::SeqCst);
         let mut compiler = make();
-        let set = compiler.fun1("checked_set_once", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
-            let len = arr.len();
-            // SAFETY: the full range is ordered and bounded by `arr.len()`.
-            let full = unsafe { arr.slice_mut_unchecked(0u64, len) };
-            CountedMutSlice { inner: full }.set(0u64, 14i64)
-        });
+        let set = compiler.fun1(
+            "checked_set_once",
+            |_ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
+                let len = arr.reborrow().len();
+                // SAFETY: the full range is ordered and bounded by `arr.len()`.
+                let full = unsafe { arr.subslice_unchecked(0u64, len) };
+                CountedMutSlice { inner: full }.set(0u64, 14i64)
+            },
+        );
         let compiled = compiler.compile(set).expect("compilation failed");
         assert_eq!(CHECKED_SET_SLICE_CODEGENS.load(Ordering::SeqCst), 1);
         let mut data = [12i64, 13];
@@ -291,7 +292,7 @@ fn test_checked_mutable_slice_set() {
     for_each_backend(|mut compiler| {
         let set = compiler.fun3(
             "checked_set",
-            |_ctx, mut arr: Var<SRefMut<Slice<i64>>>, index: Var<u64>, value: Var<i64>| {
+            |_ctx, arr: Var<SRefMut<Slice<i64>>>, index: Var<u64>, value: Var<i64>| {
                 arr.set(index, value)
             },
         );
@@ -309,7 +310,7 @@ fn test_consuming_mutable_element_projection() {
     for_each_backend(|mut compiler| {
         let set = compiler.fun1("element_ref", |_ctx, arr: Var<SRefMut<Slice<i64>>>| {
             // SAFETY: the test invokes this kernel with a slice of length 3.
-            let element = unsafe { arr.get_mut_unchecked(1u64) };
+            let element = unsafe { arr.get_ref_unchecked(1u64) };
             store_ref(element, Const::<i64>::new(77))
         });
         let compiled = compiler.compile(set).expect("compilation failed");
@@ -326,10 +327,11 @@ fn test_subslice_bind_reuse() {
     for_each_backend(|mut compiler| {
         let sum = compiler.fun1("bind_sub", |ctx, arr: Var<SRef<Slice<i64>>>| {
             // SAFETY: this test calls the kernel only with slices of length >= 4.
-            let sub: Var<SRef<Slice<i64>>> = ctx.bind(unsafe { arr.slice_unchecked(1u64, 4u64) });
+            let sub: Var<SRef<Slice<i64>>> =
+                ctx.bind(unsafe { arr.subslice_unchecked(1u64, 4u64) });
             let i = ctx.var(0u64);
             let total = ctx.var(0i64);
-            ctx.while_loop(lt(i, sub.count()), move |ctx| {
+            ctx.while_loop(lt(i, sub.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < sub.len()`.
                 ctx.store(total, total + unsafe { sub.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
@@ -350,7 +352,7 @@ fn test_slice_count_all_larger_than_3() {
             compiler.fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
                 let i = ctx.var(0u64);
                 let count = ctx.var(0u64);
-                ctx.while_loop(lt(i, arr.count()), move |ctx| {
+                ctx.while_loop(lt(i, arr.len()), move |ctx| {
                     // SAFETY: the loop condition proves `i < arr.len()`.
                     ctx.if_then(gt(unsafe { arr.get_unchecked(i) }, 3i64), move |ctx| {
                         ctx.store(count, count + 1u64);
@@ -374,7 +376,7 @@ fn test_slice_f64() {
         let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<f64>>>| {
             let i = ctx.var(0u64);
             let total = ctx.var(0.0f64);
-            ctx.while_loop(lt(i, arr.count()), move |ctx| {
+            ctx.while_loop(lt(i, arr.len()), move |ctx| {
                 // SAFETY: the loop condition proves `i < arr.len()`.
                 ctx.store(total, total + unsafe { arr.get_unchecked(i) });
                 ctx.store(i, i + 1u64);
@@ -392,10 +394,10 @@ fn test_slice_f64() {
 fn test_slice_return_subslice_len() {
     for_each_backend(|mut compiler| {
         let get_half_len = compiler.fun1("get_half_len", |_ctx, arr: Var<SRef<Slice<i64>>>| {
-            let half = arr.count() / 2u64;
+            let half = arr.len() / 2u64;
             // SAFETY: `half = len / 2`, so `0 <= half <= len`.
-            let sub = unsafe { arr.slice_unchecked(0u64, half) };
-            sub.count()
+            let sub = unsafe { arr.subslice_unchecked(0u64, half) };
+            sub.len()
         });
         let compiled = compiler.compile(get_half_len).expect("compilation failed");
         let f = compiled.as_fn();
@@ -407,11 +409,11 @@ fn test_slice_return_subslice_len() {
 #[test]
 fn test_internal_call_preserves_fat_slice_return() {
     for_each_backend(|mut compiler| {
-        let head = compiler.fun1("head", |_ctx, arr: Var<FatSliceType<i64>>| {
+        let head = compiler.fun1("head", |_ctx, arr: Var<RawSlice<i64>>| {
             // SAFETY: the caller below always supplies at least two elements.
-            unsafe { arr.slice_unchecked(0u64, 2u64) }
+            unsafe { arr.subslice_unchecked(0u64, 2u64) }
         });
-        let head_len = compiler.fun1("head_len", move |_ctx, arr: Var<FatSliceType<i64>>| {
+        let head_len = compiler.fun1("head_len", move |_ctx, arr: Var<RawSlice<i64>>| {
             call1(head, arr).len()
         });
 
@@ -426,12 +428,11 @@ fn test_if_then_else_preserves_fat_slice_value() {
     for_each_backend(|mut compiler| {
         let choose_len = compiler.fun2(
             "choose_slice_len",
-            |ctx, choose_head: Var<bool>, arr: Var<FatSliceType<i64>>| {
+            |ctx, choose_head: Var<bool>, arr: Var<RawSlice<i64>>| {
                 // SAFETY: the caller below supplies four elements and both ranges are valid.
-                let head = unsafe { arr.slice_unchecked(0u64, 1u64) };
-                let tail = unsafe { arr.slice_unchecked(1u64, 4u64) };
-                let chosen: Var<FatSliceType<i64>> =
-                    ctx.bind(if_then_else(choose_head, head, tail));
+                let head = unsafe { arr.subslice_unchecked(0u64, 1u64) };
+                let tail = unsafe { arr.subslice_unchecked(1u64, 4u64) };
+                let chosen: Var<RawSlice<i64>> = ctx.bind(if_then_else(choose_head, head, tail));
                 chosen.len()
             },
         );
@@ -446,8 +447,8 @@ fn test_if_then_else_preserves_fat_slice_value() {
 #[test]
 fn test_coption_preserves_fat_slice_payload() {
     for_each_backend(|mut compiler| {
-        let some_len = compiler.fun1("some_slice_len", |ctx, arr: Var<FatSliceType<i64>>| {
-            let value: Var<FatSliceType<i64>> = ctx.bind(unwrap_or(c_some(arr), arr));
+        let some_len = compiler.fun1("some_slice_len", |ctx, arr: Var<RawSlice<i64>>| {
+            let value: Var<RawSlice<i64>> = ctx.bind(unwrap_or(c_some(arr), arr));
             value.len()
         });
 
@@ -456,9 +457,8 @@ fn test_coption_preserves_fat_slice_payload() {
         assert_eq!(compiler.compile(some_len).unwrap().call(input), 4);
     });
     for_each_backend(|mut compiler| {
-        let none_len = compiler.fun1("none_slice_len", |ctx, arr: Var<FatSliceType<i64>>| {
-            let value: Var<FatSliceType<i64>> =
-                ctx.bind(unwrap_or(c_none::<FatSliceType<i64>>(), arr));
+        let none_len = compiler.fun1("none_slice_len", |ctx, arr: Var<RawSlice<i64>>| {
+            let value: Var<RawSlice<i64>> = ctx.bind(unwrap_or(c_none::<RawSlice<i64>>(), arr));
             value.len()
         });
 
@@ -473,9 +473,9 @@ fn test_slice_element_can_be_a_fat_slice() {
     for_each_backend(|mut compiler| {
         let inner_len = compiler.fun1(
             "inner_slice_len",
-            |ctx, outer: Var<FatSliceType<FatSliceType<i64>>>| {
+            |ctx, outer: Var<RawSlice<RawSlice<i64>>>| {
                 // SAFETY: the caller below supplies two descriptors.
-                let inner: Var<FatSliceType<i64>> = ctx.bind(unsafe { outer.get_unchecked(1u64) });
+                let inner: Var<RawSlice<i64>> = ctx.bind(unsafe { outer.get_unchecked(1u64) });
                 inner.len()
             },
         );

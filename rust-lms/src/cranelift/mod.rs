@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::{
-    types, AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, SigRef, Signature,
-    StackSlotData, StackSlotKind, Value,
+    AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData,
+    StackSlotKind, Value, types,
 };
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::FunctionBuilder;
@@ -21,8 +21,8 @@ use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 
 use crate::staged::{
-    expect_arguments, Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId,
-    VarHandle,
+    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    expect_arguments,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
 

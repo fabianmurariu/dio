@@ -16,13 +16,13 @@ pub struct Graph {
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graph_node_count(g: &Graph) -> u64 {
     g.nodes.len() as u64
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn graph_push_node(g: &mut Graph, id: u64) {
     g.nodes.push(id);
 }

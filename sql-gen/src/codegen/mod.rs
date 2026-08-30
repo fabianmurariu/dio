@@ -199,11 +199,11 @@ impl Prim for f64 {
 
 /// A staged expression yielding one lifetime-free `(ptr, len)` descriptor array.
 /// The scan or join owner retains the pointed-to batch for the enclosing loop.
-pub trait BatchSource: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
-impl<T> BatchSource for T where T: Staged<Out = FatSliceType<FfiArray>> + Copy + 'static {}
+pub trait BatchSource: Staged<Out = SRef<Slice<FfiArray>>> + Copy + 'static {}
+impl<T> BatchSource for T where T: Staged<Out = SRef<Slice<FfiArray>>> + Copy + 'static {}
 
 /// Raw staged pointer derived from the kernel's real `&mut Inputs` parameter.
-/// It is threaded through the operator walk so [`gen_scan`] can call `scan_next`
+/// It is threaded through the operator walk so `gen_scan` can call `scan_next`
 /// without fabricating an internal reference lifetime.
 pub trait InputsSource: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
 impl<T> InputsSource for T where T: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy + 'static {}
@@ -214,7 +214,7 @@ pub(crate) type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
 
 /// Emit a kernel that appends `plan`'s emitted rows into the baked output columns
 /// (`cx.out`) and returns the row count. The single entry point — a scalar
-/// `Aggregate` is just a push operator that emits one row (see [`gen_op`]).
+/// `Aggregate` is just a push operator that emits one row (see `gen_op`).
 pub fn gen_collect<I: InputsSource>(
     ctx: &mut Ctx,
     inputs: I,
@@ -383,7 +383,38 @@ pub(crate) fn gen_op<I: InputsSource>(
 }
 
 /// The staged raw slice descriptor received by a [`for_each_batch`] body.
-type ScanBatch = Var<FatSliceType<FfiArray>>;
+type ScanBatch = Var<SRef<Slice<FfiArray>>>;
+
+/// Rebuild a batch of column descriptors from a `(ptr, ncols)` pair.
+///
+/// The one place `sql-gen` turns a raw descriptor pointer into a staged batch —
+/// scan, join build, and join probe all route through here rather than
+/// repeating the `slice_from_raw_parts` plumbing and its contract three times.
+///
+/// Returns a **trusted** slice, because the contract below *is* the promotion
+/// contract: a caller that has proven the array is retained and holds exactly
+/// `ncols` entries has proven precisely what `assume_shared` asks for. Handing
+/// back a raw descriptor would discard that proof and force every consumer to
+/// re-assert it. (Reading a *column* out of the batch remains `unsafe` via
+/// `ArrayBatchOps::primitive`, but for an unrelated reason — the element type
+/// must match the Arrow buffer.)
+///
+/// # Safety
+///
+/// The producer must retain the descriptor array for every generated use of the
+/// result, and schema validation must prove it holds exactly `ncols` entries.
+pub(crate) unsafe fn batch_from_descs<P>(
+    descs: P,
+    ncols: u64,
+) -> impl Staged<Out = SRef<Slice<FfiArray>>> + Copy
+where
+    P: Staged<Out = SPtr<FfiArray>> + Copy,
+{
+    // SAFETY: forwarded from this function's own contract.
+    unsafe {
+        slice_from_raw_parts::<FfiArray, _, _>(descs, Const::<u64>::new(ncols)).assume_shared()
+    }
+}
 
 /// Drive the OUTER batch loop of table `table`: pull batches from the stream
 /// (`scan_next`, null = exhausted → break), rebuild each `&[FfiArray]` batch, and
@@ -416,12 +447,9 @@ fn for_each_batch<I: InputsSource>(
         let descs = ctx
             .bind(unsafe { call_extern2_unchecked(scan_next, inputs, Const::<u64>::new(table)) });
         ctx.if_then(ptr_is_null(descs), |ctx| ctx.break_loop());
-        // Rebuild a lifetime-free raw batch descriptor from (ptr, column count).
         // SAFETY: `Inputs` retains the current descriptor array until the next
         // callback, and Phase 1 schema validation proves it has `ncols` entries.
-        let batch = ctx.bind(unsafe {
-            slice_from_raw_parts::<FfiArray, _, _>(descs, Const::<u64>::new(ncols))
-        });
+        let batch = ctx.bind(unsafe { batch_from_descs(descs, ncols) });
         let len = gen_len(ctx, batch, &key_dt);
         body(ctx, batch, len);
     });
@@ -524,7 +552,7 @@ fn gen_read_str<B: BatchSource>(
     let hi = ctx.bind(unsafe { views.value_unchecked(add(base, 1u64)) });
     // SAFETY: `col` is schema-validated and the current batch retains this
     // descriptor and its originating `StringViewArray` for the row loop.
-    let descriptor = unsafe { slice_get_ptr_unchecked(batch, col as u64) };
+    let descriptor = unsafe { batch.get_ptr_unchecked(col as u64) };
     let array = ctx.bind(ptr_cast::<Opaque<StringViewArray>, u8, _>(unsafe {
         load_field_unchecked(descriptor, FfiArrayType::array())
     }));
@@ -574,7 +602,7 @@ pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: 
             dispatch_prim!(field.data_type(), M => {
                 // SAFETY: the output owns this control block with element type
                 // `M` and retains it for the compiled kernel's lifetime.
-                let vals = unsafe { SVec::<M>::from_raw_unchecked(*values, cx.rt.svec_grow) };
+                let mut vals = unsafe { SVec::<M>::from_raw_unchecked(*values, cx.rt.svec_grow) };
                 let v = M::coerce(ctx, cv);
                 vals.push(ctx, v);
                 // A nullable column pushes a validity flag for *every* row (the
@@ -615,7 +643,7 @@ fn write_str_col(ctx: &mut Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx:
     let emit_append = move |ctx: &mut Ctx| {
         // SAFETY: the resolved string owner remains live for this append call,
         // `len` is its byte length, and `OutCols` exclusively owns the builder.
-        let bytes = unsafe { slice_from_raw_parts::<u8, _, _>(ptr, len) };
+        let bytes = unsafe { strings::resolved_bytes(ptr, len) };
         ctx.emit(unsafe { call_extern2_unchecked(append, string_builder_mut(builder), bytes) });
     };
     match cv.nullness() {

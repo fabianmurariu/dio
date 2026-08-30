@@ -43,7 +43,7 @@ where
     {
         PrimitiveArrayView {
             // SAFETY: forwarded from `ArrayBatchOps::primitive`'s caller.
-            array: unsafe { slice_get_ptr_unchecked(self, index as u64) },
+            array: unsafe { self.get_ptr_unchecked(index as u64) },
             _elem: PhantomData,
         }
     }
@@ -57,7 +57,7 @@ where
 }
 
 /// View a single `&FfiArray` as a typed column.
-pub trait FfiArrayOps<'r>: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {
+pub trait FfiArrayOps<'r>: Staged<Out = SRef<FfiArray>> + Sized + Clone {
     /// Interpret this erased descriptor's values as `M`.
     ///
     /// # Safety
@@ -74,7 +74,7 @@ pub trait FfiArrayOps<'r>: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {
     }
 }
 
-impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<'r, FfiArray>> + Sized + Clone {}
+impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<FfiArray>> + Sized + Clone {}
 
 // =============================================================================
 // PrimitiveArrayView: read methods
@@ -99,14 +99,31 @@ impl<P: Clone, M> Clone for PrimitiveArrayView<P, M> {
 impl<P: Copy, M> Copy for PrimitiveArrayView<P, M> {}
 
 impl<P, M> PrimitiveArrayView<P, M> {
-    pub fn values(&self) -> impl Staged<Out = FatSliceType<M>> + Clone + use<P, M>
+    /// The array's values as a **trusted** staged slice.
+    ///
+    /// This is the descriptor-construction boundary, so the provenance claim is
+    /// made here, once, rather than at every read. Callers get the ordinary
+    /// slice surface — `len`, `get_or`, `get_range`, `staged_iter`,
+    /// `subslice_unchecked` — instead of an unsafe read per element.
+    ///
+    /// Safe: the obligation is already discharged at the descriptor boundary.
+    /// Both constructors — [`ArrayBatchOps::primitive`] and
+    /// [`FfiArrayOps::into_primitive`] — are `unsafe fn` and require the Arrow
+    /// values buffer to be represented by `M` for every generated-code use.
+    /// Holding a `PrimitiveArrayView` *is* that proof.
+    pub fn values(&self) -> impl Staged<Out = SRef<Slice<M>>> + Clone + use<P, M>
     where
         P: ArraySource,
         M: StagedType,
     {
-        // SAFETY: PrimitiveArrayView's element type must match the descriptor
-        // created for FfiArray::values, and that storage must outlive execution.
-        unsafe { field_addr(self.array.clone(), FfiArrayType::values()).into_raw_slice::<M>() }
+        // SAFETY: this view's construction contract establishes that the
+        // descriptor addresses a live Arrow buffer of `M` for the whole kernel
+        // run; the read is shared.
+        unsafe {
+            field_addr(self.array.clone(), FfiArrayType::values())
+                .into_raw_slice::<M>()
+                .assume_shared()
+        }
     }
 
     pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P, M>
@@ -129,7 +146,8 @@ impl<P, M> PrimitiveArrayView<P, M> {
         I: IntoStaged<u64>,
         I::Staged: Clone,
     {
-        // SAFETY: forwarded from `PrimitiveArrayView::value_unchecked`'s caller.
+        // SAFETY: forwarded from `PrimitiveArrayView::value_unchecked`'s caller
+        // — only the index bound is left, since `values()` is already trusted.
         unsafe { self.values().get_unchecked(index) }
     }
 
@@ -193,14 +211,22 @@ impl<V> ValidityView<V> {
         Self { validity }
     }
 
-    pub fn bytes(&self) -> impl Staged<Out = FatSliceType<u8>> + Clone + use<V>
+    /// The bitmap's bytes as a **trusted** staged slice — promoted here, at the
+    /// descriptor boundary, so readers use the ordinary slice surface.
+    ///
+    /// # Safety
+    ///
+    /// The `FfiValidity::bytes` descriptor must address a live byte buffer for
+    /// the duration of generated execution.
+    pub unsafe fn bytes(&self) -> impl Staged<Out = SRef<Slice<u8>>> + Clone + use<V>
     where
         V: ValiditySource,
     {
-        // SAFETY: FfiValidity::bytes describes the live byte buffer backing the
-        // bitmap for the duration of generated execution.
+        // SAFETY: promoted under this method's own contract; the read is shared.
         unsafe {
-            field_addr(self.validity.clone(), FfiValidityType::bytes()).into_raw_slice::<u8>()
+            field_addr(self.validity.clone(), FfiValidityType::bytes())
+                .into_raw_slice::<u8>()
+                .assume_shared()
         }
     }
 

@@ -1,5 +1,5 @@
 mod common;
-use common::for_each_backend;
+use common::{for_each_backend, with_backends};
 use rust_lms::prelude::*;
 
 #[test]
@@ -354,41 +354,47 @@ fn test_fn_taking_opt_mut_ref_i64() {
 
 #[test]
 fn test_fn_mutating_opt_mut_ref_i64() {
-    for_each_backend(|mut compiler| {
-        // fn increment_in_place(opt: Option<&mut i64>) -> i64
-        // If Some, increments the value in place and returns new value; else returns -1
-        let incr_fn = compiler.fun1("increment_in_place", |ctx, opt: Var<OptMutRefType<i64>>| {
-            // Use a local variable to hold the new value
-            let result = ctx.let_var(0i64);
-            (
-                result,
-                match_opt_mut_ref(
-                    ctx,
-                    opt,
-                    |_ctx, mut ptr| {
-                        // Load current value, add 1, store back, and assign to result
-                        let incremented = add(load_ref_mut(&mut ptr), 1i64);
-                        (
-                            store_ref(&mut ptr, incremented),
-                            assign(*result, load_ref_mut(&mut ptr)),
-                        )
-                    },
-                    assign(*result, -1i64),
-                ),
-                *result,
+    // Two kernels rather than one: a `match_opt_*` arm is a single staged
+    // expression, so mutating *and* reporting the new value are separate.
+    with_backends(|make| {
+        // fn increment_in_place(opt: Option<&mut i64>) — Some increments in place.
+        let mut c = make();
+        let incr = c.fun1("increment_in_place", |ctx, opt: Var<OptMutRefType<i64>>| {
+            match_opt_mut_ref(
+                ctx,
+                opt,
+                |_ctx, mut ptr| {
+                    // Sequential *Rust* bindings so the two reborrows of `ptr`
+                    // do not overlap; the staged arm is still one expression.
+                    let loaded = load_ref_mut(&mut ptr);
+                    store_ref(&mut ptr, add(loaded, 1i64))
+                },
+                unit(),
             )
         });
-
-        let compiled = compiler.compile(incr_fn).expect("compilation failed");
+        let compiled = c.compile(incr).expect("compilation failed");
         let f = compiled.as_fn();
 
-        // Test mutation
         let mut val = 41i64;
-        let returned = f.call(Some(&mut val));
-        assert_eq!(returned, 42);
-        assert_eq!(val, 42);
+        f.call(Some(&mut val));
+        assert_eq!(val, 42, "Some mutates in place");
 
-        // None case
+        f.call(None); // no target to mutate
+        // fn incremented_or(opt: Option<&mut i64>) -> i64 — the value, or -1.
+        let mut c = make();
+        let read = c.fun1("incremented_or", |ctx, opt: Var<OptMutRefType<i64>>| {
+            match_opt_mut_ref(
+                ctx,
+                opt,
+                |_ctx, mut ptr| add(load_ref_mut(&mut ptr), 1i64),
+                Const::<i64>::new(-1),
+            )
+        });
+        let compiled = c.compile(read).expect("compilation failed");
+        let f = compiled.as_fn();
+
+        let mut v = 41i64;
+        assert_eq!(f.call(Some(&mut v)), 42);
         assert_eq!(f.call(None), -1);
     });
 }

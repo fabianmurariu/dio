@@ -1130,7 +1130,7 @@ pub unsafe trait Staged {
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn duplicate(reference: Var<SRefMut<'_, i64>>) {
+/// fn duplicate(reference: Var<SRefMut<i64>>) {
 ///     let first = reference;
 ///     let second = reference;
 ///     let _ = (first, second);
@@ -1175,6 +1175,26 @@ impl<T: StagedType> Var<T> {
             id: self.id,
             _phantom: std::marker::PhantomData,
         }
+    }
+
+    /// Reborrow this variable as a single-use occurrence, leaving the variable
+    /// itself usable afterwards.
+    ///
+    /// Staged operations consume the expression they are given. For a `Copy`
+    /// variable that is invisible, but a unique handle such as
+    /// `Var<SRefMut<Slice<T>>>` would be *moved* by an ordinary read. Reborrow
+    /// makes the distinction explicit, exactly as `&mut *x` does in Rust:
+    ///
+    /// ```ignore
+    /// ctx.store(n, arr.reborrow().len());       // arr still usable
+    /// let sub = unsafe { arr.subslice_unchecked(0u64, n) };  // arr consumed
+    /// ```
+    ///
+    /// Taking `&mut self` keeps projecting a unique capability behind unique
+    /// access to the handle. Needing the same value twice in one expression is
+    /// a sign it should be `ctx.bind`-ed once instead.
+    pub fn reborrow(&mut self) -> VarUse<T> {
+        self.use_once()
     }
 }
 
@@ -1507,83 +1527,3 @@ pub fn unit() -> Const<()> {
 // =============================================================================
 // InitVar<T, EXPR> - Variable initialization wrapper
 // =============================================================================
-
-/// A variable with its initialization expression.
-///
-/// This type combines a variable reference with its initialization, providing
-/// an ergonomic API that doesn't require manual tuple unpacking.
-///
-/// When used in a tuple for sequencing, it performs the initialization.
-/// When used in operations (add, assign, etc.), it derefs to the underlying Var.
-///
-/// # Example
-/// ```ignore
-/// let i = compiler.let_var(0u64);  // Returns InitVar<u64, Const<u64>>
-/// let expr = (i, add(*i, 5i64));   // i initializes, *i gives Var<u64>
-/// ```
-pub struct LetVar<T: StagedType, EXPR> {
-    var: Var<T>,
-    init: EXPR,
-}
-
-impl<T: StagedType, EXPR> LetVar<T, EXPR> {
-    /// Create a new initialized variable wrapper
-    pub(crate) fn new(var: Var<T>, init: EXPR) -> Self {
-        LetVar { var, init }
-    }
-
-    /// Get the underlying variable reference
-    pub fn var(&self) -> Var<T>
-    where
-        T: CopyType,
-    {
-        self.var
-    }
-}
-
-impl<T: CopyType, EXPR: Clone> Clone for LetVar<T, EXPR> {
-    fn clone(&self) -> Self {
-        LetVar {
-            var: self.var,
-            init: self.init.clone(),
-        }
-    }
-}
-
-// InitVar is Copy when EXPR is Copy (like Const<T>)
-impl<T: CopyType, EXPR: Copy> Copy for LetVar<T, EXPR> {}
-
-// Deref to allow transparent access to the underlying Var
-impl<T: StagedType, EXPR> std::ops::Deref for LetVar<T, EXPR> {
-    type Target = Var<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.var
-    }
-}
-
-// When InitVar is staged, it performs the initialization
-unsafe impl<T, EXPR> Staged for LetVar<T, EXPR>
-where
-    T: StagedType,
-    EXPR: Staged<Out = T>,
-{
-    type Out = ();
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Generate code for the initialization value
-        let value = self.init.codegen(ctx);
-
-        ctx.assign_var::<T>(self.var.id, value, true);
-
-        // Return cached unit value
-        Value::scalar(ctx.get_unit_value())
-    }
-}
-
-// Allow implicit conversion from InitVar to Var for convenience
-impl<T: StagedType, EXPR> From<LetVar<T, EXPR>> for Var<T> {
-    fn from(init_var: LetVar<T, EXPR>) -> Var<T> {
-        init_var.var
-    }
-}

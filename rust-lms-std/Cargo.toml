@@ -1,7 +1,11 @@
 [package]
 name = "rust-lms-std"
 version = "0.1.0"
-edition = "2021"
+edition.workspace = true
+
+[features]
+# Run the same tests through the MLIR/LLVM backend as well. Mirrors `sql-gen`.
+llvm = ["rust-lms/llvm"]
 
 [dependencies]
 rust-lms = { workspace = true }

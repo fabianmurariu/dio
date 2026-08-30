@@ -21,7 +21,7 @@
 //! - null (0) = None
 //! - non-null = Some(pointer)
 
-use crate::func::VarBuilder;
+use crate::func::Ctx;
 use crate::refer::{SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var};
 use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
@@ -68,9 +68,11 @@ impl<T: Copy> COption<T> {
     /// # Safety
     /// Caller must ensure this is a Some variant.
     pub unsafe fn unwrap_unchecked(self) -> T {
-        match self {
-            COption::Some(v) => v,
-            COption::None => std::hint::unreachable_unchecked(),
+        unsafe {
+            match self {
+                COption::Some(v) => v,
+                COption::None => std::hint::unreachable_unchecked(),
+            }
         }
     }
 }
@@ -159,19 +161,21 @@ unsafe impl<T: StagedType> RuntimeResult for COptionType<T> {
 ///
 /// Single i64 value: null = None, non-null = Some(&T)
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OptRefType<'a, T: StagedType> {
-    _phantom: PhantomData<&'a T>,
+pub struct OptRefType<T: StagedType> {
+    _phantom: PhantomData<*const T>,
 }
 
-unsafe impl<'a, T: StagedType> StagedType for OptRefType<'a, T> {
-    type RuntimeValue = Option<&'a T::RuntimeValue>;
+unsafe impl<T: StagedType> StagedType for OptRefType<T> {
+    /// Null is `None`; the safe, lifetime-bounded view is
+    /// `RuntimeParam::Arg<'call>` / `RuntimeResult::Output<'call>`.
+    type RuntimeValue = *const T::RuntimeValue;
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
     }
 }
 
-unsafe impl<'stage, T> RuntimeParam for OptRefType<'stage, T>
+unsafe impl<T> RuntimeParam for OptRefType<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -179,7 +183,7 @@ where
     type Arg<'call> = Option<&'call T::RuntimeValue>;
 }
 
-unsafe impl<'stage, T> RuntimeResult for OptRefType<'stage, T>
+unsafe impl<T> RuntimeResult for OptRefType<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -196,26 +200,26 @@ where
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn duplicate(value: Var<OptMutRefType<'static, i64>>) {
+/// fn duplicate(value: Var<OptMutRefType<i64>>) {
 ///     let first = value;
 ///     let second = value;
 ///     let _ = (first, second);
 /// }
 /// ```
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
-pub struct OptMutRefType<'a, T: StagedType> {
-    _phantom: PhantomData<&'a mut T>,
+pub struct OptMutRefType<T: StagedType> {
+    _phantom: PhantomData<*mut T>,
 }
 
-unsafe impl<'a, T: StagedType> StagedType for OptMutRefType<'a, T> {
-    type RuntimeValue = Option<&'a mut T::RuntimeValue>;
+unsafe impl<T: StagedType> StagedType for OptMutRefType<T> {
+    type RuntimeValue = *mut T::RuntimeValue;
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
     }
 }
 
-unsafe impl<'stage, T> RuntimeParam for OptMutRefType<'stage, T>
+unsafe impl<T> RuntimeParam for OptMutRefType<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -223,7 +227,7 @@ where
     type Arg<'call> = Option<&'call mut T::RuntimeValue>;
 }
 
-unsafe impl<'stage, T> RuntimeResult for OptMutRefType<'stage, T>
+unsafe impl<T> RuntimeResult for OptMutRefType<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -314,13 +318,13 @@ pub fn c_none<T: StagedType>() -> CNone<T> {
 
 /// Expression to create `Some(&value)` for niche-optimized reference option.
 #[derive(Clone)]
-pub struct OptRefSome<'a, T: StagedType, E> {
+pub struct OptRefSome<T: StagedType, E> {
     reference: E,
-    _phantom: PhantomData<&'a T>,
+    _phantom: PhantomData<*const T>,
 }
 
-unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSome<'a, T, E> {
-    type Out = OptRefType<'a, T>;
+unsafe impl<T: StagedType, E: Staged<Out = SRef<T>>> Staged for OptRefSome<T, E> {
+    type Out = OptRefType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // The reference is the pointer - just pass it through
@@ -329,9 +333,7 @@ unsafe impl<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>> Staged for OptRefSo
 }
 
 /// Create an `Option<&T>::Some(ref)` expression.
-pub fn opt_ref_some<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>>(
-    reference: E,
-) -> OptRefSome<'a, T, E> {
+pub fn opt_ref_some<T: StagedType, E: Staged<Out = SRef<T>>>(reference: E) -> OptRefSome<T, E> {
     OptRefSome {
         reference,
         _phantom: PhantomData,
@@ -340,12 +342,12 @@ pub fn opt_ref_some<'a, T: StagedType, E: Staged<Out = SRef<'a, T>>>(
 
 /// Expression to create `None` for niche-optimized reference option.
 #[derive(Clone, Copy)]
-pub struct OptRefNone<'a, T: StagedType> {
-    _phantom: PhantomData<&'a T>,
+pub struct OptRefNone<T: StagedType> {
+    _phantom: PhantomData<*const T>,
 }
 
-unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
-    type Out = OptRefType<'a, T>;
+unsafe impl<T: StagedType> Staged for OptRefNone<T> {
+    type Out = OptRefType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         Value::scalar(ctx.null_ptr())
@@ -353,20 +355,20 @@ unsafe impl<'a, T: StagedType> Staged for OptRefNone<'a, T> {
 }
 
 /// Create an `Option<&T>::None` expression.
-pub fn opt_ref_none<'a, T: StagedType>() -> OptRefNone<'a, T> {
+pub fn opt_ref_none<T: StagedType>() -> OptRefNone<T> {
     OptRefNone {
         _phantom: PhantomData,
     }
 }
 
 /// Expression to create `Some(&mut value)` for niche-optimized mutable reference option.
-pub struct OptMutRefSome<'a, T: StagedType, E> {
+pub struct OptMutRefSome<T: StagedType, E> {
     reference: E,
-    _phantom: PhantomData<&'a mut T>,
+    _phantom: PhantomData<*mut T>,
 }
 
-unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMutRefSome<'a, T, E> {
-    type Out = OptMutRefType<'a, T>;
+unsafe impl<T: StagedType, E: Staged<Out = SRefMut<T>>> Staged for OptMutRefSome<T, E> {
+    type Out = OptMutRefType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         self.reference.codegen(ctx)
@@ -374,9 +376,9 @@ unsafe impl<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>> Staged for OptMu
 }
 
 /// Create an `Option<&mut T>::Some(ref)` expression.
-pub fn opt_mut_ref_some<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>>(
+pub fn opt_mut_ref_some<T: StagedType, E: Staged<Out = SRefMut<T>>>(
     reference: E,
-) -> OptMutRefSome<'a, T, E> {
+) -> OptMutRefSome<T, E> {
     OptMutRefSome {
         reference,
         _phantom: PhantomData,
@@ -385,12 +387,12 @@ pub fn opt_mut_ref_some<'a, T: StagedType, E: Staged<Out = SRefMut<'a, T>>>(
 
 /// Expression to create `None` for niche-optimized mutable reference option.
 #[derive(Clone, Copy)]
-pub struct OptMutRefNone<'a, T: StagedType> {
-    _phantom: PhantomData<&'a mut T>,
+pub struct OptMutRefNone<T: StagedType> {
+    _phantom: PhantomData<*mut T>,
 }
 
-unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
-    type Out = OptMutRefType<'a, T>;
+unsafe impl<T: StagedType> Staged for OptMutRefNone<T> {
+    type Out = OptMutRefType<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         Value::scalar(ctx.null_ptr())
@@ -398,7 +400,7 @@ unsafe impl<'a, T: StagedType> Staged for OptMutRefNone<'a, T> {
 }
 
 /// Create an `Option<&mut T>::None` expression.
-pub fn opt_mut_ref_none<'a, T: StagedType>() -> OptMutRefNone<'a, T> {
+pub fn opt_mut_ref_none<T: StagedType>() -> OptMutRefNone<T> {
     OptMutRefNone {
         _phantom: PhantomData,
     }
@@ -463,7 +465,7 @@ pub struct IsRefSome<E> {
     opt: E,
 }
 
-unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefSome<E> {
+unsafe impl<T: StagedType, E: Staged<Out = OptRefType<T>>> Staged for IsRefSome<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -474,9 +476,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
 }
 
 /// Check if an `Option<&T>` is `Some`.
-pub fn is_ref_some<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(
-    opt: E,
-) -> IsRefSome<E> {
+pub fn is_ref_some<T: StagedType, E: Staged<Out = OptRefType<T>>>(opt: E) -> IsRefSome<E> {
     IsRefSome { opt }
 }
 
@@ -486,7 +486,7 @@ pub struct IsRefNone<E> {
     opt: E,
 }
 
-unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged for IsRefNone<E> {
+unsafe impl<T: StagedType, E: Staged<Out = OptRefType<T>>> Staged for IsRefNone<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -497,9 +497,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>> Staged f
 }
 
 /// Check if an `Option<&T>` is `None`.
-pub fn is_ref_none<'a, T: StagedType + 'a, E: Staged<Out = OptRefType<'a, T>>>(
-    opt: E,
-) -> IsRefNone<E> {
+pub fn is_ref_none<T: StagedType, E: Staged<Out = OptRefType<T>>>(opt: E) -> IsRefNone<E> {
     IsRefNone { opt }
 }
 
@@ -510,9 +508,7 @@ pub struct IsMutRefSome<E> {
     opt: E,
 }
 
-unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged
-    for IsMutRefSome<E>
-{
+unsafe impl<T: StagedType, E: Staged<Out = OptMutRefType<T>>> Staged for IsMutRefSome<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -521,7 +517,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
     }
 }
 
-pub fn is_mut_ref_some<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>>(
+pub fn is_mut_ref_some<T: StagedType, E: Staged<Out = OptMutRefType<T>>>(
     opt: E,
 ) -> IsMutRefSome<E> {
     IsMutRefSome { opt }
@@ -533,9 +529,7 @@ pub struct IsMutRefNone<E> {
     opt: E,
 }
 
-unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Staged
-    for IsMutRefNone<E>
-{
+unsafe impl<T: StagedType, E: Staged<Out = OptMutRefType<T>>> Staged for IsMutRefNone<E> {
     type Out = bool;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
@@ -544,7 +538,7 @@ unsafe impl<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>> Stage
     }
 }
 
-pub fn is_mut_ref_none<'a, T: StagedType + 'a, E: Staged<Out = OptMutRefType<'a, T>>>(
+pub fn is_mut_ref_none<T: StagedType, E: Staged<Out = OptMutRefType<T>>>(
     opt: E,
 ) -> IsMutRefNone<E> {
     IsMutRefNone { opt }
@@ -693,7 +687,7 @@ where
 
 /// Pattern match on a `COption`, binding the value in the Some branch.
 ///
-/// The `some_fn` closure receives a `VarBuilder` context and a `Var<T>` bound
+/// The `some_fn` closure receives a `Ctx` context and a `Var<T>` bound
 /// to the unwrapped value, similar to how `fun1` works.
 ///
 /// # Example
@@ -706,7 +700,7 @@ where
 /// );
 /// ```
 pub fn match_opt<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -715,16 +709,16 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = COptionType<T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<T>) -> SomeBody,
+    SomeFn: FnOnce(&mut Ctx, Var<T>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
     // Allocate variable for bound value
-    let bound_var: Var<T> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<T> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
 
     // Build the some_body by calling the closure
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOpt {
         opt,
@@ -752,12 +746,11 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-unsafe impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged
-    for MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
+unsafe impl<T, OUT, OPT, SomeBody, NoneBody> Staged for MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
-    T: StagedType + 'a,
+    T: StagedType,
     OUT: StagedType,
-    OPT: Staged<Out = OptRefType<'a, T>>,
+    OPT: Staged<Out = OptRefType<T>>,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
@@ -779,7 +772,7 @@ where
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        ctx.assign_var::<SRef<'a, T>>(self.bound_var_id, ptr, false);
+        ctx.assign_var::<SRef<T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
         ctx.jump_value(merge_block, some_result);
@@ -799,23 +792,23 @@ where
 }
 
 /// Pattern match on an `Option<&T>`.
-pub fn match_opt_ref<'a, T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+pub fn match_opt_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
 ) -> MatchOptRef<T, OUT, OPT, SomeBody, NoneBody>
 where
-    T: StagedType + 'a,
+    T: StagedType,
     OUT: StagedType,
-    OPT: Staged<Out = OptRefType<'a, T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<SRef<'a, T>>) -> SomeBody,
+    OPT: Staged<Out = OptRefType<T>>,
+    SomeFn: FnOnce(&mut Ctx, Var<SRef<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
-    let bound_var: Var<SRef<'a, T>> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<SRef<T>> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOptRef {
         opt,
@@ -839,12 +832,12 @@ where
     _phantom: PhantomData<(T, OUT)>,
 }
 
-unsafe impl<'a, T, OUT, OPT, SomeBody, NoneBody> Staged
+unsafe impl<T, OUT, OPT, SomeBody, NoneBody> Staged
     for MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
-    T: StagedType + 'a,
+    T: StagedType,
     OUT: StagedType,
-    OPT: Staged<Out = OptMutRefType<'a, T>>,
+    OPT: Staged<Out = OptMutRefType<T>>,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
@@ -864,7 +857,7 @@ where
         ctx.switch_to_block(some_block);
         ctx.seal_block(some_block);
 
-        ctx.assign_var::<SRefMut<'a, T>>(self.bound_var_id, ptr, false);
+        ctx.assign_var::<SRefMut<T>>(self.bound_var_id, ptr, false);
 
         let some_result = self.some_body.codegen(ctx);
         ctx.jump_value(merge_block, some_result);
@@ -882,23 +875,23 @@ where
 }
 
 /// Pattern match on an `Option<&mut T>`.
-pub fn match_opt_mut_ref<'a, T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    var_builder: &mut VarBuilder,
+pub fn match_opt_mut_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
+    ctx: &mut Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
 ) -> MatchOptMutRef<T, OUT, OPT, SomeBody, NoneBody>
 where
-    T: StagedType + 'a,
+    T: StagedType,
     OUT: StagedType,
-    OPT: Staged<Out = OptMutRefType<'a, T>>,
-    SomeFn: FnOnce(&mut VarBuilder, Var<SRefMut<'a, T>>) -> SomeBody,
+    OPT: Staged<Out = OptMutRefType<T>>,
+    SomeFn: FnOnce(&mut Ctx, Var<SRefMut<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
-    let bound_var: Var<SRefMut<'a, T>> = unsafe { var_builder.var_unchecked() };
+    let bound_var: Var<SRefMut<T>> = unsafe { ctx.var_unchecked() };
     let bound_var_id = bound_var.id;
-    let some_body = some_fn(var_builder, bound_var);
+    let some_body = some_fn(ctx, bound_var);
 
     MatchOptMutRef {
         opt,

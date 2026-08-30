@@ -2,7 +2,7 @@
 //! no primitive array involved (the staged counterpart of `FfiValidity` owns its
 //! own bit get/set).
 
-use arrow_lms::{prepare_validity_mut, FfiValidityMut, ValidityView};
+use arrow_lms::{FfiValidityMut, ValidityView, prepare_validity_mut};
 use rust_lms::prelude::*;
 
 #[test]

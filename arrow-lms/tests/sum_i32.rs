@@ -9,7 +9,7 @@ use arrow::buffer::NullBuffer;
 use arrow::datatypes::{DataType, Field, Schema};
 use arrow::record_batch::RecordBatch;
 
-use arrow_lms::{prepare_dyn_arrays, prepare_record_batch, ArrayBatchOps, FfiArray};
+use arrow_lms::{ArrayBatchOps, FfiArray, prepare_dyn_arrays, prepare_record_batch};
 use rust_lms::prelude::*;
 
 fn batch(values: Vec<i32>) -> RecordBatch {

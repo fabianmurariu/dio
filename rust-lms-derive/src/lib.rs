@@ -19,8 +19,8 @@
 use proc_macro::TokenStream;
 use quote::{format_ident, quote};
 use syn::{
-    parse_macro_input, parse_quote, punctuated::Punctuated, Data, DeriveInput, Fields, FnArg,
-    ItemFn, Meta, ReturnType, Token, Type,
+    Data, DeriveInput, Fields, FnArg, ItemFn, Meta, ReturnType, Token, Type, parse_macro_input,
+    parse_quote, punctuated::Punctuated,
 };
 
 fn is_path(ty: &Type, expected: &str) -> bool {
@@ -409,31 +409,31 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
                 let ident = &segment.ident;
 
                 if ident == "COption" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::option::COptionType<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::option::COptionType<#inner_staged> });
                     }
                     return Err("COption requires a type argument".to_string());
                 }
 
                 if ident == "FatSlice" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::FatSliceType<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::ffi::RawSlice<#inner_staged> });
                     }
                     return Err("FatSlice requires a type argument".to_string());
                 }
 
                 if ident == "FatSliceMut" {
-                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments {
-                        if let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first() {
-                            let inner_staged = rust_type_to_staged_type(inner_ty)?;
-                            return Ok(quote! { ::rust_lms::ffi::FatSliceMutType<#inner_staged> });
-                        }
+                    if let syn::PathArguments::AngleBracketed(args) = &segment.arguments
+                        && let Some(syn::GenericArgument::Type(inner_ty)) = args.args.first()
+                    {
+                        let inner_staged = rust_type_to_staged_type(inner_ty)?;
+                        return Ok(quote! { ::rust_lms::ffi::RawSliceMut<#inner_staged> });
                     }
                     return Err("FatSliceMut requires a type argument".to_string());
                 }
@@ -468,11 +468,11 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 
                 if type_ref.mutability.is_some() {
                     return Ok(quote! {
-                        ::rust_lms::refer::SRefMut<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                        ::rust_lms::refer::SRefMut<::rust_lms::slice::Slice<#inner_staged>>
                     });
                 } else {
                     return Ok(quote! {
-                        ::rust_lms::refer::SRef<'static, ::rust_lms::slice::Slice<#inner_staged>>
+                        ::rust_lms::refer::SRef<::rust_lms::slice::Slice<#inner_staged>>
                     });
                 }
             }
@@ -481,11 +481,11 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
             // value, so retain its reference kind over an opaque pointee.
             if type_ref.mutability.is_some() {
                 Ok(quote! {
-                    ::rust_lms::refer::SRefMut<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRefMut<::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             } else {
                 Ok(quote! {
-                    ::rust_lms::refer::SRef<'static, ::rust_lms::opaque::Opaque<#elem_ty>>
+                    ::rust_lms::refer::SRef<::rust_lms::opaque::Opaque<#elem_ty>>
                 })
             }
         }

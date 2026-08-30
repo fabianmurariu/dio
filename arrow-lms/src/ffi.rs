@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 
 use arrow::array::types::ArrowPrimitiveType;
 use arrow::array::{
-    Array, ArrayRef, Float32Array, Float64Array, Int16Array, Int32Array, Int64Array, Int8Array,
-    PrimitiveArray, StringViewArray, UInt16Array, UInt32Array, UInt64Array, UInt8Array,
+    Array, ArrayRef, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
+    PrimitiveArray, StringViewArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
@@ -239,7 +239,11 @@ impl fmt::Display for FfiError {
             Self::Downcast { index, data_type } => {
                 write!(f, "array {index} could not be downcast as {data_type}")
             }
-            Self::MismatchedLength { index, expected, actual } => {
+            Self::MismatchedLength {
+                index,
+                expected,
+                actual,
+            } => {
                 write!(f, "array {index} has length {actual}, expected {expected}")
             }
             Self::BitmapTooShort { bit_len, byte_len } => write!(

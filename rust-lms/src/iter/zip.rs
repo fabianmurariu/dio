@@ -5,8 +5,8 @@ use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
 use crate::num::{add, lt};
-use crate::r#struct::{load_field_unchecked, Field, LoadField};
 use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
+use crate::r#struct::{Field, LoadField, load_field_unchecked};
 use crate::types::{CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};

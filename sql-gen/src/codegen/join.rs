@@ -12,7 +12,6 @@
 //! Phase 1: inner join, single `Int` key.
 
 use arrow::datatypes::{Field, SchemaRef};
-use arrow_lms::FfiArray;
 use datafusion_expr::Expr;
 use rust_lms::prelude::*;
 
@@ -22,7 +21,9 @@ use crate::value::{Nullness, Row};
 
 use super::expr::gen_expr;
 use super::numeric::to_i64;
-use super::{CodegenCtx, InputsSource, Yld, gen_len, gen_op, gen_read, write_col};
+use super::{
+    CodegenCtx, InputsSource, Yld, batch_from_descs, gen_len, gen_op, gen_read, write_col,
+};
 
 fn join_ref(state: *mut JoinState) -> impl Staged<Out = SPtr<Opaque<JoinState>>> + Copy {
     const_ptr::<Opaque<JoinState>>(state)
@@ -87,9 +88,7 @@ pub(crate) fn gen_build_index(
             ctx.bind(unsafe { call_extern2_unchecked(rt.join_left_batch, join_ref(state), b) });
         // SAFETY: `JoinState` retains each descriptor array, and schema
         // validation guarantees exactly `ncols` entries.
-        let batch = ctx.bind(unsafe {
-            slice_from_raw_parts::<FfiArray, _, _>(descs, Const::<u64>::new(ncols))
-        });
+        let batch = ctx.bind(unsafe { batch_from_descs(descs, ncols) });
         let len = gen_len(ctx, batch, &key_dt);
         let row = ctx.var(0u64);
         ctx.store(row, 0u64);
@@ -220,12 +219,8 @@ pub(crate) fn gen_join<I: InputsSource>(
                     });
                     // SAFETY: `JoinState` retains this batch and its validated
                     // schema guarantees `ncols_left` descriptor entries.
-                    let left_batch = ctx.bind(unsafe {
-                        slice_from_raw_parts::<FfiArray, _, _>(
-                            descs,
-                            Const::<u64>::new(ncols_left as u64),
-                        )
-                    });
+                    let left_batch =
+                        ctx.bind(unsafe { batch_from_descs(descs, ncols_left as u64) });
                     let mut row: Row = (0..ncols_left)
                         .map(|c| gen_read(ctx, left_batch, c, left_schema.field(c), r))
                         .collect();

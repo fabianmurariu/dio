@@ -12,28 +12,28 @@ use common::for_each_backend;
 
 /// Simple addition function
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_add(x: i64, y: i64) -> i64 {
     x + y
 }
 
 /// Simple multiplication
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_mul(x: i64, y: i64) -> i64 {
     x * y
 }
 
 /// Square a number
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_square(x: i64) -> i64 {
     x * x
 }
 
 /// Function with no return value
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_noop() {
     // Do nothing
 }
@@ -41,21 +41,21 @@ pub extern "C" fn ext_noop() {
 /// # Safety
 /// An unsafe callback must use `call_extern1_unchecked`.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub unsafe extern "C" fn ext_read_i64(ptr: *const i64) -> i64 {
-    *ptr
+    unsafe { *ptr }
 }
 
 /// A safe shared-reference callback retains a staged `SRef` signature.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_read_ref(value: &i64) -> i64 {
     *value
 }
 
 /// A safe mutable-reference callback retains a staged `SRefMut` signature.
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_add_assign(value: &mut i64, delta: i64) -> i64 {
     *value += delta;
     *value
@@ -65,7 +65,7 @@ pub extern "C" fn ext_add_assign(value: &mut i64, delta: i64) -> i64 {
 /// considered safe extern calls because Rust does not define their C ABI.
 #[allow(improper_ctypes_definitions)]
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_ref_slice_len(data: &[i64]) -> usize {
     data.len()
 }
@@ -76,27 +76,27 @@ pub extern "C" fn ext_ref_slice_len(data: &[i64]) -> usize {
 
 /// Sum elements of a slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_sum_slice(data: FatSlice<i64>) -> i64 {
     unsafe { data.as_slice().iter().sum() }
 }
 
 /// Get length of slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_slice_len(data: FatSlice<i64>) -> i64 {
     data.len as i64
 }
 
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_identity_slice(data: FatSlice<i64>) -> FatSlice<i64> {
     data
 }
 
 /// Double each element in a mutable slice
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn ext_double_slice(mut data: FatSliceMut<i64>) {
     unsafe {
         for x in data.as_slice_mut() {
@@ -125,25 +125,25 @@ fn test_extern_marker_carries_the_complete_signature() {
 
     fn assert_slice_signature<S>()
     where
-        S: ExternFn<Args = (FatSliceType<i64>,), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (RawSlice<i64>,), Ret = i64> + SafeExternFn,
     {
     }
 
     fn assert_ref_signature<S>()
     where
-        S: ExternFn<Args = (SRef<'static, Opaque<i64>>,), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (SRef<Opaque<i64>>,), Ret = i64> + SafeExternFn,
     {
     }
 
     fn assert_mut_ref_signature<S>()
     where
-        S: ExternFn<Args = (SRefMut<'static, Opaque<i64>>, i64), Ret = i64> + SafeExternFn,
+        S: ExternFn<Args = (SRefMut<Opaque<i64>>, i64), Ret = i64> + SafeExternFn,
     {
     }
 
     fn assert_ref_slice_signature<S>()
     where
-        S: ExternFn<Args = (SRef<'static, Slice<i64>>,), Ret = u64>,
+        S: ExternFn<Args = (SRef<Slice<i64>>,), Ret = u64>,
     {
     }
 
@@ -307,7 +307,7 @@ fn test_extern_fn_sum_slice() {
         let sum_fn = compiler.extern_fn::<ExtSumSliceExtern>();
 
         // Function that takes a FatSlice and returns the sum
-        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<RawSlice<i64>>| {
             call_extern1(sum_fn, data)
         });
 
@@ -329,7 +329,7 @@ fn test_extern_fn_slice_len() {
     for_each_backend(|mut compiler| {
         let len_fn = compiler.extern_fn::<ExtSliceLenExtern>();
 
-        let test_fn = compiler.fun1("test", |_ctx, data: Var<FatSliceType<i64>>| {
+        let test_fn = compiler.fun1("test", |_ctx, data: Var<RawSlice<i64>>| {
             call_extern1(len_fn, data)
         });
 
@@ -350,8 +350,8 @@ fn test_extern_fn_slice_len() {
 fn test_extern_call_preserves_fat_slice_return() {
     for_each_backend(|mut compiler| {
         let identity = compiler.extern_fn::<ExtIdentitySliceExtern>();
-        let test_fn = compiler.fun1("identity_len", |ctx, data: Var<FatSliceType<i64>>| {
-            let returned: Var<FatSliceType<i64>> = ctx.bind(call_extern1(identity, data));
+        let test_fn = compiler.fun1("identity_len", |ctx, data: Var<RawSlice<i64>>| {
+            let returned: Var<RawSlice<i64>> = ctx.bind(call_extern1(identity, data));
             returned.len()
         });
 

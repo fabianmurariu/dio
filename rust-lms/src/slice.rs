@@ -26,29 +26,21 @@
 //!
 //! ```ignore
 //! // Sum all elements in a slice
-//! let sum = compiler.fun1("sum", |arr: Var<SRef<Slice<i64>>>| {
-//!     let i = compiler.let_var(0u64);
-//!     let total = compiler.let_var(0i64);
-//!
-//!     (
-//!         i,
-//!         total,
-//!         while_loop(
-//!             lt(i, arr.len()),
-//!             (
-//!                 assign(total, add(total, arr.get_unchecked(i))),
-//!                 assign(i, add(i, 1u64)),
-//!             )
-//!         ),
-//!         total
-//!     )
+//! let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
+//!     let total = ctx.var(0i64);
+//!     arr.staged_iter().for_each(ctx, move |ctx, elem| {
+//!         ctx.store(total, add(total, elem));
+//!     });
+//!     total
 //! });
 //! ```
 
-use crate::ffi::FatSliceType;
-use crate::r#struct::{Field, FieldAddr, MutField};
+use crate::ffi::{RawSlice, RawSliceMut};
+use crate::func::Ctx;
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
+use crate::staged_opt::StagedOpt;
+use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -82,7 +74,7 @@ pub struct Slice<T: StagedType> {
 ///
 /// This trait witnesses only the representation layout. A particular
 /// descriptor's pointer validity, alignment, element count, and lifetime are
-/// checked by the caller of [`ReprSliceOps::as_slice`].
+/// checked by the caller of [`ReprSliceOps::into_raw_slice`].
 ///
 /// # Safety
 ///
@@ -128,7 +120,7 @@ pub struct AsSlice<P, T> {
 }
 
 /// Re-types a raw pointer to a repr-compatible `(ptr, len)` descriptor as a
-/// lifetime-free staged [`FatSliceType<T>`].
+/// lifetime-free staged [`RawSlice<T>`].
 pub struct AsRawSlice<P, T> {
     repr: P,
     _elem: PhantomData<T>,
@@ -151,7 +143,7 @@ where
     R: SliceRepr<T>,
     T: StagedType,
 {
-    type Out = FatSliceType<T>;
+    type Out = RawSlice<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -201,13 +193,16 @@ impl<P: Clone, T> Clone for AsSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsSlice<P, T> {}
 
-unsafe impl<'a, P, R, T> Staged for AsSlice<P, T>
+unsafe impl<P, R, T> Staged for AsSlice<P, T>
 where
-    P: Staged<Out = SRef<'a, R>>,
-    R: SliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    P: Staged<Out = SRef<R>>,
+    R: SliceRepr<T>,
+    T: StagedType,
 {
-    type Out = SRef<'a, Slice<T>>;
+    /// **Raw**, not trusted. Reading a `(ptr, len)` out of a valid `&R` is
+    /// sound, but says nothing about the buffer that pointer addresses — that
+    /// claim belongs to [`RawSliceOps::assume_shared`].
+    type Out = RawSlice<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -219,28 +214,62 @@ where
 /// Extension trait for values that point at a witnessed `(ptr, len)`
 /// representation.
 ///
+/// Producing a raw slice is an `unsafe` act, so safe code cannot reach a
+/// dereference through the safe extern path:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[extern_fn]
+/// #[no_mangle]
+/// pub extern "C" fn doc_sum(data: FatSlice<i64>) -> i64 {
+///     unsafe { data.as_slice().iter().sum() }
+/// }
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// pub struct D { #[staged(SPtr<i64>)] ptr: *const i64, #[staged(u64)] len: usize }
+/// unsafe impl SliceRepr<i64> for D {}
+///
+/// fn chain(compiler: &mut Compiler<'static>) {
+///     let ext = compiler.extern_fn::<DocSumExtern>();
+///     let _f = compiler.fun1("h", |_c, d: Var<SRef<D>>| {
+///         call_extern1(ext, d.into_raw_slice::<i64>())
+///     });
+/// }
+/// ```
+///
 /// Ordinary staged references cannot be reinterpreted as slices:
 ///
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<'_, i64>>) {
+/// fn arbitrary_value_is_not_a_slice(value: Var<SRef<i64>>) {
 ///     let _ = unsafe { value.as_slice::<u8>() };
 /// }
 /// ```
-pub trait ReprSliceOps<'a, R>: Staged<Out = SRef<'a, R>> + Sized
+pub trait ReprSliceOps<R>: Staged<Out = SRef<R>> + Sized
 where
-    R: StagedType + 'a,
+    R: StagedType,
 {
-    /// Reinterpret the pointed-to representation as a staged slice of `T`.
+    /// Read the descriptor as a **raw** slice of `T`.
     ///
     /// # Safety
     ///
-    /// The descriptor must contain a pointer that is live and aligned for
-    /// reads of `len` values of `T` for the duration of generated execution.
-    unsafe fn into_slice<T>(self) -> AsSlice<Self, T>
+    /// The descriptor must contain a pointer that is live and aligned for `len`
+    /// values of `T` for the duration of generated execution.
+    ///
+    /// It is tempting to think this could be safe, since a raw descriptor makes
+    /// no claim and every op that *dereferences* one is itself `unsafe`. It
+    /// cannot: an extern declared with a `FatSlice<T>` parameter is a
+    /// `SafeExternFn` (a plain `#[repr(C)]` struct is not a reference, so the
+    /// macro marks it safe), and such an extern dereferences its argument. A
+    /// safe constructor here would therefore complete a fully safe path from an
+    /// arbitrary descriptor to a dereference. **Producing a `RawSlice` value is
+    /// the unsafe act**; that is also why `slice_from_raw_parts` is `unsafe`.
+    unsafe fn into_raw_slice<T>(self) -> AsSlice<Self, T>
     where
-        T: StagedType + 'a,
+        T: StagedType,
         R: SliceRepr<T>,
     {
         AsSlice {
@@ -250,10 +279,10 @@ where
     }
 }
 
-impl<'a, R, S> ReprSliceOps<'a, R> for S
+impl<R, S> ReprSliceOps<R> for S
 where
-    R: StagedType + 'a,
-    S: Staged<Out = SRef<'a, R>> + Sized,
+    R: StagedType,
+    S: Staged<Out = SRef<R>> + Sized,
 {
 }
 
@@ -261,20 +290,20 @@ where
 ///
 /// The mutable twin of [`ReprSliceOps`]: given a `&mut` to an FFI descriptor
 /// whose first two fields are `ptr`/`len`, reinterpret it as a `&mut [T]`.
-pub trait ReprSliceMutOps<'a, R>: Staged<Out = SRefMut<'a, R>> + Sized
+pub trait ReprSliceMutOps<R>: Staged<Out = SRefMut<R>> + Sized
 where
-    R: StagedType + 'a,
+    R: StagedType,
 {
-    /// Reinterpret the pointed-to representation as a staged *mutable* slice.
+    /// Read the descriptor as a **raw mutable** slice of `T`; promote with
+    /// [`RawSliceOps::assume_unique`].
     ///
     /// # Safety
     ///
-    /// The descriptor must contain a pointer that is live, aligned, and
-    /// exclusively writable for `len` values of `T` for the duration of
-    /// generated execution.
-    unsafe fn into_mut_slice<T>(self) -> AsMutSlice<Self, T>
+    /// As [`ReprSliceOps::into_raw_slice`], and the buffer must be exclusively
+    /// writable.
+    unsafe fn into_raw_slice_mut<T>(self) -> AsMutSlice<Self, T>
     where
-        T: StagedType + 'a,
+        T: StagedType,
         R: MutSliceRepr<T>,
     {
         AsMutSlice {
@@ -284,10 +313,10 @@ where
     }
 }
 
-impl<'a, R, S> ReprSliceMutOps<'a, R> for S
+impl<R, S> ReprSliceMutOps<R> for S
 where
-    R: StagedType + 'a,
-    S: Staged<Out = SRefMut<'a, R>> + Sized,
+    R: StagedType,
+    S: Staged<Out = SRefMut<R>> + Sized,
 {
 }
 
@@ -310,13 +339,15 @@ impl<P: Clone, T> Clone for AsMutSlice<P, T> {
 
 impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
 
-unsafe impl<'a, P, R, T> Staged for AsMutSlice<P, T>
+unsafe impl<P, R, T> Staged for AsMutSlice<P, T>
 where
-    P: Staged<Out = SRefMut<'a, R>>,
-    R: MutSliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    P: Staged<Out = SRefMut<R>>,
+    R: MutSliceRepr<T>,
+    T: StagedType,
 {
-    type Out = SRefMut<'a, Slice<T>>;
+    /// **Raw**, not trusted — see [`AsSlice`]. Promote with
+    /// [`RawSliceOps::assume_unique`].
+    type Out = RawSliceMut<T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
@@ -329,9 +360,10 @@ where
 // StagedType for SRef<Slice<T>> - Immutable Fat Pointer
 // =============================================================================
 
-unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
-    /// Runtime type is `&[T::RuntimeValue]`
-    type RuntimeValue = &'a [T::RuntimeValue];
+unsafe impl<T: StagedType> StagedType for SRef<Slice<T>> {
+    /// A staged slice reference is a `(ptr, len)` descriptor at runtime; the
+    /// safe, lifetime-bounded view is `RuntimeResult::Output<'call>`.
+    type RuntimeValue = *const [T::RuntimeValue];
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
@@ -354,9 +386,9 @@ unsafe impl<'a, T: StagedType> StagedType for SRef<'a, Slice<T>> {
     }
 }
 
-unsafe impl<'a, T: StagedType> CopyType for SRef<'a, Slice<T>> {}
+unsafe impl<T: StagedType> CopyType for SRef<Slice<T>> {}
 
-unsafe impl<'stage, T> RuntimeParam for SRef<'stage, Slice<T>>
+unsafe impl<T> RuntimeParam for SRef<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -364,7 +396,7 @@ where
     type Arg<'call> = &'call [T::RuntimeValue];
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRef<'stage, Slice<T>>
+unsafe impl<T> RuntimeResult for SRef<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -376,9 +408,8 @@ where
 // StagedType for SRefMut<Slice<T>> - Mutable Fat Pointer
 // =============================================================================
 
-unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
-    /// Runtime type is `&mut [T::RuntimeValue]`
-    type RuntimeValue = &'a mut [T::RuntimeValue];
+unsafe impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
+    type RuntimeValue = *mut [T::RuntimeValue];
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
@@ -401,7 +432,7 @@ unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, Slice<T>> {
     }
 }
 
-unsafe impl<'stage, T> RuntimeParam for SRefMut<'stage, Slice<T>>
+unsafe impl<T> RuntimeParam for SRefMut<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -409,7 +440,7 @@ where
     type Arg<'call> = &'call mut [T::RuntimeValue];
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRefMut<'stage, Slice<T>>
+unsafe impl<T> RuntimeResult for SRefMut<Slice<T>>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -418,26 +449,46 @@ where
 }
 
 // =============================================================================
-// SliceType: unify immutable and mutable slice fat pointers
+// Capability taxonomy: representation, trusted provenance, writability
 // =============================================================================
+//
+// Four *different facts* about a staged slice, each its own trait, because a
+// `(ptr, len)` pair alone proves none of the others:
+//
+// ```text
+//   SliceType            representation: two words, an element type, a data pointer
+//   |
+//   +-- TrustedSliceType validity + provenance established -> element access is safe
+//   |     |
+//   |     +-- MutSliceType   ... and writes are permitted and exclusive
+//   |
+//   +-- RawSliceType     provenance unknown -> element access stays `unsafe`
+// ```
+//
+// `len` and the data pointer are available on any `SliceType`: reading the
+// descriptor you already hold dereferences nothing. Everything that *touches
+// memory* requires `TrustedSliceType`, and writing additionally requires
+// `MutSliceType`. A raw descriptor reaches the trusted half only through an
+// explicit unsafe promotion — never implicitly.
 
 mod slice_type_sealed {
     pub trait Sealed {}
-    pub trait MutableSealed: Sealed {}
+    pub trait TrustedSealed: Sealed {}
+    pub trait MutableSealed: TrustedSealed {}
+    pub trait RawSealed: Sealed {}
 }
 
-/// A staged slice fat-pointer type. Implemented by both `SRef<Slice<T>>`
-/// (`&[T]`) and `SRefMut<Slice<T>>` (`&mut [T]`), so a *single* op impl can
-/// serve both — the mutability lives entirely in the associated `ElemRef`.
+/// A staged slice's **representation**: a `(ptr, len)` pair with an element
+/// type. Says nothing about whether the pointer is valid or writable — see
+/// [`TrustedSliceType`] and [`MutSliceType`].
 ///
-/// This is what keeps slices *closed under sub-slicing*: every op below is
-/// generic over `S::Out: SliceType`, and `SliceSliceUnchecked` reports
-/// `Out = S::Out`, so the result of `slice_unchecked` is itself a slice that
-/// supports `len`/`get`/`slice_unchecked`/… all over again — and a sub-slice
-/// of a `&mut [T]` stays mutable.
+/// This is what keeps slices *closed under sub-slicing*: the sub-slice node
+/// reports `Out = S::Out`, so slicing a `&mut [T]` yields a `&mut [T]` and
+/// slicing a raw descriptor yields a raw descriptor — capability and provenance
+/// are preserved rather than laundered.
 ///
-/// The trait is sealed; only the slice representations supplied by this crate
-/// may participate in slice lowering.
+/// The trait is sealed; only representations supplied by this crate participate
+/// in slice lowering.
 ///
 /// ```compile_fail
 /// use rust_lms::prelude::*;
@@ -451,50 +502,123 @@ mod slice_type_sealed {
 ///
 /// impl SliceType for FabricatedSlice {
 ///     type Elem = u8;
-///     type ElemRef = SPtr<u8>;
 ///     type DataPtr = SPtr<u8>;
 /// }
 /// ```
 pub trait SliceType: StagedType + slice_type_sealed::Sealed {
     /// Element type (`T`).
     type Elem: StagedType;
-    /// Reference-to-element produced by `get_ref_unchecked`:
-    /// `SRef<T>` for an immutable slice, `SRefMut<T>` for a mutable one.
-    type ElemRef: StagedType;
     /// Raw pointer produced by `as_ptr` / `as_mut_ptr`.
     type DataPtr: StagedType;
 }
 
-impl<'a, T: StagedType> SliceType for SRef<'a, Slice<T>> {
-    type Elem = T;
-    type ElemRef = SRef<'a, T>;
-    type DataPtr = SPtr<T>;
+/// A slice whose pointer is **known valid** for its element count, so element
+/// access is an ordinary safe operation rather than an unsafe one.
+///
+/// Carries [`ElemRef`](TrustedSliceType::ElemRef) because only a trusted slice
+/// can yield a *reference* to an element; a raw descriptor can offer no more
+/// than a pointer.
+///
+/// A raw descriptor cannot be treated as trusted:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn trusted_only<S: TrustedSliceType>() {}
+///
+/// fn raw_is_not_trusted() {
+///     trusted_only::<RawSlice<i64>>();
+/// }
+/// ```
+pub trait TrustedSliceType: SliceType + slice_type_sealed::TrustedSealed {
+    /// Reference-to-element produced by `get_ref_unchecked`:
+    /// `SRef<T>` for a shared slice, `SRefMut<T>` for a unique one.
+    type ElemRef: StagedType;
 }
 
-impl<'a, T: StagedType> slice_type_sealed::Sealed for SRef<'a, Slice<T>> {}
+/// A trusted slice that is additionally **writable and exclusive**. Gates every
+/// mutating op (`set`, `set_unchecked`, `swap_unchecked`) so they cannot be
+/// reached from a shared slice.
+///
+/// Writability alone is not enough — a raw *mutable* descriptor is writable but
+/// not trusted, so it deliberately does not implement this:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn writable_only<S: MutSliceType>() {}
+///
+/// fn raw_mut_is_not_writable_through_the_slice_api() {
+///     writable_only::<RawSliceMut<i64>>();
+/// }
+/// ```
+pub trait MutSliceType: TrustedSliceType + slice_type_sealed::MutableSealed {}
 
-impl<'a, T: StagedType> SliceType for SRefMut<'a, Slice<T>> {
+/// A slice descriptor of **unknown provenance** — an FFI return, or a
+/// `(ptr, len)` read out of a foreign struct. It has a representation, so `len`,
+/// the data pointer, and sub-slicing all work, but nothing may dereference it
+/// without an explicit unsafe step.
+///
+/// Disjoint from [`TrustedSliceType`] in practice: both sit under private
+/// sealed super-traits, so only this crate could implement them, and no marker
+/// implements both. `tests/slice_taxonomy.rs` asserts the full classification.
+pub trait RawSliceType: SliceType + slice_type_sealed::RawSealed {}
+
+// --- `&[T]` — trusted, shared -------------------------------------------------
+
+impl<T: StagedType> SliceType for SRef<Slice<T>> {
     type Elem = T;
-    type ElemRef = SRefMut<'a, T>;
+    type DataPtr = SPtr<T>;
+}
+impl<T: StagedType> TrustedSliceType for SRef<Slice<T>> {
+    type ElemRef = SRef<T>;
+}
+impl<T: StagedType> slice_type_sealed::Sealed for SRef<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for SRef<Slice<T>> {}
+
+// --- `&mut [T]` — trusted, unique, writable -----------------------------------
+
+impl<T: StagedType> SliceType for SRefMut<Slice<T>> {
+    type Elem = T;
     type DataPtr = SMutPtr<T>;
 }
+impl<T: StagedType> TrustedSliceType for SRefMut<Slice<T>> {
+    type ElemRef = SRefMut<T>;
+}
+impl<T: StagedType> MutSliceType for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::Sealed for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for SRefMut<Slice<T>> {}
+impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
 
-impl<'a, T: StagedType> slice_type_sealed::Sealed for SRefMut<'a, Slice<T>> {}
+// --- raw shared descriptor ----------------------------------------------------
 
-impl<T: StagedType> SliceType for FatSliceType<T> {
+impl<T: StagedType> SliceType for RawSlice<T> {
     type Elem = T;
-    type ElemRef = SPtr<T>;
     type DataPtr = SPtr<T>;
 }
+impl<T: StagedType> RawSliceType for RawSlice<T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for RawSlice<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for RawSlice<T> {}
 
-impl<T: StagedType> slice_type_sealed::Sealed for FatSliceType<T> {}
+// --- raw mutable descriptor ---------------------------------------------------
+//
+// Half of gap G6b from the row-0 characterization matrix: before the taxonomy
+// this marker implemented nothing, so a mutable raw descriptor supported no
+// slice operation at all — not even `len`. Classifying it here makes every op
+// *node* accept it; the other half is row 4, where `RawSliceOps` stops being
+// hard-bound to `RawSlice<T>` so a call site can actually reach them.
+//
+// It is `RawSliceType`, not `MutSliceType`: the pointer permits writes, but
+// provenance is unproven, so writing goes through an explicit promotion to a
+// trusted slice rather than through the slice write API.
 
-/// Marker for *mutable* slices (`SRefMut<Slice<T>>`). Gates the writing ops
-/// (`set_unchecked`) so they cannot be called on an immutable slice.
-pub trait MutSliceType: SliceType + slice_type_sealed::MutableSealed {}
-
-impl<'a, T: StagedType> MutSliceType for SRefMut<'a, Slice<T>> {}
-impl<'a, T: StagedType> slice_type_sealed::MutableSealed for SRefMut<'a, Slice<T>> {}
+impl<T: StagedType> SliceType for RawSliceMut<T> {
+    type Elem = T;
+    type DataPtr = SMutPtr<T>;
+}
+impl<T: StagedType> RawSliceType for RawSliceMut<T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for RawSliceMut<T> {}
+impl<T: StagedType> slice_type_sealed::RawSealed for RawSliceMut<T> {}
 
 /// Convenience accessor for `S`'s element type inside generic op impls.
 type ElemOf<S> = <<S as Staged>::Out as SliceType>::Elem;
@@ -571,10 +695,12 @@ pub struct SliceGetRefUnchecked<S, I> {
 unsafe impl<S, I> Staged for SliceGetRefUnchecked<S, I>
 where
     S: Staged,
-    S::Out: SliceType,
+    // A *reference* to an element requires trusted provenance; a raw descriptor
+    // can only ever yield a pointer (`SliceGetPtrUnchecked`).
+    S::Out: TrustedSliceType,
     I: Staged<Out = u64>,
 {
-    type Out = <S::Out as SliceType>::ElemRef;
+    type Out = <S::Out as TrustedSliceType>::ElemRef;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let index = self.index.codegen(ctx);
@@ -602,28 +728,6 @@ where
         let index = self.index.codegen(ctx);
         let data_ptr = ctx.slice_data_ptr(&self.slice);
         Value::scalar(element_addr::<S>(ctx, data_ptr, index.leaf()))
-    }
-}
-
-/// Get a raw element pointer from any staged slice representation.
-///
-/// # Safety
-///
-/// At execution, `index` must be less than `slice`'s element count. Any later
-/// dereference must also satisfy the source storage's lifetime and aliasing
-/// requirements.
-pub unsafe fn slice_get_ptr_unchecked<S, I>(
-    slice: S,
-    index: I,
-) -> SliceGetPtrUnchecked<S, I::Staged>
-where
-    S: Staged,
-    S::Out: SliceType,
-    I: IntoStaged<u64>,
-{
-    SliceGetPtrUnchecked {
-        slice,
-        index: index.into_staged(),
     }
 }
 
@@ -861,29 +965,246 @@ where
 }
 
 // =============================================================================
-// Extension trait for Var<SRef<Slice<T>>> - Immutable slice operations
+// Operation umbrella: one op surface per capability
 // =============================================================================
+//
+// The op traits mirror the capability traits one-for-one, each adding what its
+// capability licenses:
+//
+// ```text
+//   SliceOps        : SliceType         len, into_ptr, get_unchecked,
+//                                       get_ptr_unchecked, get_range, subslice_unchecked
+//   TrustedSliceOps : TrustedSliceType  get_or, get_ref_unchecked
+//   SliceMutOps     : MutSliceType      set, set_unchecked, swap_unchecked
+//   RawSliceOps     : RawSliceType      assume_shared, assume_unique
+// ```
+//
+// The dividing line is safety: the safe, bounds-checked accessors (`get_or`,
+// `set`) are exactly the ones needing established provenance, so they sit above
+// `TrustedSliceType`. Everything on `SliceOps` either touches no memory or is
+// already `unsafe`.
+//
+// Every method takes `self` by value — a staged expression *is* a value, and
+// consuming it is what stops a unique `Var<SRefMut<_>>` being reused after it
+// has been projected. Use `Var::reborrow` where the variable must survive.
 
-/// Extension trait for immutable slice operations.
-pub trait SliceRefOps<'a, T: StagedType + 'a>:
-    Staged<Out = SRef<'a, Slice<T>>> + Sized + Clone
+/// Operations available from a slice's **representation** alone.
+///
+/// `len`, `as_ptr` and `subslice_unchecked` dereference nothing — they read or
+/// arithmetically adjust a `(ptr, len)` pair you already hold — so they are
+/// available on every [`SliceType`], raw descriptors included.
+// `len` is staged; host-side emptiness is unknowable, so there is no `is_empty`.
+#[allow(clippy::len_without_is_empty)]
+pub trait SliceOps: Staged + Sized
+where
+    Self::Out: SliceType,
 {
-    /// Get the length of the slice.
-    fn count(self) -> SliceLen<Self> {
+    /// Number of elements.
+    fn len(self) -> SliceLen<Self> {
         SliceLen { slice: self }
     }
 
-    /// Get the raw data pointer.
+    /// The data pointer. Mutability follows the slice's capability: `SPtr<T>`
+    /// from a shared slice, `SMutPtr<T>` from a unique one — the associated
+    /// [`SliceType::DataPtr`] carries it, so one method replaces the old
+    /// `into_ptr`/`into_mut_ptr` pair.
+    ///
+    /// Named `into_` rather than `as_`: every op here consumes the expression,
+    /// and `as_*` conventionally borrows.
     fn into_ptr(self) -> SliceAsPtr<Self> {
         SliceAsPtr { slice: self }
     }
 
-    /// Read `index` when it is in bounds, otherwise return `default`.
+    /// Read an element by value without bounds checking (`CopyType` elements).
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length. On a raw
+    /// descriptor the caller must *also* establish that the pointer is live and
+    /// aligned for `T` — that is the provenance a [`TrustedSliceType`] would
+    /// have proven.
+    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
+    where
+        I: IntoStaged<u64>,
+        ElemOf<Self>: CopyType,
+    {
+        SliceGetUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
+    }
+
+    /// A raw pointer to element `index`.
+    ///
+    /// Mutability follows the slice, via [`SliceType::DataPtr`]. Available on
+    /// every origin: computing an element address dereferences nothing.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this slice's length, and any
+    /// later dereference must satisfy the source storage's lifetime and
+    /// aliasing requirements.
+    unsafe fn get_ptr_unchecked<I>(self, index: I) -> SliceGetPtrUnchecked<Self, I::Staged>
+    where
+        I: IntoStaged<u64>,
+    {
+        SliceGetPtrUnchecked {
+            slice: self,
+            index: index.into_staged(),
+        }
+    }
+
+    /// Derive a sub-slice over `[start, end)` **with bounds checking**,
+    /// yielding a [`StagedOpt`]: `Some` when `start <= end && end <= len`,
+    /// otherwise `None`.
+    ///
+    /// Safe, and available on every origin — checking bounds and adjusting a
+    /// `(ptr, len)` pair dereferences nothing, so a raw descriptor gets a
+    /// checked *raw* sub-slice just as a trusted slice gets a trusted one.
+    ///
+    /// Takes two arguments rather than a `start..end` range: `Range<Idx>` has a
+    /// single index type, so the common mixed form — a literal start with a
+    /// staged end, `0u64 .. len` — is a type error at the `..` itself. That is
+    /// 5 of the 25 sub-slice call sites in this workspace, and they are the
+    /// dynamic ones.
+    fn get_range<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceGetRange<Self, START::Staged, END::Staged>
+    where
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
+    {
+        SliceGetRange {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
+    }
+
+    /// Derive a sub-slice over `[start, end)`.
+    ///
+    /// Closed under capability *and* provenance: the result reports
+    /// `Out = Self::Out`, so a sub-slice of a `&mut [T]` stays writable and a
+    /// sub-slice of a raw descriptor stays raw.
+    ///
+    /// Consuming the receiver is what prevents a unique parent from being used
+    /// alongside its own sub-slice:
+    ///
+    /// ```compile_fail
+    /// use rust_lms::prelude::*;
+    ///
+    /// fn overlapping(mut slice: Var<SRefMut<Slice<i64>>>) {
+    ///     let sub = unsafe { slice.subslice_unchecked(0u64, 1u64) };
+    ///     let _parent = slice.reborrow().len(); // `slice` was consumed above
+    ///     let _ = sub;
+    /// }
+    /// ```
+    ///
+    /// # Safety
+    ///
+    /// At execution, `start <= end` and `end <= self.len()` must hold.
+    unsafe fn subslice_unchecked<START, END>(
+        self,
+        start: START,
+        end: END,
+    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
+    where
+        START: IntoStaged<u64>,
+        END: IntoStaged<u64>,
+    {
+        SliceSliceUnchecked {
+            slice: self,
+            start: start.into_staged(),
+            end: end.into_staged(),
+        }
+    }
+}
+
+impl<S> SliceOps for S
+where
+    S: Staged + Sized,
+    S::Out: SliceType,
+{
+}
+
+/// A **checked** sub-slice: `Some(slice[start..end])` when
+/// `start <= end && end <= len`, otherwise `None`.
+///
+/// A [`StagedOpt`], not a [`Staged`] value — it never materializes a
+/// discriminant. The bounds test lowers to one branchless `select`, and the
+/// sub-slice is only built on the taken arm.
+///
+/// The slice expression is used *twice* (once for `len`, once for the
+/// sub-slice), which a unique origin cannot supply by cloning. It is therefore
+/// bound to a variable once and reborrowed — the same bind-once-and-reborrow
+/// idiom a generic slice helper needs, which is what lets this serve every
+/// capability rather than only shared ones.
+pub struct SliceGetRange<S, START, END> {
+    slice: S,
+    start: START,
+    end: END,
+}
+
+impl<S, START, END> StagedOpt for SliceGetRange<S, START, END>
+where
+    S: Staged + 'static,
+    S::Out: SliceType + 'static,
+    START: Staged<Out = u64> + 'static,
+    END: Staged<Out = u64> + 'static,
+{
+    type Item = S::Out;
+
+    fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
+    where
+        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
+        N: FnOnce(&mut Ctx) + 'static,
+    {
+        let mut slice = ctx.bind(self.slice);
+        let start = ctx.bind(self.start);
+        let end = ctx.bind(self.end);
+        let len = ctx.bind(slice.reborrow().len());
+
+        // `start <= end && end <= len`, branchless: there is no `le`/`and`, so
+        // read it as "if start > end then false, else end <= len".
+        let in_range = ctx.bind(crate::num::select(
+            crate::num::gt(start, end),
+            false,
+            crate::control::not(crate::num::gt(end, len)),
+        ));
+
+        // SAFETY: only codegen'd on the arm where `in_range` proved
+        // `start <= end <= len`.
+        let sub = unsafe { slice.subslice_unchecked(start, end) };
+        ctx.if_then_else(
+            in_range,
+            move |ctx| {
+                let bound = ctx.bind(sub);
+                on_some(ctx, bound);
+            },
+            on_none,
+        );
+    }
+}
+
+/// Operations licensed by **established provenance** — the two safe,
+/// bounds-checked accessors, plus element references.
+///
+/// A raw descriptor deliberately cannot reach these: a safe `get_or` on an
+/// unvalidated pointer would be a safe dereference of something nothing has
+/// vouched for. Raw values join this trait only by crossing an explicit unsafe
+/// promotion into a trusted slice.
+pub trait TrustedSliceOps: SliceOps
+where
+    Self::Out: TrustedSliceType,
+{
+    /// Read `index` when it is in bounds, otherwise evaluate `default`.
     fn get_or<I, D>(self, index: I, default: D) -> SliceGetOr<Self, I::Staged, D::Staged>
     where
         I: IntoStaged<u64>,
-        D: IntoStaged<T>,
-        T: DirectValue,
+        D: IntoStaged<ElemOf<Self>>,
+        ElemOf<Self>: DirectValue,
     {
         SliceGetOr {
             slice: self,
@@ -892,16 +1213,14 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
         }
     }
 
-    /// Get a reference to an element without bounds checking.
-    ///
-    /// Accepts any value that can be converted into a u64 staged expression for the index.
-    /// This allows ergonomic usage like `arr.get_ref_unchecked(5u64)` instead of
-    /// `arr.get_ref_unchecked(Const::<u64>::new(5))`.
+    /// Project a reference to an element. Mutability follows the slice:
+    /// `SRef<T>` from `&[T]`, `SRefMut<T>` from `&mut [T]`, carried by
+    /// [`TrustedSliceType::ElemRef`].
     ///
     /// # Safety
     ///
-    /// At execution, `index` must be less than this slice's length and the
-    /// resulting reference must obey the source slice's aliasing contract.
+    /// At execution, `index` must be less than this slice's length, and the
+    /// result must obey the source slice's aliasing contract.
     unsafe fn get_ref_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
     where
         I: IntoStaged<u64>,
@@ -911,381 +1230,37 @@ pub trait SliceRefOps<'a, T: StagedType + 'a>:
             index: index.into_staged(),
         }
     }
-
-    /// Get an element by value without bounds checking.
-    ///
-    /// Only available for `CopyType` elements.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length.
-    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
-    where
-        I: IntoStaged<u64>,
-        T: CopyType,
-    {
-        SliceGetUnchecked {
-            slice: self,
-            index: index.into_staged(),
-        }
-    }
-
-    /// Get a sub-slice without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `start <= end` and `end <= self.len()` must hold.
-    unsafe fn slice_unchecked<START, END>(
-        self,
-        start: START,
-        end: END,
-    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
-    where
-        START: IntoStaged<u64>,
-        END: IntoStaged<u64>,
-    {
-        SliceSliceUnchecked {
-            slice: self,
-            start: start.into_staged(),
-            end: end.into_staged(),
-        }
-    }
 }
 
-impl<'a, T: StagedType + 'a, S> SliceRefOps<'a, T> for S where
-    S: Staged<Out = SRef<'a, Slice<T>>> + Clone
-{
-}
-
-// =============================================================================
-// Extension trait for lifetime-free FatSliceType<T> operations
-// =============================================================================
-
-/// Read operations on a lifetime-free raw `(ptr, len)` slice descriptor.
-#[allow(clippy::len_without_is_empty)] // `len` is staged; host-side emptiness is unknowable.
-pub trait RawSliceOps<T: StagedType>: Staged<Out = FatSliceType<T>> + Sized + Clone {
-    fn len(self) -> SliceLen<Self> {
-        SliceLen { slice: self }
-    }
-
-    /// Read an element without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this descriptor's element count,
-    /// and its pointer must remain live and aligned for `T`.
-    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
-    where
-        I: IntoStaged<u64>,
-        T: CopyType,
-    {
-        SliceGetUnchecked {
-            slice: self,
-            index: index.into_staged(),
-        }
-    }
-
-    /// Create a raw sub-slice without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `start <= end` and `end <= self.len()` must hold, and the
-    /// source pointer must remain live for every use of the result.
-    unsafe fn slice_unchecked<START, END>(
-        self,
-        start: START,
-        end: END,
-    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
-    where
-        START: IntoStaged<u64>,
-        END: IntoStaged<u64>,
-    {
-        SliceSliceUnchecked {
-            slice: self,
-            start: start.into_staged(),
-            end: end.into_staged(),
-        }
-    }
-}
-
-impl<T: StagedType, S> RawSliceOps<T> for S where S: Staged<Out = FatSliceType<T>> + Sized + Clone {}
-
-type MutFieldSlice<'stage, T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<'stage, T>>, F>, E>;
-
-impl<'borrow, 'stage, T, F> MutField<'borrow, 'stage, T, F>
+impl<S> TrustedSliceOps for S
 where
-    T: StagedType + 'stage,
-    F: Field<Parent = T>,
-    F::Out: 'stage,
+    S: Staged + Sized,
+    S::Out: TrustedSliceType,
 {
-    fn as_mut_slice_once<E>(&mut self) -> MutFieldSlice<'stage, T, F, E>
-    where
-        E: StagedType + 'stage,
-        F::Out: MutSliceRepr<E>,
-    {
-        AsMutSlice {
-            repr: self.use_once(),
-            _elem: PhantomData,
-        }
-    }
-
-    /// Read the length stored in a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer
-    /// for its recorded element count.
-    pub unsafe fn slice_len<E>(&mut self) -> SliceLen<MutFieldSlice<'stage, T, F, E>>
-    where
-        E: StagedType + 'stage,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceLen {
-            slice: self.as_mut_slice_once(),
-        }
-    }
-
-    /// Read one element from a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer,
-    /// and `index` must be less than its recorded element count at execution.
-    pub unsafe fn slice_get_unchecked<E, I>(
-        &mut self,
-        index: I,
-    ) -> SliceGetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged>
-    where
-        E: CopyType + 'stage,
-        I: IntoStaged<u64>,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceGetUnchecked {
-            slice: self.as_mut_slice_once(),
-            index: index.into_staged(),
-        }
-    }
-
-    /// Write one element through a mutable slice-descriptor field.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a live, aligned, exclusively owned buffer,
-    /// and `index` must be less than its recorded element count at execution.
-    pub unsafe fn slice_set_unchecked<E, I, V>(
-        &mut self,
-        index: I,
-        value: V,
-    ) -> SliceSetUnchecked<MutFieldSlice<'stage, T, F, E>, I::Staged, V::Staged>
-    where
-        E: StagedType + 'stage,
-        I: IntoStaged<u64>,
-        V: IntoStaged<E>,
-        F::Out: MutSliceRepr<E>,
-    {
-        SliceSetUnchecked {
-            slice: self.as_mut_slice_once(),
-            index: index.into_staged(),
-            value: value.into_staged(),
-        }
-    }
 }
 
-// =============================================================================
-// Extension trait for Var<SRefMut<Slice<T>>> - Mutable slice operations
-// =============================================================================
-
-impl<'a, T: StagedType + 'a> Var<SRefMut<'a, Slice<T>>> {
-    /// Reborrow this unique slice handle to read its length.
-    pub fn len(&self) -> SliceLen<VarUse<SRefMut<'a, Slice<T>>>> {
-        SliceLen {
-            slice: self.use_once(),
-        }
-    }
-
-    /// Read `index` when it is in bounds, otherwise return `default`.
-    pub fn get_or<I, D>(
-        &self,
-        index: I,
-        default: D,
-    ) -> SliceGetOr<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, D::Staged>
-    where
-        I: IntoStaged<u64>,
-        D: IntoStaged<T>,
-        T: DirectValue,
-    {
-        SliceGetOr {
-            slice: self.use_once(),
-            index: index.into_staged(),
-            default: default.into_staged(),
-        }
-    }
-
-    /// Write `index` when it is in bounds, returning whether the write ran.
-    pub fn set<I, V>(
-        &mut self,
-        index: I,
-        value: V,
-    ) -> SliceSet<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
-    where
-        I: IntoStaged<u64>,
-        V: IntoStaged<T>,
-        T: DirectValue,
-    {
-        SliceSet {
-            slice: self.use_once(),
-            index: index.into_staged(),
-            value: value.into_staged(),
-        }
-    }
-
-    /// Consume this unique slice and project one mutable element.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length.
-    pub unsafe fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
-    where
-        I: IntoStaged<u64>,
-    {
-        SliceGetRefUnchecked {
-            slice: self,
-            index: index.into_staged(),
-        }
-    }
-
-    /// Reborrow this unique slice handle to read one element.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length.
-    pub unsafe fn get_unchecked<I>(
-        &self,
-        index: I,
-    ) -> SliceGetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged>
-    where
-        I: IntoStaged<u64>,
-        T: CopyType,
-    {
-        SliceGetUnchecked {
-            slice: self.use_once(),
-            index: index.into_staged(),
-        }
-    }
-
-    /// Reborrow this unique slice handle for one element write.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length.
-    pub unsafe fn set_unchecked<I, V>(
-        &mut self,
-        index: I,
-        value: V,
-    ) -> SliceSetUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, V::Staged>
-    where
-        I: IntoStaged<u64>,
-        V: IntoStaged<T>,
-    {
-        SliceSetUnchecked {
-            slice: self.use_once(),
-            index: index.into_staged(),
-            value: value.into_staged(),
-        }
-    }
-
-    /// Reborrow this unique slice handle to swap two elements.
-    ///
-    /// # Safety
-    ///
-    /// At execution, both indices must be less than this slice's length.
-    pub unsafe fn swap_unchecked<I, J>(
-        &mut self,
-        i: I,
-        j: J,
-    ) -> SliceSwapUnchecked<VarUse<SRefMut<'a, Slice<T>>>, I::Staged, J::Staged>
-    where
-        I: IntoStaged<u64>,
-        J: IntoStaged<u64>,
-        T: CopyType,
-    {
-        SliceSwapUnchecked {
-            slice: self.use_once(),
-            i: i.into_staged(),
-            j: j.into_staged(),
-        }
-    }
-
-    /// Consume this unique slice handle to construct a mutable sub-slice.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `start <= end <= self.len()` must hold. The consuming
-    /// receiver prevents the parent handle from being reused.
-    ///
-    /// ```compile_fail
-    /// use rust_lms::prelude::*;
-    ///
-    /// fn overlapping(slice: Var<SRefMut<'static, Slice<i64>>>) {
-    ///     let sub = unsafe { slice.slice_mut_unchecked(0u64, 1u64) };
-    ///     let _parent_len = slice.len();
-    ///     let _ = sub;
-    /// }
-    /// ```
-    pub unsafe fn slice_mut_unchecked<START, END>(
-        self,
-        start: START,
-        end: END,
-    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
-    where
-        START: IntoStaged<u64>,
-        END: IntoStaged<u64>,
-    {
-        SliceSliceUnchecked {
-            slice: self,
-            start: start.into_staged(),
-            end: end.into_staged(),
-        }
-    }
-}
-
-/// Extension trait for mutable slice operations.
+/// Writing operations, licensed by trusted **and exclusive** access.
 ///
-/// The read-only ops (`len`, `as_mut_ptr`, `get_*`, `slice_mut_unchecked`)
-/// build the same unified op structs as [`SliceRefOps`]; the associated
-/// `ElemRef`/`Out` keep their mutable flavor automatically. `set_unchecked` is
-/// gated on `MutSliceType`, so it only exists here.
-pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>>> + Sized {
-    /// Get the length of the slice.
-    fn count(self) -> SliceLen<Self> {
-        SliceLen { slice: self }
-    }
-
-    /// Get the raw mutable data pointer.
-    fn into_mut_ptr(self) -> SliceAsPtr<Self> {
-        SliceAsPtr { slice: self }
-    }
-
-    /// Read `index` when it is in bounds, otherwise return `default`.
-    fn get_or<I, D>(self, index: I, default: D) -> SliceGetOr<Self, I::Staged, D::Staged>
-    where
-        I: IntoStaged<u64>,
-        D: IntoStaged<T>,
-        T: DirectValue,
-    {
-        SliceGetOr {
-            slice: self,
-            index: index.into_staged(),
-            default: default.into_staged(),
-        }
-    }
-
+/// A shared slice cannot reach them, so a generic helper bounded on
+/// `MutSliceType` accepts only unique origins:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn write_to_shared(slice: Var<SRef<Slice<i64>>>) {
+///     let _ = slice.set(0u64, 1i64);
+/// }
+/// ```
+pub trait SliceMutOps: TrustedSliceOps
+where
+    Self::Out: MutSliceType,
+{
     /// Write `index` when it is in bounds, returning whether the write ran.
     fn set<I, V>(self, index: I, value: V) -> SliceSet<Self, I::Staged, V::Staged>
     where
         I: IntoStaged<u64>,
-        V: IntoStaged<T>,
-        T: DirectValue,
+        V: IntoStaged<ElemOf<Self>>,
+        ElemOf<Self>: DirectValue,
     {
         SliceSet {
             slice: self,
@@ -1294,47 +1269,12 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
         }
     }
 
-    /// Get a mutable reference to an element without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length, and no
-    /// overlapping staged reference may be used while the result is live.
-    unsafe fn get_mut_unchecked<I>(self, index: I) -> SliceGetRefUnchecked<Self, I::Staged>
-    where
-        I: IntoStaged<u64>,
-    {
-        SliceGetRefUnchecked {
-            slice: self,
-            index: index.into_staged(),
-        }
-    }
-
-    /// Get an element by value without bounds checking.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this slice's length.
-    unsafe fn get_unchecked<I>(self, index: I) -> SliceGetUnchecked<Self, I::Staged>
-    where
-        I: IntoStaged<u64>,
-        T: CopyType,
-    {
-        SliceGetUnchecked {
-            slice: self,
-            index: index.into_staged(),
-        }
-    }
-
-    /// Set an element without bounds checking.
-    ///
-    /// Accepts any value that can be converted into staged expressions.
-    /// This allows ergonomic usage like `arr.set_unchecked(0u64, 42i64)`.
+    /// Write an element without bounds checking.
     ///
     /// # Safety
     ///
     /// At execution, `index` must be less than this slice's length and the
-    /// mutable slice must remain exclusively accessible for the write.
+    /// slice must remain exclusively accessible for the write.
     unsafe fn set_unchecked<I, V>(
         self,
         index: I,
@@ -1342,7 +1282,7 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     ) -> SliceSetUnchecked<Self, I::Staged, V::Staged>
     where
         I: IntoStaged<u64>,
-        V: IntoStaged<T>,
+        V: IntoStaged<ElemOf<Self>>,
     {
         SliceSetUnchecked {
             slice: self,
@@ -1351,36 +1291,11 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
         }
     }
 
-    /// Get a mutable sub-slice without bounds checking.
+    /// Swap two elements (`CopyType` elements only).
     ///
     /// # Safety
     ///
-    /// At execution, `start <= end` and `end <= self.len()` must hold. No
-    /// overlapping staged reference may be used while the result is live.
-    unsafe fn slice_mut_unchecked<START, END>(
-        self,
-        start: START,
-        end: END,
-    ) -> SliceSliceUnchecked<Self, START::Staged, END::Staged>
-    where
-        START: IntoStaged<u64>,
-        END: IntoStaged<u64>,
-    {
-        SliceSliceUnchecked {
-            slice: self,
-            start: start.into_staged(),
-            end: end.into_staged(),
-        }
-    }
-
-    /// Swap the elements at indices `i` and `j` without bounds checking.
-    ///
-    /// Only available for `CopyType` elements. Ergonomic like the other ops:
-    /// `arr.swap_unchecked(0u64, lo + 1u64)`.
-    ///
-    /// # Safety
-    ///
-    /// At execution, both `i` and `j` must be less than this slice's length.
+    /// At execution, both indices must be less than this slice's length.
     unsafe fn swap_unchecked<I, J>(
         self,
         i: I,
@@ -1389,7 +1304,7 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     where
         I: IntoStaged<u64>,
         J: IntoStaged<u64>,
-        T: CopyType,
+        ElemOf<Self>: CopyType,
     {
         SliceSwapUnchecked {
             slice: self,
@@ -1399,19 +1314,158 @@ pub trait SliceMutOps<'a, T: StagedType + 'a>: Staged<Out = SRefMut<'a, Slice<T>
     }
 }
 
-impl<'a, P, R, T> SliceMutOps<'a, T> for AsMutSlice<P, T>
+impl<S> SliceMutOps for S
 where
-    P: Staged<Out = SRefMut<'a, R>>,
-    R: MutSliceRepr<T> + 'a,
-    T: StagedType + 'a,
+    S: Staged + Sized,
+    S::Out: MutSliceType,
 {
 }
 
-impl<'a, S, START, END, T> SliceMutOps<'a, T> for SliceSliceUnchecked<S, START, END>
+// =============================================================================
+// The provenance boundary: raw -> trusted
+// =============================================================================
+
+/// Reinterprets a raw `(ptr, len)` descriptor as a *trusted* slice.
+///
+/// Emits nothing: the value is already a `Value::Fat` pair, and promotion is a
+/// statement about provenance, not about representation. All of the work is in
+/// the safety contract on the constructing method.
+pub struct AssumeTrusted<S, OUT> {
+    raw: S,
+    _out: PhantomData<OUT>,
+}
+
+impl<S: Clone, OUT> Clone for AssumeTrusted<S, OUT> {
+    fn clone(&self) -> Self {
+        Self {
+            raw: self.raw.clone(),
+            _out: PhantomData,
+        }
+    }
+}
+
+impl<S: Copy, OUT> Copy for AssumeTrusted<S, OUT> {}
+
+unsafe impl<S, OUT> Staged for AssumeTrusted<S, OUT>
 where
-    S: Staged<Out = SRefMut<'a, Slice<T>>>,
-    START: Staged<Out = u64>,
-    END: Staged<Out = u64>,
-    T: StagedType + 'a,
+    S: Staged,
+    S::Out: RawSliceType,
+    OUT: TrustedSliceType<Elem = ElemOf<S>>,
 {
+    type Out = OUT;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.raw.codegen(ctx)
+    }
+}
+
+/// The one way a raw descriptor becomes a trusted slice.
+///
+/// An `extern "C"` function can return a dangling `FatSlice<T>` without writing
+/// a line of `unsafe` — the struct is two public fields and carries no lifetime.
+/// So an FFI result can never *become* `SRef<Slice<T>>` implicitly. The pipeline
+/// is deliberately three steps:
+///
+/// ```text
+/// extern result -> raw staged slice -> explicit unsafe promotion -> ordinary SliceOps
+/// ```
+///
+/// Before promotion a raw value stops at [`SliceOps`], where every accessor is
+/// `unsafe`; after it, the result is an ordinary trusted slice with the full
+/// safe surface. Nothing safe dereferences in between:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn safe_read_before_promotion(d: Var<RawSlice<i64>>) {
+///     let _ = d.get_or(0u64, 0i64);
+/// }
+/// ```
+///
+/// And a *shared* raw descriptor cannot launder itself into a writable view —
+/// `assume_unique` requires `DataPtr = SMutPtr<T>`:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// fn launder(d: Var<RawSlice<i64>>) {
+///     let _ = unsafe { d.assume_unique() };
+/// }
+/// ```
+pub trait RawSliceOps: SliceOps
+where
+    Self::Out: RawSliceType,
+{
+    /// Promote to a trusted **shared** slice (`&[T]`).
+    ///
+    /// # Safety
+    ///
+    /// The caller states, for the whole of generated execution:
+    /// * which owner keeps the allocation alive, and that it outlives every use;
+    /// * that the pointer is aligned and points at `len` initialized `T`;
+    /// * that the storage is not mutated while this shared view is live;
+    /// * that the producer cannot reallocate the storage.
+    unsafe fn assume_shared(self) -> AssumeTrusted<Self, SRef<Slice<ElemOf<Self>>>> {
+        AssumeTrusted {
+            raw: self,
+            _out: PhantomData,
+        }
+    }
+
+    /// Promote to a trusted **unique** slice (`&mut [T]`).
+    ///
+    /// Available only from a *mutable* raw descriptor: the method's bound
+    /// requires `DataPtr = SMutPtr<T>`, so a shared [`RawSlice`] cannot launder
+    /// itself into a writable view.
+    ///
+    /// # Safety
+    ///
+    /// As [`assume_shared`](Self::assume_shared), and additionally that access
+    /// through this view is *exclusive* — no other staged or host reference to
+    /// the storage is used while it is live.
+    unsafe fn assume_unique(self) -> AssumeTrusted<Self, SRefMut<Slice<ElemOf<Self>>>>
+    where
+        Self::Out: SliceType<DataPtr = SMutPtr<ElemOf<Self>>>,
+    {
+        AssumeTrusted {
+            raw: self,
+            _out: PhantomData,
+        }
+    }
+}
+
+impl<S> RawSliceOps for S
+where
+    S: Staged + Sized,
+    S::Out: RawSliceType,
+{
+}
+
+type MutFieldSlice<T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<T>>, F>, E>;
+
+impl<'borrow, T, F> MutField<'borrow, T, F>
+where
+    T: StagedType,
+    F: Field<Parent = T>,
+{
+    /// Read this `(ptr, len)` descriptor field as a **raw mutable** slice,
+    /// reborrowing the parent for one use. Promote it with
+    /// [`RawSliceOps::assume_unique`] to reach the writing ops.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must contain a pointer that is live, aligned, and
+    /// exclusively writable for its recorded element count. See
+    /// [`ReprSliceOps::into_raw_slice`] for why producing a raw slice is itself
+    /// the unsafe step.
+    pub unsafe fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
+    where
+        E: StagedType,
+        F::Out: MutSliceRepr<E>,
+    {
+        AsMutSlice {
+            repr: self.use_once(),
+            _elem: PhantomData,
+        }
+    }
 }

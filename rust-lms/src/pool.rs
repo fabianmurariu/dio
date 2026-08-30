@@ -96,7 +96,7 @@ impl Default for BytesPool {
 /// Append `bytes` into `pool`, returning a stable pointer (as `u64`) to the
 /// stored copy — the kernel-facing entry point for [`BytesPool::append`].
 #[extern_fn]
-#[no_mangle]
+#[unsafe(no_mangle)]
 pub extern "C" fn pool_append(pool: &mut BytesPool, bytes: FatSlice<u8>) -> u64 {
     // SAFETY: `bytes` is a valid `(ptr, len)` produced by staged code for the
     // duration of this call.

@@ -173,24 +173,13 @@ where
 ///
 /// # Example
 /// ```ignore
-/// // Compute sum of 1..=n (stored in 'sum' variable)
-/// // i = 1; sum = 0;
-/// // while (i <= n) { sum = sum + i; i = i + 1; }
-/// let i = compiler.var::<i64>();
-/// let sum = compiler.var::<i64>();
-/// seq(
-///     seq(assign(i, Const::new(1)), assign(sum, Const::new(0))),
-///     seq(
-///         while_loop(
-///             lt(i, add(n, Const::new(1))),  // i <= n
-///             seq(
-///                 assign(sum, add(sum, i)),
-///                 assign(i, add(i, Const::new(1))),
-///             ),
-///         ),
-///         sum,
-///     ),
-/// )
+/// // while i <= 5 { sum += i; i += 1 }
+/// let sum = ctx.var(0i64);
+/// let i = ctx.var(1i64);
+/// ctx.while_loop(not(gt(i, 5i64)), move |ctx| {
+///     ctx.store(sum, add(sum, i));
+///     ctx.store(i, add(i, 1i64));
+/// });
 /// ```
 #[derive(Clone)]
 pub struct While<COND, BODY> {

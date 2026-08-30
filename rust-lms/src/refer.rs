@@ -20,34 +20,41 @@ use std::marker::PhantomData;
 
 /// Immutable reference type (`&T` at runtime).
 ///
+/// Carries no lifetime: the staged graph is retained for `'static`, so a staged
+/// lifetime could only ever *be* `'static` and would read as a guarantee it does
+/// not provide. The real invocation lifetime is supplied by
+/// [`RuntimeParam::Arg`]/[`RuntimeResult::Output`] at each call instead.
+///
 /// Note: The `T: StagedType` bound is only required on the `StagedType` impl,
 /// not on the struct itself. This allows `SRef<Slice<T>>` to work even though
 /// `Slice<T>` doesn't implement `StagedType` (since it's a DST marker).
 #[derive(Debug)]
-pub struct SRef<'a, T> {
-    _phantom: PhantomData<&'a T>,
+pub struct SRef<T> {
+    _phantom: PhantomData<*const T>,
 }
 
 // A reference handle is just a phantom, so it is always Copy regardless of `T`
 // (a `T: Copy` bound from `#[derive]` would leak into every holder).
-impl<'a, T> Clone for SRef<'a, T> {
+impl<T> Clone for SRef<T> {
     fn clone(&self) -> Self {
         *self
     }
 }
-impl<'a, T> Copy for SRef<'a, T> {}
+impl<T> Copy for SRef<T> {}
 
-unsafe impl<'a, T: StagedType> StagedType for SRef<'a, T> {
-    type RuntimeValue = &'a T::RuntimeValue;
+unsafe impl<T: StagedType> StagedType for SRef<T> {
+    /// A staged reference is an address at runtime. The safe, lifetime-bounded
+    /// view is `RuntimeParam::Arg<'call>` / `RuntimeResult::Output<'call>`.
+    type RuntimeValue = *const T::RuntimeValue;
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
     }
 }
 
-unsafe impl<'a, T: StagedType> CopyType for SRef<'a, T> {}
+unsafe impl<T: StagedType> CopyType for SRef<T> {}
 
-unsafe impl<'stage, T> RuntimeParam for SRef<'stage, T>
+unsafe impl<T> RuntimeParam for SRef<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -55,7 +62,7 @@ where
     type Arg<'call> = &'call T::RuntimeValue;
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRef<'stage, T>
+unsafe impl<T> RuntimeResult for SRef<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -67,21 +74,23 @@ where
 // SRefMut<T> - Mutable reference type
 // =============================================================================
 
-/// Mutable reference type (`&mut T` at runtime).
+/// Mutable reference type (`&mut T` at runtime). Lifetime-free for the same
+/// reason as [`SRef`]; uniqueness is carried by the absence of a `CopyType`
+/// impl, not by a lifetime.
 #[derive(Debug)]
-pub struct SRefMut<'a, T> {
-    _phantom: PhantomData<&'a mut T>,
+pub struct SRefMut<T> {
+    _phantom: PhantomData<*mut T>,
 }
 
-unsafe impl<'a, T: StagedType> StagedType for SRefMut<'a, T> {
-    type RuntimeValue = &'a mut T::RuntimeValue;
+unsafe impl<T: StagedType> StagedType for SRefMut<T> {
+    type RuntimeValue = *mut T::RuntimeValue;
 
     fn scalar_type() -> ScalarType {
         ScalarType::Ptr
     }
 }
 
-unsafe impl<'stage, T> RuntimeParam for SRefMut<'stage, T>
+unsafe impl<T> RuntimeParam for SRefMut<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -89,7 +98,7 @@ where
     type Arg<'call> = &'call mut T::RuntimeValue;
 }
 
-unsafe impl<'stage, T> RuntimeResult for SRefMut<'stage, T>
+unsafe impl<T> RuntimeResult for SRefMut<T>
 where
     T: StagedType,
     T::RuntimeValue: 'static,
@@ -169,15 +178,14 @@ unsafe impl<T: StagedType> CopyType for SMutPtr<T> {}
 // =============================================================================
 
 /// Load value from immutable reference/pointer: `*ptr`
-pub struct LoadRef<'a, P> {
+pub struct LoadRef<P> {
     ptr: P,
-    _marker: PhantomData<&'a ()>,
 }
 
-unsafe impl<'a, P, T> Staged for LoadRef<'a, P>
+unsafe impl<P, T> Staged for LoadRef<P>
 where
-    P: Staged<Out = SRef<'a, T>>,
-    T: StagedType + 'a,
+    P: Staged<Out = SRef<T>>,
+    T: StagedType,
 {
     type Out = T;
 
@@ -198,15 +206,12 @@ where
 ///     let _ = load_ref(ptr);
 /// }
 /// ```
-pub fn load_ref<'a, P, T>(ptr: P) -> LoadRef<'a, P>
+pub fn load_ref<P, T>(ptr: P) -> LoadRef<P>
 where
-    P: Staged<Out = SRef<'a, T>>,
-    T: StagedType + 'a,
+    P: Staged<Out = SRef<T>>,
+    T: StagedType,
 {
-    LoadRef {
-        ptr,
-        _marker: PhantomData,
-    }
+    LoadRef { ptr }
 }
 
 /// Load a value through an immutable raw pointer.
@@ -250,15 +255,14 @@ where
 }
 
 /// Load from mutable reference/pointer
-pub struct LoadMutRef<'a, P> {
+pub struct LoadMutRef<P> {
     ptr: P,
-    _marker: PhantomData<&'a mut ()>,
 }
 
-unsafe impl<'a, P, T> Staged for LoadMutRef<'a, P>
+unsafe impl<P, T> Staged for LoadMutRef<P>
 where
-    P: Staged<Out = SRefMut<'a, T>>,
-    T: StagedType + 'a,
+    P: Staged<Out = SRefMut<T>>,
+    T: StagedType,
 {
     type Out = T;
 
@@ -274,16 +278,16 @@ where
 /// A mutable-reference expression is consumed. A mutable-reference variable is
 /// instead reborrowed into a crate-controlled [`VarUse`], allowing a later
 /// sequential operation to reborrow the same root again.
-pub trait IntoMutRef<'a, T: StagedType + 'a> {
-    type Staged: Staged<Out = SRefMut<'a, T>>;
+pub trait IntoMutRef<T: StagedType> {
+    type Staged: Staged<Out = SRefMut<T>>;
 
     fn into_mut_ref(self) -> Self::Staged;
 }
 
-impl<'a, P, T> IntoMutRef<'a, T> for P
+impl<P, T> IntoMutRef<T> for P
 where
-    P: Staged<Out = SRefMut<'a, T>>,
-    T: StagedType + 'a,
+    P: Staged<Out = SRefMut<T>>,
+    T: StagedType,
 {
     type Staged = P;
 
@@ -292,11 +296,11 @@ where
     }
 }
 
-impl<'a, T> IntoMutRef<'a, T> for &mut Var<SRefMut<'a, T>>
+impl<T> IntoMutRef<T> for &mut Var<SRefMut<T>>
 where
-    T: StagedType + 'a,
+    T: StagedType,
 {
-    type Staged = VarUse<SRefMut<'a, T>>;
+    type Staged = VarUse<SRefMut<T>>;
 
     fn into_mut_ref(self) -> Self::Staged {
         self.use_once()
@@ -304,14 +308,13 @@ where
 }
 
 /// Create a load operation from a unique mutable reference.
-pub fn load_ref_mut<'a, P, T>(ptr: P) -> LoadMutRef<'a, P::Staged>
+pub fn load_ref_mut<P, T>(ptr: P) -> LoadMutRef<P::Staged>
 where
-    P: IntoMutRef<'a, T>,
-    T: StagedType + 'a,
+    P: IntoMutRef<T>,
+    T: StagedType,
 {
     LoadMutRef {
         ptr: ptr.into_mut_ref(),
-        _marker: PhantomData,
     }
 }
 
@@ -352,17 +355,16 @@ where
 // =============================================================================
 
 /// Store value to mutable reference/pointer: `*ptr = val`
-pub struct StoreRef<'a, P, V> {
+pub struct StoreRef<P, V> {
     ptr: P,
     val: V,
-    _marker: PhantomData<&'a mut ()>,
 }
 
-unsafe impl<'a, P, V, T> Staged for StoreRef<'a, P, V>
+unsafe impl<P, V, T> Staged for StoreRef<P, V>
 where
-    P: Staged<Out = SRefMut<'a, T>>,
+    P: Staged<Out = SRefMut<T>>,
     V: Staged<Out = T>,
-    T: StagedType + 'a,
+    T: StagedType,
 {
     type Out = ();
 
@@ -377,16 +379,15 @@ where
 }
 
 /// Create a store operation through a unique mutable reference.
-pub fn store_ref<'a, P, V, T>(ptr: P, val: V) -> StoreRef<'a, P::Staged, V>
+pub fn store_ref<P, V, T>(ptr: P, val: V) -> StoreRef<P::Staged, V>
 where
-    P: IntoMutRef<'a, T>,
+    P: IntoMutRef<T>,
     V: Staged<Out = T>,
-    T: StagedType + 'a,
+    T: StagedType,
 {
     StoreRef {
         ptr: ptr.into_mut_ref(),
         val,
-        _marker: PhantomData,
     }
 }
 
@@ -714,10 +715,10 @@ where
 ///
 /// The result retains no reference lifetime claim. Dereferencing it or passing
 /// it to an extern that expects `&T` still requires an unsafe operation.
-pub fn ref_as_ptr<'a, T, P>(reference: P) -> PtrCast<P, SPtr<T>>
+pub fn ref_as_ptr<T, P>(reference: P) -> PtrCast<P, SPtr<T>>
 where
-    T: StagedType + 'a,
-    P: Staged<Out = SRef<'a, T>>,
+    T: StagedType,
+    P: Staged<Out = SRef<T>>,
 {
     PtrCast {
         ptr: reference,
@@ -729,10 +730,10 @@ where
 /// address.
 ///
 /// The result retains no reference lifetime or exclusivity claim.
-pub fn ref_mut_as_ptr<'a, T, P>(reference: P) -> PtrCast<P, SMutPtr<T>>
+pub fn ref_mut_as_ptr<T, P>(reference: P) -> PtrCast<P, SMutPtr<T>>
 where
-    T: StagedType + 'a,
-    P: Staged<Out = SRefMut<'a, T>>,
+    T: StagedType,
+    P: Staged<Out = SRefMut<T>>,
 {
     PtrCast {
         ptr: reference,
@@ -745,10 +746,10 @@ where
 /// This is the staged equivalent of reborrowing a mutable Rust reference as an
 /// immutable reference, primarily for passing an `SRefMut` to an external
 /// function whose typed signature expects `SRef`.
-pub fn ref_as_const<'a, T, P>(reference: P) -> PtrCast<P, SRef<'a, T>>
+pub fn ref_as_const<T, P>(reference: P) -> PtrCast<P, SRef<T>>
 where
-    T: StagedType + 'a,
-    P: Staged<Out = SRefMut<'a, T>>,
+    T: StagedType,
+    P: Staged<Out = SRefMut<T>>,
 {
     PtrCast {
         ptr: reference,
@@ -817,11 +818,9 @@ mod tests {
     fn test_load_store_i64() {
         let mut compiler = Compiler::new();
 
-        let write_fn = compiler.fun1("write_42", |_ctx, mut ptr: Var<SRefMut<i64>>| {
-            (
-                store_ref(&mut ptr, Const::<i64>::new(42)),
-                load_ref_mut(&mut ptr),
-            )
+        let write_fn = compiler.fun1("write_42", |ctx, mut ptr: Var<SRefMut<i64>>| {
+            ctx.emit(store_ref(&mut ptr, Const::<i64>::new(42)));
+            load_ref_mut(&mut ptr)
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
@@ -854,10 +853,12 @@ mod tests {
         let mut compiler = Compiler::new();
 
         // Using raw pointer types (SPtr/SMutPtr)
-        let write_fn = compiler.fun1("write_ptr", |_ctx, ptr: Var<SMutPtr<i64>>| {
+        let write_fn = compiler.fun1("write_ptr", |ctx, ptr: Var<SMutPtr<i64>>| {
             // SAFETY: the generated function is called with a valid, aligned
             // pointer to the live `value` below.
-            unsafe { (store(ptr, Const::<i64>::new(99)), load_mut(ptr)) }
+            ctx.emit(unsafe { store(ptr, Const::<i64>::new(99)) });
+            // SAFETY: as above.
+            unsafe { load_mut(ptr) }
         });
 
         let compiled = compiler.compile(write_fn).expect("compilation failed");
