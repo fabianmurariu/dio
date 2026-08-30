@@ -2,7 +2,7 @@
 
 This crate follows LLVM's [My First Language Frontend](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/) tutorial, replacing the hand-written C++ frontend with Rust and Pest. Starting in Chapter 3, the parsed AST is specialized into a `rust-lms` staged computation and JIT-compiled to native code.
 
-Chapters 1 through 3 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, and compile top-level expressions and user-defined functions to native code.
+Chapters 1 through 4 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, compile functions through rust-lms's optimized backends, call a typed host library, and retain definitions in an interactive session.
 
 ## The route to native code
 
@@ -16,10 +16,10 @@ Pest tokens                 Chapter 1
 Rust AST                    Chapter 2
         |
         v
-rust-lms staged program     Chapter 3 (now)
+rust-lms staged program     Chapter 3
         |
         v
-Cranelift / LLVM JIT        Chapters 3–4
+optimization + native JIT   Chapter 4 (now)
         |
         v
 native machine code
@@ -414,7 +414,7 @@ assert_eq!(square_nine.call(), 81.0);
 
 A top-level expression has no parameters, so it is lowered inside a generated `fun0`. `Compiler::compile` turns that function and the program's named definitions into native code. Calling `as_fn()` returns `CompiledFn<FunType0<f64>>`, which shares ownership of the executable allocation. The function therefore cannot outlive its machine code through this safe API.
 
-`evaluate(&program)` repeats that process for every top-level expression in source order and calls each resulting function. This batch-oriented implementation deliberately uses a fresh module per expression. Chapter 4 will introduce the more interactive JIT model and external host functions.
+`evaluate(&program)` repeats that process for every top-level expression in source order and calls each resulting function. This batch-oriented implementation deliberately uses a fresh module per expression. Chapter 4 adds an interactive session and external host functions on top of that ownership model.
 
 ## 3.6 Run it and inspect the generated IR
 
@@ -447,15 +447,157 @@ Evaluated to 25.000000
 
 Notice what is absent from those functions: there is no AST interpreter, string lookup, `ExprKind` tag, or arity enum. Partial evaluation used all of those static structures while constructing the staged program.
 
-## 3.7 Current boundaries
+## 3.7 Chapter 3 boundaries
 
-Chapter 3 intentionally has three visible boundaries:
+At the end of Chapter 3, the implementation has three visible boundaries:
 
-1. `extern` prototypes can be declared, but calling one reports that it has no host binding. Chapter 4 will connect selected declarations to safe `rust-lms` FFI handles.
+1. `extern` prototypes can be declared, but calling one reports that it has no host binding. Chapter 4 connects selected declarations to safe `rust-lms` FFI handles.
 2. `rust-lms` currently exposes staged functions from arity zero through eight, so the semantic checker gives larger prototypes a clear error.
-3. Each top-level expression currently owns a fresh JIT module containing the program's definitions. This is simple and lifetime-safe, but recompiles those definitions. Chapter 4 will address the interactive compilation model and optimization workflow.
+3. Each top-level expression owns a fresh JIT module containing the program's definitions. This is simple and lifetime-safe, but recompiles those definitions. Chapter 4 makes the resulting interactive model explicit and explains why it differs from LLVM ORC.
 
 The tests in `codegen.rs` cover arithmetic, precedence, numeric truth values, named calls, forward references, owner-checked execution, and every semantic error category above.
+
+# Chapter 4: backend optimization, JIT sessions, and host functions
+
+LLVM's Chapter 4 introduces two facilities: an optimization pipeline and an ORC JIT session that can retain definitions while temporary top-level expressions come and go. `rust-lms` already provides optimized native JIT compilation, so this chapter does not reproduce backend optimizations in the Kaleidoscope frontend. It focuses on executable ownership, interactive state, and typed external functions.
+
+## 4.1 Leave constant folding to the backends
+
+The LLVM tutorial configures LLVM passes to simplify expressions such as:
+
+```text
+def addThree(x) 1 + 2 + x;
+```
+
+The Kaleidoscope frontend lowers this AST directly. It does not contain a second evaluator or a source-level constant-folding pass:
+
+```text
+Binary(Add)
+|-- Binary(Add)
+|   |-- Number(1)
+|   `-- Number(2)
+`-- Variable(x)
+        |
+        v
+ctx.bind(ctx.bind(1.0 + 2.0) + x)
+```
+
+Both rust-lms backends receive that staged computation and perform their own constant folding and target-level optimization. The default Cranelift path uses its `speed` optimization level; the optional LLVM/MLIR path similarly delegates optimization to that backend. This keeps optimization policy in one layer and ensures every rust-lms frontend benefits from backend improvements.
+
+`RUST_LMS_DEBUG_IR=1` prints rust-lms's pre-optimization Cranelift IR, so it may still show the addition of `1.0` and `2.0`. That diagnostic is a view of the staged lowering, not a promise that the redundant operation survives in generated machine code.
+
+Partial evaluation still does the important frontend work described in Chapter 3: matching AST variants, resolving names, and choosing typed staged operations all happen at compile time. Constant arithmetic is simply left to the backend because it already handles it.
+
+## 4.2 Explicit, typed external symbols
+
+The LLVM tutorial falls back to process-wide dynamic symbol lookup when a name is not present in a JIT module. That makes `extern sin(x)` resolve to the platform math library, but it also makes every exported process symbol part of the language's ambient authority.
+
+This crate uses an explicit standard host environment in [`src/runtime.rs`](src/runtime.rs):
+
+| Kaleidoscope name | Rust operation | Arity |
+| --- | --- | --- |
+| `sin` | `f64::sin` | 1 |
+| `cos` | `f64::cos` | 1 |
+| `exp` | `f64::exp` | 1 |
+| `log` | `f64::ln` | 1 |
+| `sqrt` | `f64::sqrt` | 1 |
+| `putchard` | write one byte as a character to standard error | 1 |
+
+Each Rust function is declared `extern "C"` and annotated with `#[extern_fn]`. The macro generates an `ExternFn` marker containing its exact argument type, result type, and function pointer. Compilation then performs three typed steps:
+
+```text
+source declaration       extern sin(x)
+        |
+        v
+host registration        compiler.extern_fn::<HostSinExtern>()
+        |
+        v
+staged call              call_extern1(handle, argument: Var<f64>)
+```
+
+The source-level validator still checks the prototype. `extern sin(x y)` cannot silently call a unary Rust function with the wrong ABI, and calling an unknown external reports that no host binding is registered. Merely declaring an unknown extern remains harmless; an error is produced only if a call needs to resolve it.
+
+An internal Kaleidoscope definition takes precedence over a same-named host function. This mirrors normal symbol resolution while retaining rust-lms's typed call path.
+
+## 4.3 A persistent source-level session
+
+[`Session`](src/runtime.rs) retains definitions and prototypes between submissions:
+
+```rust
+use kaleidoscope_tutorial::{Session, parse_program};
+
+let mut session = Session::new();
+session.submit(parse_program("def double(x) x * 2;")?)?;
+assert_eq!(
+    session.submit(parse_program("double(21);")?)?,
+    vec![42.0],
+);
+# Ok::<(), Box<dyn std::error::Error>>(())
+```
+
+A submission is transactional with respect to compiler state. The session first constructs and validates a candidate program. If validation fails, its previous declarations and definitions remain usable. Successful top-level expressions are compiled and executed in source order, then discarded from stored session state just as LLVM removes an anonymous-expression resource after calling it.
+
+Definitions within one submission can refer forward to each other. Across separate REPL submissions, a callee must already have a prototype or definition because later input is not yet available.
+
+## 4.4 Why the native session differs from LLVM ORC
+
+LLVM's tutorial adds independently compiled modules to one ORC symbol space. `rust-lms::Compiler::compile(self, ...)`, by design, consumes the compiler and freezes the executable. The returned `CompiledFn` shares an ownership lease with that frozen allocation, preventing safe code from calling a pointer after its machine code has been freed.
+
+That safety boundary means this tutorial does not mutate or link new functions into an existing compiled rust-lms module:
+
+| Concern | LLVM tutorial | This rust-lms tutorial |
+| --- | --- | --- |
+| Persistent state | ORC modules and prototype map | source AST definitions and prototypes |
+| New expression | temporary module linked to old modules | fresh module containing accumulated definitions |
+| Expression cleanup | remove ORC resource tracker | drop owner-checked `CompiledFn` |
+| Host lookup | process-wide dynamic lookup | explicit typed registry |
+| Redefinition | rejected by current ORC duplicate-symbol rules | rejected by semantic validation |
+
+The observable language behavior is the same for defining a function and calling it repeatedly. The tradeoff is compilation time: accumulated definitions are rebuilt for each top-level expression. Achieving true incremental native linking would require a new rust-lms facility for persistent modules or safe cross-module function imports; it cannot be implemented solely inside this tutorial crate without weakening the current ownership model.
+
+## 4.5 Use the REPL
+
+Pass `--repl` to treat each input line as one complete submission:
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --repl
+ready> def double(x) x * 2;
+ready> double(21);
+Evaluated to 42.000000
+ready> extern sin(x);
+ready> sin(1);
+Evaluated to 0.841471
+```
+
+This deliberately small driver accepts one complete definition, declaration, or group of semicolon-separated expressions per line. It reports an invalid line and continues with the prior session intact. Multiline input buffering is a parser-driver exercise rather than a code-generation concern.
+
+The same mode can replay a file line by line without prompts:
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --repl kaleidoscope-tutorial/examples/chapter4.ks
+Evaluated to 7.000000
+Evaluated to 1.000000
+```
+
+Normal `--run` remains the batch mode and permits forward references across the complete file:
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --run kaleidoscope-tutorial/examples/chapter4.ks
+Evaluated to 7.000000
+Evaluated to 1.000000
+```
+
+## 4.6 What the tests establish
+
+Chapter 4's tests verify:
+
+- typed `sin` and `cos` calls produce the expected native result;
+- host declarations with incorrect arity are rejected before staging;
+- definitions persist across session submissions;
+- rejected submissions leave previous session state unchanged;
+- temporary top-level expressions are not retained by the session.
+
+At this point Kaleidoscope is an optimized, user-driven native language with functions and controlled access to host services. Chapter 5 adds conditional expressions and loops, where rust-lms's staged control-flow builders replace manual basic-block and phi-node construction.
 
 ## Progress
 
@@ -464,7 +606,7 @@ The tests in `codegen.rs` cover arithmetic, precedence, numeric truth values, na
 | 1 | Language and lexer | Implemented |
 | 2 | Parser and AST | Implemented |
 | 3 | AST specialization and native code | Implemented |
-| 4 | JIT, host externs, and optimization | Next |
-| 5 | Control flow | Planned |
+| 4 | JIT, host externs, and backend optimization | Implemented |
+| 5 | Control flow | Next |
 | 6 | User-defined operators | Planned |
 | 7 | Mutable variables | Planned |

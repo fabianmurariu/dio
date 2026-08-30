@@ -11,6 +11,7 @@ use rust_lms::prelude::{Compiler, Const, Var, lt, select};
 
 use crate::ast::{BinaryOp, Expr, ExprKind, Function, Item, Program, Prototype};
 use crate::lexer::Span;
+use crate::runtime::{HostFunctionRef, register_standard_externs, standard_extern_arity};
 
 /// An owner-checked, native `fn() -> f64` produced for a top-level expression.
 pub type NativeNullary = CompiledFn<FunType0<f64>>;
@@ -191,13 +192,13 @@ pub fn compile_top_level(
     program: &Program,
     item_index: usize,
 ) -> Result<NativeNullary, CodegenError> {
-    validate_program(program)?;
+    validate(program)?;
     compile_top_level_validated(program, item_index)
 }
 
 /// Compile and execute every top-level expression in source order.
 pub fn evaluate(program: &Program) -> Result<Vec<f64>, CodegenError> {
-    validate_program(program)?;
+    validate(program)?;
     program
         .items
         .iter()
@@ -221,22 +222,31 @@ fn compile_top_level_validated(
 
     let function_refs = predeclare_functions(program);
     let mut compiler = Compiler::new();
+    let host_functions = register_standard_externs(&mut compiler);
     for item in &program.items {
         if let Item::Definition(function) = item {
-            define_function(&mut compiler, function, &function_refs);
+            define_function(&mut compiler, function, &function_refs, &host_functions);
         }
     }
 
     let entry_refs = function_refs.clone();
+    let entry_host_functions = host_functions.clone();
     let entry_name = format!("__rust_lms_kaleidoscope_expression_{item_index}");
     let entry = compiler.fun0(&entry_name, move |ctx| {
-        lower_expr(&expression, ctx, &HashMap::new(), &entry_refs)
+        lower_expr(
+            &expression,
+            ctx,
+            &HashMap::new(),
+            &entry_refs,
+            &entry_host_functions,
+        )
     });
     let compiled = compiler.compile(entry)?;
     Ok(compiled.as_fn())
 }
 
-fn validate_program(program: &Program) -> Result<(), CodegenError> {
+/// Check names, prototypes, calls, and the Chapter 4 host environment.
+pub fn validate(program: &Program) -> Result<(), CodegenError> {
     let mut signatures = HashMap::<String, Signature>::new();
 
     for item in &program.items {
@@ -359,10 +369,24 @@ fn validate_expr(
                 ));
             }
             if !signature.defined {
-                return Err(CodegenError::semantic(
-                    format!("external function '{callee}' has no Chapter 3 host binding"),
-                    expression.span,
-                ));
+                match standard_extern_arity(callee) {
+                    Some(host_arity) if host_arity != signature.arity => {
+                        return Err(CodegenError::semantic(
+                            format!(
+                                "host binding for '{callee}' expects {host_arity} parameter, declaration has {}",
+                                signature.arity
+                            ),
+                            expression.span,
+                        ));
+                    }
+                    Some(_) => {}
+                    None => {
+                        return Err(CodegenError::semantic(
+                            format!("external function '{callee}' has no registered host binding"),
+                            expression.span,
+                        ));
+                    }
+                }
             }
             for argument in arguments {
                 validate_expr(argument, variables, signatures)?;
@@ -391,13 +415,21 @@ fn predeclare_functions(program: &Program) -> HashMap<String, FunctionRef> {
 }
 
 macro_rules! define_with_parameters {
-    ($compiler:expr, $method:ident, $name:expr, $function:expr, $refs:expr; $($argument:ident),+) => {{
+    ($compiler:expr, $method:ident, $name:expr, $function:expr, $refs:expr, $host_functions:expr; $($argument:ident),+) => {{
         let body = $function.body.clone();
         let parameter_names = $function.prototype.parameters.clone();
         let function_refs = $refs.clone();
+        let host_functions = $host_functions.clone();
         $compiler.$method($name, move |ctx, $($argument: Var<f64>),+| {
             let arguments = [$($argument),+];
-            lower_function_body(ctx, &parameter_names, &arguments, &body, &function_refs)
+            lower_function_body(
+                ctx,
+                &parameter_names,
+                &arguments,
+                &body,
+                &function_refs,
+                &host_functions,
+            )
         })
     }};
 }
@@ -406,39 +438,41 @@ fn define_function(
     compiler: &mut Compiler,
     function: &Function,
     function_refs: &HashMap<String, FunctionRef>,
+    host_functions: &HashMap<String, HostFunctionRef>,
 ) {
     let name = &function.prototype.name;
     let actual = match function.prototype.parameters.len() {
         0 => {
             let body = function.body.clone();
             let refs = function_refs.clone();
+            let hosts = host_functions.clone();
             FunctionRef::Zero(compiler.fun0(name, move |ctx| {
-                lower_expr(&body, ctx, &HashMap::new(), &refs)
+                lower_expr(&body, ctx, &HashMap::new(), &refs, &hosts)
             }))
         }
         1 => FunctionRef::One(define_with_parameters!(
-            compiler, fun1, name, function, function_refs; a
+            compiler, fun1, name, function, function_refs, host_functions; a
         )),
         2 => FunctionRef::Two(define_with_parameters!(
-            compiler, fun2, name, function, function_refs; a, b
+            compiler, fun2, name, function, function_refs, host_functions; a, b
         )),
         3 => FunctionRef::Three(define_with_parameters!(
-            compiler, fun3, name, function, function_refs; a, b, c
+            compiler, fun3, name, function, function_refs, host_functions; a, b, c
         )),
         4 => FunctionRef::Four(define_with_parameters!(
-            compiler, fun4, name, function, function_refs; a, b, c, d
+            compiler, fun4, name, function, function_refs, host_functions; a, b, c, d
         )),
         5 => FunctionRef::Five(define_with_parameters!(
-            compiler, fun5, name, function, function_refs; a, b, c, d, e
+            compiler, fun5, name, function, function_refs, host_functions; a, b, c, d, e
         )),
         6 => FunctionRef::Six(define_with_parameters!(
-            compiler, fun6, name, function, function_refs; a, b, c, d, e, f
+            compiler, fun6, name, function, function_refs, host_functions; a, b, c, d, e, f
         )),
         7 => FunctionRef::Seven(define_with_parameters!(
-            compiler, fun7, name, function, function_refs; a, b, c, d, e, f, g
+            compiler, fun7, name, function, function_refs, host_functions; a, b, c, d, e, f, g
         )),
         8 => FunctionRef::Eight(define_with_parameters!(
-            compiler, fun8, name, function, function_refs; a, b, c, d, e, f, g, h
+            compiler, fun8, name, function, function_refs, host_functions; a, b, c, d, e, f, g, h
         )),
         _ => unreachable!("semantic validation limits functions to eight parameters"),
     };
@@ -452,13 +486,14 @@ fn lower_function_body(
     arguments: &[Var<f64>],
     body: &Expr,
     function_refs: &HashMap<String, FunctionRef>,
+    host_functions: &HashMap<String, HostFunctionRef>,
 ) -> Var<f64> {
     let variables = parameter_names
         .iter()
         .cloned()
         .zip(arguments.iter().copied())
         .collect();
-    lower_expr(body, ctx, &variables, function_refs)
+    lower_expr(body, ctx, &variables, function_refs, host_functions)
 }
 
 fn lower_expr(
@@ -466,13 +501,14 @@ fn lower_expr(
     ctx: &mut Ctx,
     variables: &HashMap<String, Var<f64>>,
     function_refs: &HashMap<String, FunctionRef>,
+    host_functions: &HashMap<String, HostFunctionRef>,
 ) -> Var<f64> {
     match &expression.kind {
         ExprKind::Number(value) => ctx.bind(Const::<f64>::new(*value)),
         ExprKind::Variable(name) => variables[name],
         ExprKind::Binary { op, left, right } => {
-            let left = lower_expr(left, ctx, variables, function_refs);
-            let right = lower_expr(right, ctx, variables, function_refs);
+            let left = lower_expr(left, ctx, variables, function_refs, host_functions);
+            let right = lower_expr(right, ctx, variables, function_refs, host_functions);
             match op {
                 BinaryOp::LessThan => ctx.bind(select(lt(left, right), 1.0f64, 0.0f64)),
                 BinaryOp::Add => ctx.bind(left + right),
@@ -483,9 +519,13 @@ fn lower_expr(
         ExprKind::Call { callee, arguments } => {
             let arguments = arguments
                 .iter()
-                .map(|argument| lower_expr(argument, ctx, variables, function_refs))
+                .map(|argument| lower_expr(argument, ctx, variables, function_refs, host_functions))
                 .collect::<Vec<_>>();
-            function_refs[callee].emit_call(ctx, &arguments)
+            if let Some(function) = function_refs.get(callee) {
+                function.emit_call(ctx, &arguments)
+            } else {
+                host_functions[callee].emit_call(ctx, arguments[0])
+            }
         }
     }
 }
@@ -563,10 +603,10 @@ mod tests {
     }
 
     #[test]
-    fn defers_unbound_externals_to_chapter_four() {
+    fn reports_unregistered_externals() {
         assert!(
-            error("extern sin(x); sin(1);")
-                .contains("external function 'sin' has no Chapter 3 host binding")
+            error("extern mystery(x); mystery(1);")
+                .contains("external function 'mystery' has no registered host binding")
         );
     }
 
