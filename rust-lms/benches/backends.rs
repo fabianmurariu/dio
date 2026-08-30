@@ -14,7 +14,7 @@
 //!     PATH="$MLIR_SYS_220_PREFIX/bin:$PATH" DYLD_LIBRARY_PATH="$MLIR_SYS_220_PREFIX/lib" \
 //!     cargo bench --bench backends --features llvm      # + LLVM/MLIR
 
-use criterion::{criterion_group, criterion_main, BenchmarkId, Criterion, Throughput};
+use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use std::hint::black_box;

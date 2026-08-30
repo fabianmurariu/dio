@@ -959,23 +959,54 @@ impl<'c> CompilationContext<'c> {
 
     /// Bind `value` to variable `id`, retaining its neutral shape. `reuse` reuses an
     /// existing binding for loop-carried assignments. The value shape and `T` must agree.
+    pub(crate) fn assign_var_layout(
+        &mut self,
+        id: usize,
+        value: Value,
+        is_fat: bool,
+        scalar: ScalarType,
+        name: &'static str,
+        reuse: bool,
+    ) {
+        self.assign_var_inner(id, value, is_fat, scalar, name, reuse)
+    }
+
     pub(crate) fn assign_var<T: StagedType>(&mut self, id: usize, value: Value, reuse: bool) {
+        self.assign_var_inner(
+            id,
+            value,
+            T::is_fat_pointer(),
+            T::scalar_type(),
+            std::any::type_name::<T>(),
+            reuse,
+        )
+    }
+
+    fn assign_var_inner(
+        &mut self,
+        id: usize,
+        value: Value,
+        is_fat: bool,
+        scalar: ScalarType,
+        name: &'static str,
+        reuse: bool,
+    ) {
         let existing = reuse.then(|| self.variables.get(&id).copied()).flatten();
 
         match value {
-            Value::Scalar(leaf) if !T::is_fat_pointer() => {
-                expect_type(leaf, T::scalar_type(), "staged variable assignment");
+            Value::Scalar(leaf) if !is_fat => {
+                expect_type(leaf, scalar, "staged variable assignment");
                 let var = match existing {
                     Some(VarValue::Scalar(var)) => var,
                     Some(VarValue::Fat { .. }) => {
                         panic!("cannot assign a scalar value to fat staged variable {id}")
                     }
-                    None => self.declare_var(T::scalar_type()),
+                    None => self.declare_var(scalar),
                 };
                 self.def_var(var, leaf);
                 self.variables.insert(id, VarValue::Scalar(var));
             }
-            Value::Fat { ptr, len } if T::is_fat_pointer() => {
+            Value::Fat { ptr, len } if is_fat => {
                 let (ptr_var, len_var) = match existing {
                     Some(VarValue::Fat { ptr, len }) => (ptr, len),
                     Some(VarValue::Scalar(_)) => {
@@ -998,11 +1029,11 @@ impl<'c> CompilationContext<'c> {
             }
             Value::Scalar(_) => panic!(
                 "{} declares a fat value but codegen produced a scalar",
-                std::any::type_name::<T>()
+                name
             ),
             Value::Fat { .. } => panic!(
                 "{} declares a scalar value but codegen produced a fat value",
-                std::any::type_name::<T>()
+                name
             ),
         }
     }
@@ -1109,6 +1140,35 @@ pub unsafe trait Staged {
     fn codegen(&self, ctx: &mut CompilationContext) -> Value;
 }
 
+/// A staged expression that carries a Rust borrow.
+///
+/// `Out` keeps the borrow (so `bind` can hand back a `Var` that holds it);
+/// `ErasedOut` is the same staged type with every lifetime widened to
+/// `'static`, which is what actually enters the `'static` action queue. The two
+/// must have identical layout — they differ only in phantom lifetimes.
+// A boxed staged value is itself staged, so combinators can hold an erased
+// inner expression.
+unsafe impl<O: StagedType> Staged for Box<dyn Staged<Out = O>> {
+    type Out = O;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        (**self).codegen(ctx)
+    }
+}
+
+/// Deliberately **not** a `Staged` supertrait: if the borrow-carrying handle
+/// were itself `Staged`, method resolution would prefer its by-value slice ops
+/// over the lifetime-free ones it derefs to, and every ordinary read would drag
+/// the borrow into the `'static` action queue.
+pub trait LifetimeErased {
+    /// The staged type this binds to — keeps the borrow.
+    type Out: StagedType;
+    /// `Self::Out` with its lifetimes replaced by `'static`. Same layout.
+    type ErasedOut: StagedType + 'static;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>>;
+}
+
 // =============================================================================
 // VarRef<T> - Typed staged variable handle
 // =============================================================================
@@ -1149,7 +1209,7 @@ pub struct Var<T: StagedType> {
 /// the variable ID it will lower later.
 #[doc(hidden)]
 pub struct VarUse<T: StagedType> {
-    id: usize,
+    pub(crate) id: usize,
     _phantom: std::marker::PhantomData<T>,
 }
 

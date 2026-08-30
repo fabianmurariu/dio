@@ -18,7 +18,9 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarValue, assign};
+use crate::staged::{
+    CompilationContext, LifetimeErased, SigSpec, Staged, Value, ValueId, Var, VarValue, assign,
+};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
@@ -105,7 +107,7 @@ impl Ctx {
         })
     }
 
-    fn alloc<T: StagedType + 'static>(&mut self) -> Var<T> {
+    fn alloc<T: StagedType>(&mut self) -> Var<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
         Var::new(id)
@@ -152,6 +154,47 @@ impl Ctx {
         self.actions.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
             ctx.assign_var::<T>(id, value, true);
+        }));
+        v
+    }
+
+    /// Bind an expression that **carries a Rust borrow**.
+    ///
+    /// [`bind`](Self::bind) cannot be used for these. Its expression is stored
+    /// in the `'static` action queue, so it requires `E: 'static`, which a
+    /// borrowing expression is not. Erasing the lifetime to get it into the
+    /// queue would also erase it from the result, and the borrow would stop
+    /// protecting anything.
+    ///
+    /// So the lifetime is split across two types: the *erased* expression goes
+    /// into the queue, while the returned `Var` is typed with the **un-erased**
+    /// `Out`. The two have identical layout and differ only in phantom
+    /// lifetimes, so the generated code is the same — but the `Var` keeps its
+    /// source borrowed, and the borrow checker rejects a mutation of that
+    /// source while the `Var` is live.
+    ///
+    /// That is what makes a captured `(ptr, len)` safe: growing an `SVec` may
+    /// move its buffer, so a snapshot of its descriptor must not outlive a
+    /// `push`. Binding the length of a slice yields `Var<u64>`, which carries
+    /// no borrow and therefore does not restrict later growth; binding the
+    /// slice itself yields `Var<BorrowedSlice<'a, _>>`, which does.
+    pub fn bind_lt<E>(&mut self, expr: E) -> Var<E::Out>
+    where
+        E: LifetimeErased,
+    {
+        let v = self.alloc::<E::Out>();
+        let id = v.id;
+        // Layout comes from the erased twin — identical to `E::Out`'s, and read
+        // here so `E::Out` never enters the `'static` closure.
+        let (is_fat, scalar, name) = (
+            E::ErasedOut::is_fat_pointer(),
+            E::ErasedOut::scalar_type(),
+            std::any::type_name::<E::ErasedOut>(),
+        );
+        let expr = expr.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            let value = expr.codegen(ctx);
+            ctx.assign_var_layout(id, value, is_fat, scalar, name, true);
         }));
         v
     }
