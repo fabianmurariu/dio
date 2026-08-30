@@ -1,0 +1,9 @@
+[package]
+name = "kaleidoscope-tutorial"
+version.workspace = true
+edition.workspace = true
+publish = false
+
+[dependencies]
+pest.workspace = true
+pest_derive.workspace = true

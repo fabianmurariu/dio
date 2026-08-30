@@ -1,0 +1,20 @@
+WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
+COMMENT = _{ "#" ~ (!("\n" | "\r") ~ ANY)* }
+
+source = { SOI ~ token* ~ EOI }
+token = _{ keyword_def | keyword_extern | number | identifier | character }
+
+// Atomic keyword rules prevent Pest's implicit whitespace skipping from
+// occurring before the identifier-boundary check.
+keyword_def = @{ "def" ~ !ASCII_ALPHANUMERIC }
+keyword_extern = @{ "extern" ~ !ASCII_ALPHANUMERIC }
+
+// Keep Chapter 1's identifier syntax deliberately small and predictable.
+identifier = @{ ASCII_ALPHA ~ ASCII_ALPHANUMERIC* }
+
+// Unlike the tutorial's permissive [0-9.]+ loop, this rule describes one
+// decimal point at most. Signs remain punctuation and are parsed as operators.
+number = @{ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)?) | ("." ~ ASCII_DIGIT+) }
+
+// Chapter 1 leaves operators and delimiters as their literal characters.
+character = @{ ANY }

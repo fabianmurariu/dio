@@ -1,5 +1,12 @@
 [workspace]
-members = ["rust-lms", "rust-lms-derive", "rust-lms-std", "arrow-lms", "sql-gen"]
+members = [
+    "rust-lms",
+    "rust-lms-derive",
+    "rust-lms-std",
+    "arrow-lms",
+    "sql-gen",
+    "kaleidoscope-tutorial",
+]
 resolver = "3"
 
 [workspace.package]
@@ -13,6 +20,8 @@ rust-lms-std = { path = "rust-lms-std" }
 arrow-lms = { path = "arrow-lms" }
 # Parsing
 nom = "7.1"
+pest = "2.9"
+pest_derive = "2.9"
 
 # Error handling & diagnostics
 thiserror = "1.0"
