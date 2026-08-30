@@ -4,7 +4,13 @@ use std::ffi::OsString;
 use std::fs;
 use std::io::{self, Read};
 
-use kaleidoscope_tutorial::lex;
+use kaleidoscope_tutorial::{lex, parse_program};
+
+#[derive(Clone, Copy)]
+enum Mode {
+    Ast,
+    Tokens,
+}
 
 fn main() {
     if let Err(error) = run() {
@@ -14,19 +20,24 @@ fn main() {
 }
 
 fn run() -> Result<(), Box<dyn Error>> {
-    let mut arguments = env::args_os().skip(1);
-    let path = arguments.next();
-    if let Some(unexpected) = arguments.next() {
-        return Err(format!(
-            "expected at most one source path, found unexpected argument {:?}",
-            unexpected
-        )
-        .into());
+    let mut mode = Mode::Ast;
+    let mut path = None;
+    for argument in env::args_os().skip(1) {
+        if argument == "--tokens" {
+            mode = Mode::Tokens;
+        } else if path.replace(argument).is_some() {
+            return Err("expected at most one source path".into());
+        }
     }
 
     let source = read_source(path)?;
-    for token in lex(&source)? {
-        println!("{token}");
+    match mode {
+        Mode::Ast => println!("{:#?}", parse_program(&source)?),
+        Mode::Tokens => {
+            for token in lex(&source)? {
+                println!("{token}");
+            }
+        }
     }
     Ok(())
 }

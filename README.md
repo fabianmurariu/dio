@@ -165,7 +165,7 @@ assert_eq!(compiler.compile(quad).expect("compile").as_fn().call(2), 16);
 | [`rust-lms-std`](rust-lms-std/)       | typed staged data structures built on `rust-lms` — a growable `SVec` (handle indirection: a JIT structure grows without dangling baked pointers) and query-shaped packed records (`RecordLayout` / `FieldId`)                                                                 |
 | [`arrow-lms`](arrow-lms/)             | staged Apache Arrow interop — read a `RecordBatch`'s columns inside a JIT kernel via lifetime-free `FfiArray` descriptors, with first-class validity bitmaps                                                                                                                  |
 | [`sql-gen`](sql-gen/)                 | a SQL → JIT engine: datafusion parses SQL, a small optimizer (predicate pushdown) runs, and the plan lowers to one rust-lms kernel per query — `Scan`/`Filter`/`Project`, scalar + `GROUP BY` aggregates, `Utf8View` strings, streaming multi-batch input, and hash **joins** |
-| [`kaleidoscope-tutorial`](kaleidoscope-tutorial/) | a chapter-by-chapter implementation of LLVM's Kaleidoscope language using Pest for the frontend and `rust-lms` staging for native code generation; Chapter 1 currently implements the lexer |
+| [`kaleidoscope-tutorial`](kaleidoscope-tutorial/) | a chapter-by-chapter implementation of LLVM's Kaleidoscope language using Pest for the frontend and `rust-lms` staging for native code generation; Chapters 1–2 implement the lexer, parser, and source-spanned AST |
 
 ## Build & test
 

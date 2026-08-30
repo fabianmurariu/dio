@@ -1,7 +1,8 @@
 WHITESPACE = _{ " " | "\t" | "\r" | "\n" }
 COMMENT = _{ "#" ~ (!("\n" | "\r") ~ ANY)* }
 
-source = { SOI ~ token* ~ EOI }
+// Chapter 1: expose the grammar as a flat token stream.
+token_stream = { SOI ~ token* ~ EOI }
 token = _{ keyword_def | keyword_extern | number | identifier | character }
 
 // Atomic keyword rules prevent Pest's implicit whitespace skipping from
@@ -10,7 +11,12 @@ keyword_def = @{ "def" ~ !ASCII_ALPHANUMERIC }
 keyword_extern = @{ "extern" ~ !ASCII_ALPHANUMERIC }
 
 // Keep Chapter 1's identifier syntax deliberately small and predictable.
-identifier = @{ ASCII_ALPHA ~ ASCII_ALPHANUMERIC* }
+identifier = @{
+    !("def" ~ !ASCII_ALPHANUMERIC)
+    ~ !("extern" ~ !ASCII_ALPHANUMERIC)
+    ~ ASCII_ALPHA
+    ~ ASCII_ALPHANUMERIC*
+}
 
 // Unlike the tutorial's permissive [0-9.]+ loop, this rule describes one
 // decimal point at most. Signs remain punctuation and are parsed as operators.
@@ -18,3 +24,27 @@ number = @{ (ASCII_DIGIT+ ~ ("." ~ ASCII_DIGIT*)?) | ("." ~ ASCII_DIGIT+) }
 
 // Chapter 1 leaves operators and delimiters as their literal characters.
 character = @{ ANY }
+
+// Chapter 2: parse complete programs. Function parameters are whitespace-
+// separated, as in the LLVM tutorial; call arguments are comma-separated.
+program = { SOI ~ top_level* ~ EOI }
+top_level = _{ definition | extern_declaration | top_level_expression | empty_statement }
+empty_statement = { ";" }
+
+definition = { keyword_def ~ prototype ~ expression ~ ";"? }
+extern_declaration = { keyword_extern ~ prototype ~ ";"? }
+top_level_expression = { expression ~ ";"? }
+prototype = { identifier ~ "(" ~ identifier* ~ ")" }
+
+expression = { primary ~ (binary_operator ~ primary)* }
+primary = _{ number | parenthesized | identifier_expression }
+parenthesized = { "(" ~ expression ~ ")" }
+identifier_expression = { identifier ~ call_suffix? }
+call_suffix = { "(" ~ argument_list? ~ ")" }
+argument_list = { expression ~ ("," ~ expression)* }
+
+binary_operator = _{ less_than | add | subtract | multiply }
+less_than = { "<" }
+add = { "+" }
+subtract = { "-" }
+multiply = { "*" }

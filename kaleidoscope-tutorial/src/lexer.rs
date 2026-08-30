@@ -3,11 +3,8 @@
 use std::fmt;
 
 use pest::Parser;
-use pest_derive::Parser;
 
-#[derive(Parser)]
-#[grammar = "kaleidoscope.pest"]
-struct KaleidoscopeLexer;
+use crate::syntax::{KaleidoscopeParser, Rule};
 
 /// A one-based source position plus its zero-based UTF-8 byte offset.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -89,7 +86,7 @@ impl fmt::Display for Token {
 /// parentheses, commas, and semicolons remain individual character tokens so
 /// Chapter 2 can decide what they mean.
 pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
-    let mut parsed = KaleidoscopeLexer::parse(Rule::source, source)?;
+    let mut parsed = KaleidoscopeParser::parse(Rule::token_stream, source)?;
     let source_pair = parsed
         .next()
         .expect("the source rule always produces a pair");
@@ -112,9 +109,10 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
                     .expect("a character token cannot be empty"),
             ),
             Rule::EOI => continue,
-            Rule::source | Rule::token | Rule::WHITESPACE | Rule::COMMENT => {
+            Rule::token_stream | Rule::token | Rule::WHITESPACE | Rule::COMMENT => {
                 unreachable!("silent and wrapper rules are not inner tokens")
             }
+            _ => unreachable!("parser-only rules do not appear in the token stream"),
         };
         tokens.push(Token { kind, span });
     }
