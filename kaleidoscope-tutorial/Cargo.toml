@@ -7,3 +7,4 @@ publish = false
 [dependencies]
 pest.workspace = true
 pest_derive.workspace = true
+rust-lms.workspace = true
