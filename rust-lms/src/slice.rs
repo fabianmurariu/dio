@@ -37,6 +37,7 @@
 
 use crate::ffi::{RawSlice, RawSliceMut};
 use crate::func::Ctx;
+use crate::num::{add, lt};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::staged_opt::StagedOpt;
@@ -1579,6 +1580,59 @@ where
             i: i.into_staged(),
             j: j.into_staged(),
         }
+    }
+
+    /// Replace every element with `f` applied to its current value.
+    ///
+    /// The in-place counterpart to `staged_iter().map(..)`: a terminal, because
+    /// a staged iterator yields values and has nowhere to put them back. Binds
+    /// the slice once and reborrows per element, so a unique — and therefore
+    /// non-`Clone` — origin works.
+    fn map_in_place<F, E>(self, ctx: &mut Ctx, f: F)
+    where
+        Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        <VarUse<<Self as Staged>::Out> as crate::staged::LifetimeErased>::ErasedOut:
+            MutSliceType<Elem = ElemOf<Self>>,
+        ElemOf<Self>: CopyType + 'static,
+        F: Fn(Var<ElemOf<Self>>) -> E,
+        E: Staged<Out = ElemOf<Self>> + 'static,
+    {
+        let mut slice = ctx.bind_lt(self);
+        let n = ctx.bind_lt(slice.reborrow().len());
+        let i = ctx.var(0u64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            // SAFETY: the loop condition proves `i < len`.
+            let elem = ctx.bind_lt(unsafe { slice.reborrow().get_unchecked(i) });
+            // SAFETY: as above.
+            ctx.emit_lt(unsafe { slice.reborrow().set_unchecked(i, f(elem)) });
+            ctx.store(i, add(i, 1u64));
+        });
+    }
+
+    /// Write `value` into every element.
+    ///
+    /// Emits only the store — routing this through
+    /// [`map_in_place`](Self::map_in_place) would emit a per-element load whose
+    /// result is never used, and the frontend does not remove it.
+    fn fill<V>(self, ctx: &mut Ctx, value: V)
+    where
+        Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        <VarUse<<Self as Staged>::Out> as crate::staged::LifetimeErased>::ErasedOut:
+            MutSliceType<Elem = ElemOf<Self>>,
+        ElemOf<Self>: CopyType + 'static,
+        V: IntoStaged<ElemOf<Self>> + Clone,
+        V::Staged: 'static,
+    {
+        let mut slice = ctx.bind_lt(self);
+        let n = ctx.bind_lt(slice.reborrow().len());
+        let i = ctx.var(0u64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            // SAFETY: the loop condition proves `i < len`.
+            ctx.emit_lt(unsafe { slice.reborrow().set_unchecked(i, value.clone()) });
+            ctx.store(i, add(i, 1u64));
+        });
     }
 }
 

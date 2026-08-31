@@ -108,13 +108,8 @@ fn test_slice_mutable_set() {
 #[test]
 fn test_slice_mutable_fill() {
     for_each_backend(|mut compiler| {
-        let fill = compiler.fun1("fill", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, arr.reborrow().len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < arr.len()`.
-                ctx.emit(unsafe { arr.set_unchecked(i, 42i64) });
-                ctx.store(i, i + 1u64);
-            });
+        let fill = compiler.fun1("fill", |ctx, arr: Var<SRefMut<Slice<i64>>>| {
+            arr.fill(ctx, 42i64);
             Const::<()>::new(())
         });
         let compiled = compiler.compile(fill).expect("compilation failed");
@@ -122,6 +117,32 @@ fn test_slice_mutable_fill() {
         let mut data: [i64; 4] = [0, 0, 0, 0];
         f.call(&mut data[..]);
         assert_eq!(data, [42, 42, 42, 42]);
+    });
+}
+
+/// `map_in_place` is the in-place counterpart to `map`: it reads each element,
+/// applies the staged function, and writes the result back. Driven here from a
+/// mutable parameter and from a mutable sub-slice of it, so the write lands in
+/// the caller's buffer either way.
+#[test]
+fn test_slice_map_in_place() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1(
+            "double_then_bump",
+            |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
+                arr.reborrow().map_in_place(ctx, |x| x * 2i64);
+                // SAFETY: the test calls this kernel with 4 elements.
+                let sub = unsafe { arr.reborrow().subslice_unchecked(2u64, 4u64) };
+                sub.map_in_place(ctx, |x| x + 1i64);
+                Const::<()>::new(())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let g = compiled.as_fn();
+        let mut data: [i64; 4] = [1, 2, 3, 4];
+        g.call(&mut data[..]);
+        // all doubled -> [2,4,6,8]; then [2..4] bumped -> [2,4,7,9]
+        assert_eq!(data, [2, 4, 7, 9]);
     });
 }
 

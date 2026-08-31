@@ -401,23 +401,6 @@ where
     acc
 }
 
-/// Fill a *unique* `i64` slice, whatever it came from. Accepts only unique
-/// origins — `S::Out: MutSliceType`.
-fn fill<S>(ctx: &mut Ctx, s: S, value: i64)
-where
-    S: Staged + 'static,
-    S::Out: MutSliceType<Elem = i64>,
-{
-    let mut v = ctx.bind(s);
-    let n = ctx.bind(v.reborrow().len());
-    let i = ctx.var(0u64);
-    ctx.while_loop(lt(i, n), move |ctx| {
-        // SAFETY: the loop condition proves `i < len`.
-        ctx.emit(unsafe { v.reborrow().set_unchecked(i, value) });
-        ctx.store(i, add(i, 1u64));
-    });
-}
-
 /// One helper, three trusted shared origins: a function parameter, a sub-slice
 /// of it, and a witnessed descriptor field.
 #[test]
@@ -449,15 +432,15 @@ fn one_helper_serves_every_trusted_shared_origin() {
 }
 
 /// The same for the unique side: a mutable parameter and a mutable sub-slice
-/// both drive one `fill`.
+/// both drive `SliceMutOps::fill`.
 #[test]
 fn one_helper_serves_every_unique_origin() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("fill_both", |ctx, mut a: Var<SRefMut<Slice<i64>>>| {
             // SAFETY: the test calls this with 4 elements.
             let sub = ctx.bind(unsafe { a.reborrow().subslice_unchecked(2u64, 4u64) });
-            fill(ctx, sub, 9i64);
-            fill(ctx, a.reborrow(), 7i64);
+            sub.fill(ctx, 9i64);
+            a.reborrow().fill(ctx, 7i64);
             // `total` is capability-independent: the same helper that served the
             // three shared origins above also takes a unique one.
             let _ = total(ctx, a.reborrow());
