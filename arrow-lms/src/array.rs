@@ -111,10 +111,15 @@ impl<P, M> PrimitiveArrayView<P, M> {
     /// [`FfiArrayOps::into_primitive`] — are `unsafe fn` and require the Arrow
     /// values buffer to be represented by `M` for every generated-code use.
     /// Holding a `PrimitiveArrayView` *is* that proof.
-    pub fn values(&self) -> impl Staged<Out = SRef<Slice<M>>> + Clone + use<P, M>
+    pub fn values(
+        &self,
+    ) -> impl Staged<Out = SRef<Slice<M>>>
+    + Clone
+    + LifetimeErased<Out = SRef<Slice<M>>, ErasedOut = SRef<Slice<M>>>
+    + use<P, M>
     where
-        P: ArraySource,
-        M: StagedType,
+        P: ArraySource + 'static,
+        M: StagedType + 'static,
     {
         // SAFETY: this view's construction contract establishes that the
         // descriptor addresses a live Arrow buffer of `M` for the whole kernel
@@ -128,8 +133,8 @@ impl<P, M> PrimitiveArrayView<P, M> {
 
     pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P, M>
     where
-        P: ArraySource,
-        M: StagedType,
+        P: ArraySource + 'static,
+        M: StagedType + 'static,
     {
         self.values().len()
     }
@@ -141,8 +146,8 @@ impl<P, M> PrimitiveArrayView<P, M> {
     /// At execution, `index` must be less than this array's length.
     pub unsafe fn value_unchecked<I>(&self, index: I) -> impl Staged<Out = M> + Clone + use<P, M, I>
     where
-        P: ArraySource,
-        M: StagedType + CopyType,
+        P: ArraySource + 'static,
+        M: StagedType + CopyType + 'static,
         I: IntoStaged<u64>,
         I::Staged: Clone,
     {

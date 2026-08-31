@@ -210,6 +210,70 @@ where
     }
 }
 
+/// Builds a [`ZipItem`] from two arbitrary staged expressions.
+///
+/// [`ZipGetAt`] pairs two *indexed sources* at the same index; this pairs two
+/// values that are already in hand, which is what [`Enumerate`](super::Enumerate)
+/// needs — its source may be any iterator, indexed or not.
+pub struct Pair<A, B> {
+    first: A,
+    second: B,
+}
+
+impl<A, B> Pair<A, B> {
+    pub fn new(first: A, second: B) -> Self {
+        Pair { first, second }
+    }
+}
+
+impl<A: Clone, B: Clone> Clone for Pair<A, B> {
+    fn clone(&self) -> Self {
+        Pair {
+            first: self.first.clone(),
+            second: self.second.clone(),
+        }
+    }
+}
+
+impl<A: Copy, B: Copy> Copy for Pair<A, B> {}
+
+// SAFETY: writes both fields at their declared offsets into a stack slot sized
+// and aligned for `ZipItem`, and yields that slot's address — the indirect
+// representation `is_copy_struct` declares.
+unsafe impl<A, B> Staged for Pair<A, B>
+where
+    A: Staged,
+    B: Staged,
+    A::Out: CopyType + 'static,
+    B::Out: CopyType + 'static,
+{
+    type Out = ZipItem<A::Out, B::Out>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let first = self.first.codegen(ctx);
+        let second = self.second.codegen(ctx);
+
+        let align_shift = Self::Out::align_of().trailing_zeros() as u8;
+        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
+        let slot_ptr = ctx.stack_addr(stack_slot, 0);
+
+        store_value::<A::Out>(
+            ctx,
+            first,
+            slot_ptr,
+            ZipItemType::__field_first::<A::Out, B::Out>::OFFSET as i32,
+        );
+        store_value::<B::Out>(
+            ctx,
+            second,
+            slot_ptr,
+            ZipItemType::__field_second::<A::Out, B::Out>::OFFSET as i32,
+        );
+
+        Value::scalar(slot_ptr)
+    }
+}
+
 fn store_value<T: StagedType>(
     ctx: &mut CompilationContext,
     value: Value,

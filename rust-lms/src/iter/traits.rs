@@ -224,6 +224,18 @@ pub trait StagedIterator: Sized {
         acc
     }
 
+    /// Pair each element with its zero-based position.
+    ///
+    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
+    /// element separately; used through the combinators the item is a
+    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
+    fn enumerate(self) -> super::Enumerate<Self>
+    where
+        Self: Sized,
+    {
+        super::Enumerate::new(self)
+    }
+
     /// Branchless count of elements satisfying `pred`.
     ///
     /// Equivalent to `self.filter(pred).count(ctx)` but adds a predicated

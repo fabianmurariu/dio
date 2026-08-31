@@ -608,3 +608,70 @@ fn test_iter_skip_while() {
         assert_eq!(f.call(&[1i64, 2, 3, 5, 4, 6][..]), 15);
     });
 }
+
+// =============================================================================
+// enumerate
+// =============================================================================
+
+/// The three-argument path: index and element arrive as separate vars.
+#[test]
+fn test_iter_enumerate_weighted_sum() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("weighted", |ctx, a: Var<SRef<Slice<i64>>>| {
+            let acc = ctx.var(0i64);
+            a.staged_iter().enumerate().for_each(ctx, move |ctx, i, x| {
+                ctx.store(acc, acc + x * int_cast::<i64, u64, _>(i));
+            });
+            acc
+        });
+
+        let compiled = compiler.compile(f).expect("compile failed");
+        let weighted = compiled.as_fn();
+        // 10*0 + 20*1 + 30*2 + 40*3 = 200
+        let data: [i64; 4] = [10, 20, 30, 40];
+        assert_eq!(weighted.call(&data[..]), 200);
+    });
+}
+
+/// The combinator path: `Item = ZipItem<u64, _>`, so `enumerate` composes with
+/// `map` and the terminals like any other adapter.
+#[test]
+fn test_iter_enumerate_composes_with_map() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("indexed", |ctx, a: Var<SRef<Slice<i64>>>| {
+            a.staged_iter()
+                .enumerate()
+                .map(|pair| pair.second() * int_cast::<i64, u64, _>(pair.first()))
+                .sum(ctx)
+        });
+
+        let compiled = compiler.compile(f).expect("compile failed");
+        let indexed = compiled.as_fn();
+        let data: [i64; 4] = [10, 20, 30, 40];
+        assert_eq!(indexed.call(&data[..]), 200);
+    });
+}
+
+/// The index counts *elements the consumer sees*, so a preceding `filter`
+/// renumbers from zero rather than reporting source positions.
+#[test]
+fn test_iter_enumerate_after_filter_renumbers() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("after_filter", |ctx, a: Var<SRef<Slice<i64>>>| {
+            let acc = ctx.var(0u64);
+            a.staged_iter()
+                .filter(|x| gt(x, 15i64))
+                .enumerate()
+                .for_each(ctx, move |ctx, i, _x| {
+                    ctx.store(acc, acc + i);
+                });
+            acc
+        });
+
+        let compiled = compiler.compile(f).expect("compile failed");
+        let after_filter = compiled.as_fn();
+        // 20, 30, 40 survive and are numbered 0,1,2 -> 0+1+2 = 3
+        let data: [i64; 4] = [10, 20, 30, 40];
+        assert_eq!(after_filter.call(&data[..]), 3u64);
+    });
+}

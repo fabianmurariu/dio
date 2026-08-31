@@ -17,6 +17,7 @@
 //!      });
 //! ```
 
+mod enumerate;
 mod filter;
 mod filter_map;
 mod map;
@@ -29,6 +30,7 @@ mod take_while;
 mod traits;
 mod zip;
 
+pub use enumerate::Enumerate;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
 pub use map::Map;
@@ -46,4 +48,4 @@ pub use take_while::TakeWhile;
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
-pub use zip::{Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen};
+pub use zip::{Pair, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen};
