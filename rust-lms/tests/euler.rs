@@ -120,11 +120,9 @@ fn euler_03_largest_prime_factor() {
 fn euler_04_largest_palindrome_product() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun0("e04", |ctx| {
-            let a = ctx.var(100i64);
             let best = ctx.var(0i64);
-            ctx.while_loop(lt(a, 1000i64), move |ctx| {
-                let b = ctx.var(100i64);
-                ctx.while_loop(lt(b, 1000i64), move |ctx| {
+            range(100i64, 1000i64).for_each(ctx, move |ctx, a| {
+                range(100i64, 1000i64).for_each(ctx, move |ctx, b| {
                     let n = ctx.var(0i64);
                     ctx.store(n, a * b);
                     let r = ctx.var(0i64);
@@ -139,9 +137,7 @@ fn euler_04_largest_palindrome_product() {
                             ctx.store(best, n);
                         });
                     });
-                    ctx.store(b, b + 1i64);
                 });
-                ctx.store(a, a + 1i64);
             });
             best
         });
@@ -160,8 +156,7 @@ fn euler_05_smallest_multiple() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e05", |ctx, n: Var<i64>| {
             let acc = ctx.var(1i64);
-            let i = ctx.var(2i64);
-            ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+            range(2i64, n + 1i64).for_each(ctx, move |ctx, i| {
                 let x = ctx.var(0i64);
                 let y = ctx.var(0i64);
                 let t = ctx.var(0i64);
@@ -173,7 +168,6 @@ fn euler_05_smallest_multiple() {
                     ctx.store(y, t);
                 });
                 ctx.store(acc, (acc / x) * i);
-                ctx.store(i, i + 1i64);
             });
             acc
         });
@@ -258,12 +252,10 @@ fn euler_08_largest_product_of_k_adjacent() {
             let best = ctx.var(0i64);
             ctx.while_loop(lt(i + k, n + 1u64), move |ctx| {
                 let prod = ctx.var(1i64);
-                let j = ctx.var(0u64);
-                ctx.while_loop(lt(j, k), move |ctx| {
+                range(0u64, k).for_each(ctx, move |ctx, j| {
                     // SAFETY: the outer loop maintains `i + k <= n`, and this
-                    // loop proves `j < k`, so `i + j < n` for tested inputs.
+                    // range proves `j < k`, so `i + j < n` for tested inputs.
                     ctx.store(prod, prod * unsafe { digits.get_unchecked(i + j) });
-                    ctx.store(j, j + 1u64);
                 });
                 ctx.if_then(gt(prod, best), move |ctx| {
                     ctx.store(best, prod);
@@ -297,11 +289,8 @@ fn euler_09_pythagorean_triplet() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e09", |ctx, n: Var<i64>| {
             let result = ctx.var(0i64);
-            let a = ctx.var(1i64);
-            ctx.while_loop(lt(a, n), move |ctx| {
-                let b = ctx.var(0i64);
-                ctx.store(b, a + 1i64);
-                ctx.while_loop(lt(b, n), move |ctx| {
+            range(1i64, n).for_each(ctx, move |ctx, a| {
+                range(a + 1i64, n).for_each(ctx, move |ctx, b| {
                     let c = ctx.var(0i64);
                     ctx.store(c, n - a - b);
                     ctx.if_then(gt(c, b), move |ctx| {
@@ -309,9 +298,7 @@ fn euler_09_pythagorean_triplet() {
                             ctx.store(result, a * b * c);
                         });
                     });
-                    ctx.store(b, b + 1i64);
                 });
-                ctx.store(a, a + 1i64);
             });
             result
         });
@@ -332,8 +319,7 @@ fn euler_10_sum_of_primes_below() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e10", |ctx, n: Var<i64>| {
             let sum = ctx.var(0i64);
-            let i = ctx.var(2i64);
-            ctx.while_loop(lt(i, n), move |ctx| {
+            range(2i64, n).for_each(ctx, move |ctx, i| {
                 let prime = ctx.var(true);
                 let d = ctx.var(2i64);
                 ctx.while_loop(lt(d * d, i + 1i64), move |ctx| {
@@ -345,7 +331,6 @@ fn euler_10_sum_of_primes_below() {
                 ctx.if_then(prime, move |ctx| {
                     ctx.store(sum, sum + i);
                 });
-                ctx.store(i, i + 1i64);
             });
             sum
         });
@@ -406,10 +391,9 @@ fn euler_12_highly_divisible_triangle() {
 fn euler_14_longest_collatz() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e14", |ctx, limit: Var<i64>| {
-            let i = ctx.var(1i64);
             let best_len = ctx.var(0i64);
             let best_n = ctx.var(0i64);
-            ctx.while_loop(lt(i, limit), move |ctx| {
+            range(1i64, limit).for_each(ctx, move |ctx, i| {
                 let x = ctx.var(0i64);
                 ctx.store(x, i);
                 let len = ctx.var(1i64);
@@ -424,7 +408,6 @@ fn euler_14_longest_collatz() {
                     ctx.store(best_len, len);
                     ctx.store(best_n, i);
                 });
-                ctx.store(i, i + 1i64);
             });
             best_n
         });
@@ -444,11 +427,9 @@ fn euler_14_longest_collatz() {
 fn euler_15_lattice_paths() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e15", |ctx, n: Var<i64>| {
-            let i = ctx.var(1i64);
             let acc = ctx.var(1i64);
-            ctx.while_loop(lt(i, n + 1i64), move |ctx| {
+            range(1i64, n + 1i64).for_each(ctx, move |ctx, i| {
                 ctx.store(acc, acc * (n + i) / i);
-                ctx.store(i, i + 1i64);
             });
             acc
         });
@@ -478,8 +459,7 @@ fn euler_21_amicable_sum() {
                 compiler.fun1("e21_sigma", |ctx, mut sigma: Var<SRefMut<Slice<u64>>>| {
                     let n = ctx.var(0u64);
                     ctx.store(n, sigma.reborrow().len());
-                    let i = ctx.var(2u64);
-                    ctx.while_loop(lt(i, n), |ctx| {
+                    range(2u64, n).for_each(ctx, |ctx, i| {
                         let s = ctx.var(1u64);
                         let d = ctx.var(2u64);
                         ctx.while_loop(lt(d * d, i + 1u64), move |ctx| {
@@ -493,9 +473,8 @@ fn euler_21_amicable_sum() {
                             });
                             ctx.store(d, d + 1u64);
                         });
-                        // SAFETY: the loop condition proves `i < sigma.reborrow().len()`.
+                        // SAFETY: the range bound is the slice length, so `i < len`.
                         ctx.emit(unsafe { sigma.set_unchecked(i, s) });
-                        ctx.store(i, i + 1u64);
                     });
                     Const::<()>::new(())
                 });
@@ -508,10 +487,9 @@ fn euler_21_amicable_sum() {
                 let n = ctx.var(0u64);
                 ctx.store(n, sigma.len());
                 let total = ctx.var(0u64);
-                let a = ctx.var(2u64);
-                ctx.while_loop(lt(a, n), move |ctx| {
+                range(2u64, n).for_each(ctx, move |ctx, a| {
                     let b = ctx.var(0u64);
-                    // SAFETY: the loop condition proves `a < sigma.reborrow().len()`.
+                    // SAFETY: the range bound is the slice length, so `a < len`.
                     ctx.store(b, unsafe { sigma.get_unchecked(a) });
                     ctx.if_then(gt(b, a), move |ctx| {
                         ctx.if_then(lt(b, n), move |ctx| {
@@ -521,7 +499,6 @@ fn euler_21_amicable_sum() {
                             });
                         });
                     });
-                    ctx.store(a, a + 1u64);
                 });
                 total
             });
@@ -584,8 +561,7 @@ fn euler_30_digit_fifth_powers() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e30", |ctx, upper: Var<i64>| {
             let total = ctx.var(0i64);
-            let n = ctx.var(2i64);
-            ctx.while_loop(lt(n, upper), move |ctx| {
+            range(2i64, upper).for_each(ctx, move |ctx, n| {
                 let m = ctx.var(0i64);
                 ctx.store(m, n);
                 let sum = ctx.var(0i64);
@@ -598,7 +574,6 @@ fn euler_30_digit_fifth_powers() {
                 ctx.if_then(eq(sum, n), move |ctx| {
                     ctx.store(total, total + n);
                 });
-                ctx.store(n, n + 1i64);
             });
             total
         });
@@ -625,8 +600,7 @@ fn euler_34_digit_factorials() {
             "e34",
             |ctx, upper: Var<u64>, fact: Var<SRef<Slice<u64>>>| {
                 let total = ctx.var(0u64);
-                let n = ctx.var(3u64);
-                ctx.while_loop(lt(n, upper), move |ctx| {
+                range(3u64, upper).for_each(ctx, move |ctx, n| {
                     let m = ctx.var(0u64);
                     ctx.store(m, n);
                     let sum = ctx.var(0u64);
@@ -639,7 +613,6 @@ fn euler_34_digit_factorials() {
                     ctx.if_then(eq(sum, n), move |ctx| {
                         ctx.store(total, total + n);
                     });
-                    ctx.store(n, n + 1u64);
                 });
                 total
             },
@@ -688,42 +661,34 @@ fn euler_67_max_path_sum_triangle() {
                 // Seed workspace with the bottom row.
                 let last_row_offset = ctx.var(0u64);
                 ctx.store(last_row_offset, (num_rows - 1u64) * num_rows / 2u64);
-                let i = ctx.var(0u64);
-                ctx.while_loop(lt(i, num_rows), |ctx| {
+                range(0u64, num_rows).for_each(ctx, |ctx, i| {
                     // SAFETY: callers supply a `num_rows` workspace and a complete
-                    // triangular input; this loop bounds `i` to the bottom row.
+                    // triangular input; this range bounds `i` to the bottom row.
                     let value = unsafe { tri.get_unchecked(last_row_offset + i) };
                     ctx.emit(unsafe { workspace.reborrow().set_unchecked(i, value) });
-                    ctx.store(i, i + 1u64);
                 });
 
-                // Fold from row num_rows-2 down to row 0. We track row+1 to keep the
-                // counter unsigned (it never reaches 0 during the loop body).
-                let row_plus_1 = ctx.var(0u64);
-                ctx.store(row_plus_1, num_rows - 1u64);
-                ctx.while_loop(gt(row_plus_1, 0u64), |ctx| {
-                    let row = ctx.var(0u64);
-                    ctx.store(row, row_plus_1 - 1u64);
-                    let row_offset = ctx.var(0u64);
-                    ctx.store(row_offset, row * (row + 1u64) / 2u64);
-                    let j = ctx.var(0u64);
-                    ctx.while_loop(lt(j, row + 1u64), |ctx| {
-                        let l = ctx.var(0i64);
-                        let r = ctx.var(0i64);
-                        // SAFETY: `j < row + 1 < num_rows`, so both frontier
-                        // indices are within the workspace.
-                        ctx.store(l, unsafe { workspace.reborrow().get_unchecked(j) });
-                        ctx.store(r, unsafe { workspace.reborrow().get_unchecked(j + 1u64) });
-                        let best = ctx.var(0i64);
-                        ctx.store(best, select(gt(l, r), l, r));
-                        // SAFETY: `j` is within the workspace and `row_offset + j`
-                        // is within the complete triangular input.
-                        let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
-                        ctx.emit(unsafe { workspace.reborrow().set_unchecked(j, value) });
-                        ctx.store(j, j + 1u64);
+                // Fold from row num_rows-2 down to row 0.
+                range(0u64, num_rows - 1u64)
+                    .rev()
+                    .for_each(ctx, |ctx, row| {
+                        let row_offset = ctx.var(0u64);
+                        ctx.store(row_offset, row * (row + 1u64) / 2u64);
+                        range(0u64, row + 1u64).for_each(ctx, |ctx, j| {
+                            let l = ctx.var(0i64);
+                            let r = ctx.var(0i64);
+                            // SAFETY: `j < row + 1 < num_rows`, so both frontier
+                            // indices are within the workspace.
+                            ctx.store(l, unsafe { workspace.reborrow().get_unchecked(j) });
+                            ctx.store(r, unsafe { workspace.reborrow().get_unchecked(j + 1u64) });
+                            let best = ctx.var(0i64);
+                            ctx.store(best, select(gt(l, r), l, r));
+                            // SAFETY: `j` is within the workspace and `row_offset + j`
+                            // is within the complete triangular input.
+                            let value = unsafe { tri.get_unchecked(row_offset + j) } + best;
+                            ctx.emit(unsafe { workspace.reborrow().set_unchecked(j, value) });
+                        });
                     });
-                    ctx.store(row_plus_1, row_plus_1 - 1u64);
-                });
                 // SAFETY: tested calls use at least one triangle row.
                 unsafe { workspace.reborrow().get_unchecked(0u64) }
             },

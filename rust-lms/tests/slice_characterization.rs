@@ -383,41 +383,6 @@ fn raw_mut_descriptor_has_representation_ops() {
 // helper to shared origins. Binding the expression into a variable costs one
 // use, and every later use is a reborrow, which works for both capabilities.
 
-/// Sum a trusted `i64` slice, whatever it came from — shared *or* unique.
-fn total<S>(ctx: &mut Ctx, s: S) -> Var<i64>
-where
-    S: Staged + 'static,
-    S::Out: TrustedSliceType<Elem = i64>,
-{
-    let mut v = ctx.bind(s);
-    let n = ctx.bind(v.reborrow().len());
-    let acc = ctx.var(0i64);
-    let i = ctx.var(0u64);
-    ctx.while_loop(lt(i, n), move |ctx| {
-        // SAFETY: the loop condition proves `i < len`.
-        ctx.store(acc, add(acc, unsafe { v.reborrow().get_unchecked(i) }));
-        ctx.store(i, add(i, 1u64));
-    });
-    acc
-}
-
-/// Fill a *unique* `i64` slice, whatever it came from. Accepts only unique
-/// origins — `S::Out: MutSliceType`.
-fn fill<S>(ctx: &mut Ctx, s: S, value: i64)
-where
-    S: Staged + 'static,
-    S::Out: MutSliceType<Elem = i64>,
-{
-    let mut v = ctx.bind(s);
-    let n = ctx.bind(v.reborrow().len());
-    let i = ctx.var(0u64);
-    ctx.while_loop(lt(i, n), move |ctx| {
-        // SAFETY: the loop condition proves `i < len`.
-        ctx.emit(unsafe { v.reborrow().set_unchecked(i, value) });
-        ctx.store(i, add(i, 1u64));
-    });
-}
-
 /// One helper, three trusted shared origins: a function parameter, a sub-slice
 /// of it, and a witnessed descriptor field.
 #[test]
@@ -426,13 +391,13 @@ fn one_helper_serves_every_trusted_shared_origin() {
         let f = compiler.fun2(
             "origins",
             |ctx, a: Var<SRef<Slice<i64>>>, d: Var<SRef<Desc>>| {
-                let from_param = total(ctx, a);
+                let from_param = a.staged_iter().sum(ctx);
                 // SAFETY: the test calls this with at least 3 elements.
                 let sub = ctx.bind(unsafe { a.subslice_unchecked(1u64, 3u64) });
-                let from_subslice = total(ctx, sub);
+                let from_subslice = sub.staged_iter().sum(ctx);
                 // SAFETY: the test keeps the descriptor's buffer alive.
                 let view = ctx.bind(unsafe { d.into_raw_slice::<i64>().assume_shared() });
-                let from_descriptor = total(ctx, view);
+                let from_descriptor = view.staged_iter().sum(ctx);
                 add(add(from_param, from_subslice), from_descriptor)
             },
         );
@@ -449,18 +414,18 @@ fn one_helper_serves_every_trusted_shared_origin() {
 }
 
 /// The same for the unique side: a mutable parameter and a mutable sub-slice
-/// both drive one `fill`.
+/// both drive `SliceMutOps::fill`.
 #[test]
 fn one_helper_serves_every_unique_origin() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("fill_both", |ctx, mut a: Var<SRefMut<Slice<i64>>>| {
             // SAFETY: the test calls this with 4 elements.
             let sub = ctx.bind(unsafe { a.reborrow().subslice_unchecked(2u64, 4u64) });
-            fill(ctx, sub, 9i64);
-            fill(ctx, a.reborrow(), 7i64);
+            sub.fill(ctx, 9i64);
+            a.reborrow().fill(ctx, 7i64);
             // `total` is capability-independent: the same helper that served the
             // three shared origins above also takes a unique one.
-            let _ = total(ctx, a.reborrow());
+            let _ = a.reborrow().staged_iter().sum(ctx);
             a.len()
         });
         let c = compiler.compile(f).unwrap();

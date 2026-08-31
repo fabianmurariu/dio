@@ -18,7 +18,9 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
-use crate::staged::{CompilationContext, SigSpec, Staged, Value, ValueId, Var, VarValue, assign};
+use crate::staged::{
+    CompilationContext, LifetimeErased, SigSpec, Staged, Value, ValueId, Var, VarValue, assign,
+};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
@@ -105,7 +107,7 @@ impl Ctx {
         })
     }
 
-    fn alloc<T: StagedType + 'static>(&mut self) -> Var<T> {
+    fn alloc<T: StagedType>(&mut self) -> Var<T> {
         let id = self.next_var_id;
         self.next_var_id += 1;
         Var::new(id)
@@ -156,6 +158,47 @@ impl Ctx {
         v
     }
 
+    /// Bind an expression that **carries a Rust borrow**.
+    ///
+    /// [`bind`](Self::bind) cannot be used for these. Its expression is stored
+    /// in the `'static` action queue, so it requires `E: 'static`, which a
+    /// borrowing expression is not. Erasing the lifetime to get it into the
+    /// queue would also erase it from the result, and the borrow would stop
+    /// protecting anything.
+    ///
+    /// So the lifetime is split across two types: the *erased* expression goes
+    /// into the queue, while the returned `Var` is typed with the **un-erased**
+    /// `Out`. The two have identical layout and differ only in phantom
+    /// lifetimes, so the generated code is the same — but the `Var` keeps its
+    /// source borrowed, and the borrow checker rejects a mutation of that
+    /// source while the `Var` is live.
+    ///
+    /// That is what makes a captured `(ptr, len)` safe: growing an `SVec` may
+    /// move its buffer, so a snapshot of its descriptor must not outlive a
+    /// `push`. Binding the length of a slice yields `Var<u64>`, which carries
+    /// no borrow and therefore does not restrict later growth; binding the
+    /// slice itself yields `Var<BorrowedSlice<'a, _>>`, which does.
+    pub fn bind_lt<E>(&mut self, expr: E) -> Var<E::Out>
+    where
+        E: LifetimeErased,
+    {
+        let v = self.alloc::<E::Out>();
+        let id = v.id;
+        // Layout comes from the erased twin — identical to `E::Out`'s, and read
+        // here so `E::Out` never enters the `'static` closure.
+        let (is_fat, scalar, name) = (
+            E::ErasedOut::is_fat_pointer(),
+            E::ErasedOut::scalar_type(),
+            std::any::type_name::<E::ErasedOut>(),
+        );
+        let expr = expr.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            let value = expr.codegen(ctx);
+            ctx.assign_var_layout(id, value, is_fat, scalar, name, true);
+        }));
+        v
+    }
+
     /// Emit an assignment: `var = expr`.
     ///
     /// Accepts any value that implements `IntoStaged<T>` — primitives like
@@ -169,6 +212,34 @@ impl Ctx {
         let staged_expr = expr.into_staged();
         self.actions.push(Box::new(move |ctx| {
             assign(var, staged_expr).codegen(ctx);
+        }));
+    }
+
+    /// [`store`](Self::store) for an expression that borrows. `T` is the
+    /// variable's own type, which carries no borrow, so nothing survives the
+    /// assignment holding one.
+    pub fn store_lt<T, E>(&mut self, var: Var<T>, expr: E)
+    where
+        T: StagedType + 'static,
+        E: LifetimeErased<Out = T, ErasedOut = T>,
+    {
+        let expr = expr.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            assign(var, expr).codegen(ctx);
+        }));
+    }
+
+    /// [`emit`](Self::emit) for a statement that borrows — a write through a
+    /// borrowed slice, say. Same split as [`bind_lt`](Self::bind_lt): the
+    /// statement is erased to enter the `'static` queue, and because its `Out` is
+    /// `()` there is nothing left holding the borrow afterwards.
+    pub fn emit_lt<S>(&mut self, stmt: S)
+    where
+        S: LifetimeErased<Out = (), ErasedOut = ()>,
+    {
+        let stmt = stmt.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            stmt.codegen(ctx);
         }));
     }
 
@@ -252,7 +323,7 @@ impl Ctx {
         consumer: F,
     ) where
         Item: StagedType + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>),
     {
         // Element var: defined inside the body from `next`'s value register.
         let elem: Var<Item> = unsafe { self.var_unchecked() };
@@ -347,7 +418,7 @@ impl Ctx {
     ) where
         Item: StagedType + 'static,
         InitFn: FnOnce(&mut CompilationContext, ValueId) + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>),
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;
@@ -1112,6 +1183,15 @@ impl Compiler {
         flag_builder
             .set("opt_level", "speed")
             .map_err(|e| CompileError::JitError(e.to_string()))?;
+        // The IR verifier catches malformed CLIF — mis-ordered `seal_block` above
+        // all — which is worth the ~3x compile-time cost while authoring codegen,
+        // and not worth it once the emitted shapes are known good. Debug builds
+        // keep the net; release builds pay only for what they use.
+        if !cfg!(debug_assertions) {
+            flag_builder
+                .set("enable_verifier", "false")
+                .map_err(|e| CompileError::JitError(e.to_string()))?;
+        }
         flag_builder
             .set("use_colocated_libcalls", "true")
             .map_err(|e| CompileError::JitError(e.to_string()))?;

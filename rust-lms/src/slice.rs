@@ -37,6 +37,7 @@
 
 use crate::ffi::{RawSlice, RawSliceMut};
 use crate::func::Ctx;
+use crate::num::{add, lt};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::staged_opt::StagedOpt;
@@ -589,6 +590,274 @@ impl<T: StagedType> MutSliceType for SRefMut<Slice<T>> {}
 impl<T: StagedType> slice_type_sealed::Sealed for SRefMut<Slice<T>> {}
 impl<T: StagedType> slice_type_sealed::TrustedSealed for SRefMut<Slice<T>> {}
 impl<T: StagedType> slice_type_sealed::MutableSealed for SRefMut<Slice<T>> {}
+
+// --- borrowed slice: a trusted slice that carries a Rust borrow ---------------
+
+/// A trusted shared slice whose staged type carries a Rust lifetime.
+///
+/// Same representation and operations as `SRef<Slice<T>>`. The lifetime exists
+/// so that a `Var<BorrowedSlice<'a, T>>` produced by `Ctx::bind2` keeps its
+/// source borrowed — a captured `(ptr, len)` must not outlive a reallocation of
+/// the storage it came from.
+#[derive(Debug)]
+pub struct BorrowedSlice<'a, T> {
+    _phantom: PhantomData<&'a T>,
+}
+
+impl<T> Clone for BorrowedSlice<'_, T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<T> Copy for BorrowedSlice<'_, T> {}
+
+unsafe impl<T: StagedType> StagedType for BorrowedSlice<'_, T> {
+    type RuntimeValue = *const [T::RuntimeValue];
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
+    fn size_of() -> usize {
+        16
+    }
+    fn align_of() -> usize {
+        8
+    }
+    fn is_copy_struct() -> bool {
+        true
+    }
+    fn is_fat_pointer() -> bool {
+        true
+    }
+}
+
+unsafe impl<T: StagedType> CopyType for BorrowedSlice<'_, T> {}
+
+impl<T: StagedType> SliceType for BorrowedSlice<'_, T> {
+    type Elem = T;
+    type DataPtr = SPtr<T>;
+}
+impl<'a, T: StagedType> TrustedSliceType for BorrowedSlice<'a, T> {
+    type ElemRef = SRef<T>;
+}
+impl<T: StagedType> slice_type_sealed::Sealed for BorrowedSlice<'_, T> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for BorrowedSlice<'_, T> {}
+
+/// The unique twin of [`BorrowedSlice`].
+#[derive(Debug)]
+pub struct BorrowedSliceMut<'a, T> {
+    _phantom: PhantomData<&'a mut T>,
+}
+
+unsafe impl<T: StagedType> StagedType for BorrowedSliceMut<'_, T> {
+    type RuntimeValue = *mut [T::RuntimeValue];
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
+    fn size_of() -> usize {
+        16
+    }
+    fn align_of() -> usize {
+        8
+    }
+    fn is_copy_struct() -> bool {
+        true
+    }
+    fn is_fat_pointer() -> bool {
+        true
+    }
+}
+
+impl<T: StagedType> SliceType for BorrowedSliceMut<'_, T> {
+    type Elem = T;
+    type DataPtr = SMutPtr<T>;
+}
+impl<T: StagedType> TrustedSliceType for BorrowedSliceMut<'_, T> {
+    type ElemRef = SRefMut<T>;
+}
+impl<T: StagedType> MutSliceType for BorrowedSliceMut<'_, T> {}
+impl<T: StagedType> slice_type_sealed::Sealed for BorrowedSliceMut<'_, T> {}
+impl<T: StagedType> slice_type_sealed::TrustedSealed for BorrowedSliceMut<'_, T> {}
+impl<T: StagedType> slice_type_sealed::MutableSealed for BorrowedSliceMut<'_, T> {}
+
+/// A borrow-carrying variable erases to the same variable id, re-typed. This is
+/// the first of the forwarding impls `bind2` needs.
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased for Var<BorrowedSlice<'a, T>> {
+    type Out = BorrowedSlice<'a, T>;
+    type ErasedOut = BorrowedSlice<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSlice<'static, T>>::new(self.id))
+    }
+}
+
+/// ...and one per op node. `SliceLen`'s own `Out` carries no borrow, but the
+/// slice it wraps does, so the node still has to forward.
+impl<S> crate::staged::LifetimeErased for SliceLen<S>
+where
+    S: crate::staged::LifetimeErased,
+    S::ErasedOut: SliceType,
+{
+    type Out = u64;
+    type ErasedOut = u64;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = u64>> {
+        Box::new(SliceLen {
+            slice: self.slice.erase_lifetime(),
+        })
+    }
+}
+
+/// A reborrow of a borrow-carrying variable forwards the same way.
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased for VarUse<BorrowedSlice<'a, T>> {
+    type Out = BorrowedSlice<'a, T>;
+    type ErasedOut = BorrowedSlice<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSlice<'static, T>>::new(self.id))
+    }
+}
+
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased for Var<BorrowedSliceMut<'a, T>> {
+    type Out = BorrowedSliceMut<'a, T>;
+    type ErasedOut = BorrowedSliceMut<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSliceMut<'static, T>>::new(self.id))
+    }
+}
+
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased
+    for VarUse<BorrowedSliceMut<'a, T>>
+{
+    type Out = BorrowedSliceMut<'a, T>;
+    type ErasedOut = BorrowedSliceMut<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSliceMut<'static, T>>::new(self.id))
+    }
+}
+
+impl<S, I, V> crate::staged::LifetimeErased for SliceSetUnchecked<S, I, V>
+where
+    S: crate::staged::LifetimeErased,
+    S::Out: MutSliceType,
+    S::ErasedOut: MutSliceType<Elem = <S::Out as SliceType>::Elem>,
+    I: Staged<Out = u64> + 'static,
+    V: Staged<Out = <S::Out as SliceType>::Elem> + 'static,
+{
+    type Out = ();
+    type ErasedOut = ();
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = ()>> {
+        Box::new(SliceSetUnchecked {
+            slice: self.slice.erase_lifetime(),
+            index: self.index,
+            value: self.value,
+        })
+    }
+}
+
+/// An *already*-`'static` slice erases to itself. One of these is needed for
+/// every borrow-free type that a `LifetimeErased`-bounded helper should accept —
+/// a blanket is impossible, because it would overlap the borrow-carrying impls
+/// at `'static`.
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for Var<SRef<Slice<T>>> {
+    type Out = SRef<Slice<T>>;
+    type ErasedOut = SRef<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for Var<SRefMut<Slice<T>>> {
+    type Out = SRefMut<Slice<T>>;
+    type ErasedOut = SRefMut<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for VarUse<SRefMut<Slice<T>>> {
+    type Out = SRefMut<Slice<T>>;
+    type ErasedOut = SRefMut<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+/// A promotion forwards to whatever it promotes.
+impl<S, OUT> crate::staged::LifetimeErased for AssumeTrusted<S, OUT>
+where
+    S: Staged + 'static,
+    S::Out: RawSliceType,
+    OUT: TrustedSliceType + 'static,
+    AssumeTrusted<S, OUT>: Staged<Out = OUT>,
+{
+    type Out = OUT;
+    type ErasedOut = OUT;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = OUT>> {
+        Box::new(self)
+    }
+}
+
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for VarUse<SRef<Slice<T>>> {
+    type Out = SRef<Slice<T>>;
+    type ErasedOut = SRef<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+/// ...and another. Every op node reachable from a borrow-carrying value needs
+/// one of these; there is no blanket, because a blanket over `'static` types
+/// overlaps the borrow-carrying ones at `'static`.
+impl<S, I> crate::staged::LifetimeErased for SliceGetUnchecked<S, I>
+where
+    S: crate::staged::LifetimeErased,
+    S::Out: SliceType,
+    S::ErasedOut: SliceType<Elem = <S::Out as SliceType>::Elem>,
+    <S::Out as SliceType>::Elem: CopyType + 'static,
+    I: Staged<Out = u64> + 'static,
+{
+    type Out = <S::Out as SliceType>::Elem;
+    type ErasedOut = <S::Out as SliceType>::Elem;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(SliceGetUnchecked {
+            slice: self.slice.erase_lifetime(),
+            index: self.index,
+        })
+    }
+}
+
+/// A sub-slice keeps whatever borrow its source had — `Out = S::Out` — so it
+/// forwards rather than erasing.
+impl<S, START, END> crate::staged::LifetimeErased for SliceSliceUnchecked<S, START, END>
+where
+    S: crate::staged::LifetimeErased,
+    S::Out: SliceType,
+    S::ErasedOut: SliceType,
+    START: Staged<Out = u64> + 'static,
+    END: Staged<Out = u64> + 'static,
+{
+    type Out = S::Out;
+    type ErasedOut = S::ErasedOut;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(SliceSliceUnchecked {
+            slice: self.slice.erase_lifetime(),
+            start: self.start,
+            end: self.end,
+        })
+    }
+}
 
 // --- raw shared descriptor ----------------------------------------------------
 
@@ -1158,8 +1427,8 @@ where
 
     fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static,
+        F: FnOnce(&mut Ctx, Var<Self::Item>),
+        N: FnOnce(&mut Ctx),
     {
         let mut slice = ctx.bind(self.slice);
         let start = ctx.bind(self.start);
@@ -1311,6 +1580,59 @@ where
             i: i.into_staged(),
             j: j.into_staged(),
         }
+    }
+
+    /// Replace every element with `f` applied to its current value.
+    ///
+    /// The in-place counterpart to `staged_iter().map(..)`: a terminal, because
+    /// a staged iterator yields values and has nowhere to put them back. Binds
+    /// the slice once and reborrows per element, so a unique — and therefore
+    /// non-`Clone` — origin works.
+    fn map_in_place<F, E>(self, ctx: &mut Ctx, f: F)
+    where
+        Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        <VarUse<<Self as Staged>::Out> as crate::staged::LifetimeErased>::ErasedOut:
+            MutSliceType<Elem = ElemOf<Self>>,
+        ElemOf<Self>: CopyType + 'static,
+        F: Fn(Var<ElemOf<Self>>) -> E,
+        E: Staged<Out = ElemOf<Self>> + 'static,
+    {
+        let mut slice = ctx.bind_lt(self);
+        let n = ctx.bind_lt(slice.reborrow().len());
+        let i = ctx.var(0u64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            // SAFETY: the loop condition proves `i < len`.
+            let elem = ctx.bind_lt(unsafe { slice.reborrow().get_unchecked(i) });
+            // SAFETY: as above.
+            ctx.emit_lt(unsafe { slice.reborrow().set_unchecked(i, f(elem)) });
+            ctx.store(i, add(i, 1u64));
+        });
+    }
+
+    /// Write `value` into every element.
+    ///
+    /// Emits only the store — routing this through
+    /// [`map_in_place`](Self::map_in_place) would emit a per-element load whose
+    /// result is never used, and the frontend does not remove it.
+    fn fill<V>(self, ctx: &mut Ctx, value: V)
+    where
+        Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
+        <VarUse<<Self as Staged>::Out> as crate::staged::LifetimeErased>::ErasedOut:
+            MutSliceType<Elem = ElemOf<Self>>,
+        ElemOf<Self>: CopyType + 'static,
+        V: IntoStaged<ElemOf<Self>> + Clone,
+        V::Staged: 'static,
+    {
+        let mut slice = ctx.bind_lt(self);
+        let n = ctx.bind_lt(slice.reborrow().len());
+        let i = ctx.var(0u64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            // SAFETY: the loop condition proves `i < len`.
+            ctx.emit_lt(unsafe { slice.reborrow().set_unchecked(i, value.clone()) });
+            ctx.store(i, add(i, 1u64));
+        });
     }
 }
 

@@ -435,18 +435,22 @@ fn for_each_batch<I: InputsSource>(
     let scan_next = cx.rt.scan_next;
     let poison = cx.poison.get();
 
-    ctx.while_loop(Const::<bool>::new(true), move |ctx| {
+    // A pull source with no length: `scan_next` reports exhaustion with a null
+    // descriptor pointer, which becomes this iterator's `None`.
+    from_fn(move |ctx| {
         // Stop pulling batches once a fallible callback has poisoned the run — the
-        // driver will surface the recorded error after we return.
+        // driver will surface the recorded error after we return. This sits before
+        // the pull, so a poisoned run consumes nothing further.
         if let Some(p) = poison {
             ctx.if_then(p, |ctx| ctx.break_loop());
         }
-        // Pull the next batch; a null descriptor pointer means the stream is done.
         // SAFETY: the compiled entry point receives exclusive access to live
         // `Inputs`; scan callbacks are sequenced by this outer loop.
         let descs = ctx
             .bind(unsafe { call_extern2_unchecked(scan_next, inputs, Const::<u64>::new(table)) });
-        ctx.if_then(ptr_is_null(descs), |ctx| ctx.break_loop());
+        not(ptr_is_null(descs)).then_some(descs)
+    })
+    .for_each(ctx, move |ctx, descs| {
         // SAFETY: `Inputs` retains the current descriptor array until the next
         // callback, and Phase 1 schema validation proves it has `ncols` entries.
         let batch = ctx.bind(unsafe { batch_from_descs(descs, ncols) });
@@ -468,17 +472,14 @@ fn gen_scan<I: InputsSource>(
     yld: Yld,
 ) {
     let fields = schema.fields().clone();
-    let i = ctx.var(0u64);
     for_each_batch(ctx, inputs, table, schema, cx, move |ctx, batch, len| {
-        ctx.store(i, 0u64);
-        ctx.while_loop(lt(i, len), move |ctx| {
+        range(0u64, len).for_each(ctx, move |ctx, i| {
             let row: Row = fields
                 .iter()
                 .enumerate()
                 .map(|(col, f)| gen_read(ctx, batch, col, f, i))
                 .collect();
             yld(ctx, row);
-            ctx.store(i, add(i, 1u64));
         });
     });
 }

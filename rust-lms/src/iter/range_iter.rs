@@ -7,10 +7,10 @@
 use std::marker::PhantomData;
 
 use crate::func::Ctx;
-use crate::num::{Add, Div, Num, Sub, lt, sub};
+use crate::num::{Add, Div, Mul, Num, Sub, add, lt, mul, sub};
 use crate::staged::{Const, IntoStaged, Staged, Var};
 
-use super::traits::{IndexedStagedIterator, IntoStagedIterator, StagedIterator};
+use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
 
 /// Numeric types usable as a range element/step: `u64` and `i64`.
 ///
@@ -41,6 +41,19 @@ pub struct RangeIter<T, Start, End, Step> {
     end: End,
     step: Step,
     _phantom: PhantomData<T>,
+}
+
+// Hand-written so the derive does not demand `T: Clone` — `T` is a staged
+// *marker*, not a runtime value.
+impl<T, Start: Clone, End: Clone, Step: Clone> Clone for RangeIter<T, Start, End, Step> {
+    fn clone(&self) -> Self {
+        RangeIter {
+            start: self.start.clone(),
+            end: self.end.clone(),
+            step: self.step.clone(),
+            _phantom: PhantomData,
+        }
+    }
 }
 
 /// Create a range iterator over `[start, end)` with unit step.
@@ -89,7 +102,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<T>) + 'static,
+        F: FnOnce(&mut Ctx, Var<T>),
     {
         // i starts at `start`, advances by `step` until it reaches `end`.
         let i = ctx.var(self.start.clone());
@@ -97,7 +110,11 @@ where
         let step = self.step;
 
         ctx.while_loop(lt(i, end), move |ctx| {
-            consumer(ctx, i);
+            // Hand out a *copy* of the counter: a consumer that stores to its
+            // item must not be able to change the iteration. Single-def, so the
+            // frontend resolves it with no extra instruction.
+            let item = ctx.bind(i);
+            consumer(ctx, item);
             ctx.store(i, i + step);
         });
     }
@@ -122,6 +139,29 @@ where
         let span = sub(self.end.clone(), self.start.clone());
         let step_minus_1 = sub(self.step.clone(), Const::<u64>::new(1));
         (span + step_minus_1) / self.step.clone()
+    }
+}
+
+/// Random access into a range: element `k` is `start + k * step`. Makes a range
+/// usable as a `zip` source and as the input to `rev`.
+impl<Start, End, Step> IndexedSource for RangeIter<u64, Start, End, Step>
+where
+    Start: Staged<Out = u64> + Clone + 'static,
+    End: Staged<Out = u64> + Clone + 'static,
+    Step: Staged<Out = u64> + Clone + 'static,
+{
+    type Item = u64;
+    type LenExpr = Div<Add<Sub<End, Start>, Sub<Step, Const<u64>>>, Step>;
+    type GetExpr = Add<Start, Mul<Var<u64>, Step>>;
+
+    fn count(&self) -> Self::LenExpr {
+        IndexedStagedIterator::len(self)
+    }
+
+    unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
+        // Total for any `index`; the `unsafe` contract is about staying inside
+        // `count`, which only affects whether the value is *in* the range.
+        add(self.start, mul(index, self.step))
     }
 }
 

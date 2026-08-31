@@ -99,18 +99,19 @@ pub mod prelude {
         FunType1, FunType2, FunType3, JitBackend, call0, call1, call2, call3,
     };
     pub use crate::iter::{
-        DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
-        ExactSizeOpaqueIterKind, Filter, FilterMap, IndexedSource, IndexedStagedIterator,
-        IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter,
-        OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, RangeIter,
-        RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan, SkipWhile,
-        SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType,
-        ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step,
+        DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner, ExactSizeOpaqueIter,
+        ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap, FromFn, IndexedSource,
+        IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP,
+        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner,
+        OpaqueIterSlot, Pair, RangeIter, RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns,
+        ReusedOpaqueIterKind, Rev, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
+        ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter,
+        emplace_iter, from_fn, range, range_step,
     };
     pub use crate::num::{
-        BitAnd, BitOr, BitXor, Bitcast, FloatNum, IntCast, IntNum, IntToFloat, Num, Shl, Shr, add,
-        bitand, bitcast, bitor, bitxor, div, eq, gt, int_cast, int_to_float, lt, max, min, mul,
-        rem, select, shl, shr, sub,
+        BitAnd, BitOr, BitXor, Bitcast, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne, Num,
+        Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le,
+        lt, max, min, mul, ne, rem, select, shl, shr, sub,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{
@@ -127,14 +128,14 @@ pub mod prelude {
         ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
     };
     pub use crate::slice::{
-        AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, MutSliceType, RawSliceOps, RawSliceType,
-        ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
-        SliceGetRange, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet, SliceSliceUnchecked,
-        SliceType, TrustedSliceOps, TrustedSliceType,
+        AsMutSlice, AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceRepr,
+        MutSliceType, RawSliceOps, RawSliceType, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps,
+        Slice, SliceGetOr, SliceGetPtrUnchecked, SliceGetRange, SliceLen, SliceMutOps, SliceOps,
+        SliceRepr, SliceSet, SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{
-        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, Staged, Value, ValueId, Var,
-        assign, unit,
+        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LifetimeErased, Staged,
+        Value, ValueId, Var, VarUse, assign, unit,
     };
     pub use crate::staged_opt::{SNone, SSome, StagedOpt, ThenSome, When, s_none, s_some};
     pub use crate::r#struct::{

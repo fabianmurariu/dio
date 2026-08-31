@@ -31,7 +31,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Self::Item>),
     {
         let pred = self.pred;
         self.inner.for_each(ctx, move |ctx, elem| {

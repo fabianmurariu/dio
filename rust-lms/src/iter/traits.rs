@@ -126,7 +126,7 @@ pub trait StagedIterator: Sized {
     /// body via the `Ctx` it receives. No `Clone` constraint required.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static;
+        F: FnOnce(&mut Ctx, Var<Self::Item>);
 
     // =========================================================================
     // Combinators
@@ -222,6 +222,18 @@ pub trait StagedIterator: Sized {
             ctx.store(acc, acc + 1u64);
         });
         acc
+    }
+
+    /// Pair each element with its zero-based position.
+    ///
+    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
+    /// element separately; used through the combinators the item is a
+    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
+    fn enumerate(self) -> super::Enumerate<Self>
+    where
+        Self: Sized,
+    {
+        super::Enumerate::new(self)
     }
 
     /// Branchless count of elements satisfying `pred`.
@@ -427,6 +439,17 @@ pub trait IndexedStagedIterator: StagedIterator {
 
     /// Return the number of elements as a staged expression.
     fn len(&self) -> Self::LenExpr;
+
+    /// Iterate from the last element to the first.
+    ///
+    /// Needs random access, so it is bounded on `IndexedSource` like
+    /// [`zip`](Self::zip): a push-based iterator cannot be run backwards.
+    fn rev(self) -> super::Rev<Self>
+    where
+        Self: IndexedSource,
+    {
+        super::Rev::new(self)
+    }
 
     /// Zip this (indexed) iterator with a secondary random-access source.
     ///

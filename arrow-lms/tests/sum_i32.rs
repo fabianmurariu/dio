@@ -33,15 +33,7 @@ fn sum_i32_column() {
     let f = compiler.fun1("sum", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
         // SAFETY: `batch()` constructs a one-column Int32 batch.
         let col = unsafe { batch.primitive::<i32>(0) };
-        let acc = ctx.var(0i32);
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, col.len()), move |ctx| {
-            // SAFETY: the loop condition proves `i < col.len()`.
-            let v = ctx.bind(unsafe { col.value_unchecked(i) });
-            ctx.store(acc, add(acc, v));
-            ctx.store(i, add(i, 1u64));
-        });
-        acc
+        col.values().staged_iter().sum(ctx)
     });
     let compiled = compiler.compile(f).unwrap();
     let sum = compiled.as_fn();
@@ -61,15 +53,7 @@ fn empty_column_sums_to_zero() {
     let f = compiler.fun1("sum", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
         // SAFETY: `batch()` constructs a one-column Int32 batch.
         let col = unsafe { batch.primitive::<i32>(0) };
-        let acc = ctx.var(0i32);
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, col.len()), move |ctx| {
-            // SAFETY: the loop condition proves `i < col.len()`.
-            let v = ctx.bind(unsafe { col.value_unchecked(i) });
-            ctx.store(acc, add(acc, v));
-            ctx.store(i, add(i, 1u64));
-        });
-        acc
+        col.values().staged_iter().sum(ctx)
     });
     let compiled = compiler.compile(f).unwrap();
     let sum = compiled.as_fn();
@@ -87,17 +71,15 @@ fn sum_skips_nulls_via_is_valid() {
         // SAFETY: `nullable_batch()` constructs a one-column Int32 batch.
         let col = unsafe { batch.primitive::<i32>(0) };
         let acc = ctx.var(0i32);
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, col.len()), move |ctx| {
-            // SAFETY: the loop condition proves `i < col.len()`.
-            let valid = ctx.bind(unsafe { col.validity().is_valid(i) });
-            ctx.if_then(valid, move |ctx| {
-                // SAFETY: the surrounding loop proves `i < col.len()`.
-                let v = ctx.bind(unsafe { col.value_unchecked(i) });
-                ctx.store(acc, add(acc, v));
+        col.values()
+            .staged_iter()
+            .enumerate()
+            .for_each(ctx, move |ctx, i, v| {
+                // SAFETY: `i` is a position the iterator produced, so it is in
+                // range for this column's validity bitmap.
+                let valid = ctx.bind(unsafe { col.validity().is_valid(i) });
+                ctx.if_then(valid, move |ctx| ctx.store(acc, add(acc, v)));
             });
-            ctx.store(i, add(i, 1u64));
-        });
         acc
     });
     let compiled = compiler.compile(f).unwrap();
@@ -122,15 +104,12 @@ fn is_valid_respects_sliced_bitmap_offset() {
     let f = compiler.fun1("count_valid", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
         // SAFETY: the prepared batch has one Int32 column.
         let col = unsafe { batch.primitive::<i32>(0) };
-        let acc = ctx.var(0i64);
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, col.len()), move |ctx| {
-            // SAFETY: the loop condition proves `i < col.len()`.
-            let valid = ctx.bind(unsafe { col.validity().is_valid(i) });
-            ctx.if_then(valid, move |ctx| ctx.store(acc, add(acc, 1i64)));
-            ctx.store(i, add(i, 1u64));
+        // Only the bitmap is read, so a range over positions drives this one.
+        let valid = range(0u64, col.len()).count_if(ctx, move |i| {
+            // SAFETY: `i < col.len()`, the range's bound.
+            unsafe { col.validity().is_valid(i) }
         });
-        acc
+        int_cast::<i64, u64, _>(valid)
     });
     let compiled = compiler.compile(f).unwrap();
     let count_valid = compiled.as_fn();
@@ -148,14 +127,7 @@ fn read_i16_from_erased_dyn_arrays() {
     let f = compiler.fun1("sum_i16", |ctx, batch: Var<SRef<Slice<FfiArray>>>| {
         // SAFETY: `arrays` contains one Int16 array.
         let col = unsafe { batch.primitive::<i16>(0) };
-        let acc = ctx.var(0i16);
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, col.len()), move |ctx| {
-            // SAFETY: the loop condition proves `i < col.len()`.
-            let v = ctx.bind(unsafe { col.value_unchecked(i) });
-            ctx.store(acc, add(acc, v));
-            ctx.store(i, add(i, 1u64));
-        });
+        let acc = col.values().staged_iter().sum(ctx);
         int_cast::<i64, i16, _>(acc)
     });
     let compiled = compiler.compile(f).unwrap();

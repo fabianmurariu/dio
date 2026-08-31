@@ -126,16 +126,9 @@ fn test_ergonomic_slice_set() {
 fn test_ergonomic_slice_subslice() {
     for_each_backend(|mut compiler| {
         let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
             let sub = unsafe { arr.subslice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < sub.len()`.
-                ctx.store(total, total + unsafe { sub.get_unchecked(i) });
-                ctx.store(i, i + 1u64);
-            });
-            total
+            sub.staged_iter().sum(ctx)
         });
 
         let compiled = compiler.compile(sum_middle).expect("compilation failed");

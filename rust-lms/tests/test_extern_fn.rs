@@ -360,3 +360,103 @@ fn test_extern_call_preserves_fat_slice_return() {
         assert_eq!(compiled.call(FatSlice::from_slice(&data)), 3);
     });
 }
+
+// =============================================================================
+// from_fn: a pull-based source that reports its own exhaustion
+// =============================================================================
+
+const STREAM: [i64; 4] = [5, 7, 11, 13];
+
+/// One host-side cursor per test: these are process globals and the test
+/// harness runs tests in parallel, so sharing one between two tests would let
+/// them observe each other's pulls.
+static mut DRAIN_CURSOR: usize = 0;
+static mut CAPPED_CURSOR: usize = 0;
+
+/// Returns the next value, or the `0` sentinel once drained — the shape an FFI
+/// stream callback has.
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn drain_next() -> i64 {
+    // SAFETY: only `from_fn_pulls_until_the_sentinel` touches this cursor, and
+    // it drives one kernel at a time.
+    unsafe {
+        if DRAIN_CURSOR >= STREAM.len() {
+            return 0;
+        }
+        let v = STREAM[DRAIN_CURSOR];
+        DRAIN_CURSOR += 1;
+        v
+    }
+}
+
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn capped_next() -> i64 {
+    // SAFETY: only `from_fn_producer_can_break_before_pulling` touches this one.
+    unsafe {
+        if CAPPED_CURSOR >= STREAM.len() {
+            return 0;
+        }
+        let v = STREAM[CAPPED_CURSOR];
+        CAPPED_CURSOR += 1;
+        v
+    }
+}
+
+/// `from_fn` drives the loop until the producer yields `None`, with no length
+/// known up front.
+#[test]
+fn from_fn_pulls_until_the_sentinel() {
+    for_each_backend(|mut compiler| {
+        let next = compiler.extern_fn::<DrainNextExtern>();
+        let f = compiler.fun0("drain", move |ctx| {
+            let acc = ctx.var(0i64);
+            from_fn(move |ctx| {
+                let v = ctx.bind(call_extern0(next));
+                ne(v, 0i64).then_some(v)
+            })
+            .for_each(ctx, move |ctx, v| {
+                ctx.store(acc, add(acc, v));
+            });
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+
+        // SAFETY: this test owns `DRAIN_CURSOR`; reset before each backend run.
+        unsafe { DRAIN_CURSOR = 0 };
+        assert_eq!(compiled.call(), 36); // 5 + 7 + 11 + 13
+    });
+}
+
+/// The producer may emit a guard *before* pulling — the case a `take_while` on
+/// the produced item cannot express, because by then the pull has happened.
+#[test]
+fn from_fn_producer_can_break_before_pulling() {
+    for_each_backend(|mut compiler| {
+        let next = compiler.extern_fn::<CappedNextExtern>();
+        let f = compiler.fun1("drain_capped", move |ctx, cap: Var<i64>| {
+            let acc = ctx.var(0i64);
+            let pulls = ctx.var(0i64);
+            from_fn(move |ctx| {
+                // Stop before consuming another item once the cap is reached.
+                ctx.if_then(ge(pulls, cap), |ctx| ctx.break_loop());
+                ctx.store(pulls, add(pulls, 1i64));
+                let v = ctx.bind(call_extern0(next));
+                ne(v, 0i64).then_some(v)
+            })
+            .for_each(ctx, move |ctx, v| {
+                ctx.store(acc, add(acc, v));
+            });
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+
+        // SAFETY: this test owns `CAPPED_CURSOR`.
+        unsafe { CAPPED_CURSOR = 0 };
+        // Cap of 2 stops after 5 + 7, leaving 11 and 13 unread.
+        assert_eq!(compiled.call(2), 12);
+        // SAFETY: as above — the cursor proves only two items were pulled.
+        assert_eq!(unsafe { CAPPED_CURSOR }, 2);
+    });
+}

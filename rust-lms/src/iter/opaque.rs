@@ -192,7 +192,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<K::Item>),
     {
         // Bind the handle once, then drive the storage-pointer loop.
         let handle = ctx.bind(self.handle);
@@ -246,7 +246,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<K::Item>),
     {
         let handle = ctx.bind(self.handle);
         // SAFETY: all calls use the live handle produced for this iterator kind.
@@ -682,7 +682,7 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<K::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<K::Item>),
     {
         type Slot<K> =
             OpaqueIterSlot<<<K as ReusedOpaqueIterKind>::Item as StagedType>::RuntimeValue>;

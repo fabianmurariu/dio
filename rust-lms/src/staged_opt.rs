@@ -33,8 +33,8 @@ pub trait StagedOpt {
     fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, on_none: N)
     where
         Self: Sized,
-        S: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static;
+        S: FnOnce(&mut Ctx, Var<Self::Item>),
+        N: FnOnce(&mut Ctx);
 }
 
 // =============================================================================
@@ -59,8 +59,8 @@ where
 
     fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static,
+        S: FnOnce(&mut Ctx, Var<T>),
+        N: FnOnce(&mut Ctx),
     {
         let value = self.value;
         ctx.if_then_else(
@@ -113,8 +113,8 @@ where
 
     fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, _on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static,
+        S: FnOnce(&mut Ctx, Var<T>),
+        N: FnOnce(&mut Ctx),
     {
         let v = ctx.bind(self.value);
         on_some(ctx, v);
@@ -146,8 +146,8 @@ where
 
     fn eliminate<S, N>(self, ctx: &mut Ctx, _on_some: S, on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static,
+        S: FnOnce(&mut Ctx, Var<T>),
+        N: FnOnce(&mut Ctx),
     {
         on_none(ctx);
     }

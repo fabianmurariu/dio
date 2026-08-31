@@ -80,14 +80,7 @@ fn test_slice_get_unchecked() {
 fn test_slice_sum() {
     for_each_backend(|mut compiler| {
         let sum = compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            let total = ctx.var(0i64);
-            ctx.while_loop(lt(i, arr.len()), |ctx| {
-                // SAFETY: the loop condition proves `i < arr.len()`.
-                ctx.store(total, total + unsafe { arr.get_unchecked(i) });
-                ctx.store(i, i + 1u64);
-            });
-            total
+            arr.staged_iter().sum(ctx)
         });
         let compiled = compiler.compile(sum).expect("compilation failed");
         let f = compiled.as_fn();
@@ -115,13 +108,8 @@ fn test_slice_mutable_set() {
 #[test]
 fn test_slice_mutable_fill() {
     for_each_backend(|mut compiler| {
-        let fill = compiler.fun1("fill", |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, arr.reborrow().len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < arr.len()`.
-                ctx.emit(unsafe { arr.set_unchecked(i, 42i64) });
-                ctx.store(i, i + 1u64);
-            });
+        let fill = compiler.fun1("fill", |ctx, arr: Var<SRefMut<Slice<i64>>>| {
+            arr.fill(ctx, 42i64);
             Const::<()>::new(())
         });
         let compiled = compiler.compile(fill).expect("compilation failed");
@@ -132,20 +120,39 @@ fn test_slice_mutable_fill() {
     });
 }
 
+/// `map_in_place` is the in-place counterpart to `map`: it reads each element,
+/// applies the staged function, and writes the result back. Driven here from a
+/// mutable parameter and from a mutable sub-slice of it, so the write lands in
+/// the caller's buffer either way.
+#[test]
+fn test_slice_map_in_place() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1(
+            "double_then_bump",
+            |ctx, mut arr: Var<SRefMut<Slice<i64>>>| {
+                arr.reborrow().map_in_place(ctx, |x| x * 2i64);
+                // SAFETY: the test calls this kernel with 4 elements.
+                let sub = unsafe { arr.reborrow().subslice_unchecked(2u64, 4u64) };
+                sub.map_in_place(ctx, |x| x + 1i64);
+                Const::<()>::new(())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let g = compiled.as_fn();
+        let mut data: [i64; 4] = [1, 2, 3, 4];
+        g.call(&mut data[..]);
+        // all doubled -> [2,4,6,8]; then [2..4] bumped -> [2,4,7,9]
+        assert_eq!(data, [2, 4, 7, 9]);
+    });
+}
+
 #[test]
 fn test_slice_subslice() {
     for_each_backend(|mut compiler| {
         let sum_middle = compiler.fun1("sum_middle", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            let total = ctx.var(0i64);
             // SAFETY: this test calls the kernel only with slices of length >= 4.
             let sub = unsafe { arr.subslice_unchecked(1u64, 4u64) };
-            ctx.while_loop(lt(i, sub.len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < sub.len()`.
-                ctx.store(total, total + unsafe { sub.get_unchecked(i) });
-                ctx.store(i, i + 1u64);
-            });
-            total
+            sub.staged_iter().sum(ctx)
         });
         let compiled = compiler.compile(sum_middle).expect("compilation failed");
         let f = compiled.as_fn();
@@ -176,8 +183,6 @@ fn test_slice_of_slice() {
     // Slicing is closed: a sub-slice supports `slice_unchecked` again.
     for_each_backend(|mut compiler| {
         let sum = compiler.fun1("sub_of_sub", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            let i = ctx.var(0u64);
-            let total = ctx.var(0i64);
             // arr[1..5] then [1..3] of that == arr[2..4]
             // SAFETY: this test uses slices of length >= 5, and both ranges are
             // ordered and within their respective source slices.
@@ -185,12 +190,7 @@ fn test_slice_of_slice() {
                 arr.subslice_unchecked(1u64, 5u64)
                     .subslice_unchecked(1u64, 3u64)
             };
-            ctx.while_loop(lt(i, sub.len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < sub.len()`.
-                ctx.store(total, total + unsafe { sub.get_unchecked(i) });
-                ctx.store(i, i + 1u64);
-            });
-            total
+            sub.staged_iter().sum(ctx)
         });
         let compiled = compiler.compile(sum).expect("compilation failed");
         let f = compiled.as_fn();
@@ -348,18 +348,9 @@ fn test_subslice_bind_reuse() {
 #[test]
 fn test_slice_count_all_larger_than_3() {
     for_each_backend(|mut compiler| {
-        let count_greater_than_3 =
-            compiler.fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
-                let i = ctx.var(0u64);
-                let count = ctx.var(0u64);
-                ctx.while_loop(lt(i, arr.len()), move |ctx| {
-                    // SAFETY: the loop condition proves `i < arr.len()`.
-                    ctx.if_then(gt(unsafe { arr.get_unchecked(i) }, 3i64), move |ctx| {
-                        ctx.store(count, count + 1u64);
-                    });
-                    ctx.store(i, i + 1u64);
-                });
-                count
+        let count_greater_than_3 = compiler
+            .fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
+                arr.staged_iter().count_if(ctx, |x| gt(x, 3i64))
             });
         let compiled = compiler
             .compile(count_greater_than_3)
@@ -374,14 +365,7 @@ fn test_slice_count_all_larger_than_3() {
 fn test_slice_f64() {
     for_each_backend(|mut compiler| {
         let sum_f64 = compiler.fun1("sum_f64", |ctx, arr: Var<SRef<Slice<f64>>>| {
-            let i = ctx.var(0u64);
-            let total = ctx.var(0.0f64);
-            ctx.while_loop(lt(i, arr.len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < arr.len()`.
-                ctx.store(total, total + unsafe { arr.get_unchecked(i) });
-                ctx.store(i, i + 1u64);
-            });
-            total
+            arr.staged_iter().sum(ctx)
         });
         let compiled = compiler.compile(sum_f64).expect("compilation failed");
         let f = compiled.as_fn();

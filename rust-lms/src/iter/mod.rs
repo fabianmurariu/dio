@@ -17,11 +17,14 @@
 //!      });
 //! ```
 
+mod enumerate;
 mod filter;
 mod filter_map;
+mod from_fn;
 mod map;
 pub mod opaque;
 mod range_iter;
+mod rev;
 mod scan;
 mod skip_while;
 mod slice_iter;
@@ -29,8 +32,10 @@ mod take_while;
 mod traits;
 mod zip;
 
+pub use enumerate::Enumerate;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
+pub use from_fn::{FromFn, from_fn};
 pub use map::Map;
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
@@ -39,6 +44,7 @@ pub use opaque::{
     ReusedOpaqueIterFns, ReusedOpaqueIterKind, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
 };
 pub use range_iter::{RangeIter, RangeStep, range, range_step};
+pub use rev::Rev;
 pub use scan::Scan;
 pub use skip_while::SkipWhile;
 pub use slice_iter::SliceIter;
@@ -46,4 +52,4 @@ pub use take_while::TakeWhile;
 pub use traits::{
     IndexedSource, IndexedStagedIterator, IntoStagedIterator, MinMax, StagedIterator,
 };
-pub use zip::{Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen};
+pub use zip::{Pair, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen};

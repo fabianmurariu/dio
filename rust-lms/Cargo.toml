@@ -36,3 +36,7 @@ proptest = { workspace = true }
 [[bench]]
 name = "backends"
 harness = false
+
+[[bench]]
+name = "iter"
+harness = false

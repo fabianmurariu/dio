@@ -12,12 +12,12 @@ mod ops;
 mod traits;
 
 pub use ops::{
-    Add, BitAnd, BitOr, BitXor, Bitcast, Div, Eq, Gt, IntCast, IntToFloat, Lt, Mul, Rem, Select,
-    Shl, Shr, Sub,
+    Add, BitAnd, BitOr, BitXor, Bitcast, Div, Eq, Ge, Gt, IntCast, IntToFloat, Le, Lt, Mul, Ne,
+    Rem, Select, Shl, Shr, Sub,
 };
 pub use traits::{FloatNum, IntNum, Num};
 
 pub use ops::{
-    add, bitand, bitcast, bitor, bitxor, div, eq, gt, int_cast, int_to_float, lt, max, min, mul,
-    rem, select, shl, shr, sub,
+    add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le, lt, max, min,
+    mul, ne, rem, select, shl, shr, sub,
 };

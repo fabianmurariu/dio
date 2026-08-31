@@ -81,8 +81,7 @@ pub(crate) fn gen_build_index(
     // SAFETY: the build driver retains `state` and does not mutate it while
     // this shared call executes.
     let count = ctx.bind(unsafe { call_extern1_unchecked(rt.join_rel_count, join_ref(state)) });
-    let b = ctx.var(0u64);
-    ctx.while_loop(lt(b, count), move |ctx| {
+    range(0u64, count).for_each(ctx, move |ctx, b| {
         // SAFETY: `b < count`; `state` retains all relation batches.
         let descs =
             ctx.bind(unsafe { call_extern2_unchecked(rt.join_left_batch, join_ref(state), b) });
@@ -90,17 +89,12 @@ pub(crate) fn gen_build_index(
         // validation guarantees exactly `ncols` entries.
         let batch = ctx.bind(unsafe { batch_from_descs(descs, ncols) });
         let len = gen_len(ctx, batch, &key_dt);
-        let row = ctx.var(0u64);
-        ctx.store(row, 0u64);
-        let key_field = key_field.clone();
-        ctx.while_loop(lt(row, len), move |ctx| {
+        range(0u64, len).for_each(ctx, move |ctx, row| {
             let key_cv = gen_read(ctx, batch, key_col, &key_field, row);
             let rb_pos = ctx.bind(int_cast::<u32, u64, _>(b));
             let row_u32 = ctx.bind(int_cast::<u32, u64, _>(row));
             emit_key_insert(ctx, state, rt, key_cv, rb_pos, row_u32);
-            ctx.store(row, add(row, 1u64));
         });
-        ctx.store(b, add(b, 1u64));
     });
 }
 
@@ -199,8 +193,7 @@ pub(crate) fn gen_join<I: InputsSource>(
                 let base = ctx.bind(unsafe {
                     call_extern2_unchecked(rt.join_probe_base, join_ref(state), key)
                 });
-                let i = ctx.var(0u64);
-                ctx.while_loop(lt(i, count), move |ctx| {
+                range(0u64, count).for_each(ctx, move |ctx, i| {
                     // SAFETY: `join_probe_base` returns `count` initialized
                     // Locators, and the loop condition proves `i < count`.
                     let loc = ctx.bind(unsafe { ptr_offset(base, int_cast::<i64, u64, _>(i)) });
@@ -226,7 +219,6 @@ pub(crate) fn gen_join<I: InputsSource>(
                         .collect();
                     row.extend(right_row.iter().copied());
                     yld(ctx, row);
-                    ctx.store(i, add(i, 1u64));
                 });
             };
 

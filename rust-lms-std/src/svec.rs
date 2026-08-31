@@ -6,7 +6,6 @@
 
 use std::alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc};
 use std::marker::PhantomData;
-use std::ops::Deref;
 
 use rust_lms::prelude::*;
 
@@ -205,15 +204,21 @@ impl<T> Clone for SVecSlice<'_, T> {
     }
 }
 
-/// Derefs to a `Copy` staged slice expression, so every by-value slice method
-/// reaches it: `view.len()`, `view.get_or(..)`, `view.staged_iter()` are the
-/// *same* methods a function-parameter slice uses. The borrow stays on the
-/// guard, because the deref target is copied out rather than moved.
-impl<T> Deref for SVecSlice<'_, T> {
-    type Target = SVecSliceExpr<T>;
+// SAFETY: lowers exactly as its erased twin does — same reloading `(ptr, len)`.
+unsafe impl<'a, T: StagedType + 'static> Staged for SVecSlice<'a, T> {
+    type Out = BorrowedSlice<'a, T>;
 
-    fn deref(&self) -> &Self::Target {
-        &self.expr
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.expr.codegen(ctx)
+    }
+}
+
+impl<'a, T: StagedType + 'static> LifetimeErased for SVecSlice<'a, T> {
+    type Out = BorrowedSlice<'a, T>;
+    type ErasedOut = BorrowedSlice<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = BorrowedSlice<'static, T>>> {
+        Box::new(self.expr)
     }
 }
 
@@ -222,17 +227,6 @@ impl<T> Deref for SVecSlice<'_, T> {
 pub struct SVecSliceMut<'a, T> {
     expr: SVecSliceExprMut<T>,
     _borrow: PhantomData<&'a mut T>,
-}
-
-/// Derefs to a `Copy` [`SRefMut<Slice<T>>`] expression — the writing ops arrive
-/// by exactly the same route as the reading ones. Exclusivity is the guard's
-/// `&'a mut` borrow, not the expression's copy-ness.
-impl<T> Deref for SVecSliceMut<'_, T> {
-    type Target = SVecSliceExprMut<T>;
-
-    fn deref(&self) -> &Self::Target {
-        &self.expr
-    }
 }
 
 /// The staged `(ptr, len)` of an `SVec`'s storage, **reloaded** from the control
@@ -261,9 +255,9 @@ fn raw_svec_slice<T: StagedType + 'static>(
 /// **Reloading on purpose.** Each use re-reads `(ptr, len)` from the control
 /// block, so even a copy that outlives its guard observes the current buffer
 /// after a growth rather than a stale pointer.
-pub struct SVecSliceExpr<T> {
+pub(crate) struct SVecSliceExpr<T> {
     ctrl: *mut RawVec,
-    _t: PhantomData<fn() -> T>,
+    _t: PhantomData<T>,
 }
 
 impl<T> Clone for SVecSliceExpr<T> {
@@ -275,7 +269,7 @@ impl<T> Copy for SVecSliceExpr<T> {}
 
 // SAFETY: lowers to the `(ptr, len)` pair the host control block maintains.
 unsafe impl<T: StagedType + 'static> Staged for SVecSliceExpr<T> {
-    type Out = SRef<Slice<T>>;
+    type Out = BorrowedSlice<'static, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // SAFETY: `SVec`'s constructors require the host storage to outlive every
@@ -287,9 +281,9 @@ unsafe impl<T: StagedType + 'static> Staged for SVecSliceExpr<T> {
 
 /// The unique twin of [`SVecSliceExpr`] — an [`SRefMut<Slice<T>>`] expression,
 /// so it carries the writing ops as well.
-pub struct SVecSliceExprMut<T> {
+pub(crate) struct SVecSliceExprMut<T> {
     ctrl: *mut RawVec,
-    _t: PhantomData<fn() -> T>,
+    _t: PhantomData<T>,
 }
 
 impl<T> Clone for SVecSliceExprMut<T> {
@@ -302,7 +296,7 @@ impl<T> Copy for SVecSliceExprMut<T> {}
 // SAFETY: as `SVecSliceExpr`, and the guard that produced it borrows the handle
 // mutably, so no other view of the same handle can coexist.
 unsafe impl<T: StagedType + 'static> Staged for SVecSliceExprMut<T> {
-    type Out = SRefMut<Slice<T>>;
+    type Out = BorrowedSliceMut<'static, T>;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         // SAFETY: see the type-level note; exclusivity comes from the guard.
@@ -316,6 +310,24 @@ fn raw_vec_len(ctx: &mut Ctx, ctrl: *mut RawVec) -> Var<u64> {
     // SAFETY: every constructor of a view or handle guarantees `ctrl` points at
     // a live control block; `len` is one of its declared staged fields.
     ctx.bind(unsafe { load_field_unchecked(const_mut_ptr::<RawVec>(ctrl), RawVecType::len()) })
+}
+
+// SAFETY: as `SVecSlice`, and the guard's `&mut` borrow gives exclusivity.
+unsafe impl<'a, T: StagedType + 'static> Staged for SVecSliceMut<'a, T> {
+    type Out = BorrowedSliceMut<'a, T>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        self.expr.codegen(ctx)
+    }
+}
+
+impl<'a, T: StagedType + 'static> LifetimeErased for SVecSliceMut<'a, T> {
+    type Out = BorrowedSliceMut<'a, T>;
+    type ErasedOut = BorrowedSliceMut<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = BorrowedSliceMut<'static, T>>> {
+        Box::new(self.expr)
+    }
 }
 
 /// The kernel-side, typed handle to a [`HostVec`]'s storage. Generic over the
@@ -375,6 +387,39 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
 
     /// Borrow the storage as a shared view. Blocks growth through this handle
     /// until the view is dropped.
+    ///
+    /// The borrow rides on the view's staged type, so it survives
+    /// [`bind_lt`](rust_lms::prelude::Ctx::bind_lt): a bound slice keeps the
+    /// vector borrowed, and growing it underneath is a borrow error rather than
+    /// a dangling `(ptr, len)` in the emitted code.
+    ///
+    /// ```compile_fail
+    /// # use rust_lms::prelude::*;
+    /// # use rust_lms_std::SVec;
+    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, v: Var<i64>) {
+    /// let snapshot = ctx.bind_lt(svec.as_slice());
+    /// svec.push(ctx, v);                        // error: `svec` is still borrowed
+    /// let _n = ctx.bind_lt(snapshot.len());
+    /// # }
+    /// ```
+    ///
+    /// The same applies across a loop back-edge, which emission order alone
+    /// would miss — the `push` is emitted *after* the use, but the next
+    /// iteration reads through the same bound registers:
+    ///
+    /// ```compile_fail
+    /// # use rust_lms::prelude::*;
+    /// # use rust_lms_std::SVec;
+    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, n: Var<u64>, seen: Var<u64>, i: Var<u64>) {
+    /// let snapshot = ctx.bind_lt(svec.as_slice());
+    /// ctx.while_loop(lt(i, n), move |ctx| {
+    ///     let l = ctx.bind_lt(snapshot.len());  // read on every iteration ...
+    ///     ctx.store(seen, add(seen, l));
+    ///     let v = ctx.bind(0i64);
+    ///     svec.push(ctx, v);                    // ... while this moves the buffer
+    /// });
+    /// # }
+    /// ```
     pub fn as_slice(&self) -> SVecSlice<'_, T> {
         SVecSlice {
             expr: SVecSliceExpr {

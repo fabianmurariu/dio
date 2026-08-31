@@ -94,6 +94,14 @@ pub enum IntCmp {
     Ult,
     /// unsigned `>`
     Ugt,
+    /// signed `<=`
+    Sle,
+    /// signed `>=`
+    Sge,
+    /// unsigned `<=`
+    Ule,
+    /// unsigned `>=`
+    Uge,
 }
 
 impl IntCmp {
@@ -106,6 +114,10 @@ impl IntCmp {
             IntCmp::Sgt => IntCC::SignedGreaterThan,
             IntCmp::Ult => IntCC::UnsignedLessThan,
             IntCmp::Ugt => IntCC::UnsignedGreaterThan,
+            IntCmp::Sle => IntCC::SignedLessThanOrEqual,
+            IntCmp::Sge => IntCC::SignedGreaterThanOrEqual,
+            IntCmp::Ule => IntCC::UnsignedLessThanOrEqual,
+            IntCmp::Uge => IntCC::UnsignedGreaterThanOrEqual,
         }
     }
 }
@@ -118,6 +130,15 @@ pub enum FloatCmp {
     Lt,
     /// ordered `>`
     Gt,
+    /// ordered `<=`
+    Le,
+    /// ordered `>=`
+    Ge,
+    /// **unordered** `!=` — true when either operand is NaN, matching Rust's
+    /// `!=` on floats. The one deliberately unordered predicate here: every
+    /// other float comparison is false when an operand is NaN, and `!=` has to
+    /// be its exact negation.
+    Ne,
 }
 
 impl FloatCmp {
@@ -127,6 +148,9 @@ impl FloatCmp {
             FloatCmp::Eq => FloatCC::Equal,
             FloatCmp::Lt => FloatCC::LessThan,
             FloatCmp::Gt => FloatCC::GreaterThan,
+            FloatCmp::Le => FloatCC::LessThanOrEqual,
+            FloatCmp::Ge => FloatCC::GreaterThanOrEqual,
+            FloatCmp::Ne => FloatCC::NotEqual,
         }
     }
 }
