@@ -718,6 +718,46 @@ impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased for VarUse<Borro
     }
 }
 
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased for Var<BorrowedSliceMut<'a, T>> {
+    type Out = BorrowedSliceMut<'a, T>;
+    type ErasedOut = BorrowedSliceMut<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSliceMut<'static, T>>::new(self.id))
+    }
+}
+
+impl<'a, T: StagedType + 'static> crate::staged::LifetimeErased
+    for VarUse<BorrowedSliceMut<'a, T>>
+{
+    type Out = BorrowedSliceMut<'a, T>;
+    type ErasedOut = BorrowedSliceMut<'static, T>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(Var::<BorrowedSliceMut<'static, T>>::new(self.id))
+    }
+}
+
+impl<S, I, V> crate::staged::LifetimeErased for SliceSetUnchecked<S, I, V>
+where
+    S: crate::staged::LifetimeErased,
+    S::Out: MutSliceType,
+    S::ErasedOut: MutSliceType<Elem = <S::Out as SliceType>::Elem>,
+    I: Staged<Out = u64> + 'static,
+    V: Staged<Out = <S::Out as SliceType>::Elem> + 'static,
+{
+    type Out = ();
+    type ErasedOut = ();
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = ()>> {
+        Box::new(SliceSetUnchecked {
+            slice: self.slice.erase_lifetime(),
+            index: self.index,
+            value: self.value,
+        })
+    }
+}
+
 /// An *already*-`'static` slice erases to itself. One of these is needed for
 /// every borrow-free type that a `LifetimeErased`-bounded helper should accept —
 /// a blanket is impossible, because it would overlap the borrow-carrying impls
@@ -727,6 +767,40 @@ impl<T: StagedType + 'static> crate::staged::LifetimeErased for Var<SRef<Slice<T
     type ErasedOut = SRef<Slice<T>>;
 
     fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for Var<SRefMut<Slice<T>>> {
+    type Out = SRefMut<Slice<T>>;
+    type ErasedOut = SRefMut<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+impl<T: StagedType + 'static> crate::staged::LifetimeErased for VarUse<SRefMut<Slice<T>>> {
+    type Out = SRefMut<Slice<T>>;
+    type ErasedOut = SRefMut<Slice<T>>;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(self)
+    }
+}
+
+/// A promotion forwards to whatever it promotes.
+impl<S, OUT> crate::staged::LifetimeErased for AssumeTrusted<S, OUT>
+where
+    S: Staged + 'static,
+    S::Out: RawSliceType,
+    OUT: TrustedSliceType + 'static,
+    AssumeTrusted<S, OUT>: Staged<Out = OUT>,
+{
+    type Out = OUT;
+    type ErasedOut = OUT;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = OUT>> {
         Box::new(self)
     }
 }

@@ -222,8 +222,6 @@ impl<'a, T: StagedType + 'static> LifetimeErased for SVecSlice<'a, T> {
     }
 }
 
-
-
 /// A unique borrow of an [`SVec`]'s storage. Neither `Copy` nor `Clone`:
 /// duplicating it would duplicate the exclusive capability.
 pub struct SVecSliceMut<'a, T> {
@@ -389,6 +387,39 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
 
     /// Borrow the storage as a shared view. Blocks growth through this handle
     /// until the view is dropped.
+    ///
+    /// The borrow rides on the view's staged type, so it survives
+    /// [`bind_lt`](rust_lms::prelude::Ctx::bind_lt): a bound slice keeps the
+    /// vector borrowed, and growing it underneath is a borrow error rather than
+    /// a dangling `(ptr, len)` in the emitted code.
+    ///
+    /// ```compile_fail
+    /// # use rust_lms::prelude::*;
+    /// # use rust_lms_std::SVec;
+    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, v: Var<i64>) {
+    /// let snapshot = ctx.bind_lt(svec.as_slice());
+    /// svec.push(ctx, v);                        // error: `svec` is still borrowed
+    /// let _n = ctx.bind_lt(snapshot.len());
+    /// # }
+    /// ```
+    ///
+    /// The same applies across a loop back-edge, which emission order alone
+    /// would miss — the `push` is emitted *after* the use, but the next
+    /// iteration reads through the same bound registers:
+    ///
+    /// ```compile_fail
+    /// # use rust_lms::prelude::*;
+    /// # use rust_lms_std::SVec;
+    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, n: Var<u64>, seen: Var<u64>, i: Var<u64>) {
+    /// let snapshot = ctx.bind_lt(svec.as_slice());
+    /// ctx.while_loop(lt(i, n), move |ctx| {
+    ///     let l = ctx.bind_lt(snapshot.len());  // read on every iteration ...
+    ///     ctx.store(seen, add(seen, l));
+    ///     let v = ctx.bind(0i64);
+    ///     svec.push(ctx, v);                    // ... while this moves the buffer
+    /// });
+    /// # }
+    /// ```
     pub fn as_slice(&self) -> SVecSlice<'_, T> {
         SVecSlice {
             expr: SVecSliceExpr {

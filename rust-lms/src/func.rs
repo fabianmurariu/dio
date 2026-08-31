@@ -215,6 +215,34 @@ impl Ctx {
         }));
     }
 
+    /// [`store`](Self::store) for an expression that borrows. `T` is the
+    /// variable's own type, which carries no borrow, so nothing survives the
+    /// assignment holding one.
+    pub fn store_lt<T, E>(&mut self, var: Var<T>, expr: E)
+    where
+        T: StagedType + 'static,
+        E: LifetimeErased<Out = T, ErasedOut = T>,
+    {
+        let expr = expr.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            assign(var, expr).codegen(ctx);
+        }));
+    }
+
+    /// [`emit`](Self::emit) for a statement that borrows — a write through a
+    /// borrowed slice, say. Same split as [`bind_lt`](Self::bind_lt): the
+    /// statement is erased to enter the `'static` queue, and because its `Out` is
+    /// `()` there is nothing left holding the borrow afterwards.
+    pub fn emit_lt<S>(&mut self, stmt: S)
+    where
+        S: LifetimeErased<Out = (), ErasedOut = ()>,
+    {
+        let stmt = stmt.erase_lifetime();
+        self.actions.push(Box::new(move |ctx| {
+            stmt.codegen(ctx);
+        }));
+    }
+
     /// Emit any unit-typed staged expression (e.g. a store, an extern call).
     pub fn emit<S: Staged<Out = ()> + 'static>(&mut self, stmt: S) {
         self.actions.push(Box::new(move |ctx| {

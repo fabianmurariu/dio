@@ -14,7 +14,7 @@ use std::marker::PhantomData;
 use crate::func::Ctx;
 use crate::num::{add, lt};
 use crate::slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType};
-use crate::staged::{Staged, Var};
+use crate::staged::{LifetimeErased, Staged, Var, VarUse};
 use crate::types::{ConstantType, CopyType, StagedType};
 
 use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
@@ -56,7 +56,7 @@ impl<T, S: Clone> Clone for SliceIter<T, S> {
 impl<T, S> SliceIter<T, S>
 where
     T: StagedType,
-    S: Staged,
+    S: LifetimeErased,
     S::Out: TrustedSliceType<Elem = T>,
 {
     pub fn new(slice: S) -> Self {
@@ -70,8 +70,10 @@ where
 impl<T, S> StagedIterator for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: Staged + 'static,
-    S::Out: TrustedSliceType<Elem = T> + 'static,
+    S: LifetimeErased,
+    S::Out: TrustedSliceType<Elem = T>,
+    VarUse<S::Out>: LifetimeErased<Out = S::Out>,
+    <VarUse<S::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
     T::RuntimeValue: Default,
 {
     type Item = T;
@@ -80,15 +82,19 @@ where
     /// `S: Clone`. A unique slice expression is deliberately not `Clone` — that
     /// *is* its uniqueness guarantee — so a `Clone` bound here would silently
     /// restrict iteration to shared origins.
+    ///
+    /// Bound with [`bind_lt`](Ctx::bind_lt), so a borrowing source — an `SVec`
+    /// view — iterates through this same path. The borrow ends with the loop,
+    /// because every value handed on is a borrow-free `Var`.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
         F: FnOnce(&mut Ctx, Var<T>) + 'static,
     {
-        let mut slice = ctx.bind(self.slice);
-        // Hoisted: the length is loop-invariant (a view's borrow forbids growth
-        // while it is live), so this reads the descriptor once instead of once
-        // per iteration.
-        let n = ctx.bind(slice.reborrow().len());
+        let mut slice = ctx.bind_lt(self.slice);
+        // Hoisted: the length is loop-invariant (the source's borrow forbids
+        // growth while it is live), so this reads the descriptor once instead of
+        // once per iteration.
+        let n = ctx.bind_lt(slice.reborrow().len());
         let i = ctx.var(0u64);
 
         ctx.while_loop(lt(i, n), move |ctx| {
@@ -96,7 +102,7 @@ where
             // frontend resolves this single-def var to the loaded value with no
             // copy — so the emitted body matches a hand-written `while_loop`.
             // SAFETY: the loop condition proves `i < len`.
-            let elem = ctx.bind(unsafe { slice.reborrow().get_unchecked(i) });
+            let elem = ctx.bind_lt(unsafe { slice.reborrow().get_unchecked(i) });
             consumer(ctx, elem);
             ctx.store(i, add(i, 1u64));
         });
@@ -111,8 +117,10 @@ where
 impl<T, S> IndexedStagedIterator for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: Staged + Clone + 'static,
-    S::Out: TrustedSliceType<Elem = T> + 'static,
+    S: Staged + Clone + 'static + LifetimeErased<Out = <S as Staged>::Out>,
+    <S as Staged>::Out: TrustedSliceType<Elem = T>,
+    VarUse<<S as Staged>::Out>: LifetimeErased<Out = <S as Staged>::Out>,
+    <VarUse<<S as Staged>::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
     T::RuntimeValue: Default,
 {
     type LenExpr = SliceLen<S>;
@@ -125,8 +133,10 @@ where
 impl<T, S> IndexedSource for SliceIter<T, S>
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: Staged + Clone + 'static,
-    S::Out: TrustedSliceType<Elem = T> + 'static,
+    S: Staged + Clone + 'static + LifetimeErased<Out = <S as Staged>::Out>,
+    <S as Staged>::Out: TrustedSliceType<Elem = T>,
+    VarUse<<S as Staged>::Out>: LifetimeErased<Out = <S as Staged>::Out>,
+    <VarUse<<S as Staged>::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
     T::RuntimeValue: Default,
 {
     type Item = T;
@@ -178,8 +188,10 @@ where
 impl<T, S> IntoStagedIterator for S
 where
     T: StagedType + CopyType + ConstantType + 'static,
-    S: Staged + 'static,
-    S::Out: TrustedSliceType<Elem = T> + 'static,
+    S: LifetimeErased,
+    S::Out: TrustedSliceType<Elem = T>,
+    VarUse<S::Out>: LifetimeErased<Out = S::Out>,
+    <VarUse<S::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
     T::RuntimeValue: Default,
 {
     type Iter = SliceIter<T, S>;

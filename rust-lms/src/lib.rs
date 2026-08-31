@@ -127,14 +127,14 @@ pub mod prelude {
         ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
     };
     pub use crate::slice::{
-        AsMutSlice, AsRawSlice, AsSlice, MutSliceRepr, MutSliceType, RawSliceOps, RawSliceType,
-        BorrowedSlice, BorrowedSliceMut, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
-        SliceGetRange, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet, SliceSliceUnchecked,
-        SliceType, TrustedSliceOps, TrustedSliceType,
+        AsMutSlice, AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceRepr,
+        MutSliceType, RawSliceOps, RawSliceType, ReprRawSliceOps, ReprSliceMutOps, ReprSliceOps,
+        Slice, SliceGetOr, SliceGetPtrUnchecked, SliceGetRange, SliceLen, SliceMutOps, SliceOps,
+        SliceRepr, SliceSet, SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
     };
     pub use crate::staged::{
-        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LifetimeErased, Staged, Value, ValueId, Var, VarUse,
-        assign, unit,
+        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LifetimeErased, Staged,
+        Value, ValueId, Var, VarUse, assign, unit,
     };
     pub use crate::staged_opt::{SNone, SSome, StagedOpt, ThenSome, When, s_none, s_some};
     pub use crate::r#struct::{

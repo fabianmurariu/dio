@@ -205,11 +205,16 @@ fn view_released_then_grow() {
 /// Binds once and reborrows rather than taking `S: Clone`: unique slice
 /// expressions are deliberately not `Clone`, so a `Clone` bound would silently
 /// restrict this to shared origins.
+///
+/// Each borrowed sub-expression is `bind_lt`-ed at the point it is produced, so
+/// everything downstream is an ordinary borrow-free `Var` and the plain ops
+/// apply. That is what keeps `LifetimeErased` off the arithmetic nodes.
 fn total<S>(ctx: &mut Ctx, s: S) -> Var<i64>
 where
     S: LifetimeErased,
     S::Out: TrustedSliceType<Elem = i64>,
     VarUse<S::Out>: LifetimeErased<Out = S::Out>,
+    <VarUse<S::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = i64>,
 {
     let mut v = ctx.bind_lt(s);
     let n = ctx.bind_lt(v.reborrow().len());
@@ -217,7 +222,8 @@ where
     let i = ctx.var(0u64);
     ctx.while_loop(lt(i, n), move |ctx| {
         // SAFETY: the loop condition proves `i < len`.
-        ctx.store(acc, add(acc, unsafe { v.reborrow().get_unchecked(i) }));
+        let elem = ctx.bind_lt(unsafe { v.reborrow().get_unchecked(i) });
+        ctx.store(acc, add(acc, elem));
         ctx.store(i, add(i, 1u64));
     });
     acc
@@ -272,50 +278,16 @@ fn mutable_view_writes_through_the_common_api() {
                 let view = svec.as_mut_slice();
                 let mut m = ctx.bind_lt(view);
                 // SAFETY: three elements were pushed above.
-                ctx.emit(unsafe { m.reborrow().set_unchecked(0u64, 7i64) });
+                ctx.emit_lt(unsafe { m.reborrow().set_unchecked(0u64, 7i64) });
                 // SAFETY: as above.
-                ctx.emit(unsafe { m.reborrow().set_unchecked(2u64, 9i64) });
-                ctx.bind(m.len())
+                ctx.emit_lt(unsafe { m.reborrow().set_unchecked(2u64, 9i64) });
+                ctx.bind_lt(m.len())
             }
         });
 
         let compiled = compiler.compile(f).expect("compile");
         assert_eq!(compiled.call(), 3);
         assert_eq!(host.as_slice(), &[7i64, 0, 9]);
-    });
-}
-
-/// A view is *reloading*: an expression copied out of a guard, used after a
-/// growth has been emitted, observes the new buffer rather than a stale
-/// pointer. This is what makes the `Copy`, lifetime-free deref target safe.
-#[test]
-fn view_expression_reloads_after_growth() {
-    for_each_backend(|mut compiler| {
-        let mut host = HostVec::<i64>::new();
-        let grow = compiler.extern_fn::<SvecGrowExtern>();
-        // SAFETY: `host` outlives compilation and the call below.
-        let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-        let f = compiler.fun0("reload", |ctx| {
-            // One element, then copy the expression out and drop the guard.
-            let first = ctx.var(1i64);
-            svec.push(ctx, first);
-            let expr = {
-                let view = svec.as_slice();
-                view
-            };
-            // Force several growths (capacity starts at 4).
-            for k in 2..=8i64 {
-                let v = ctx.var(k);
-                svec.push(ctx, v);
-            }
-            // The copied expression re-reads `(ptr, len)`, so it sees all 8.
-            total(ctx, expr)
-        });
-
-        let compiled = compiler.compile(f).expect("compile");
-        assert_eq!(compiled.call(), 36); // 1+2+…+8
-        assert_eq!(host.len(), 8);
     });
 }
 
@@ -356,51 +328,6 @@ fn svec_view_iterates() {
 // until a `push` is emitted after it. Rust's own scoping covers the loop
 // back-edge, because a `Var` created inside a `while_loop` body cannot escape
 // the closure that made it.
-
-/// Where the problem shows up, made observable *without* dereferencing anything
-/// stale: a bound slice keeps the length it had at bind time, while the view
-/// reports the current one.
-///
-/// The stale length is the visible half of the bug; the stale *pointer* is the
-/// dangerous half. Reading an element through `snapshot` after the growth below
-/// would read freed memory — which is why binding an `SVec` slice and then
-/// pushing must not be expressible.
-#[test]
-fn a_bound_slice_is_a_snapshot_and_goes_stale() {
-    for_each_backend(|mut compiler| {
-        let mut host = HostVec::<i64>::new();
-        let grow = compiler.extern_fn::<SvecGrowExtern>();
-        // SAFETY: `host` outlives compilation and the call below.
-        let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-        let f = compiler.fun0("stale", |ctx| {
-            for k in 0..2i64 {
-                let v = ctx.var(k);
-                svec.push(ctx, v);
-            }
-            // Snapshot at length 2.
-            let snapshot = {
-                let view = svec.as_slice();
-                ctx.bind_lt(view)
-            };
-            // Grow well past the initial capacity of 4.
-            for k in 2..8i64 {
-                let v = ctx.var(k);
-                svec.push(ctx, v);
-            }
-            let live = {
-                let view = svec.as_slice();
-                ctx.bind_lt(view.len())
-            };
-            let stale = ctx.bind(snapshot.len());
-            ctx.bind(int_cast::<i64, u64, _>(add(mul(stale, 1000u64), live)))
-        });
-
-        let compiled = compiler.compile(f).expect("compile");
-        // The snapshot still says 2; the live view says 8.
-        assert_eq!(compiled.call(), 2_008);
-    });
-}
 
 /// The ordinary reason to want an `SVec` slice: fill the vector, then read it
 /// back through the common slice API. No growth is emitted after the view is
@@ -458,9 +385,9 @@ fn push_then_bind_then_use_inside_a_loop() {
                 let last = {
                     let view = svec.as_slice();
                     let s = ctx.bind_lt(view);
-                    let len = ctx.bind(s.len());
+                    let len = ctx.bind_lt(s.len());
                     // SAFETY: the push above guarantees `len >= 1`.
-                    ctx.bind(unsafe { s.get_unchecked(sub(len, 1u64)) })
+                    ctx.bind_lt(unsafe { s.get_unchecked(sub(len, 1u64)) })
                 };
                 ctx.store(acc, add(acc, last));
                 ctx.store(i, add(i, 1u64));
@@ -472,88 +399,6 @@ fn push_then_bind_then_use_inside_a_loop() {
         // Reads back 0,1,…,9 across ~3 reallocations.
         assert_eq!(compiled.call(10), 45);
         assert_eq!(host.as_slice(), &[0i64, 1, 2, 3, 4, 5, 6, 7, 8, 9]);
-    });
-}
-
-/// A view used *without* binding survives growth either way, because every use
-/// re-reads the descriptor. This is the property that makes the un-bound view
-/// safe to hand around.
-#[test]
-fn unbound_view_survives_growth_between_uses() {
-    for_each_backend(|mut compiler| {
-        let mut host = HostVec::<i64>::new();
-        let grow = compiler.extern_fn::<SvecGrowExtern>();
-        // SAFETY: `host` outlives compilation and the call below.
-        let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-        let f = compiler.fun0("reload", |ctx| {
-            let first = ctx.var(1i64);
-            svec.push(ctx, first);
-            let expr = {
-                let view = svec.as_slice();
-                view // the borrow-carrying view expression
-            };
-            for k in 2..=8i64 {
-                let v = ctx.var(k);
-                svec.push(ctx, v);
-            }
-            // Same expression, re-read after several reallocations.
-            total(ctx, expr)
-        });
-
-        let compiled = compiler.compile(f).expect("compile");
-        assert_eq!(compiled.call(), 36); // 1+2+…+8
-    });
-}
-
-/// The case emission order alone does **not** catch: a slice bound *before* a
-/// loop, used inside it, with the `push` after the use.
-///
-/// In emission order there is no `push` between the bind and the use, so a naive
-/// "invalidate on the next emitted push" rule would accept it. The loop's
-/// back-edge makes it unsound anyway: iteration 1 reads the buffer, then grows
-/// it, and iteration 2 reads through the *same* bound registers.
-///
-/// Shown here through the snapshot's length, which stays at its bind-time value
-/// while the vector grows underneath it. Reading elements this way would read
-/// freed memory, so any rule that guards binding has to treat a `push` anywhere
-/// in a loop body as invalidating everything bound before the loop.
-#[test]
-fn a_loop_back_edge_defeats_plain_emission_order() {
-    for_each_backend(|mut compiler| {
-        let mut host = HostVec::<i64>::new();
-        let grow = compiler.extern_fn::<SvecGrowExtern>();
-        // SAFETY: `host` outlives compilation and the call below.
-        let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
-
-        let f = compiler.fun1("back_edge", |ctx, n: Var<u64>| {
-            let seed = ctx.var(0i64);
-            svec.push(ctx, seed);
-
-            // Bound once, before the loop.
-            let snapshot = {
-                let view = svec.as_slice();
-                ctx.bind_lt(view)
-            };
-
-            let seen = ctx.var(0u64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
-                // Use first ...
-                ctx.store(seen, add(seen, snapshot.len()));
-                // ... then grow, which the next iteration's use will not see.
-                let v = ctx.bind(int_cast::<i64, u64, _>(i));
-                svec.push(ctx, v);
-                ctx.store(i, add(i, 1u64));
-            });
-            seen
-        });
-
-        let compiled = compiler.compile(f).expect("compile");
-        // The snapshot reports 1 on every iteration, so 4 iterations sum to 4 —
-        // never 1+2+3+4, which the live lengths would have given.
-        assert_eq!(compiled.call(4), 4);
-        assert_eq!(host.len(), 5);
     });
 }
 
