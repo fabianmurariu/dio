@@ -89,7 +89,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<T>) + 'static,
+        F: FnOnce(&mut Ctx, Var<T>),
     {
         // i starts at `start`, advances by `step` until it reaches `end`.
         let i = ctx.var(self.start.clone());

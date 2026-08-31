@@ -43,7 +43,7 @@ where
 
     fn for_each<G>(self, ctx: &mut Ctx, consumer: G)
     where
-        G: FnOnce(&mut Ctx, Var<St>) + 'static,
+        G: FnOnce(&mut Ctx, Var<St>),
     {
         // Allocate the state once, before the loop; update it each iteration.
         let state = ctx.var(self.init);

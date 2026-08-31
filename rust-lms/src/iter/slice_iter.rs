@@ -88,7 +88,7 @@ where
     /// because every value handed on is a borrow-free `Var`.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<T>) + 'static,
+        F: FnOnce(&mut Ctx, Var<T>),
     {
         let mut slice = ctx.bind_lt(self.slice);
         // Hoisted: the length is loop-invariant (the source's borrow forbids

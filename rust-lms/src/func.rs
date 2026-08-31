@@ -323,7 +323,7 @@ impl Ctx {
         consumer: F,
     ) where
         Item: StagedType + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>),
     {
         // Element var: defined inside the body from `next`'s value register.
         let elem: Var<Item> = unsafe { self.var_unchecked() };
@@ -418,7 +418,7 @@ impl Ctx {
     ) where
         Item: StagedType + 'static,
         InitFn: FnOnce(&mut CompilationContext, ValueId) + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Item>),
     {
         let elem: Var<Item> = unsafe { self.var_unchecked() };
         let elem_id = elem.id;

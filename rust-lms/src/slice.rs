@@ -836,6 +836,28 @@ where
     }
 }
 
+/// A sub-slice keeps whatever borrow its source had — `Out = S::Out` — so it
+/// forwards rather than erasing.
+impl<S, START, END> crate::staged::LifetimeErased for SliceSliceUnchecked<S, START, END>
+where
+    S: crate::staged::LifetimeErased,
+    S::Out: SliceType,
+    S::ErasedOut: SliceType,
+    START: Staged<Out = u64> + 'static,
+    END: Staged<Out = u64> + 'static,
+{
+    type Out = S::Out;
+    type ErasedOut = S::ErasedOut;
+
+    fn erase_lifetime(self) -> Box<dyn Staged<Out = Self::ErasedOut>> {
+        Box::new(SliceSliceUnchecked {
+            slice: self.slice.erase_lifetime(),
+            start: self.start,
+            end: self.end,
+        })
+    }
+}
+
 // --- raw shared descriptor ----------------------------------------------------
 
 impl<T: StagedType> SliceType for RawSlice<T> {
@@ -1404,8 +1426,8 @@ where
 
     fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
-        N: FnOnce(&mut Ctx) + 'static,
+        F: FnOnce(&mut Ctx, Var<Self::Item>),
+        N: FnOnce(&mut Ctx),
     {
         let mut slice = ctx.bind(self.slice);
         let start = ctx.bind(self.start);

@@ -82,14 +82,12 @@ fn build_filtered_sum(backend: JitBackend) -> FilteredSum {
         "filtered_sum",
         |ctx, a: Var<SRef<Slice<i64>>>, z: Var<i64>| {
             let acc = ctx.var(0i64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, a.len()), move |ctx| {
-                // SAFETY: the loop condition proves `i < a.len()`.
-                let v = ctx.bind(unsafe { a.get_unchecked(i) });
+            // Branching (not `sum_if`'s branchless select) so this stays a like
+            // -for-like comparison with the native Rust baseline above.
+            a.staged_iter().for_each(ctx, move |ctx, v| {
                 ctx.if_then(gt(v, z), move |ctx| {
                     ctx.store(acc, add(acc, v));
                 });
-                ctx.store(i, add(i, 1u64));
             });
             acc
         },
@@ -108,16 +106,13 @@ fn build_sum_above_median(backend: JitBackend) -> SumAboveMedian {
             // Median of the (pre-sorted) first array.
             let m = ctx.bind(unsafe { a.get_unchecked(mid) });
             let acc = ctx.var(0i64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), move |ctx| {
-                // SAFETY: `i < n <= len(a)` and the caller passes `len(b) >= len(a)`.
-                let ai = ctx.bind(unsafe { a.get_unchecked(i) });
-                let bi = ctx.bind(unsafe { b.get_unchecked(i) });
+            // `zip` stops at the shorter side; the caller passes `len(b) >= len(a)`,
+            // so this is the same trip count the manual `i < n` loop had.
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
                 // "one of the two values exceeds the median" == max(ai, bi) > m.
                 ctx.if_then(gt(max(ai, bi), m), move |ctx| {
                     ctx.store(acc, add(acc, add(ai, bi)));
                 });
-                ctx.store(i, add(i, 1u64));
             });
             acc
         },

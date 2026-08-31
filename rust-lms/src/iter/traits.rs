@@ -126,7 +126,7 @@ pub trait StagedIterator: Sized {
     /// body via the `Ctx` it receives. No `Clone` constraint required.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static;
+        F: FnOnce(&mut Ctx, Var<Self::Item>);
 
     // =========================================================================
     // Combinators

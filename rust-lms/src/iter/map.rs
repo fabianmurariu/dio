@@ -39,7 +39,7 @@ where
 
     fn for_each<G>(self, ctx: &mut Ctx, consumer: G)
     where
-        G: FnOnce(&mut Ctx, Var<U>) + 'static,
+        G: FnOnce(&mut Ctx, Var<U>),
     {
         let map_fn = self.map_fn;
         self.inner.for_each(ctx, move |ctx, inner_elem| {

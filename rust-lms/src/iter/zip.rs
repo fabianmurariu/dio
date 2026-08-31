@@ -233,7 +233,7 @@ where
 
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) + 'static,
+        F: FnOnce(&mut Ctx, Var<Self::Item>),
     {
         let i = ctx.var(0u64);
         let len = ctx.bind(ZipLen::new(
@@ -322,9 +322,13 @@ where
         let sec = self.other;
 
         ctx.while_loop(lt(i, len), move |ctx| {
-            let pair = ctx.bind(ZipGetAt::new(prim.clone(), sec.clone(), i));
-            let elem1 = ctx.bind(pair.first());
-            let elem2 = ctx.bind(pair.second());
+            // Read both sides straight into their own vars. Going through a
+            // `ZipItem` here would store the pair to a stack slot and load both
+            // fields back out — a memory round-trip this consumer never wants.
+            // SAFETY: `i < len <= min(count(prim), count(sec))`.
+            let elem1 = ctx.bind(unsafe { IndexedSource::get_at(prim.clone(), i) });
+            // SAFETY: as above.
+            let elem2 = ctx.bind(unsafe { IndexedSource::get_at(sec.clone(), i) });
             consumer(ctx, elem1, elem2);
             ctx.store(i, add(i, 1u64));
         });

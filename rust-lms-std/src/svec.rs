@@ -257,7 +257,7 @@ fn raw_svec_slice<T: StagedType + 'static>(
 /// after a growth rather than a stale pointer.
 pub(crate) struct SVecSliceExpr<T> {
     ctrl: *mut RawVec,
-    _t: PhantomData<fn() -> T>,
+    _t: PhantomData<T>,
 }
 
 impl<T> Clone for SVecSliceExpr<T> {
@@ -283,7 +283,7 @@ unsafe impl<T: StagedType + 'static> Staged for SVecSliceExpr<T> {
 /// so it carries the writing ops as well.
 pub(crate) struct SVecSliceExprMut<T> {
     ctrl: *mut RawVec,
-    _t: PhantomData<fn() -> T>,
+    _t: PhantomData<T>,
 }
 
 impl<T> Clone for SVecSliceExprMut<T> {
