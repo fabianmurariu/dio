@@ -1183,6 +1183,15 @@ impl Compiler {
         flag_builder
             .set("opt_level", "speed")
             .map_err(|e| CompileError::JitError(e.to_string()))?;
+        // The IR verifier catches malformed CLIF — mis-ordered `seal_block` above
+        // all — which is worth the ~3x compile-time cost while authoring codegen,
+        // and not worth it once the emitted shapes are known good. Debug builds
+        // keep the net; release builds pay only for what they use.
+        if !cfg!(debug_assertions) {
+            flag_builder
+                .set("enable_verifier", "false")
+                .map_err(|e| CompileError::JitError(e.to_string()))?;
+        }
         flag_builder
             .set("use_colocated_libcalls", "true")
             .map_err(|e| CompileError::JitError(e.to_string()))?;

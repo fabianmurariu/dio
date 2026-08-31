@@ -37,6 +37,9 @@ type SliceFn = Box<dyn Fn(&[i64]) -> i64>;
 type SlicePairFn = Box<dyn Fn(&[i64], &[i64]) -> i64>;
 type CountFn = Box<dyn Fn(u64) -> u64>;
 
+/// One labelled way of building a slice kernel, for side-by-side comparison.
+type SliceVariant = (&'static str, fn(JitBackend) -> SliceFn);
+
 fn data(size: usize, seed: u64) -> Vec<i64> {
     let mut rng = StdRng::seed_from_u64(seed);
     (0..size)
@@ -118,6 +121,17 @@ fn filtered_iter(backend: JitBackend) -> SliceFn {
                 ctx.store(acc, add(acc, v));
             });
         acc
+    });
+    let compiled = compiler.compile(f).expect("compile");
+    Box::new(move |a| compiled.as_fn().call(a))
+}
+
+/// The branchless form: `select(pred, v, 0)` every iteration instead of a
+/// branch. Same answer, no misprediction.
+fn filtered_branchless(backend: JitBackend) -> SliceFn {
+    let mut compiler = Compiler::new().with_backend(backend);
+    let f = compiler.fun1("filtered_branchless", |ctx, a: Var<SRef<Slice<i64>>>| {
+        a.staged_iter().sum_if(ctx, |v| gt(v, 0i64))
     });
     let compiled = compiler.compile(f).expect("compile");
     Box::new(move |a| compiled.as_fn().call(a))
@@ -205,6 +219,10 @@ fn zip_iter(backend: JitBackend) -> SlicePairFn {
 
 // ============================================================================
 // 5. counted range — no slice, just the loop
+//
+// Accumulates with `xor`, not `+`. With `+` this is a polynomial recurrence and
+// LLVM replaces the whole loop with a closed form — it reported the same 3.8 ns
+// for 10_000 and 1_000_000 elements, which is a measurement of nothing.
 // ============================================================================
 
 fn range_manual(backend: JitBackend) -> CountFn {
@@ -213,7 +231,7 @@ fn range_manual(backend: JitBackend) -> CountFn {
         let acc = ctx.var(0u64);
         let i = ctx.var(0u64);
         ctx.while_loop(lt(i, n), move |ctx| {
-            ctx.store(acc, add(acc, mul(i, i)));
+            ctx.store(acc, bitxor(acc, mul(i, i)));
             ctx.store(i, add(i, 1u64));
         });
         acc
@@ -227,7 +245,7 @@ fn range_iter_(backend: JitBackend) -> CountFn {
     let f = compiler.fun1("range_iter", |ctx, n: Var<u64>| {
         let acc = ctx.var(0u64);
         range(0u64, n).for_each(ctx, move |ctx, i| {
-            ctx.store(acc, add(acc, mul(i, i)));
+            ctx.store(acc, bitxor(acc, mul(i, i)));
         });
         acc
     });
@@ -239,54 +257,71 @@ fn range_iter_(backend: JitBackend) -> CountFn {
 // Benchmarks
 // ============================================================================
 
-/// Time `manual` against `iter` for one slice-consuming shape, after checking
-/// that they agree.
-fn compare_slice(
-    c: &mut Criterion,
-    name: &str,
-    manual: fn(JitBackend) -> SliceFn,
-    iter: fn(JitBackend) -> SliceFn,
-) {
+/// Time several builds of one slice-consuming shape against each other, after
+/// checking they all agree. The first variant is the reference.
+fn compare_slice(c: &mut Criterion, name: &str, variants: &[SliceVariant]) {
     let mut group = c.benchmark_group(name);
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(30);
 
-    let built: Vec<(&str, SliceFn, SliceFn)> = backends()
+    let built: Vec<(&str, Vec<(&str, SliceFn)>)> = backends()
         .into_iter()
-        .map(|(b, backend)| (b, manual(backend), iter(backend)))
+        .map(|(b, backend)| {
+            (
+                b,
+                variants
+                    .iter()
+                    .map(|(l, f)| (*l, f(backend)))
+                    .collect::<Vec<_>>(),
+            )
+        })
         .collect();
 
     for &size in SIZES {
         let a = data(size, 42);
         group.throughput(Throughput::Elements(size as u64));
 
-        for (backend, m, it) in &built {
-            assert_eq!(m(&a[..]), it(&a[..]), "{name}/{backend}: results differ");
-            group.bench_with_input(
-                BenchmarkId::new(format!("{backend}/manual"), size),
-                &size,
-                |bch, _| bch.iter(|| black_box(m(black_box(&a[..])))),
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{backend}/iter"), size),
-                &size,
-                |bch, _| bch.iter(|| black_box(it(black_box(&a[..])))),
-            );
+        for (backend, vs) in &built {
+            let expected = vs[0].1(&a[..]);
+            for (label, f) in vs {
+                assert_eq!(
+                    f(&a[..]),
+                    expected,
+                    "{name}/{backend}/{label}: results differ"
+                );
+                group.bench_with_input(
+                    BenchmarkId::new(format!("{backend}/{label}"), size),
+                    &size,
+                    |bch, _| bch.iter(|| black_box(f(black_box(&a[..])))),
+                );
+            }
         }
     }
     group.finish();
 }
 
 fn bench_sum(c: &mut Criterion) {
-    compare_slice(c, "sum", sum_manual, sum_iter);
+    compare_slice(c, "sum", &[("manual", sum_manual), ("iter", sum_iter)]);
 }
 
 fn bench_filtered(c: &mut Criterion) {
-    compare_slice(c, "filtered_sum", filtered_manual, filtered_iter);
+    compare_slice(
+        c,
+        "filtered_sum",
+        &[
+            ("manual", filtered_manual),
+            ("iter", filtered_iter),
+            ("branchless", filtered_branchless),
+        ],
+    );
 }
 
 fn bench_chain(c: &mut Criterion) {
-    compare_slice(c, "filter_map_sum", chain_manual, chain_iter);
+    compare_slice(
+        c,
+        "filter_map_sum",
+        &[("manual", chain_manual), ("iter", chain_iter)],
+    );
 }
 
 fn bench_zip(c: &mut Criterion) {
