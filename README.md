@@ -1,10 +1,24 @@
 # dio — staged JIT compilation in Rust
 
+Because Dio is metal!
+
+## The human part
+
+Ever sice I read about [Scala-LMS](https://scala-lms.github.io/) I was fascinated by it. In theory the idea is simple and with a strong typesystem you can speed-run compiler building. You can turn your AST directly into an expression that gets compiled into machine code, or in this case some IR that then gets made into machine code. This is called partial evaluation or [Futamura projection](https://en.wikipedia.org/wiki/Partial_evaluation). There are many videos about this but one that caught my eye, because of the excelent title, is [Compilers for free](https://www.youtube.com/watch?v=n_k6O50Nd-4).
+
+`rust-lms` is made using a combination of Claude and Codex because I have a life and a job and a familly and they all insist I don't write the code I want to write. I reviewed all changes and you can see the commit history of the entire project. I am not a compiler expert which I think is quite clear.
+
+This is under GPLv3 and not published to crates.io because it's an experiment and I'm delighted to have this thing actually exist and out of my head because it's been taking up space for the last 8 years. There are parts of it that I don't like that much but the basic idea works (see [sql-gen](https://github.com/fabianmurariu/dio/tree/master/sql-gen)).
+
+If you're interested in the project either star it or raise a PR.
+
+## AI from here on
+
 This workspace is built around **[`rust-lms`](rust-lms/)**, a type-safe
 **multi-stage programming** library in the spirit of Scala
 [LMS](https://scala-lms.github.io/) (Lightweight Modular Staging). You build a
 description of a computation out of ordinary, strongly-typed Rust values; the
-library lowers it to [Cranelift](https://cranelift.dev/) IR, JIT-compiles it to
+library lowers it to [Cranelift](https://cranelift.dev/) IR or [LLVM](https://llvm.org/) MLIR, JIT-compiles to
 native machine code, and hands you back a callable function pointer.
 
 The key property is that **a value's Rust type encodes its staged type**, so the
@@ -212,7 +226,7 @@ One override worth knowing:
   `MLIR_SYS_220_PREFIX`, `LLVM_SYS_220_PREFIX`, or `TABLEGEN_220_PREFIX` values also override
   the repository defaults.
 
-With the feature on, **every high-level-API test runs on *both* Cranelift and LLVM** (the
+With the feature on, **every high-level-API test runs on _both_ Cranelift and LLVM** (the
 `tests/common` harness), so the run is a live differential check that the two backends agree.
 `RUST_LMS_DEBUG_IR=1` additionally dumps the pre-lowering MLIR module. Pick a backend in code
 with `Compiler::new().with_backend(JitBackend::Llvm)`.
