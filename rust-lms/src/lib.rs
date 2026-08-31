@@ -99,13 +99,14 @@ pub mod prelude {
         FunType1, FunType2, FunType3, JitBackend, call0, call1, call2, call3,
     };
     pub use crate::iter::{
-        DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
-        ExactSizeOpaqueIterKind, Filter, FilterMap, IndexedSource, IndexedStagedIterator,
-        IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter,
-        OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, RangeIter,
-        RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Scan, SkipWhile,
-        SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess, ZipItemType,
-        ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, range, range_step,
+        DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner, ExactSizeOpaqueIter,
+        ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap, FromFn, IndexedSource,
+        IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP,
+        OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner,
+        OpaqueIterSlot, Pair, RangeIter, RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns,
+        ReusedOpaqueIterKind, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt,
+        ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter,
+        emplace_iter, from_fn, range, range_step,
     };
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, FloatNum, IntCast, IntNum, IntToFloat, Num, Shl, Shr, add,

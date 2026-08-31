@@ -20,6 +20,7 @@
 mod enumerate;
 mod filter;
 mod filter_map;
+mod from_fn;
 mod map;
 pub mod opaque;
 mod range_iter;
@@ -33,6 +34,7 @@ mod zip;
 pub use enumerate::Enumerate;
 pub use filter::Filter;
 pub use filter_map::FilterMap;
+pub use from_fn::{FromFn, from_fn};
 pub use map::Map;
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
