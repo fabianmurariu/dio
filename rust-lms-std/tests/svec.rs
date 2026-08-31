@@ -28,11 +28,9 @@ fn push_grows_and_reads_back() {
         let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
 
         let fill = compiler.fun1("fill", move |ctx, n: Var<u64>| {
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
+            range(0u64, n).for_each(ctx, |ctx, i| {
                 let v = ctx.bind(mul(int_cast::<i64, u64, _>(i), 10i64));
                 svec.push(ctx, v);
-                ctx.store(i, add(i, 1u64));
             });
             svec.len(ctx)
         });
@@ -60,21 +58,17 @@ fn get_after_grow() {
 
         let sum_fn = compiler.fun1("sum", move |ctx, n: Var<u64>| {
             // push 0..n
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
+            range(0u64, n).for_each(ctx, |ctx, i| {
                 let v = ctx.bind(int_cast::<i64, u64, _>(i));
                 svec.push(ctx, v);
-                ctx.store(i, add(i, 1u64));
             });
             // sum via get
             let acc = ctx.var(0i64);
-            let j = ctx.var(0u64);
             let count = svec.len(ctx);
-            ctx.while_loop(lt(j, count), |ctx| {
-                // SAFETY: the loop condition proves `j < count == svec.len()`.
+            range(0u64, count).for_each(ctx, |ctx, j| {
+                // SAFETY: the range bound is `svec.len()`, so `j < len`.
                 let e = unsafe { svec.get(ctx, j) };
                 ctx.store(acc, add(acc, e));
-                ctx.store(j, add(j, 1u64));
             });
             acc
         });
@@ -101,11 +95,9 @@ fn set_overwrites() {
 
         let build = compiler.fun0("build", move |ctx| {
             // push 5 zeros
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, 5u64), |ctx| {
+            range(0u64, 5u64).for_each(ctx, |ctx, _i| {
                 let zero = ctx.var(0u64);
                 svec.push(ctx, zero);
-                ctx.store(i, add(i, 1u64));
             });
             // set[2] = 42, set[4] = 7
             let (two, forty_two) = (ctx.var(2u64), ctx.var(42u64));
@@ -341,11 +333,9 @@ fn slice_of_a_filled_svec_is_the_normal_use() {
         let mut svec = unsafe { SVec::<i64>::new(host.handle(), grow) };
 
         let f = compiler.fun1("sum_filled", |ctx, n: Var<u64>| {
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
+            range(0u64, n).for_each(ctx, |ctx, i| {
                 let v = ctx.bind(int_cast::<i64, u64, _>(i));
                 svec.push(ctx, v);
-                ctx.store(i, add(i, 1u64));
             });
             // All growth is behind us; the view is the natural way to read back.
             let view = svec.as_slice();
@@ -377,8 +367,7 @@ fn push_then_bind_then_use_inside_a_loop() {
         // through a freshly bound slice, accumulating the total.
         let f = compiler.fun1("push_then_read", |ctx, n: Var<u64>| {
             let acc = ctx.var(0i64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
+            range(0u64, n).for_each(ctx, |ctx, i| {
                 let v = ctx.bind(int_cast::<i64, u64, _>(i));
                 svec.push(ctx, v);
 
@@ -390,7 +379,6 @@ fn push_then_bind_then_use_inside_a_loop() {
                     ctx.bind_lt(unsafe { s.get_unchecked(sub(len, 1u64)) })
                 };
                 ctx.store(acc, add(acc, last));
-                ctx.store(i, add(i, 1u64));
             });
             acc
         });
@@ -418,8 +406,7 @@ fn bound_slice_hoists_the_descriptor_load_safely() {
 
         let f = compiler.fun1("hoist", |ctx, n: Var<u64>| {
             let acc = ctx.var(0i64);
-            let i = ctx.var(0u64);
-            ctx.while_loop(lt(i, n), |ctx| {
+            range(0u64, n).for_each(ctx, |ctx, i| {
                 let v = ctx.bind(int_cast::<i64, u64, _>(i));
                 svec.push(ctx, v);
                 let last = {
@@ -431,7 +418,6 @@ fn bound_slice_hoists_the_descriptor_load_safely() {
                     ctx.bind_lt(unsafe { s.get_unchecked(idx) })
                 };
                 ctx.store(acc, add(acc, last));
-                ctx.store(i, add(i, 1u64));
             });
             acc
         });

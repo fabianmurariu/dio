@@ -104,14 +104,14 @@ pub mod prelude {
         IndexedStagedIterator, IntoStagedIterator, Map, MinMax, OPAQUE_ITER_INLINE_CAP,
         OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner,
         OpaqueIterSlot, Pair, RangeIter, RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns,
-        ReusedOpaqueIterKind, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip, ZipGetAt,
-        ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter,
+        ReusedOpaqueIterKind, Rev, Scan, SkipWhile, SliceIter, StagedIterator, TakeWhile, Zip,
+        ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter,
         emplace_iter, from_fn, range, range_step,
     };
     pub use crate::num::{
-        BitAnd, BitOr, BitXor, Bitcast, FloatNum, IntCast, IntNum, IntToFloat, Num, Shl, Shr, add,
-        bitand, bitcast, bitor, bitxor, div, eq, gt, int_cast, int_to_float, lt, max, min, mul,
-        rem, select, shl, shr, sub,
+        BitAnd, BitOr, BitXor, Bitcast, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne, Num,
+        Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le,
+        lt, max, min, mul, ne, rem, select, shl, shr, sub,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{

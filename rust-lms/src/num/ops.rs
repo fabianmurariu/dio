@@ -384,6 +384,75 @@ where
     }
 }
 
+/// Not-equal comparison.
+///
+/// For floats this is the **unordered** `!=` — the exact negation of [`Eq`], so
+/// `NaN != NaN` is true, matching Rust.
+#[derive(Clone)]
+pub struct Ne<L, R> {
+    left: L,
+    right: R,
+}
+
+unsafe impl<L, R, T> Staged for Ne<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: Num,
+{
+    type Out = bool;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_ne(lv, rv, ctx)
+    }
+}
+
+/// Less-than-or-equal comparison (ordered for floats: false if either is NaN).
+#[derive(Clone)]
+pub struct Le<L, R> {
+    left: L,
+    right: R,
+}
+
+unsafe impl<L, R, T> Staged for Le<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: Num,
+{
+    type Out = bool;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_le(lv, rv, ctx)
+    }
+}
+
+/// Greater-than-or-equal comparison (ordered for floats: false if either is NaN).
+#[derive(Clone)]
+pub struct Ge<L, R> {
+    left: L,
+    right: R,
+}
+
+unsafe impl<L, R, T> Staged for Ge<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: Num,
+{
+    type Out = bool;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx);
+        let rv = self.right.codegen(ctx);
+        T::codegen_ge(lv, rv, ctx)
+    }
+}
+
 // =============================================================================
 // Helper Functions for Ergonomics
 // =============================================================================
@@ -623,6 +692,52 @@ where
     R: IntoStaged<T>,
 {
     Eq {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged not-equal comparison.
+///
+/// On floats this is unordered — `ne(NaN, NaN)` is true — so it is exactly
+/// `!eq(..)` rather than an ordered comparison.
+pub fn ne<T, L, R>(left: L, right: R) -> Ne<L::Staged, R::Staged>
+where
+    T: Num,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Ne {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged less-than-or-equal comparison.
+///
+/// Ordered on floats, so this is **not** `!gt(..)`: both are false when an
+/// operand is NaN.
+pub fn le<T, L, R>(left: L, right: R) -> Le<L::Staged, R::Staged>
+where
+    T: Num,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Le {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build a staged greater-than-or-equal comparison. Ordered on floats; see
+/// [`le`].
+pub fn ge<T, L, R>(left: L, right: R) -> Ge<L::Staged, R::Staged>
+where
+    T: Num,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    Ge {
         left: left.into_staged(),
         right: right.into_staged(),
     }

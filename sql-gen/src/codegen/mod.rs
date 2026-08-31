@@ -472,17 +472,14 @@ fn gen_scan<I: InputsSource>(
     yld: Yld,
 ) {
     let fields = schema.fields().clone();
-    let i = ctx.var(0u64);
     for_each_batch(ctx, inputs, table, schema, cx, move |ctx, batch, len| {
-        ctx.store(i, 0u64);
-        ctx.while_loop(lt(i, len), move |ctx| {
+        range(0u64, len).for_each(ctx, move |ctx, i| {
             let row: Row = fields
                 .iter()
                 .enumerate()
                 .map(|(col, f)| gen_read(ctx, batch, col, f, i))
                 .collect();
             yld(ctx, row);
-            ctx.store(i, add(i, 1u64));
         });
     });
 }

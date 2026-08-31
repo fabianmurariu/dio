@@ -40,8 +40,7 @@ fn jit_writes_typed_fields_into_packed_records() {
 
     let mut compiler = Compiler::new();
     let fill = compiler.fun1("fill", move |ctx, n: Var<u64>| {
-        let i = ctx.var(0u64);
-        ctx.while_loop(lt(i, n), move |ctx| {
+        range(0u64, n).for_each(ctx, move |ctx, i| {
             // SAFETY: the test calls this kernel with `n == N`; `buf` contains
             // exactly N records using this layout and remains live for the call.
             let rec: DynamicRecord = unsafe { layout.record(ctx, const_mut_ptr::<u8>(base), i) };
@@ -52,9 +51,8 @@ fn jit_writes_typed_fields_into_packed_records() {
             rec.set(ctx, val, vf);
             let ci = ctx.bind(int_cast::<i64, u64, _>(i));
             rec.set(ctx, cnt, ci);
-            ctx.store(i, add(i, 1u64));
         });
-        i
+        n
     });
     let compiled = compiler.compile(fill).expect("compile");
     compiled.call(N as u64);

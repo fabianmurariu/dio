@@ -171,8 +171,7 @@ fn p99_34_totient() {
             });
             ctx.if_then(gt(n, 1i64), move |ctx| {
                 let count = ctx.var(0i64);
-                let k = ctx.var(1i64);
-                ctx.while_loop(lt(k, n), move |ctx| {
+                range(1i64, n).for_each(ctx, move |ctx, k| {
                     // gcd(k, n) via Euclidean
                     let x = ctx.var(0i64);
                     let y = ctx.var(0i64);
@@ -187,7 +186,6 @@ fn p99_34_totient() {
                     ctx.if_then(eq(x, 1i64), move |ctx| {
                         ctx.store(count, count + 1i64);
                     });
-                    ctx.store(k, k + 1i64);
                 });
                 ctx.store(result, count);
             });

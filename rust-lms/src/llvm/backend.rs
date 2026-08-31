@@ -53,6 +53,10 @@ fn int_predicate(cc: IntCmp) -> CmpiPredicate {
         IntCmp::Sgt => CmpiPredicate::Sgt,
         IntCmp::Ult => CmpiPredicate::Ult,
         IntCmp::Ugt => CmpiPredicate::Ugt,
+        IntCmp::Sle => CmpiPredicate::Sle,
+        IntCmp::Sge => CmpiPredicate::Sge,
+        IntCmp::Ule => CmpiPredicate::Ule,
+        IntCmp::Uge => CmpiPredicate::Uge,
     }
 }
 
@@ -62,6 +66,9 @@ fn float_predicate(cc: FloatCmp) -> CmpfPredicate {
         FloatCmp::Eq => CmpfPredicate::Oeq,
         FloatCmp::Lt => CmpfPredicate::Olt,
         FloatCmp::Gt => CmpfPredicate::Ogt,
+        FloatCmp::Le => CmpfPredicate::Ole,
+        FloatCmp::Ge => CmpfPredicate::Oge,
+        FloatCmp::Ne => CmpfPredicate::Une,
     }
 }
 

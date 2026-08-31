@@ -133,8 +133,7 @@ pub(crate) fn gen_grouped<I: InputsSource>(
     let num_groups = ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_len, group_ref(state)) });
     let base =
         ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_records_base, group_mut(state)) });
-    let g = ctx.var(0u64);
-    ctx.while_loop(lt(g, num_groups), move |ctx| {
+    range(0u64, num_groups).for_each(ctx, move |ctx, g| {
         // SAFETY: `g < num_groups`, and `base` addresses the stable records
         // buffer after the fold has completed.
         let rec = unsafe { layout.record(ctx, base, g) };
@@ -163,7 +162,6 @@ pub(crate) fn gen_grouped<I: InputsSource>(
             row.push(agg.finalize(ctx, rec));
         }
         yld(ctx, row);
-        ctx.store(g, add(g, 1u64));
     });
 }
 

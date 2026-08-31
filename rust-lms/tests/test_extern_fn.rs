@@ -414,7 +414,7 @@ fn from_fn_pulls_until_the_sentinel() {
             let acc = ctx.var(0i64);
             from_fn(move |ctx| {
                 let v = ctx.bind(call_extern0(next));
-                not(eq(v, 0i64)).then_some(v)
+                ne(v, 0i64).then_some(v)
             })
             .for_each(ctx, move |ctx, v| {
                 ctx.store(acc, add(acc, v));
@@ -440,10 +440,10 @@ fn from_fn_producer_can_break_before_pulling() {
             let pulls = ctx.var(0i64);
             from_fn(move |ctx| {
                 // Stop before consuming another item once the cap is reached.
-                ctx.if_then(not(lt(pulls, cap)), |ctx| ctx.break_loop());
+                ctx.if_then(ge(pulls, cap), |ctx| ctx.break_loop());
                 ctx.store(pulls, add(pulls, 1i64));
                 let v = ctx.bind(call_extern0(next));
-                not(eq(v, 0i64)).then_some(v)
+                ne(v, 0i64).then_some(v)
             })
             .for_each(ctx, move |ctx, v| {
                 ctx.store(acc, add(acc, v));

@@ -34,6 +34,9 @@ pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
     fn codegen_lt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_gt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_eq(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_ne(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_le(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+    fn codegen_ge(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
 /// Integer-typed numbers — additionally support remainder (modulo).
@@ -79,6 +82,15 @@ macro_rules! impl_int_num {
             }
             fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
+            }
+            fn codegen_ne(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Ne, l.leaf(), r.leaf()))
+            }
+            fn codegen_le(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Sle, l.leaf(), r.leaf()))
+            }
+            fn codegen_ge(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Sge, l.leaf(), r.leaf()))
             }
         }
         impl IntNum for $ty {
@@ -127,6 +139,15 @@ macro_rules! impl_int_num {
             }
             fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
+            }
+            fn codegen_ne(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Ne, l.leaf(), r.leaf()))
+            }
+            fn codegen_le(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Ule, l.leaf(), r.leaf()))
+            }
+            fn codegen_ge(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.icmp(IntCmp::Uge, l.leaf(), r.leaf()))
             }
         }
         impl IntNum for $ty {
@@ -191,6 +212,16 @@ macro_rules! impl_float_num {
             }
             fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.fcmp(FloatCmp::Eq, l.leaf(), r.leaf()))
+            }
+            fn codegen_ne(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                // Unordered: `NaN != x` is true, the exact negation of `eq`.
+                Value::scalar(ctx.fcmp(FloatCmp::Ne, l.leaf(), r.leaf()))
+            }
+            fn codegen_le(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fcmp(FloatCmp::Le, l.leaf(), r.leaf()))
+            }
+            fn codegen_ge(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+                Value::scalar(ctx.fcmp(FloatCmp::Ge, l.leaf(), r.leaf()))
             }
         }
         impl FloatNum for $ty {}

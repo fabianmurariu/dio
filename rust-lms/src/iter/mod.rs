@@ -24,6 +24,7 @@ mod from_fn;
 mod map;
 pub mod opaque;
 mod range_iter;
+mod rev;
 mod scan;
 mod skip_while;
 mod slice_iter;
@@ -43,6 +44,7 @@ pub use opaque::{
     ReusedOpaqueIterFns, ReusedOpaqueIterKind, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
 };
 pub use range_iter::{RangeIter, RangeStep, range, range_step};
+pub use rev::Rev;
 pub use scan::Scan;
 pub use skip_while::SkipWhile;
 pub use slice_iter::SliceIter;

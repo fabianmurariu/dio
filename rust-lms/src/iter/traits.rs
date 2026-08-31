@@ -440,6 +440,17 @@ pub trait IndexedStagedIterator: StagedIterator {
     /// Return the number of elements as a staged expression.
     fn len(&self) -> Self::LenExpr;
 
+    /// Iterate from the last element to the first.
+    ///
+    /// Needs random access, so it is bounded on `IndexedSource` like
+    /// [`zip`](Self::zip): a push-based iterator cannot be run backwards.
+    fn rev(self) -> super::Rev<Self>
+    where
+        Self: IndexedSource,
+    {
+        super::Rev::new(self)
+    }
+
     /// Zip this (indexed) iterator with a secondary random-access source.
     ///
     /// Both sources are accessed at the same 0-based position each iteration.
