@@ -92,15 +92,12 @@ fn run_repl_reader(mut reader: impl BufRead, interactive: bool) -> Result<(), Bo
             continue;
         }
 
-        match parse_program(&submission) {
-            Ok(program) => match session.submit(program) {
-                Ok(values) => {
-                    for value in values {
-                        println!("Evaluated to {value:.6}");
-                    }
+        match session.submit_source(&submission) {
+            Ok(values) => {
+                for value in values {
+                    println!("Evaluated to {value:.6}");
                 }
-                Err(error) => eprintln!("kaleidoscope: {error}"),
-            },
+            }
             Err(error) => eprintln!("kaleidoscope: {error}"),
         }
     }

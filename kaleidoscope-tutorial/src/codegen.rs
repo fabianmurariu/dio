@@ -9,7 +9,7 @@ use rust_lms::func::{
 };
 use rust_lms::prelude::{Compiler, Const, Var, eq, lt, not, select};
 
-use crate::ast::{BinaryOp, Expr, ExprKind, Function, Item, Program, Prototype};
+use crate::ast::{BinaryOp, Expr, ExprKind, Function, Item, Program, Prototype, PrototypeKind};
 use crate::lexer::Span;
 use crate::runtime::{HostFunctionRef, register_standard_externs, standard_extern_arity};
 
@@ -245,7 +245,7 @@ fn compile_top_level_validated(
     Ok(compiled.as_fn())
 }
 
-/// Check names, prototypes, calls, and the Chapter 4 host environment.
+/// Check names, prototypes, calls, operators, and the host environment.
 pub fn validate(program: &Program) -> Result<(), CodegenError> {
     let mut signatures = HashMap::<String, Signature>::new();
 
@@ -309,6 +309,28 @@ pub fn validate(program: &Program) -> Result<(), CodegenError> {
 }
 
 fn validate_prototype(prototype: &Prototype) -> Result<(), CodegenError> {
+    match prototype.kind {
+        PrototypeKind::Unary { .. } if prototype.parameters.len() != 1 => {
+            return Err(CodegenError::semantic(
+                "a unary operator must have exactly one operand",
+                prototype.span,
+            ));
+        }
+        PrototypeKind::Binary { .. } if prototype.parameters.len() != 2 => {
+            return Err(CodegenError::semantic(
+                "a binary operator must have exactly two operands",
+                prototype.span,
+            ));
+        }
+        PrototypeKind::Binary { precedence, .. } if !(1..=100).contains(&precedence) => {
+            return Err(CodegenError::semantic(
+                "binary precedence must be from 1 through 100",
+                prototype.span,
+            ));
+        }
+        PrototypeKind::Function | PrototypeKind::Unary { .. } | PrototypeKind::Binary { .. } => {}
+    }
+
     if prototype.parameters.len() > 8 {
         return Err(CodegenError::semantic(
             format!(
@@ -347,9 +369,21 @@ fn validate_expr(
             format!("unknown variable '{name}'"),
             expression.span,
         )),
-        ExprKind::Binary { left, right, .. } => {
+        ExprKind::Unary { operator, operand } => {
+            validate_expr(operand, variables, signatures)?;
+            validate_operator("unary", *operator, 1, expression.span, signatures)
+        }
+        ExprKind::Binary { op, left, right } => {
             validate_expr(left, variables, signatures)?;
-            validate_expr(right, variables, signatures)
+            validate_expr(right, variables, signatures)?;
+            match op {
+                BinaryOp::UserDefined(operator) => {
+                    validate_operator("binary", *operator, 2, expression.span, signatures)
+                }
+                BinaryOp::LessThan | BinaryOp::Add | BinaryOp::Subtract | BinaryOp::Multiply => {
+                    Ok(())
+                }
+            }
         }
         ExprKind::Call { callee, arguments } => {
             let Some(signature) = signatures.get(callee) else {
@@ -419,6 +453,35 @@ fn validate_expr(
             validate_expr(body, &loop_variables, signatures)
         }
     }
+}
+
+fn validate_operator(
+    kind: &str,
+    operator: char,
+    arity: usize,
+    span: Span,
+    signatures: &HashMap<String, Signature>,
+) -> Result<(), CodegenError> {
+    let name = format!("{kind}{operator}");
+    let Some(signature) = signatures.get(&name) else {
+        return Err(CodegenError::semantic(
+            format!("unknown {kind} operator '{operator}'"),
+            span,
+        ));
+    };
+    if signature.arity != arity {
+        return Err(CodegenError::semantic(
+            format!("{kind} operator '{operator}' has an invalid prototype"),
+            span,
+        ));
+    }
+    if !signature.defined {
+        return Err(CodegenError::semantic(
+            format!("{kind} operator '{operator}' is declared but not defined"),
+            span,
+        ));
+    }
+    Ok(())
 }
 
 fn predeclare_functions(program: &Program) -> HashMap<String, FunctionRef> {
@@ -531,6 +594,10 @@ fn lower_expr(
     match &expression.kind {
         ExprKind::Number(value) => ctx.bind(Const::<f64>::new(*value)),
         ExprKind::Variable(name) => variables[name],
+        ExprKind::Unary { operator, operand } => {
+            let operand = lower_expr(operand, ctx, variables, function_refs, host_functions);
+            function_refs[&format!("unary{operator}")].emit_call(ctx, &[operand])
+        }
         ExprKind::Binary { op, left, right } => {
             let left = lower_expr(left, ctx, variables, function_refs, host_functions);
             let right = lower_expr(right, ctx, variables, function_refs, host_functions);
@@ -539,6 +606,9 @@ fn lower_expr(
                 BinaryOp::Add => ctx.bind(left + right),
                 BinaryOp::Subtract => ctx.bind(left - right),
                 BinaryOp::Multiply => ctx.bind(left * right),
+                BinaryOp::UserDefined(operator) => {
+                    function_refs[&format!("binary{operator}")].emit_call(ctx, &[left, right])
+                }
             }
         }
         ExprKind::Call { callee, arguments } => {
@@ -766,5 +836,29 @@ mod tests {
         let program = parse_program("40 + 2").unwrap();
         let function = compile_top_level(&program, 0).unwrap();
         assert_eq!(function.call(), 42.0);
+    }
+
+    #[test]
+    fn compiles_user_defined_unary_and_binary_operators() {
+        let source = "
+            def unary!(value) if value then 0 else 1;
+            def binary> 10 (left right) right < left;
+            def binary| 5 (left right)
+                if left then 1 else if right then 1 else 0;
+            def binary= 9 (left right) !(left < right | left > right);
+            !0; !42; 3 > 2; 2 > 3; 3 = 3; 3 = 4;
+        ";
+        assert_eq!(values(source).unwrap(), vec![1.0, 0.0, 1.0, 0.0, 1.0, 0.0]);
+    }
+
+    #[test]
+    fn user_defined_binary_operators_are_left_associative_calls() {
+        let source = "def binary: 1 (left right) left * 10 + right; 1 : 2 : 3;";
+        assert_eq!(values(source).unwrap(), vec![123.0]);
+    }
+
+    #[test]
+    fn reports_unknown_unary_operators() {
+        assert!(error("!1").contains("unknown unary operator '!'"));
     }
 }

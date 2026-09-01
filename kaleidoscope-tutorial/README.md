@@ -2,7 +2,7 @@
 
 This crate follows LLVM's [My First Language Frontend](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/) tutorial, replacing the hand-written C++ frontend with Rust and Pest. Starting in Chapter 3, the parsed AST is specialized into a `rust-lms` staged computation and JIT-compiled to native code.
 
-Chapters 1 through 5 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, compile functions through rust-lms's optimized backends, call a typed host library, retain definitions in an interactive session, and generate native conditional and loop control flow.
+Chapters 1 through 6 are implemented. The crate can tokenize a source file, parse it into an owned source-spanned AST, compile functions through rust-lms's optimized backends, call a typed host library, retain definitions in an interactive session, generate native conditional and loop control flow, and extend its expression grammar with user-defined operators.
 
 ## The route to native code
 
@@ -19,7 +19,7 @@ Rust AST                    Chapter 2
 rust-lms staged program     Chapter 3
         |
         v
-optimization + native JIT   Chapter 4 (now)
+optimization + native JIT   Chapter 4 and later
         |
         v
 native machine code
@@ -142,7 +142,7 @@ Good small changes to try before Chapter 2:
 
 # Chapter 2: parser and AST
 
-LLVM's implementation combines recursive descent with a hand-written operator-precedence parser. Pest already handles the recursive grammar, and its `PrattParser` provides the same precedence-climbing behavior for binary expressions. The result is still the same language and essentially the same AST.
+LLVM's implementation combines recursive descent with a hand-written operator-precedence parser. Pest handles the recursive grammar here. At the Chapter 2 stage a fixed Pratt table is sufficient; the cumulative implementation in [`src/parser.rs`](src/parser.rs) evolves that table into Chapter 6's stateful operator-precedence reduction. The result is still the same language and essentially the same AST.
 
 ## 2.1 An AST that does not know about Pest
 
@@ -230,7 +230,7 @@ Chapter 2 defines this table, from weakest to strongest binding:
 | `+`, `-` | 20 | left |
 | `*` | 40 | left |
 
-[`src/parser.rs`](src/parser.rs) expresses the same ordering with Pest's Pratt parser:
+The Chapter 2 implementation can express that ordering with Pest's Pratt parser:
 
 ```rust
 PrattParser::new()
@@ -780,7 +780,190 @@ Chapter 5's parser and native execution tests cover:
 - loop-variable shadowing and restoration;
 - rejection of loop variables used outside their scope.
 
-Chapter 6 will make binary and unary operators user-definable and move operator precedence from a fixed parser table into language state.
+# Chapter 6: user-defined operators
+
+LLVM's [Chapter 6](https://llvm.org/docs/tutorial/MyFirstLanguageFrontend/LangImpl06.html) lets Kaleidoscope programs add new unary and binary operators. A binary definition also declares a precedence, so it changes how subsequent source is parsed. The backend side remains pleasantly small in the rust-lms version: applying an operator is just a staged call to the function which implements it.
+
+## 6.1 Operator prototypes and AST nodes
+
+Two new reserved words introduce operator prototypes:
+
+```text
+def unary!(value) ...
+def binary| 5 (left right) ...
+```
+
+A unary operator has exactly one parameter. A binary operator has exactly two and may provide an integer precedence from 1 through 100; omission selects the tutorial's default of 30. Internally these definitions receive ordinary symbol names such as `unary!` and `binary|`, matching LLVM's convention.
+
+The grammar keeps ordinary, unary, and binary prototypes distinct:
+
+```pest
+prototype = { ordinary_prototype | unary_prototype | binary_prototype }
+ordinary_prototype = { identifier ~ "(" ~ identifier* ~ ")" }
+unary_prototype = { keyword_unary ~ operator ~ "(" ~ identifier* ~ ")" }
+binary_prototype = { keyword_binary ~ operator ~ number? ~ "(" ~ identifier* ~ ")" }
+```
+
+[`PrototypeKind`](src/ast.rs) preserves the source-level meaning:
+
+```rust
+pub enum PrototypeKind {
+    Function,
+    Unary { operator: char },
+    Binary { operator: char, precedence: u8 },
+}
+```
+
+Operator applications need one new unary expression and a general binary case:
+
+```rust
+Unary { operator: char, operand: Box<Expr> }
+BinaryOp::UserDefined(char)
+```
+
+The original four binary operators remain dedicated variants because their staged implementations are primitive arithmetic or comparison operations.
+
+## 6.2 Dynamic precedence with Pest
+
+Pest still owns the lexical and recursive syntax, but a static `PrattParser` can no longer describe the whole language: parsing this definition changes the meaning of later expressions:
+
+```text
+def binary@ 50 (left right) right;
+1 + 2 @ 3 * 4;
+```
+
+The grammar therefore recognizes a flat expression rather than assigning precedence itself:
+
+```pest
+expression = { unary_expression ~ (operator ~ unary_expression)* }
+unary_expression = { operator* ~ primary }
+```
+
+[`ParserState`](src/parser.rs) begins with the Chapter 2 table:
+
+| Operator | Precedence |
+| --- | ---: |
+| `<` | 10 |
+| `+`, `-` | 20 |
+| `*` | 40 |
+
+After a binary definition's body has parsed successfully, its precedence is installed for following items. A compact operator-stack pass then reduces the flat Pest pairs. Operators of equal precedence reduce from the left, exactly like the LLVM tutorial. This order also means the new binary operator cannot be used recursively inside its own definition, matching the original parser.
+
+In the example above, `@` binds more tightly than `*`, producing:
+
+```text
+Add(1, Multiply(UserBinary('@', 2, 3), 4))
+```
+
+An unknown binary character is rejected during AST construction because it has no precedence. Unary operators need no precedence and can be parsed syntactically before their definitions; semantic validation later requires a matching unary function.
+
+The operator rule covers the useful ASCII punctuation accepted by this implementation while excluding comments and structural delimiters. A dot followed by a digit remains the beginning of a literal such as `.5`, rather than becoming a unary dot operator.
+
+## 6.3 Recursive unary parsing
+
+Prefix operators associate from right to left. The flat prefix sequence in `!!value` is folded backwards into:
+
+```text
+Unary('!', Unary('!', Variable("value")))
+```
+
+That reproduces the tutorial's recursive unary production without forcing the rest of the expression grammar out of Pest. Parentheses remain primaries, so `!(a < b)` applies `!` to the complete parenthesized comparison.
+
+A small source-level operator library can now fill in missing language primitives:
+
+```text
+def unary!(value)
+  if value then 0 else 1;
+
+def unary-(value)
+  0 - value;
+
+def binary> 10 (left right)
+  right < left;
+
+def binary| 5 (left right)
+  if left then 1 else if right then 1 else 0;
+```
+
+As in LLVM's example, `|` is an ordinary eager function call rather than a short-circuiting primitive.
+
+## 6.4 Specializing operator calls
+
+Definitions are already predeclared as typed rust-lms function references. User-defined operator lowering reuses those references:
+
+```text
+Unary(op, value)
+    -> lower value
+    -> call function "unary<op>" with one Var<f64>
+
+UserBinary(op, left, right)
+    -> lower left and right
+    -> call function "binary<op>" with two Var<f64> values
+```
+
+There is no new machine-code instruction builder and no runtime operator lookup. The operator character and AST shape are stage-0 data, so specialization selects the exact typed `FunRef1` or `FunRef2` while compiling. Native code contains a direct function call. The four built-ins still lower directly to `+`, `-`, `*`, or the numeric `<` result.
+
+Semantic validation checks that each application has a matching defined operator. Prototype arity and precedence errors are diagnosed before staging. As in previous chapters, constant folding and low-level call optimization are left to the selected rust-lms backend.
+
+## 6.5 Persistent and transactional REPL grammar
+
+Dynamic precedence is language state, not merely file-local parser configuration. Use one [`ParserState`](src/parser.rs) when parsing successive inputs directly, or let [`Session::submit_source`](src/runtime.rs) coordinate parsing and native compilation:
+
+```rust
+use kaleidoscope_tutorial::Session;
+
+let mut session = Session::new();
+session.submit_source("def binary@ 50 (left right) left * 10 + right;")?;
+assert_eq!(session.submit_source("1 + 2 @ 3;")?, vec![24.0]);
+# Ok::<(), kaleidoscope_tutorial::SubmissionError>(())
+```
+
+Both halves are transactional. Parsing occurs against a cloned precedence table, then the accumulated program is cloned and validated. Only after native compilation succeeds are the new definitions and precedence committed. A malformed operator body or duplicate parameter therefore cannot leave a ghost operator in later REPL input.
+
+`Session::submit(Program)` remains available for callers which construct or parse ASTs themselves. On a successful submission it also learns the precedence metadata of retained binary definitions.
+
+## 6.6 Run the example
+
+[`examples/chapter6.ks`](examples/chapter6.ks) defines logical not, unary negation, greater-than, eager logical operators, equality, and a low-precedence sequencing operator:
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --run kaleidoscope-tutorial/examples/chapter6.ks
+Evaluated to 1.000000
+Evaluated to 1.000000
+Evaluated to 1.000000
+Evaluated to 42.000000
+```
+
+The line-oriented REPL retains operator grammar between submissions:
+
+```console
+ready> def binary> 10 (left right) right < left;
+ready> 3 > 2;
+Evaluated to 1.000000
+```
+
+The same primitives are sufficient for LLVM's Chapter 6 Mandelbrot program: recursion and `if` came from Chapter 5, `putchard` came from Chapter 4, and the missing logical, comparison, negation, and sequencing operations can now be written in Kaleidoscope itself. A compact rendering of that complete program is included in [`examples/chapter6-mandelbrot.ks`](examples/chapter6-mandelbrot.ks):
+
+```console
+$ cargo run -q -p kaleidoscope-tutorial -- --run kaleidoscope-tutorial/examples/chapter6-mandelbrot.ks
+```
+
+It deliberately renders fewer rows and columns than LLVM's original invocation so it remains convenient to run while experimenting.
+
+## 6.7 What the tests establish
+
+Chapter 6 adds coverage for:
+
+- `binary` and `unary` keyword boundaries;
+- operator prototype names, arity, default/explicit precedence, and precedence bounds;
+- source-ordered precedence and left associativity;
+- right-associated chains of unary operators;
+- native execution of unary, comparison, logical, equality, and sequencing operators;
+- clear diagnostics for unknown unary and binary operators;
+- operator precedence retained across REPL submissions;
+- rollback of parser state after rejected definitions.
+
+Chapter 7 will add mutable local variables and assignment. That will require changing the staged variable environment from immutable values to mutable `Var<f64>` cells while preserving lexical shadowing.
 
 ## Progress
 
@@ -791,5 +974,5 @@ Chapter 6 will make binary and unary operators user-definable and move operator 
 | 3 | AST specialization and native code | Implemented |
 | 4 | JIT, host externs, and backend optimization | Implemented |
 | 5 | Control flow | Implemented |
-| 6 | User-defined operators | Next |
-| 7 | Mutable variables | Planned |
+| 6 | User-defined operators | Implemented |
+| 7 | Mutable variables | Next |

@@ -1,6 +1,7 @@
 //! Chapter 4's interactive session and typed host environment.
 
 use std::collections::HashMap;
+use std::fmt;
 use std::io::Write;
 
 use rust_lms::ffi::ExternRef;
@@ -9,6 +10,7 @@ use rust_lms::prelude::{Compiler, Ctx, Var, call_extern1, extern_fn};
 use crate::ast::{Item, Program};
 use crate::codegen::{CodegenError, compile_top_level, validate};
 use crate::lexer::{Position, Span};
+use crate::parser::{ParseError, ParserState};
 
 #[extern_fn]
 extern "C" fn host_sin(value: f64) -> f64 {
@@ -112,6 +114,7 @@ pub(crate) fn register_standard_externs(
 #[derive(Clone, Debug)]
 pub struct Session {
     program: Program,
+    parser: ParserState,
 }
 
 impl Default for Session {
@@ -135,6 +138,7 @@ impl Session {
                     end: origin,
                 },
             },
+            parser: ParserState::new(),
         }
     }
 
@@ -159,13 +163,65 @@ impl Session {
         candidate
             .items
             .retain(|item| !matches!(item, Item::Expression(_)));
+        let mut parser = self.parser.clone();
+        parser.install_definitions(&candidate);
         self.program = candidate;
+        self.parser = parser;
+        Ok(values)
+    }
+
+    /// Parse and submit source while retaining user-defined operator precedence.
+    ///
+    /// Parsing and semantic validation are both transactional: a rejected
+    /// operator definition does not affect later submissions.
+    pub fn submit_source(&mut self, source: &str) -> Result<Vec<f64>, SubmissionError> {
+        let mut parser = self.parser.clone();
+        let submission = parser.parse_program(source)?;
+        let values = self.submit(submission)?;
+        self.parser = parser;
         Ok(values)
     }
 
     /// The declarations and definitions retained for future submissions.
     pub fn program(&self) -> &Program {
         &self.program
+    }
+}
+
+/// A syntax, semantic, or backend error from [`Session::submit_source`].
+#[derive(Debug)]
+pub enum SubmissionError {
+    Parse(ParseError),
+    Codegen(CodegenError),
+}
+
+impl fmt::Display for SubmissionError {
+    fn fmt(&self, formatter: &mut fmt::Formatter<'_>) -> fmt::Result {
+        match self {
+            Self::Parse(error) => error.fmt(formatter),
+            Self::Codegen(error) => error.fmt(formatter),
+        }
+    }
+}
+
+impl std::error::Error for SubmissionError {
+    fn source(&self) -> Option<&(dyn std::error::Error + 'static)> {
+        match self {
+            Self::Parse(error) => Some(error),
+            Self::Codegen(error) => Some(error),
+        }
+    }
+}
+
+impl From<ParseError> for SubmissionError {
+    fn from(error: ParseError) -> Self {
+        Self::Parse(error)
+    }
+}
+
+impl From<CodegenError> for SubmissionError {
+    fn from(error: CodegenError) -> Self {
+        Self::Codegen(error)
     }
 }
 
@@ -217,5 +273,30 @@ mod tests {
             .unwrap_err()
             .to_string();
         assert!(error.contains("host binding for 'sin' expects 1 parameter"));
+    }
+
+    #[test]
+    fn operators_and_precedence_persist_between_source_submissions() {
+        let mut session = Session::new();
+        assert!(
+            session
+                .submit_source("def binary@ 50 (left right) left * 10 + right;")
+                .unwrap()
+                .is_empty()
+        );
+        assert_eq!(session.submit_source("1 + 2 @ 3;").unwrap(), vec![24.0]);
+    }
+
+    #[test]
+    fn rejected_operator_definitions_do_not_change_parser_state() {
+        let mut session = Session::new();
+        let error = session
+            .submit_source("def binary@ 50 (value value) value;")
+            .unwrap_err()
+            .to_string();
+        assert!(error.contains("duplicate parameter 'value'"));
+
+        let error = session.submit_source("1 @ 2;").unwrap_err().to_string();
+        assert!(error.contains("unknown binary operator '@'"));
     }
 }

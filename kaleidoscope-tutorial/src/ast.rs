@@ -25,12 +25,21 @@ pub struct Function {
     pub span: Span,
 }
 
-/// A function's name and parameter names.
+/// A function's name, parameter names, and optional operator metadata.
 #[derive(Clone, Debug, PartialEq)]
 pub struct Prototype {
     pub name: String,
     pub parameters: Vec<String>,
+    pub kind: PrototypeKind,
     pub span: Span,
+}
+
+/// The source form which introduced a function prototype.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum PrototypeKind {
+    Function,
+    Unary { operator: char },
+    Binary { operator: char, precedence: u8 },
 }
 
 /// An expression and the source range which produced it.
@@ -40,11 +49,15 @@ pub struct Expr {
     pub span: Span,
 }
 
-/// The expression forms introduced through Chapter 5.
+/// The expression forms introduced through Chapter 6.
 #[derive(Clone, Debug, PartialEq)]
 pub enum ExprKind {
     Number(f64),
     Variable(String),
+    Unary {
+        operator: char,
+        operand: Box<Expr>,
+    },
     Binary {
         op: BinaryOp,
         left: Box<Expr>,
@@ -68,13 +81,14 @@ pub enum ExprKind {
     },
 }
 
-/// Chapter 2's four built-in binary operators.
+/// A built-in or user-defined binary operator.
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
 pub enum BinaryOp {
     LessThan,
     Add,
     Subtract,
     Multiply,
+    UserDefined(char),
 }
 
 impl BinaryOp {
@@ -84,6 +98,7 @@ impl BinaryOp {
             Self::Add => '+',
             Self::Subtract => '-',
             Self::Multiply => '*',
+            Self::UserDefined(operator) => operator,
         }
     }
 }

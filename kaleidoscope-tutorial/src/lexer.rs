@@ -21,7 +21,7 @@ pub struct Span {
     pub end: Position,
 }
 
-/// The tokens recognized in Chapter 1.
+/// The token vocabulary accumulated through Chapter 6.
 #[derive(Clone, Debug, PartialEq)]
 pub enum TokenKind {
     Def,
@@ -31,6 +31,8 @@ pub enum TokenKind {
     Else,
     For,
     In,
+    Binary,
+    Unary,
     Identifier(String),
     Number(f64),
     Character(char),
@@ -72,6 +74,8 @@ impl fmt::Display for TokenKind {
             Self::Else => formatter.write_str("else"),
             Self::For => formatter.write_str("for"),
             Self::In => formatter.write_str("in"),
+            Self::Binary => formatter.write_str("binary"),
+            Self::Unary => formatter.write_str("unary"),
             Self::Identifier(name) => write!(formatter, "identifier({name})"),
             Self::Number(value) => write!(formatter, "number({value})"),
             Self::Character(character) => write!(formatter, "'{character}'"),
@@ -113,6 +117,8 @@ pub fn lex(source: &str) -> Result<Vec<Token>, LexError> {
             Rule::keyword_else => TokenKind::Else,
             Rule::keyword_for => TokenKind::For,
             Rule::keyword_in => TokenKind::In,
+            Rule::keyword_binary => TokenKind::Binary,
+            Rule::keyword_unary => TokenKind::Unary,
             Rule::identifier => TokenKind::Identifier(text.to_owned()),
             Rule::number => TokenKind::Number(
                 text.parse()
@@ -239,7 +245,7 @@ mod tests {
     fn only_exact_keywords_are_reserved() {
         assert_eq!(
             kinds(
-                "def define extern external if iffy then then2 else elsewhere for format in inside"
+                "def define extern external if iffy then then2 else elsewhere for format in inside binary binary2 unary unary2"
             ),
             vec![
                 TokenKind::Def,
@@ -256,6 +262,10 @@ mod tests {
                 TokenKind::Identifier("format".into()),
                 TokenKind::In,
                 TokenKind::Identifier("inside".into()),
+                TokenKind::Binary,
+                TokenKind::Identifier("binary2".into()),
+                TokenKind::Unary,
+                TokenKind::Identifier("unary2".into()),
                 TokenKind::Eof,
             ]
         );

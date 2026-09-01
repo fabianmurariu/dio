@@ -11,6 +11,8 @@ token = _{
     | keyword_else
     | keyword_for
     | keyword_in
+    | keyword_binary
+    | keyword_unary
     | number
     | identifier
     | character
@@ -25,6 +27,8 @@ keyword_then = @{ "then" ~ !ASCII_ALPHANUMERIC }
 keyword_else = @{ "else" ~ !ASCII_ALPHANUMERIC }
 keyword_for = @{ "for" ~ !ASCII_ALPHANUMERIC }
 keyword_in = @{ "in" ~ !ASCII_ALPHANUMERIC }
+keyword_binary = @{ "binary" ~ !ASCII_ALPHANUMERIC }
+keyword_unary = @{ "unary" ~ !ASCII_ALPHANUMERIC }
 
 // Keep Chapter 1's identifier syntax deliberately small and predictable.
 identifier = @{
@@ -35,6 +39,8 @@ identifier = @{
     ~ !("else" ~ !ASCII_ALPHANUMERIC)
     ~ !("for" ~ !ASCII_ALPHANUMERIC)
     ~ !("in" ~ !ASCII_ALPHANUMERIC)
+    ~ !("binary" ~ !ASCII_ALPHANUMERIC)
+    ~ !("unary" ~ !ASCII_ALPHANUMERIC)
     ~ ASCII_ALPHA
     ~ ASCII_ALPHANUMERIC*
 }
@@ -55,9 +61,13 @@ empty_statement = { ";" }
 definition = { keyword_def ~ prototype ~ expression ~ ";"? }
 extern_declaration = { keyword_extern ~ prototype ~ ";"? }
 top_level_expression = { expression ~ ";"? }
-prototype = { identifier ~ "(" ~ identifier* ~ ")" }
+prototype = { ordinary_prototype | unary_prototype | binary_prototype }
+ordinary_prototype = { identifier ~ "(" ~ identifier* ~ ")" }
+unary_prototype = { keyword_unary ~ operator ~ "(" ~ identifier* ~ ")" }
+binary_prototype = { keyword_binary ~ operator ~ number? ~ "(" ~ identifier* ~ ")" }
 
-expression = { primary ~ (binary_operator ~ primary)* }
+expression = { unary_expression ~ (operator ~ unary_expression)* }
+unary_expression = { operator* ~ primary }
 primary = _{ number | parenthesized | if_expression | for_expression | identifier_expression }
 parenthesized = { "(" ~ expression ~ ")" }
 if_expression = {
@@ -71,8 +81,9 @@ identifier_expression = { identifier ~ call_suffix? }
 call_suffix = { "(" ~ argument_list? ~ ")" }
 argument_list = { expression ~ ("," ~ expression)* }
 
-binary_operator = _{ less_than | add | subtract | multiply }
-less_than = { "<" }
-add = { "+" }
-subtract = { "-" }
-multiply = { "*" }
+// A dot followed by a digit starts a number (`.5`), not an operator. Delimiters
+// and `#` are excluded because they already have syntactic roles.
+operator = @{
+    "!" | "$" | "%" | "&" | "*" | "+" | "-" | ("." ~ !ASCII_DIGIT)
+    | "/" | ":" | "<" | "=" | ">" | "?" | "@" | "\\" | "^" | "|" | "~"
+}
