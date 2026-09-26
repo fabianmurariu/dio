@@ -19,8 +19,8 @@ pub mod record;
 pub mod svec;
 
 pub use iter_pool::{
-    ChunkSlot, ChunkSlotPtr, ChunkSlotRef, IterPool, IterPoolRef, POOLED_ITER_INLINE_CAP,
-    PooledIter, PooledIterFns, PooledIterKind, StagedIterPool,
+    Chunk, ChunkSlot, ChunkSlotRef, IterPool, IterPoolRef, PoolSlot, PoolSlotRef, PooledIter,
+    PooledIterFns, PooledIterKind, StagedIterPool,
 };
 pub use record::{DynamicRecord, FieldId, RecordLayout};
 pub use svec::{HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern, svec_grow};

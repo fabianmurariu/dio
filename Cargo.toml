@@ -31,6 +31,7 @@ datafusion-sql = "54.1.0"
 
 # Performance utilities
 ahash = "0.8"
+smallbox = "0.8"
 hashbrown = "0.17"
 
 # Testing

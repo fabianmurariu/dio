@@ -63,117 +63,138 @@
 //! the `&mut` is what keeps concurrent calls from sharing buffers. Kernels must
 //! not recurse (`fun_rec`) while a pooled loop is live, because a recursive call
 //! would reuse the caller's slot indices.
+//!
+//! # Where the unsafe is
+//!
+//! The host side is safe Rust: the iterator is a trait object held inline by
+//! [`SmallBox`], each slot's chunk buffers are `Vec<R>`s found by type, and the
+//! externs are ordinary `#[extern_fn]`s whose ABI thunks the derive generates.
+//! What remains cannot be expressed safely, and each point is marked `unsafe`:
+//!
+//! 1. [`ChunkSlot::emplace_borrowed`] — storing an iterator that borrows host data
+//!    in a slot that outlives the borrow. The slot lifetime cannot be named
+//!    across `extern "C"`; the caller promises the data outlives the kernel call.
+//! 2. The slot lookup in [`PooledIter`] — `iter_pool_slot` returns a
+//!    `&mut PoolSlot` whose exclusivity the staged result cannot carry (the
+//!    derive leaves reference-returning externs unchecked). Exclusive because
+//!    stage 0 gives each live traversal its own slot index.
+//! 3. The producer call in [`PooledIterFns::iter1`]/[`iter2`](PooledIterFns::iter2)
+//!    — handing the slot to `init` as `&mut ChunkSlot<R>`, a typed view of the
+//!    `PoolSlot` the pool returned. Sound because `ChunkSlot` is
+//!    `repr(transparent)` over `PoolSlot`.
+//! 4. The element load in [`PooledIter`]'s loop — reading `data[i]` for `i < n`,
+//!    where `(data, n)` is the chunk the last refill returned. The chunk pointer
+//!    is relabelled from `*const u8` to `*const R` (like [`SVec`](crate::SVec)'s
+//!    buffer); `R` is fixed by the `ChunkSlot<R>` the producer filled.
 
-use std::cell::Cell;
+use std::any::Any;
+use std::cell::{Cell, RefCell};
 use std::marker::PhantomData;
-use std::mem::MaybeUninit;
 use std::ptr::NonNull;
 
 use rust_lms::prelude::*;
+use smallbox::space::S32;
+use smallbox::{SmallBox, smallbox};
 
 // =============================================================================
-// Host side: the pool and its slots
+// Host side: the pool and its slots (safe Rust)
 // =============================================================================
 
-/// Inline storage budget (bytes) for a slot's iterator. Iterators that fit live
-/// in the slot; larger ones fall back to one heap box per `init`.
-pub const POOLED_ITER_INLINE_CAP: usize = 256;
-
-/// Alignment of a slot's inline iterator storage and of its chunk buffer.
-/// Item types must not need more (checked at compile time, per item type).
-const POOL_ALIGN: usize = 16;
-
-#[repr(C, align(16))]
-struct InlineStorage([MaybeUninit<u8>; POOLED_ITER_INLINE_CAP]);
-
-/// One aligned unit of a chunk buffer. Buffers are `Vec`s of these, so the
-/// allocation is managed by `Vec` and always `POOL_ALIGN`-aligned.
-#[derive(Clone, Copy)]
-#[repr(C, align(16))]
-struct Block([MaybeUninit<u8>; POOL_ALIGN]);
-
-/// Where a slot's iterator lives.
-///
-/// An inline iterator's address is recomputed from the slot borrow in hand on
-/// every use, never stored: each extern call reborrows the slot afresh, which
-/// would invalidate a pointer derived from an earlier borrow.
-#[derive(Clone, Copy)]
-enum Place {
-    Inline,
-    Heap(*mut u8),
+/// What a slot's iterator can do once its concrete type is erased.
+trait ChunkSource {
+    /// Refill this iterator's chunk buffer in `bufs` with up to `chunk` items.
+    fn refill(&mut self, bufs: &mut ChunkBufs, chunk: usize) -> Chunk;
 }
 
-/// The type-erased iterator currently emplaced in a slot: where it lives, plus
-/// monomorphic refill/drop functions for its concrete type.
-struct ErasedIter {
-    place: Place,
-    /// Write up to `chunk` items into the buffer; returns the data pointer and
-    /// the number written.
-    refill: unsafe fn(*mut u8, &mut Vec<Block>, usize) -> (*const u8, usize),
-    drop: unsafe fn(*mut u8),
-}
-
-/// One reusable slot: iterator storage plus a chunk buffer. Boxed by the pool so
-/// its address is stable.
-struct PoolSlot {
-    storage: InlineStorage,
-    iter: Option<ErasedIter>,
+/// An iterator plus its end-of-stream latch.
+struct Filler<I> {
+    it: I,
     /// Set once a refill comes back short, so a non-fused iterator is never
     /// polled again after reporting its end.
     exhausted: bool,
-    buf: Vec<Block>,
+}
+
+impl<I> ChunkSource for Filler<I>
+where
+    I: Iterator,
+    I::Item: Copy + 'static,
+{
+    fn refill(&mut self, bufs: &mut ChunkBufs, chunk: usize) -> Chunk {
+        let buf = bufs.get::<I::Item>();
+        buf.clear();
+        if !self.exhausted {
+            // Within capacity after the first chunk, so the buffer is reused.
+            buf.extend(self.it.by_ref().take(chunk));
+            self.exhausted = buf.len() < chunk;
+        }
+        Chunk::of(buf)
+    }
+}
+
+/// A slot's chunk buffers, one `Vec<R>` per item type the slot has served.
+/// Sibling loops of different item types can share a slot, so each keeps its
+/// own typed buffer (and capacity) instead of reinterpreting bytes.
+#[derive(Default)]
+struct ChunkBufs(Vec<Box<dyn Any>>);
+
+impl ChunkBufs {
+    fn get<R: 'static>(&mut self) -> &mut Vec<R> {
+        let i = match self.0.iter().position(|b| b.is::<Vec<R>>()) {
+            Some(i) => i,
+            None => {
+                self.0.push(Box::new(Vec::<R>::new()));
+                self.0.len() - 1
+            }
+        };
+        self.0[i]
+            .downcast_mut()
+            .expect("the buffer at `i` was found or pushed as a `Vec<R>`")
+    }
+}
+
+/// A chunk as the kernel sees it: the items the last refill wrote. The pointer
+/// is untyped here because the refill extern serves every item type; staged code
+/// relabels it to the slot's item type.
+#[repr(C)]
+#[derive(Clone, Copy, StagedType)]
+pub struct Chunk {
+    #[staged(SPtr<u8>)]
+    ptr: *const u8,
+    #[staged(u64)]
+    len: usize,
+}
+
+impl Chunk {
+    fn of<R>(buf: &[R]) -> Self {
+        Chunk {
+            ptr: buf.as_ptr().cast(),
+            len: buf.len(),
+        }
+    }
+
+    const EMPTY: Chunk = Chunk {
+        ptr: NonNull::dangling().as_ptr(),
+        len: 0,
+    };
+}
+
+/// A type-erased iterator, stored inline when it fits 256 bytes.
+type Source = SmallBox<dyn ChunkSource, S32>;
+
+/// One reusable slot: the current iterator plus the chunk buffers. The pool
+/// boxes each slot, so its address is stable while the kernel holds it.
+#[derive(Default)]
+pub struct PoolSlot {
+    source: Option<Source>,
+    bufs: ChunkBufs,
 }
 
 impl PoolSlot {
-    fn new() -> Self {
-        PoolSlot {
-            storage: InlineStorage([MaybeUninit::uninit(); POOLED_ITER_INLINE_CAP]),
-            iter: None,
-            exhausted: false,
-            buf: Vec::new(),
+    fn refill(&mut self, chunk: usize) -> Chunk {
+        match &mut self.source {
+            Some(source) => source.refill(&mut self.bufs, chunk),
+            None => Chunk::EMPTY,
         }
-    }
-
-    /// Drop the emplaced iterator, if any. The buffer and its capacity stay.
-    fn clear(&mut self) {
-        if let Some(it) = self.iter.take() {
-            let data = iter_data(&mut self.storage, it.place);
-            // SAFETY: `it` was produced by `ChunkSlot::emplace` for the value at
-            // `data`, and `take` guarantees it is dropped only once.
-            unsafe { (it.drop)(data) };
-        }
-        self.exhausted = false;
-    }
-
-    /// Write the next chunk into the buffer; returns its data pointer and length.
-    fn refill(&mut self, chunk: usize) -> (*const u8, usize) {
-        let PoolSlot {
-            storage,
-            iter,
-            exhausted,
-            buf,
-        } = self;
-        let (ptr, n) = match iter {
-            Some(it) if !*exhausted => {
-                let data = iter_data(storage, it.place);
-                // SAFETY: `data` holds the live iterator `it.refill` was
-                // monomorphized for (see `ChunkSlot::emplace`).
-                unsafe { (it.refill)(data, buf, chunk) }
-            }
-            // Items are never read from an empty chunk; any aligned pointer does.
-            _ => (buf.as_ptr().cast(), 0),
-        };
-        if n < chunk {
-            *exhausted = true;
-        }
-        (ptr, n)
-    }
-}
-
-fn iter_data(storage: &mut InlineStorage, place: Place) -> *mut u8 {
-    match place {
-        Place::Inline => storage.0.as_mut_ptr().cast(),
-        Place::Heap(p) => p,
     }
 }
 
@@ -182,15 +203,17 @@ fn iter_data(storage: &mut InlineStorage, place: Place) -> *mut u8 {
 ///
 /// Slots are created lazily the first time a kernel reaches a nesting depth, and
 /// keep their buffers (capacity) until the pool is dropped.
+#[derive(Default)]
 pub struct IterPool {
-    /// Individually boxed (via `Box::into_raw`), so slot addresses never move
-    /// while the list grows.
-    slots: Vec<NonNull<PoolSlot>>,
+    /// Boxed so a slot stays put while the list grows: the kernel holds slot `k`
+    /// while it asks for slot `k + 1`.
+    #[allow(clippy::vec_box)]
+    slots: Vec<Box<PoolSlot>>,
 }
 
 impl IterPool {
     pub fn new() -> Self {
-        IterPool { slots: Vec::new() }
+        Self::default()
     }
 
     /// Number of slots created so far (the deepest nesting any kernel reached).
@@ -198,193 +221,104 @@ impl IterPool {
         self.slots.len()
     }
 
-    fn slot(&mut self, k: usize) -> NonNull<PoolSlot> {
-        while self.slots.len() <= k {
-            let slot = Box::into_raw(Box::new(PoolSlot::new()));
-            // SAFETY: `Box::into_raw` never returns null.
-            self.slots.push(unsafe { NonNull::new_unchecked(slot) });
+    fn slot(&mut self, k: usize) -> &mut PoolSlot {
+        if self.slots.len() <= k {
+            self.slots.resize_with(k + 1, Box::default);
         }
-        self.slots[k]
-    }
-}
-
-impl Default for IterPool {
-    fn default() -> Self {
-        Self::new()
-    }
-}
-
-impl Drop for IterPool {
-    fn drop(&mut self) {
-        for slot in self.slots.drain(..) {
-            // SAFETY: every entry came from `Box::into_raw` in `slot` and is
-            // released exactly once, here.
-            let mut slot = unsafe { Box::from_raw(slot.as_ptr()) };
-            slot.clear();
-        }
+        &mut self.slots[k]
     }
 }
 
 /// A pool slot typed by the runtime item type `R` its iterator yields. This is
 /// what a producer's `init` extern receives (`slot: &mut ChunkSlot<R>`), so the
-/// item type the staged kind declares is the item type the producer must emplace.
+/// item type the staged kind declares is the item type the producer can emplace.
 #[repr(transparent)]
 pub struct ChunkSlot<R> {
     slot: PoolSlot,
     _item: PhantomData<fn() -> R>,
 }
 
-impl<R: Copy> ChunkSlot<R> {
-    /// Install `it` as this slot's iterator: inline if it fits
-    /// [`POOLED_ITER_INLINE_CAP`], else one heap box. Any iterator left from an
-    /// earlier use is dropped first; the chunk buffer is kept.
+impl<R: Copy + 'static> ChunkSlot<R> {
+    /// Install `it` as this slot's iterator, replacing any earlier one. The
+    /// chunk buffers are kept.
+    ///
+    /// The slot's type fixes the item type, so a producer cannot emplace an
+    /// iterator the kernel would read as something else:
+    ///
+    /// ```compile_fail
+    /// # use rust_lms_std::ChunkSlot;
+    /// fn producer(slot: &mut ChunkSlot<u64>) {
+    ///     slot.emplace([1.5f64, 2.5].into_iter()); // error: expected `u64`
+    /// }
+    /// ```
+    ///
+    /// And an iterator that borrows needs [`emplace_borrowed`](Self::emplace_borrowed):
+    ///
+    /// ```compile_fail
+    /// # use rust_lms_std::ChunkSlot;
+    /// fn producer(data: &[u64], slot: &mut ChunkSlot<u64>) {
+    ///     slot.emplace(data.iter().copied()); // error: `data` must be 'static
+    /// }
+    /// ```
+    pub fn emplace<I: Iterator<Item = R> + 'static>(&mut self, it: I) {
+        let source: Source = smallbox!(Filler {
+            it,
+            exhausted: false
+        });
+        self.slot.source = Some(source);
+    }
+
+    /// [`emplace`](Self::emplace) for an iterator that borrows host data — the
+    /// common case, e.g. neighbours read out of a graph passed to the producer.
     ///
     /// # Safety
     ///
-    /// Anything `it` borrows must outlive the kernel call that runs this
-    /// traversal: generated code keeps the iterator after this function returns
-    /// and drops it when the loop exits.
-    pub unsafe fn emplace<I: Iterator<Item = R>>(&mut self, it: I) {
-        unsafe fn refill<R: Copy, I: Iterator<Item = R>>(
-            data: *mut u8,
-            buf: &mut Vec<Block>,
-            chunk: usize,
-        ) -> (*const u8, usize) {
-            const {
-                assert!(
-                    std::mem::align_of::<R>() <= POOL_ALIGN,
-                    "pooled iterator items must not need more than 16-byte alignment"
-                )
-            };
-            let Some(bytes) = chunk.checked_mul(std::mem::size_of::<R>()) else {
-                std::process::abort();
-            };
-            let blocks = bytes.div_ceil(POOL_ALIGN);
-            if buf.len() < blocks {
-                buf.resize(blocks, Block([MaybeUninit::uninit(); POOL_ALIGN]));
-            }
-            let out = buf.as_mut_ptr().cast::<R>();
-            // SAFETY: `data` holds a live `I` (see `ChunkSlot::emplace`).
-            let it = unsafe { &mut *data.cast::<I>() };
-            let mut n = 0;
-            while n < chunk {
-                let Some(x) = it.next() else { break };
-                // SAFETY: the buffer holds at least `chunk` items of `R`, and is
-                // aligned for `R` (checked above).
-                unsafe { out.add(n).write(x) };
-                n += 1;
-            }
-            (out.cast_const().cast(), n)
-        }
-        unsafe fn drop_inline<I>(data: *mut u8) {
-            // SAFETY: `data` holds a live `I` written in place by `emplace`.
-            unsafe { std::ptr::drop_in_place(data.cast::<I>()) };
-        }
-        unsafe fn drop_heap<I>(data: *mut u8) {
-            // SAFETY: `data` came from `Box::into_raw` in `emplace`.
-            unsafe { drop(Box::from_raw(data.cast::<I>())) };
-        }
-
-        let slot = &mut self.slot;
-        slot.clear();
-        let (place, drop): (Place, unsafe fn(*mut u8)) = if std::mem::size_of::<I>()
-            <= POOLED_ITER_INLINE_CAP
-            && std::mem::align_of::<I>() <= POOL_ALIGN
-        {
-            let dst = slot.storage.0.as_mut_ptr().cast::<I>();
-            // SAFETY: the storage is large and aligned enough for `I` (checked
-            // above), and holds no live value after `clear`.
-            unsafe { dst.write(it) };
-            (Place::Inline, drop_inline::<I>)
-        } else {
-            (
-                Place::Heap(Box::into_raw(Box::new(it)).cast()),
-                drop_heap::<I>,
-            )
-        };
-        slot.iter = Some(ErasedIter {
-            place,
-            refill: refill::<R, I>,
-            drop,
+    /// Everything `it` borrows must outlive the kernel call that runs this
+    /// traversal. Generated code drops the iterator when its loop exits, which
+    /// always happens before the call returns, but the slot itself outlives the
+    /// call, and the borrow cannot be named across `extern "C"`.
+    pub unsafe fn emplace_borrowed<'a, I: Iterator<Item = R> + 'a>(&mut self, it: I) {
+        let source: SmallBox<dyn ChunkSource + 'a, S32> = smallbox!(Filler {
+            it,
+            exhausted: false
         });
+        // SAFETY: only the trait object's lifetime bound changes, so the layout
+        // is identical; the caller guarantees the borrowed data outlives every
+        // use, which ends when generated code drops the iterator.
+        let source: Source = unsafe { std::mem::transmute(source) };
+        self.slot.source = Some(source);
     }
 }
 
 // =============================================================================
 // Library externs: slot lookup, refill, drop
 // =============================================================================
-//
-// Generic over the staged item type `T`, so each is monomorphized per item type
-// and its signature carries `ChunkSlot<T::RuntimeValue>`. The thunks follow the
-// canonical storage-pointer ABI: each argument arrives as a pointer to its
-// storage, and the result is written through the trailing output pointer.
 
-/// Staged type of a slot handle in generated code: `*mut ChunkSlot<R>`.
-pub type ChunkSlotPtr<T> = SMutPtr<Opaque<ChunkSlot<<T as StagedType>::RuntimeValue>>>;
-/// Staged type of the slot parameter of a producer's `init` extern.
-pub type ChunkSlotRef<T> = SRefMut<Opaque<ChunkSlot<<T as StagedType>::RuntimeValue>>>;
 /// Staged type of the pool parameter a kernel receives.
 pub type IterPoolRef = SRefMut<Opaque<IterPool>>;
+/// Staged type of a slot handle.
+pub type PoolSlotRef = SRefMut<Opaque<PoolSlot>>;
+/// Staged type of the slot parameter of a producer's `init` extern.
+pub type ChunkSlotRef<T> = SRefMut<Opaque<ChunkSlot<<T as StagedType>::RuntimeValue>>>;
+type ChunkSlotPtr<T> = SMutPtr<Opaque<ChunkSlot<<T as StagedType>::RuntimeValue>>>;
 
-unsafe extern "C" fn iter_pool_slot_thunk<R>(pool: *const u8, k: *const u8, out: *mut u8) {
-    // SAFETY: storage-pointer ABI — `pool` holds a `&mut IterPool`, `k` a `u64`,
-    // and `out` has room for one pointer.
-    unsafe {
-        let pool = pool.cast::<*mut IterPool>().read();
-        let k = k.cast::<u64>().read();
-        let slot = (*pool).slot(k as usize);
-        out.cast::<*mut ChunkSlot<R>>().write(slot.as_ptr().cast());
-    }
+/// Slot `k` of the pool, created on first use.
+#[extern_fn]
+pub extern "C" fn iter_pool_slot(pool: &mut IterPool, k: u64) -> &mut PoolSlot {
+    pool.slot(k as usize)
 }
 
-unsafe extern "C" fn chunk_refill_thunk<R>(slot: *const u8, chunk: *const u8, out: *mut u8) {
-    // SAFETY: storage-pointer ABI — `slot` holds a pointer to a live slot, `chunk`
-    // a `u64`, and `out` has room for one `FatSlice<R>`.
-    unsafe {
-        let slot = &mut *slot.cast::<*mut PoolSlot>().read();
-        let chunk = chunk.cast::<u64>().read() as usize;
-        let (ptr, n) = slot.refill(chunk);
-        out.cast::<FatSlice<R>>()
-            .write(FatSlice::from_raw_parts(ptr.cast(), n));
-    }
+/// The slot iterator's next chunk of up to `chunk` items; empty once it is
+/// exhausted (or if the producer installed nothing).
+#[extern_fn]
+pub extern "C" fn chunk_refill(slot: &mut PoolSlot, chunk: u64) -> Chunk {
+    slot.refill(chunk as usize)
 }
 
-unsafe extern "C" fn chunk_drop_thunk(slot: *const u8, _out: *mut u8) {
-    // SAFETY: storage-pointer ABI — `slot` holds a pointer to a live slot.
-    unsafe { (*slot.cast::<*mut PoolSlot>().read()).clear() };
-}
-
-/// `iter_pool_slot(pool: &mut IterPool, k: u64) -> *mut ChunkSlot<R>`: slot `k`,
-/// created on first use.
-#[doc(hidden)]
-pub struct IterPoolSlotExtern<T>(PhantomData<T>);
-unsafe impl<T: StagedType + 'static> ExternFn for IterPoolSlotExtern<T> {
-    type Args = (IterPoolRef, u64);
-    type Ret = ChunkSlotPtr<T>;
-    const NAME: &'static str = "iter_pool_slot";
-    const FN_PTR: *const u8 = iter_pool_slot_thunk::<T::RuntimeValue> as *const u8;
-}
-
-/// `chunk_refill(slot: &mut ChunkSlot<R>, chunk: u64) -> FatSlice<R>`: the next
-/// chunk, empty once the iterator is exhausted.
-#[doc(hidden)]
-pub struct ChunkRefillExtern<T>(PhantomData<T>);
-unsafe impl<T: StagedType + 'static> ExternFn for ChunkRefillExtern<T> {
-    type Args = (ChunkSlotRef<T>, u64);
-    type Ret = RawSlice<T>;
-    const NAME: &'static str = "chunk_refill";
-    const FN_PTR: *const u8 = chunk_refill_thunk::<T::RuntimeValue> as *const u8;
-}
-
-/// `chunk_drop(slot: &mut ChunkSlot<R>)`: drop the slot's iterator, keep the
-/// buffer.
-#[doc(hidden)]
-pub struct ChunkDropExtern<T>(PhantomData<T>);
-unsafe impl<T: StagedType + 'static> ExternFn for ChunkDropExtern<T> {
-    type Args = (ChunkSlotRef<T>,);
-    type Ret = ();
-    const NAME: &'static str = "chunk_drop";
-    const FN_PTR: *const u8 = chunk_drop_thunk as *const u8;
+/// Drop the slot's iterator. The chunk buffers keep their capacity.
+#[extern_fn]
+pub extern "C" fn chunk_drop(slot: &mut PoolSlot) {
+    slot.source = None;
 }
 
 // =============================================================================
@@ -403,9 +337,9 @@ pub trait PooledIterKind: 'static {
 
 /// The registered externs for a kind. `Copy`, so capture it into kernel closures.
 pub struct PooledIterFns<K: PooledIterKind> {
-    slot: ExternRef<IterPoolSlotExtern<K::Item>>,
-    refill: ExternRef<ChunkRefillExtern<K::Item>>,
-    drop: ExternRef<ChunkDropExtern<K::Item>>,
+    slot: ExternRef<IterPoolSlotExtern>,
+    refill: ExternRef<ChunkRefillExtern>,
+    drop: ExternRef<ChunkDropExtern>,
     init: ExternRef<K::Init>,
 }
 
@@ -446,8 +380,9 @@ impl<K: PooledIterKind> PooledIterFns<K> {
             pool,
             chunk,
             Box::new(move |slot| {
-                // SAFETY: `slot` comes from `iter_pool_slot` for this kernel's
-                // live pool and is used by this traversal alone (see `PooledIter`).
+                // SAFETY: `slot` addresses the `PoolSlot` this traversal owns, and
+                // `ChunkSlot<R>` is `repr(transparent)` over `PoolSlot`, so it is
+                // a valid, exclusive `&mut ChunkSlot<R>` for the call.
                 Box::new(unsafe { call_extern2_unchecked(init, a, slot) })
             }),
         )
@@ -490,16 +425,18 @@ impl<K: PooledIterKind> PooledIterFns<K> {
 /// assigns slot indices by nesting depth. Borrow it into nested consumers
 /// (`let pool = &pool;`) — sources take `&StagedIterPool`.
 pub struct StagedIterPool {
-    pool: Var<SMutPtr<Opaque<IterPool>>>,
+    /// A unique reference, reborrowed once per slot lookup. Behind a `RefCell`
+    /// because nested sources share the pool by `&`.
+    pool: RefCell<Var<IterPoolRef>>,
     depth: Cell<u64>,
     max_depth: Cell<u64>,
 }
 
 impl StagedIterPool {
     /// Wrap the kernel's `&mut IterPool` parameter.
-    pub fn new(ctx: &mut Ctx, pool: Var<IterPoolRef>) -> Self {
+    pub fn new(pool: Var<IterPoolRef>) -> Self {
         StagedIterPool {
-            pool: ctx.bind(ref_mut_as_ptr(pool)),
+            pool: RefCell::new(pool),
             depth: Cell::new(0),
             max_depth: Cell::new(0),
         }
@@ -530,6 +467,14 @@ impl StagedIterPool {
 // =============================================================================
 // The source
 // =============================================================================
+
+/// A single-use reborrow of a unique staged reference, leaving `v` usable for
+/// later, sequenced uses (the staged `&mut *v`).
+fn reborrow<T: StagedType + 'static>(
+    v: &mut Var<SRefMut<T>>,
+) -> impl Staged<Out = SRefMut<T>> + 'static {
+    IntoExternArg::<SRefMut<T>>::into_extern_arg(v)
+}
 
 /// Emits the producer's `init(args.., slot)` call for a given slot handle.
 type InitCall<T> = Box<dyn FnOnce(Var<ChunkSlotPtr<T>>) -> Box<dyn Staged<Out = ()>>>;
@@ -577,38 +522,43 @@ where
             init,
         } = self;
         let k = pool.acquire();
+        let chunk = Const::<u64>::new(chunk);
 
-        // SAFETY (all extern calls below): `pool.pool` is the kernel's live
-        // `&mut IterPool`; slot `k` is used by no other live traversal, because
-        // stage 0 hands each nesting depth its own index.
-        let slot =
-            ctx.bind(unsafe { call_extern2_unchecked(fns.slot, pool.pool, Const::<u64>::new(k)) });
-        ctx.emit(init(slot));
+        let pool_ref = reborrow(&mut pool.pool.borrow_mut());
+        // SAFETY: the returned `&mut PoolSlot` is exclusive for this traversal —
+        // stage 0 hands each live nesting depth its own index `k` — and it lives
+        // in the kernel's `IterPool`, which outlives the call. Each call below
+        // reborrows the unique `slot`.
+        let mut slot: Var<PoolSlotRef> =
+            ctx.bind(unsafe { call_extern2_unchecked(fns.slot, pool_ref, Const::<u64>::new(k)) });
+        let typed_slot = ctx.bind(ptr_cast_mut::<Opaque<ChunkSlot<_>>, Opaque<PoolSlot>, _>(
+            ref_mut_as_ptr(reborrow(&mut slot)),
+        ));
+        ctx.emit(init(typed_slot));
 
-        let first =
-            ctx.bind(unsafe { call_extern2_unchecked(fns.refill, slot, Const::<u64>::new(chunk)) });
-        let data = ctx.var(first.into_ptr());
-        let n = ctx.var(first.len());
+        let first = ctx.bind(call_extern2(fns.refill, &mut slot, chunk));
+        let data = ctx.var(ptr_cast::<K::Item, u8, _>(first.get(ChunkType::ptr())));
+        let n = ctx.var(first.get(ChunkType::len()));
         let i = ctx.var(0u64);
         let refill = fns.refill;
+        let slot_in_loop = &mut slot;
         ctx.while_loop(true, move |ctx| {
             ctx.if_then(eq(i, n), move |ctx| {
-                let next = ctx.bind(unsafe {
-                    call_extern2_unchecked(refill, slot, Const::<u64>::new(chunk))
-                });
-                ctx.store(data, next.into_ptr());
-                ctx.store(n, next.len());
+                let next = ctx.bind(call_extern2(refill, slot_in_loop, chunk));
+                ctx.store(data, ptr_cast::<K::Item, u8, _>(next.get(ChunkType::ptr())));
+                ctx.store(n, next.get(ChunkType::len()));
                 ctx.store(i, 0u64);
                 ctx.if_then(eq(n, 0u64), |ctx| ctx.break_loop());
             });
             let idx = ctx.bind(int_cast::<i64, u64, _>(i));
-            // SAFETY: `i < n`, and `data` points at the `n` items the last refill
-            // wrote, which stay put until the next refill.
+            // SAFETY: `i < n`, and `data` points at the `n` items of the slot's
+            // item type that the last refill wrote; they stay put until the
+            // next refill.
             let elem = ctx.bind(unsafe { load(ptr_offset(data, idx)) });
             ctx.store(i, add(i, 1u64));
             consumer(ctx, elem);
         });
-        ctx.emit(unsafe { call_extern1_unchecked(fns.drop, slot) });
+        ctx.emit(call_extern1(fns.drop, &mut slot));
 
         pool.release(k);
     }

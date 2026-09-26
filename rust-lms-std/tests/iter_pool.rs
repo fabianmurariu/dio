@@ -2,8 +2,6 @@
 //! code a chunk at a time through reused per-nesting-level slots that stage 0
 //! assigns (nested loops get distinct slots, siblings share one).
 
-#![allow(clippy::missing_safety_doc)]
-
 use std::alloc::{GlobalAlloc, Layout, System};
 use std::cell::Cell;
 
@@ -51,29 +49,36 @@ impl Graph {
     }
 }
 
-/// Node ids `0..len`.
+/// Node ids `0..len`. The range owns its bounds, so this producer is safe.
 #[extern_fn]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pool_nodes(g: &Graph, slot: &mut ChunkSlot<u64>) {
-    unsafe { slot.emplace(0u64..g.adj.len() as u64) };
+pub extern "C" fn pool_nodes(g: &Graph, slot: &mut ChunkSlot<u64>) {
+    slot.emplace(0u64..g.adj.len() as u64);
 }
 
-/// Neighbours of `n`.
+/// Neighbours of `n`: borrows the graph, which outlives the kernel call.
+///
+/// # Safety
+///
+/// `g` must outlive the kernel call that runs the traversal.
 #[extern_fn]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pool_neighbours(g: &Graph, n: u64, slot: &mut ChunkSlot<u64>) {
-    unsafe { slot.emplace(g.adj[n as usize].iter().copied()) };
+    // SAFETY: `g` outlives every kernel call these tests make.
+    unsafe { slot.emplace_borrowed(g.adj[n as usize].iter().copied()) };
 }
 
 /// `0..n`, but records any `next` after it has returned `None`.
+///
+/// # Safety
+///
+/// `g` must outlive the kernel call that runs the traversal.
 #[extern_fn]
-#[unsafe(no_mangle)]
 pub unsafe extern "C" fn pool_counted(g: &Graph, n: u64, slot: &mut ChunkSlot<u64>) {
     let mut i = 0u64;
     let mut ended = false;
     let polls = &g.polls_after_end;
+    // SAFETY: `g` outlives every kernel call these tests make.
     unsafe {
-        slot.emplace(std::iter::from_fn(move || {
+        slot.emplace_borrowed(std::iter::from_fn(move || {
             if ended {
                 polls.set(polls.get() + 1);
                 return None;
@@ -91,8 +96,7 @@ pub unsafe extern "C" fn pool_counted(g: &Graph, n: u64, slot: &mut ChunkSlot<u6
 
 /// Emplaces nothing: an empty iteration.
 #[extern_fn]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn pool_nothing(_g: &Graph, _slot: &mut ChunkSlot<u64>) {}
+pub extern "C" fn pool_nothing(_g: &Graph, _slot: &mut ChunkSlot<u64>) {}
 
 struct Nodes;
 impl PooledIterKind for Nodes {
@@ -143,7 +147,7 @@ fn nested_traversal_sums_neighbours() {
             let nodes = PooledIterFns::<Nodes>::register(&mut compiler);
             let neigh = PooledIterFns::<Neighbours>::register(&mut compiler);
             let f = compiler.fun2("sum", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-                let pool = &StagedIterPool::new(ctx, pool);
+                let pool = &StagedIterPool::new(pool);
                 let total = ctx.var(0u64);
                 nodes.iter1(pool, g, chunk).for_each(ctx, move |ctx, n| {
                     neigh.iter2(pool, g, n, chunk).for_each(ctx, move |ctx, b| {
@@ -170,7 +174,7 @@ fn sibling_loops_share_a_slot() {
         let nodes = PooledIterFns::<Nodes>::register(&mut compiler);
         let neigh = PooledIterFns::<Neighbours>::register(&mut compiler);
         let f = compiler.fun2("siblings", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-            let pool = &StagedIterPool::new(ctx, pool);
+            let pool = &StagedIterPool::new(pool);
             let total = ctx.var(0u64);
             nodes.iter1(pool, g, 2).for_each(ctx, move |ctx, n| {
                 neigh.iter2(pool, g, n, 2).for_each(ctx, move |ctx, b| {
@@ -204,7 +208,7 @@ fn any_short_circuits_mid_chunk() {
         let f = compiler.fun3(
             "any",
             move |ctx, g: Var<G>, n: Var<u64>, pool: Var<IterPoolRef>| {
-                let pool = &StagedIterPool::new(ctx, pool);
+                let pool = &StagedIterPool::new(pool);
                 counted.iter2(pool, g, n, 4).any(ctx, |x| eq(x, 5u64))
             },
         );
@@ -226,7 +230,7 @@ fn exhausted_iterator_is_not_polled_again() {
         let f = compiler.fun3(
             "count",
             move |ctx, g: Var<G>, n: Var<u64>, pool: Var<IterPoolRef>| {
-                let pool = &StagedIterPool::new(ctx, pool);
+                let pool = &StagedIterPool::new(pool);
                 counted.iter2(pool, g, n, 4).count(ctx)
             },
         );
@@ -246,7 +250,7 @@ fn empty_producer_yields_nothing() {
     for_each_backend(|mut compiler| {
         let nothing = PooledIterFns::<Nothing>::register(&mut compiler);
         let f = compiler.fun2("none", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-            let pool = &StagedIterPool::new(ctx, pool);
+            let pool = &StagedIterPool::new(pool);
             nothing.iter1(pool, g, 8).count(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -268,7 +272,7 @@ fn filter_map_into_output_svec() {
         let nodes = PooledIterFns::<Nodes>::register(&mut compiler);
         let neigh = PooledIterFns::<Neighbours>::register(&mut compiler);
         let f = compiler.fun2("pipeline", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-            let pool = &StagedIterPool::new(ctx, pool);
+            let pool = &StagedIterPool::new(pool);
             nodes.iter1(pool, g, 3).for_each(ctx, |ctx, n| {
                 neigh
                     .iter2(pool, g, n, 2)
@@ -304,7 +308,7 @@ fn warm_pool_traversal_does_not_allocate() {
         let nodes = PooledIterFns::<Nodes>::register(&mut compiler);
         let neigh = PooledIterFns::<Neighbours>::register(&mut compiler);
         let f = compiler.fun2("sum", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-            let pool = &StagedIterPool::new(ctx, pool);
+            let pool = &StagedIterPool::new(pool);
             let total = ctx.var(0u64);
             nodes.iter1(pool, g, 2).for_each(ctx, move |ctx, n| {
                 neigh.iter2(pool, g, n, 4).for_each(ctx, move |ctx, b| {
