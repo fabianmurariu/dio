@@ -422,50 +422,6 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             .copied()
             .map(|value| ValueId::from_cranelift(value, sig.return_type().unwrap()))
     }
-    fn call_multi(
-        &mut self,
-        func: FuncRefId,
-        args: &[ValueId],
-        rets: &[ScalarType],
-    ) -> Vec<ValueId> {
-        let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
-        let inst = self.builder.ins().call(func.cranelift(), &cargs);
-        let results = self.builder.inst_results(inst);
-        assert_eq!(results.len(), rets.len(), "call_multi: result count");
-        results
-            .iter()
-            .zip(rets)
-            .map(|(&value, &ty)| ValueId::from_cranelift(value, ty))
-            .collect()
-    }
-    fn call_indirect_multi(
-        &mut self,
-        params: &[ScalarType],
-        rets: &[ScalarType],
-        callee: ValueId,
-        args: &[ValueId],
-    ) -> Vec<ValueId> {
-        expect_arguments("call_indirect_multi", args, params);
-        let mut signature = Signature::new(self.module.isa().default_call_conv());
-        signature
-            .params
-            .extend(params.iter().map(|p| AbiParam::new(p.to_cranelift())));
-        signature
-            .returns
-            .extend(rets.iter().map(|r| AbiParam::new(r.to_cranelift())));
-        let sig_ref = self.builder.import_signature(signature);
-        let cargs: Vec<Value> = args.iter().map(|&v| v.cranelift()).collect();
-        let inst = self
-            .builder
-            .ins()
-            .call_indirect(sig_ref, callee.cranelift(), &cargs);
-        self.builder
-            .inst_results(inst)
-            .iter()
-            .zip(rets)
-            .map(|(&value, &ty)| ValueId::from_cranelift(value, ty))
-            .collect()
-    }
     fn func_addr(&mut self, func: FuncRefId) -> ValueId {
         ValueId::from_cranelift(
             self.builder.ins().func_addr(types::I64, func.cranelift()),

@@ -8,7 +8,7 @@
 //! drops the iterator right there if it is already exhausted.
 //!
 //! ```text
-//! slot = stack slot (once per nesting level; reentrant, no pool)
+//! slot = stack slot (one per loop in the kernel frame; reentrant, allocation-free)
 //! slot.head = { len: 0, done: 1 }        ; a producer that starts nothing is empty
 //! init(args.., slot)                     ; producer: slot.start(iter) — fills chunk 1
 //! n = head.len; done = head.done; i = 0
@@ -28,6 +28,20 @@
 //! combinators' `break_loop` (`any`, `find_map`, `take_while`) leaves the whole
 //! iteration, never just one chunk.
 //!
+//! # When to use it
+//!
+//! Measured by `benches/graph_iter.rs` (1M-node graphs, mean out-degree ≈ 10,
+//! power-law and uniform):
+//!
+//! - about **1.4–1.9× faster** than [`ReusedOpaqueIter`],
+//!   which makes one indirect extern call per item;
+//! - about **1.4–1.9× slower** than one extern call per list that returns the
+//!   list as a slice, and slower again than handing the kernel the storage itself.
+//!
+//! So when storage can expose a list as a slice, pass the slice. Use this when
+//! only an iterator can produce the items — computed, filtered, or spread across
+//! structures a slice cannot describe.
+//!
 //! # Where the unsafe is
 //!
 //! The host side is safe Rust: the slot is an ordinary `#[repr(C)]` struct, the
@@ -37,7 +51,7 @@
 //!
 //! 1. [`ChunkStart::start_borrowed`] — storing an iterator that borrows host data
 //!    in a slot the borrow cannot be named for across `extern "C"`.
-//! 2. [`SlotView`] — the kernel's typed view of its stack slot: resetting the
+//! 2. `SlotView` — the kernel's typed view of its stack slot: resetting the
 //!    head, reading it back, handing the slot to the externs, and reading
 //!    `buf[i]`. Each operation states the protocol step that makes it valid.
 
@@ -56,7 +70,7 @@ pub const CHUNK: usize = 64;
 // =============================================================================
 
 /// The part of a slot the kernel reads: how many items the last fill wrote, and
-/// whether the iterator is finished (and already dropped).
+/// whether the iterator is finished (and already dropped). Protocol internal.
 #[repr(C)]
 #[derive(Clone, Copy, StagedType)]
 pub struct ChunkHead {
@@ -89,7 +103,8 @@ impl<I: Iterator> Fill<I::Item> for I {
     }
 }
 
-/// A kernel stack slot holding one iterator and its current chunk.
+/// A kernel stack slot holding one iterator and its current chunk. Protocol
+/// internal: producers see it only as [`ChunkStart`].
 ///
 /// `head` comes first (`#[repr(C)]`), so the kernel reads it at offset 0.
 #[repr(C)]
@@ -123,6 +138,9 @@ pub struct ChunkStart<R>(MaybeUninit<ChunkedSlot<R>>);
 
 impl<R: Copy + 'static> ChunkStart<R> {
     /// Build the slot around `it` and fill its first chunk.
+    ///
+    /// Call it at most once per `init`: a second call replaces the first
+    /// iterator without dropping it (a leak, not undefined behavior).
     ///
     /// The slot's type fixes the item type, so a producer cannot start an
     /// iterator the kernel would read as something else:

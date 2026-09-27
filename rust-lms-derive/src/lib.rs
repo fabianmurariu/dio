@@ -526,6 +526,22 @@ fn rust_type_to_staged_type(ty: &Type) -> Result<proc_macro2::TokenStream, Strin
 /// - Fat slices: `FatSlice<T>`, `FatSliceMut<T>`
 /// - Custom structs: Any `#[repr(C)]` struct with `derive(StagedType)`
 ///
+/// # Generic functions
+///
+/// Type parameters (not lifetime or const parameters) are supported: they become
+/// parameters of the marker, and each instantiation gets its own monomorphic
+/// thunk. A type parameter used directly as a parameter or return type must be
+/// bounded by `StagedType` in the function's own bounds; behind a reference
+/// (`&mut Slot<R>`, staged as `SRefMut<Opaque<Slot<R>>>`) it needs no such bound.
+///
+/// ```ignore
+/// #[extern_fn]
+/// pub extern "C" fn widen<T: StagedType + Copy + Into<i64>>(x: T) -> i64 {
+///     x.into()
+/// }
+/// // Usage: compiler.extern_fn::<WidenExtern<i32>>()
+/// ```
+///
 /// # Example
 ///
 /// ```ignore

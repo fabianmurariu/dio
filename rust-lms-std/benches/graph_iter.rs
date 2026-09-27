@@ -28,11 +28,17 @@
 //! 100k — mostly tiny lists, occasionally huge), and a uniform degree-10 control.
 //!
 //! Every kernel's result is checked against `native` before it is timed.
+//! `native` is a reference line, not a like-for-like baseline: its `sum` is one
+//! flat (vectorized) pass over `targets` that ignores node boundaries.
 //!
 //! Run:
 //!   cargo bench -p rust-lms-std --bench graph_iter                  # Cranelift
 //!   cargo bench -p rust-lms-std --bench graph_iter --features llvm  # + LLVM (needs LLVM 22)
 //!   cargo bench -p rust-lms-std --bench graph_iter -- 'two_hop'     # one workload
+//!
+//! With Homebrew LLVM on macOS, prefix the `llvm` run with
+//! `LIBRARY_PATH=/opt/homebrew/lib` (LLVM links `-lzstd`, which Apple's linker
+//! does not look for there).
 
 #![allow(clippy::missing_safety_doc)]
 

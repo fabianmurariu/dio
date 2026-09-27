@@ -320,7 +320,6 @@ impl Ctx {
         handle: Var<crate::refer::SMutPtr<()>>,
         next_id: usize,
         drop_id: usize,
-        drop_register: bool,
         consumer: F,
     ) where
         Item: StagedType + 'static,
@@ -385,13 +384,9 @@ impl Ctx {
                 .resolve_var::<crate::refer::SMutPtr<()>>(handle_id)
                 .leaf();
             let drop_ref = ctx.declare_extern_func(drop_id);
-            if drop_register {
-                crate::ffi::emit_register_call(ctx, drop_ref, &[it_val2], &[]);
-            } else {
-                let mut args = Vec::with_capacity(1);
-                crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
-                crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
-            }
+            let mut args = Vec::with_capacity(1);
+            crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
+            crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
         }));
     }
 
@@ -418,7 +413,6 @@ impl Ctx {
         next_off: i32,
         drop_off: i32,
         data_off: i32,
-        next_regs: Option<(i32, ScalarType)>,
         init_call: InitFn,
         consumer: F,
     ) where
@@ -467,31 +461,15 @@ impl Ctx {
             // header: load data + next ptr, call it, branch on the tag register.
             ctx.switch_to_block(header);
             let data = ctx.load(ScalarType::Ptr, slot_ptr, data_off);
-            let (tag, val) = match next_regs {
-                // Register ABI (spike): `data` in, `(tag, value)` back in x0:x1.
-                Some((next_regs_off, item_ty)) => {
-                    let next_fn = ctx.load(ScalarType::Ptr, slot_ptr, next_regs_off);
-                    let results = ctx.call_indirect_multi(
-                        &[ScalarType::Ptr],
-                        &[ScalarType::I64, item_ty],
-                        next_fn,
-                        &[data],
-                    );
-                    (results[0], Value::scalar(results[1]))
-                }
-                None => {
-                    let next_fn = ctx.load(ScalarType::Ptr, slot_ptr, next_off);
-                    ctx.store(data, data_ptr, 0);
-                    ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
-                    let tag = ctx.load(ScalarType::I64, option_ptr, 0);
-                    // Single source of truth for the COption payload offset (see
-                    // COptionType::payload_offset); do not re-derive align_up(8, align) here.
-                    let payload_offset =
-                        crate::option::COptionType::<Item>::payload_offset() as i64;
-                    let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
-                    (tag, ctx.load_value::<Item>(payload_ptr))
-                }
-            };
+            let next_fn = ctx.load(ScalarType::Ptr, slot_ptr, next_off);
+            ctx.store(data, data_ptr, 0);
+            ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
+            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
+            // Single source of truth for the COption payload offset (see
+            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
+            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i64;
+            let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
+            let val = ctx.load_value::<Item>(payload_ptr);
             ctx.brif(tag, body, &[], exit, &[]);
 
             // body: bind elem = value register, replay consumer, loop.
@@ -620,9 +598,6 @@ pub(crate) struct ExternFnDef {
     pub name: String,
     pub num_params: usize,
     pub fn_ptr: *const u8,
-    /// `Some` when called under the register ABI (spike): `fn_ptr` is then the
-    /// `extern "C"` function itself, declared with this signature.
-    pub register_abi: Option<crate::ffi::RegAbi>,
 }
 
 /// Emit one function body under the private storage-pointer ABI, **backend-neutrally**.
@@ -782,17 +757,11 @@ impl Compiler {
     pub fn extern_fn<S: crate::ffi::ExternFn>(&mut self) -> crate::ffi::ExternRef<S> {
         let extern_id = self.extern_functions.len();
 
-        let register_abi = crate::ffi::register_abi::<S>();
-        let fn_ptr = match (&register_abi, S::DIRECT_FN_PTR) {
-            (Some(_), Some(direct)) => direct,
-            _ => S::FN_PTR,
-        };
         self.extern_functions.push(ExternFnDef {
             // Disambiguate generic instantiations (same NAME, different fn ptr).
-            name: format!("{}_{:x}", S::NAME, fn_ptr as usize),
+            name: format!("{}_{:x}", S::NAME, S::FN_PTR as usize),
             num_params: S::NUM_PARAMS,
-            fn_ptr,
-            register_abi,
+            fn_ptr: S::FN_PTR,
         });
 
         crate::ffi::ExternRef::new(extern_id)
@@ -1276,20 +1245,8 @@ impl Compiler {
             let mut sig = module.make_signature();
             sig.call_conv = call_conv;
 
-            match &extern_def.register_abi {
-                Some(abi) => {
-                    for &param in &abi.params {
-                        sig.params.push(AbiParam::new(param.to_cranelift()));
-                    }
-                    for &ret in &abi.rets {
-                        sig.returns.push(AbiParam::new(ret.to_cranelift()));
-                    }
-                }
-                None => {
-                    for _ in 0..=extern_def.num_params {
-                        sig.params.push(AbiParam::new(types::I64));
-                    }
-                }
+            for _ in 0..=extern_def.num_params {
+                sig.params.push(AbiParam::new(types::I64));
             }
 
             // Declare the function (will be linked to the actual function pointer)
