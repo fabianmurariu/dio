@@ -4,12 +4,13 @@ use crate::types::IntCmp;
 use rust_lms_derive::StagedType;
 
 use crate::func::Ctx;
-use crate::num::{add, lt};
+use crate::label::Label;
+use crate::num::{add, ge};
 use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
 use crate::r#struct::{Field, LoadField, load_field_unchecked};
 use crate::types::{CopyType, StagedType};
 
-use super::traits::{IndexedSource, IndexedStagedIterator, StagedIterator};
+use super::traits::{Close, Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 
 /// Element yielded by a zipped iterator.
 ///
@@ -77,9 +78,10 @@ where
 {
 }
 
-/// Combinator that pairs elements from two sources at the same 0-based index.
+/// Combinator that pairs elements of two iterators, stopping at the shorter.
 ///
-/// Created by `indexed_iter.zip(secondary)`. Use `for_each` to drive the loop.
+/// Created by [`StagedIterator::zip`]. Any two iterators zip; two indexed ones
+/// share a single counter (see [`Cursor::indexed_len`]).
 pub struct Zip<I, S> {
     pub(crate) iter: I,
     pub(crate) other: S,
@@ -284,34 +286,104 @@ fn store_value<T: StagedType>(
     ctx.store_value::<T>(destination, value);
 }
 
-impl<I, S> StagedIterator for Zip<I, S>
+impl<A, B> StagedIterator for Zip<A, B>
 where
-    I: IndexedStagedIterator + IndexedSource + Clone + 'static,
-    <I as IndexedSource>::Item: CopyType + 'static,
-    S: IndexedSource + Clone + 'static,
-    <S as IndexedSource>::Item: CopyType + 'static,
-    <I as IndexedSource>::GetExpr: 'static,
-    <S as IndexedSource>::GetExpr: 'static,
+    A: StagedIterator,
+    B: StagedIterator,
+    A::Item: CopyType + 'static,
+    B::Item: CopyType + 'static,
 {
-    type Item = ZipItem<<I as IndexedSource>::Item, <S as IndexedSource>::Item>;
+    type Item = ZipItem<A::Item, B::Item>;
+    type Cursor = ZipCursor<A::Cursor, B::Cursor>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
-    {
-        let i = ctx.var(0u64);
-        let len = ctx.bind(ZipLen::new(
-            IndexedSource::count(&self.iter),
-            IndexedSource::count(&self.other),
-        ));
-        let prim = self.iter;
-        let sec = self.other;
+    /// Open both sides, then choose the plan at stage 0: when both have random
+    /// access, one shared counter against the hoisted `min` of the lengths —
+    /// the loop a hand-written zip over two slices would be. Otherwise each
+    /// side pulls its own element.
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+        let mut a = self.iter.open(ctx);
+        let mut b = self.other.open(ctx);
+        let shared = match (a.indexed_len(ctx), b.indexed_len(ctx)) {
+            (Some(len_a), Some(len_b)) => Some(SharedIndex {
+                len: ctx.bind(ZipLen::new(len_a, len_b)),
+                pos: ctx.var(0u64),
+            }),
+            _ => None,
+        };
+        ZipCursor { a, b, shared }
+    }
+}
 
-        ctx.while_loop(lt(i, len), move |ctx| {
-            let elem = ctx.bind(ZipGetAt::new(prim.clone(), sec.clone(), i));
-            consumer(ctx, elem);
-            ctx.store(i, add(i, 1u64));
-        });
+/// A counter shared by both sides of an indexed zip.
+#[derive(Clone, Copy)]
+pub struct SharedIndex {
+    len: Var<u64>,
+    pos: Var<u64>,
+}
+
+/// The cursor of a [`Zip`]. Random access when both sides are.
+pub struct ZipCursor<A, B> {
+    a: A,
+    b: B,
+    /// `Some` when both sides are indexed (decided in `open`).
+    shared: Option<SharedIndex>,
+}
+
+/// One zip step: both elements, and both sides' closes.
+type ZipStep<A, B> = (
+    (Var<<A as Cursor>::Item>, Var<<B as Cursor>::Item>),
+    (<A as Cursor>::Close, <B as Cursor>::Close),
+);
+
+impl<A: Cursor, B: Cursor> ZipCursor<A, B> {
+    /// One step, yielding both elements as separate vars (no pair slot).
+    fn next_parts(self, ctx: &mut Ctx, done: Label<'_>) -> ZipStep<A, B> {
+        match self.shared {
+            Some(SharedIndex { len, pos }) => {
+                ctx.exit_if(ge(pos, len), done);
+                // SAFETY: `pos < len = min(len_a, len_b)`.
+                let (x, ca) = unsafe { self.a.next_at(ctx, pos) };
+                // SAFETY: as above.
+                let (y, cb) = unsafe { self.b.next_at(ctx, pos) };
+                ctx.store(pos, add(pos, 1u64));
+                ((x, y), (ca, cb))
+            }
+            None => {
+                // `a` first: if `b` is then exhausted, `a`'s element is dropped,
+                // as in `std::iter::Zip`.
+                let (x, ca) = self.a.next(ctx, done);
+                let (y, cb) = self.b.next(ctx, done);
+                ((x, y), (ca, cb))
+            }
+        }
+    }
+}
+
+impl<A, B> Cursor for ZipCursor<A, B>
+where
+    A: Cursor,
+    B: Cursor,
+    A::Item: CopyType + 'static,
+    B::Item: CopyType + 'static,
+{
+    type Item = ZipItem<A::Item, B::Item>;
+    type Close = (A::Close, B::Close);
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
+        let ((x, y), close) = self.next_parts(ctx, done);
+        (ctx.bind(Pair::new(x, y)), close)
+    }
+
+    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+        self.shared.map(|s| s.len)
+    }
+
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+        // SAFETY: `index < len = min(len_a, len_b)`, forwarded from the caller.
+        let (x, ca) = unsafe { self.a.next_at(ctx, index) };
+        // SAFETY: as above.
+        let (y, cb) = unsafe { self.b.next_at(ctx, index) };
+        (ctx.bind(Pair::new(x, y)), (ca, cb))
     }
 }
 
@@ -319,7 +391,9 @@ impl<I, S> IndexedStagedIterator for Zip<I, S>
 where
     I: IndexedStagedIterator + IndexedSource + Clone + 'static,
     <I as IndexedSource>::Item: CopyType + 'static,
-    S: IndexedSource + Clone + 'static,
+    S: StagedIterator + IndexedSource + Clone + 'static,
+    <I as StagedIterator>::Item: CopyType + 'static,
+    <S as StagedIterator>::Item: CopyType + 'static,
     <S as IndexedSource>::Item: CopyType + 'static,
     <I as IndexedSource>::GetExpr: 'static,
     <S as IndexedSource>::GetExpr: 'static,
@@ -336,7 +410,7 @@ where
 
 impl<I, S> IndexedSource for Zip<I, S>
 where
-    I: IndexedStagedIterator + IndexedSource + Clone + 'static,
+    I: IndexedSource + Clone + 'static,
     <I as IndexedSource>::Item: CopyType + 'static,
     S: IndexedSource + Clone + 'static,
     <S as IndexedSource>::Item: CopyType + 'static,
@@ -359,42 +433,29 @@ where
     }
 }
 
-impl<I, S> Zip<I, S>
+impl<A, B> Zip<A, B>
 where
-    I: IndexedStagedIterator + IndexedSource + 'static,
-    <I as IndexedSource>::Item: StagedType + CopyType + 'static,
-    S: IndexedSource + 'static,
-    <S as IndexedSource>::Item: StagedType + CopyType + 'static,
-    <I as IndexedSource>::GetExpr: 'static,
-    <S as IndexedSource>::GetExpr: 'static,
+    A: StagedIterator,
+    B: StagedIterator,
+    A::Item: CopyType + 'static,
+    B::Item: CopyType + 'static,
 {
-    /// Drive a loop over `(primary_elem, secondary_elem)` pairs.
+    /// Drive a loop over `(a_elem, b_elem)` pairs.
     ///
-    /// Both sources are accessed at the same 0-based index and iteration stops
-    /// at the shorter source.
+    /// Shadows [`StagedIterator::for_each`] with a three-argument consumer: the
+    /// two elements arrive as separate vars, so no `ZipItem` is written to a
+    /// stack slot and read back. Iteration stops at the shorter side.
     pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<<I as IndexedSource>::Item>, Var<<S as IndexedSource>::Item>)
-            + 'static,
+        F: FnOnce(&mut Ctx, Var<A::Item>, Var<B::Item>),
     {
-        let i = ctx.var(0u64);
-        let len = ctx.bind(ZipLen::new(
-            IndexedSource::count(&self.iter),
-            IndexedSource::count(&self.other),
-        ));
-        let prim = self.iter;
-        let sec = self.other;
-
-        ctx.while_loop(lt(i, len), move |ctx| {
-            // Read both sides straight into their own vars. Going through a
-            // `ZipItem` here would store the pair to a stack slot and load both
-            // fields back out — a memory round-trip this consumer never wants.
-            // SAFETY: `i < len <= min(count(prim), count(sec))`.
-            let elem1 = ctx.bind(unsafe { IndexedSource::get_at(prim.clone(), i) });
-            // SAFETY: as above.
-            let elem2 = ctx.bind(unsafe { IndexedSource::get_at(sec.clone(), i) });
-            consumer(ctx, elem1, elem2);
-            ctx.store(i, add(i, 1u64));
+        let cursor = StagedIterator::open(self, ctx);
+        let mut close = None;
+        ctx.iterate(|ctx, done| {
+            let ((x, y), c) = cursor.next_parts(ctx, done);
+            close = Some(c);
+            consumer(ctx, x, y);
         });
+        close.expect("the step is staged exactly once").close(ctx);
     }
 }

@@ -20,7 +20,7 @@
 use crate::cranelift::CraneliftBackend;
 use crate::label::{Again, Label};
 use crate::staged::{
-    CompilationContext, LifetimeErased, SigSpec, Staged, Value, ValueId, Var, VarValue, assign,
+    CompilationContext, LifetimeErased, Staged, Value, ValueId, Var, VarValue, assign,
 };
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
@@ -251,6 +251,26 @@ impl Ctx {
         }));
     }
 
+    /// Crate-internal: emit backend code directly, for sources whose step has
+    /// no staged-expression form (an indirect call through a slot's vtable).
+    pub(crate) fn emit_raw(&mut self, f: impl FnOnce(&mut CompilationContext) + 'static) {
+        self.actions.push(Box::new(f));
+    }
+
+    /// Crate-internal: bind the value produced by raw backend code.
+    pub(crate) fn bind_raw<T: StagedType + 'static>(
+        &mut self,
+        f: impl FnOnce(&mut CompilationContext) -> Value + 'static,
+    ) -> Var<T> {
+        let v = self.alloc::<T>();
+        let id = v.id;
+        self.actions.push(Box::new(move |ctx| {
+            let value = f(ctx);
+            ctx.assign_var::<T>(id, value, true);
+        }));
+        v
+    }
+
     /// Emit a while loop: `while cond { body }`.
     ///
     /// `body` is called once at staging time; the closure emits the per-iteration
@@ -448,11 +468,26 @@ impl Ctx {
     where
         C: Staged<Out = bool> + 'static,
     {
-        let id = label.id;
+        self.branch_to(cond, label.id, true);
+    }
+
+    /// `if !cond { break 'label }` — branches on `cond` itself, no negation.
+    pub fn exit_unless<C>(&mut self, cond: C, label: Label<'_>)
+    where
+        C: Staged<Out = bool> + 'static,
+    {
+        self.branch_to(cond, label.id, false);
+    }
+
+    /// Jump to label `id` when `cond == when`, else continue.
+    fn branch_to<C>(&mut self, cond: C, id: usize, when: bool)
+    where
+        C: Staged<Out = bool> + 'static,
+    {
         self.actions.push(Box::new(move |ctx| {
             let cond = cond.codegen(ctx);
             let target = label_block(ctx, id);
-            branch_or_continue(ctx, cond.leaf(), target);
+            branch_or_continue(ctx, cond.leaf(), target, when);
         }));
     }
 
@@ -471,207 +506,15 @@ impl Ctx {
     where
         C: Staged<Out = bool> + 'static,
     {
-        let id = again.id;
-        self.actions.push(Box::new(move |ctx| {
-            let cond = cond.codegen(ctx);
-            let head = label_block(ctx, id);
-            branch_or_continue(ctx, cond.leaf(), head);
-        }));
+        self.branch_to(cond, again.id, true);
     }
 
-    /// Drive a push loop over an opaque external iterator via `next`/`drop`.
-    ///
-    /// Emits the storage-pointer loop (see `iter::opaque`):
-    /// ```text
-    /// header: next(&it, &option)        ; Rust thunk writes COption<Item>
-    ///         brif tag, body, exit      ; tag: 1 = Some, 0 = None
-    /// body:   elem = val ; <consumer> ; jump header
-    /// exit:   drop(it)
-    /// ```
-    /// `drop` sits at the top of `exit`, which is reached both by the `None`
-    /// branch and by any `break_loop` from the body, so the handle is always
-    /// freed. The element is loaded from the exact `COption<Item>` payload.
-    ///
-    /// `Item` must be an integer no wider than 64 bits (the `COption` FFI ABI
-    /// returns the payload in an integer register). Float/compound items go via
-    /// the ExactSize path instead.
-    pub fn opaque_for_each<Item, F>(
-        &mut self,
-        handle: Var<crate::refer::SMutPtr<()>>,
-        next_id: usize,
-        drop_id: usize,
-        consumer: F,
-    ) where
-        Item: StagedType + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>),
+    /// `if !cond { continue 'again }` — branches on `cond` itself, no negation.
+    pub fn again_unless<C>(&mut self, cond: C, again: Again<'_>)
+    where
+        C: Staged<Out = bool> + 'static,
     {
-        // Element var: defined inside the body from `next`'s value register.
-        let elem: Var<Item> = unsafe { self.var_unchecked() };
-        let elem_id = elem.id;
-        let handle_id = handle.id;
-
-        // Build the body into a child Ctx (same shape as `while_loop`).
-        let mut child = Ctx::new(self.next_var_id);
-        consumer(&mut child, elem);
-        self.next_var_id = child.next_var_id;
-        let body_actions = child.actions;
-
-        self.actions.push(Box::new(move |ctx| {
-            let header = ctx.create_block();
-            let body = ctx.create_block();
-            let exit = ctx.create_block();
-
-            ctx.jump(header, &[]);
-
-            // header: call the canonical thunk and branch on the stored tag.
-            ctx.switch_to_block(header);
-            let it_val = ctx
-                .resolve_var::<crate::refer::SMutPtr<()>>(handle_id)
-                .leaf();
-            let next_ref = ctx.declare_extern_func(next_id);
-            let mut args = Vec::with_capacity(1);
-            crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val);
-            let option_ptr = crate::ffi::emit_extern_call::<crate::option::COptionType<Item>>(
-                ctx, next_ref, args,
-            )
-            .leaf();
-            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
-            // Single source of truth for the COption payload offset (see
-            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
-            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i64;
-            let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
-            let val = ctx.load_value::<Item>(payload_ptr);
-            ctx.brif(tag, body, &[], exit, &[]);
-
-            // body: bind elem = value register (already the element's ABI type,
-            // since COption<Item> returns [tag, ...Item's abi...]), replay
-            // consumer, loop.
-            ctx.switch_to_block(body);
-            ctx.seal_block(body);
-            ctx.assign_var::<Item>(elem_id, val, false);
-            ctx.loop_exit_stack.push(exit);
-            for action in body_actions {
-                action(ctx);
-            }
-            ctx.loop_exit_stack.pop();
-            ctx.jump(header, &[]);
-            ctx.seal_block(header);
-
-            // exit: free the iterator (reached by None and by break_loop).
-            ctx.switch_to_block(exit);
-            ctx.seal_block(exit);
-            let it_val2 = ctx
-                .resolve_var::<crate::refer::SMutPtr<()>>(handle_id)
-                .leaf();
-            let drop_ref = ctx.declare_extern_func(drop_id);
-            let mut args = Vec::with_capacity(1);
-            crate::ffi::push_extern_value::<crate::refer::SMutPtr<()>>(ctx, &mut args, it_val2);
-            crate::ffi::emit_extern_call::<()>(ctx, drop_ref, args);
-        }));
-    }
-
-    /// Drive a push loop over a *reused-storage* opaque iterator (see
-    /// `iter::opaque`): reserve one per-level slot in the JIT frame, let the
-    /// producer build the iterator into it (`init_call`), then drive it through
-    /// the slot's hand-rolled mini-vtable with indirect calls:
-    /// ```text
-    /// reserve slot[size]            ; once, reused every outer iteration
-    /// init(args.., &slot)           ; producer fills next/drop ptrs + storage
-    /// header: data = slot.data
-    ///         (tag, val) = call_indirect slot.next (data)   ; COption in regs
-    ///         brif tag, body, exit
-    /// body:   elem = val ; <consumer> ; jump header
-    /// exit:   call_indirect slot.drop (slot.data)
-    /// ```
-    /// The slot is a function-level stack slot, so nesting just reserves one per
-    /// level; `drop` runs on every exit (None and `break_loop`).
-    #[allow(clippy::too_many_arguments)]
-    pub fn reused_opaque_for_each<Item, InitFn, F>(
-        &mut self,
-        slot_size: u32,
-        slot_align_shift: u8,
-        next_off: i32,
-        drop_off: i32,
-        data_off: i32,
-        init_call: InitFn,
-        consumer: F,
-    ) where
-        Item: StagedType + 'static,
-        InitFn: FnOnce(&mut CompilationContext, ValueId) + 'static,
-        F: FnOnce(&mut Ctx, Var<Item>),
-    {
-        let elem: Var<Item> = unsafe { self.var_unchecked() };
-        let elem_id = elem.id;
-
-        let mut child = Ctx::new(self.next_var_id);
-        consumer(&mut child, elem);
-        self.next_var_id = child.next_var_id;
-        let body_actions = child.actions;
-
-        self.actions.push(Box::new(move |ctx| {
-            // One per-level slot, reserved once in the frame and reused.
-            let slot = ctx.alloc_stack_slot(slot_size, slot_align_shift);
-            let slot_ptr = ctx.stack_addr(slot, 0);
-
-            // Producer builds the iterator into the slot (fills the mini-vtable).
-            init_call(ctx, slot_ptr);
-
-            // Canonical storage-pointer signatures for indirect next/drop:
-            // (data slot ptr, output slot ptr) -> void.
-            let storage_ptr_sig = SigSpec {
-                params: vec![ScalarType::Ptr, ScalarType::Ptr],
-                ret: None,
-            };
-            let next_sigref = ctx.import_signature(&storage_ptr_sig);
-            let drop_sigref = ctx.import_signature(&storage_ptr_sig);
-
-            let data_slot = ctx.alloc_stack_slot(8, 3);
-            let data_ptr = ctx.stack_addr(data_slot, 0);
-            let option_slot = ctx.alloc_stack_slot(
-                crate::option::COptionType::<Item>::size_of() as u32,
-                crate::option::COptionType::<Item>::align_of().trailing_zeros() as u8,
-            );
-            let option_ptr = ctx.stack_addr(option_slot, 0);
-
-            let header = ctx.create_block();
-            let body = ctx.create_block();
-            let exit = ctx.create_block();
-            ctx.jump(header, &[]);
-
-            // header: load data + next ptr, call it, branch on the tag register.
-            ctx.switch_to_block(header);
-            let data = ctx.load(ScalarType::Ptr, slot_ptr, data_off);
-            let next_fn = ctx.load(ScalarType::Ptr, slot_ptr, next_off);
-            ctx.store(data, data_ptr, 0);
-            ctx.call_indirect(next_sigref, next_fn, &[data_ptr, option_ptr]);
-            let tag = ctx.load(ScalarType::I64, option_ptr, 0);
-            // Single source of truth for the COption payload offset (see
-            // COptionType::payload_offset); do not re-derive align_up(8, align) here.
-            let payload_offset = crate::option::COptionType::<Item>::payload_offset() as i64;
-            let payload_ptr = ctx.ptr_offset_const(option_ptr, payload_offset);
-            let val = ctx.load_value::<Item>(payload_ptr);
-            ctx.brif(tag, body, &[], exit, &[]);
-
-            // body: bind elem = value register, replay consumer, loop.
-            ctx.switch_to_block(body);
-            ctx.seal_block(body);
-            ctx.assign_var::<Item>(elem_id, val, false);
-            ctx.loop_exit_stack.push(exit);
-            for action in body_actions {
-                action(ctx);
-            }
-            ctx.loop_exit_stack.pop();
-            ctx.jump(header, &[]);
-            ctx.seal_block(header);
-
-            // exit: drop the iterator (frees only if it was heap-boxed).
-            ctx.switch_to_block(exit);
-            ctx.seal_block(exit);
-            let data2 = ctx.load(ScalarType::Ptr, slot_ptr, data_off);
-            let drop_fn = ctx.load(ScalarType::Ptr, slot_ptr, drop_off);
-            ctx.store(data2, data_ptr, 0);
-            ctx.call_indirect(drop_sigref, drop_fn, &[data_ptr, option_ptr]);
-        }));
+        self.branch_to(cond, again.id, false);
     }
 
     /// Break out of the innermost enclosing loop — an [`iterate`](Self::iterate)
@@ -836,14 +679,20 @@ fn switch_to_dead_block(ctx: &mut CompilationContext) {
     ctx.seal_block(dead);
 }
 
-/// `brif cond, target, cont` and continue in `cont` — one branch, no merge block.
+/// Branch to `target` when `cond == when`, else continue in a fresh block —
+/// one `brif`, no merge block.
 fn branch_or_continue(
     ctx: &mut CompilationContext,
     cond: ValueId,
     target: crate::staged::BlockHandle,
+    when: bool,
 ) {
     let cont = ctx.create_block();
-    ctx.brif(cond, target, &[], cont, &[]);
+    if when {
+        ctx.brif(cond, target, &[], cont, &[]);
+    } else {
+        ctx.brif(cond, cont, &[], target, &[]);
+    }
     ctx.switch_to_block(cont);
     ctx.seal_block(cont);
 }

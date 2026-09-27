@@ -54,6 +54,38 @@ migration plan (§10), and risks and open questions (§11).
 
 ---
 
+## Implementation status (branch `pull-iter`)
+
+| Increment (§10) | State |
+|---|---|
+| 1. Labels: `block`/`join`/`repeat`/`iterate` + `exit`/`goto`/`again` (+ `_if`/`_unless`) | **done** — `rust-lms/src/label.rs`, `func.rs`; `tests/test_labels.rs` |
+| 2–5. Pull protocol as the required method of `StagedIterator`; every source and combinator a cursor; `for_each` provided | **done** — went straight to the merged trait (no temporary parallel trait); `opaque_for_each`/`reused_opaque_for_each` deleted from `Ctx` |
+| 4. `zip` for any two iterators (shared counter when both indexed), `chain`, `take`, `skip` | **done** — `tests/test_pull_iter.rs` |
+| 6. `flat_map`, `peekable`, `merge_by`, `intersect_sorted` | next |
+| 7. Item representation (3-arg consumers, register tuples) | open (the 3-arg `Zip::for_each`/`Enumerate::for_each` remain) |
+| §6.3 stage-0 `size_hint` | open |
+
+Correctness gaps from §1.3 closed so far: `map`/`enumerate` keep random access
+(`a.map(f).zip(b)` compiles and shares one counter); `i64` ranges zip;
+`take_while` inside a `chain` ends only its half, and a downstream early exit
+leaves the whole chain; every extern handle opened by a pipeline is dropped
+exactly once on every exit; the `u64` range length no longer wraps for an empty
+range (`range(5, 3).rev()` used to run ~2^64 times).
+
+Where the implementation differs from the sketches below: value-less labels
+are `ctx.block`/`ctx.exit` (not `join::<()>`/`goto(done, ())`); the random-access
+probe is `Cursor::indexed_len`/`next_at` rather than a boxed `Indexed<T>` (§6.2
+explains why); `IndexedStagedIterator` stays as the typed capability behind
+`rev`, with `zip` moved off it.
+
+Verified: whole workspace green with `--features llvm`, where every test body
+runs on both Cranelift and LLVM (rust-lms 337 tests, sql-gen 113, rust-lms-std
+28); emitted IR for slice sum and indexed zip
+has the same loop as before, and filter adds only the one trivial jump predicted
+in §8.1.
+
+---
+
 ## 1. What's there today (review of `rust-lms/src/iter/`)
 
 ### 1.1 The model
@@ -285,40 +317,47 @@ value) and *backward* (filter's retry) without opening a loop scope that
 model, `block` + `loop` + `br`, typed and tied to the closure scope:
 
 ```rust
-/// A jump target that carries a `T` (the merge-block parameters — a phi).
-/// `Label<'s, ()>` is a plain target. `'s` is an invariant brand tying it to the
-/// scope that created it, so it cannot be used after that scope is sealed.
-#[derive(Clone, Copy)]
-pub struct Label<'s, T> { id: usize, _brand: PhantomData<(fn(&'s ()) -> &'s (), T)> }
-
+// rust-lms/src/label.rs
+/// A forward jump target that receives a `T` (the merge-block parameters — a
+/// phi). `Label<'s>` (`T = ()`) is a plain target. `'s` is an invariant brand
+/// tying it to the scope that created it.
+pub struct Label<'s, T = ()> { id: usize, … }   // Copy
 /// A backward target: jumping to it re-runs the `repeat` body.
-#[derive(Clone, Copy)]
-pub struct Again<'s> { id: usize, _brand: PhantomData<fn(&'s ()) -> &'s ()> }
+pub struct Again<'s> { id: usize, … }           // Copy
 
+// rust-lms/src/func.rs
 impl Ctx {
-    /// Forward join (Wasm `block`). Every `goto(l, v)` inside `body`, plus
-    /// `body`'s own fall-through result, lands on one merge block whose
-    /// parameters are `T`. Returns the merged value.
-    pub fn join<T, R, F>(&mut self, body: F) -> Var<T>
+    /// The iteration loop: `'done: loop { body }`. `break_loop` inside targets
+    /// the same exit as `exit(done)`.
+    pub fn iterate<F>(&mut self, body: F)
+    where F: for<'s> FnOnce(&mut Ctx, Label<'s>);
+
+    /// Forward label, no value (Wasm `block`): `'out: { body }`.
+    pub fn block<F>(&mut self, body: F)
+    where F: for<'s> FnOnce(&mut Ctx, Label<'s>);
+
+    /// Forward label carrying a value: every `goto(out, v)` inside `body`, plus
+    /// `body`'s own fall-through result, lands on one merge block.
+    pub fn join<T, E, F>(&mut self, body: F) -> Var<T>
     where
         T: StagedType + 'static,
-        F: for<'s> FnOnce(&mut Ctx, Label<'s, T>) -> R,
-        R: IntoStaged<T>, R::Staged: 'static;
+        E: IntoStaged<T>, E::Staged: 'static,
+        F: for<'s> FnOnce(&mut Ctx, Label<'s, T>) -> E;
 
-    /// Backward label (Wasm `loop`). `again(a)` jumps back to the start of
-    /// `body`; falling off the end continues after it. *Not* an iteration
-    /// scope: `break_loop` inside ignores it and targets the enclosing loop.
+    /// Backward label (Wasm `loop`, exiting by default). *Not* an iteration
+    /// scope: `break_loop` inside passes through to the enclosing loop.
     pub fn repeat<R, F>(&mut self, body: F) -> R
     where F: for<'s> FnOnce(&mut Ctx, Again<'s>) -> R;
 
-    pub fn goto<T, E>(&mut self, label: Label<'_, T>, value: E) where E: IntoStaged<T>, …;
-    pub fn again(&mut self, a: Again<'_>);
+    pub fn goto<T, E>(&mut self, label: Label<'_, T>, value: E);   // break 'l value
+    pub fn exit(&mut self, label: Label<'_>);                      // break 'l
+    pub fn again(&mut self, again: Again<'_>);                     // continue 'l
 
-    /// The driver loop: `loop { body }`. `done` is its exit. `break_loop` inside
-    /// also targets that exit, so a terminal's early break and a source's
-    /// exhaustion leave through the same block.
-    pub fn iterate<F>(&mut self, body: F)
-    where F: for<'s> FnOnce(&mut Ctx, Label<'s, ()>);
+    // One `brif` each, no merge block (what sources and filters use):
+    pub fn exit_if<C>(&mut self, cond: C, label: Label<'_>);       // if c { break 'l }
+    pub fn exit_unless<C>(&mut self, cond: C, label: Label<'_>);   // if !c { break 'l }
+    pub fn again_if<C>(&mut self, cond: C, again: Again<'_>);      // if c { continue 'l }
+    pub fn again_unless<C>(&mut self, cond: C, again: Again<'_>);  // if !c { continue 'l }
 }
 ```
 
@@ -452,7 +491,7 @@ ctx.iterate(|ctx, done| {               // 'done: loop {
   let x = ctx.repeat(|ctx, again| {     //   let x = 'again: loop {
     // SliceCursor::next
     ctx.if_then(ge(i, n), |ctx|         //     if i >= n { break 'done }
-        ctx.goto(done, ()));
+        ctx.exit(done));
     let x = ctx.bind(s[i]);             //     let x = s[i];
     ctx.store(i, i + 1);                //     i += 1;
     ctx.if_then(not(p(x)), |ctx|        //     if !p(x) { continue 'again }
@@ -477,7 +516,7 @@ combinator decides what that means by choosing which label to pass down.
 ```rust
 let x = ctx.join(|ctx, got| {                        // 'got: {
     ctx.if_then(not(in_b), |ctx| {                   //   if !in_b {
-        ctx.join::<(), _, _>(|ctx, a_done| {         //     'a_done: {
+        ctx.block(|ctx, a_done| {         //     'a_done: {
             let x = a.next(ctx, a_done);             //       let x = a.next() else break 'a_done;
             ctx.goto(got, x);                        //       break 'got x;
         });                                          //     }
@@ -498,7 +537,7 @@ is tied to that closure and can't be named outside it:
 
 ```rust
 let mut leaked = None;
-ctx.join::<(), _, _>(|_ctx, l| { leaked = Some(l); });   // error[E0521]: borrowed data escapes the closure
+ctx.block(|_ctx, l| { leaked = Some(l); });   // error[E0521]: borrowed data escapes the closure
 ctx.goto(leaked.unwrap(), ());
 ```
 
@@ -542,10 +581,15 @@ into a compile error. Generated code only ever sees the label's plain id, as wit
 - `repeat`: `head = create_block(); jump(head); switch_to_block(head)`; replay
   the body; continue in the current block; `seal_block(head)` at the end (its
   back-edges are all inside the body).
-- `iterate`: `while_loop(true, …)` with its exit block also registered as a
-  `Label<()>`. `while_loop` itself can then be re-expressed as
-  `iterate(|ctx, done| { if !cond { goto done }; body })`, so the lowering stays
-  in one place.
+- `block`: as `join`, with no block parameters.
+- `exit_if`/`exit_unless`/`again_if`/`again_unless`: `brif cond, target, cont`
+  (or the targets swapped), then continue in `cont`. One branch, no merge block
+  and no negation instruction.
+- `iterate` and `while_loop` share one lowering (`emit_loop` in `func.rs`):
+  `while_loop` adds the header test; `iterate` has none and registers its exit
+  block as the `done` label. Both push the exit on `loop_exit_stack`, so
+  `break_loop` targets them and only them. (Re-expressing `while_loop` *as*
+  `iterate` + `exit_unless` was rejected: it adds a block per loop.)
 
 **The brand and the `'static` action queue.** Ctx actions are `'static` boxed
 closures. The brand only exists on the stage-0 handle; the recorded action
@@ -582,11 +626,7 @@ pub trait StagedIterator: Sized {
     /// before the loop that drives the cursor.
     fn open(self, ctx: &mut Ctx) -> Self::Cursor;
 
-    /// Stage-0 capability probe (§6.2): random access, if this iterator has it.
-    fn into_indexed(self) -> Result<Indexed<Self::Item>, Self> { Err(self) }
-
-    /// Stage-0 length knowledge (§6.3).
-    fn size_hint(&self) -> SizeHint { SizeHint::Unknown }
+    /// (Not yet implemented: a stage-0 `size_hint`, §6.3.)
 
     /// Provided: the one push driver. Override for a better loop (FlatMap).
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
@@ -603,13 +643,13 @@ pub trait StagedIterator: Sized {
     }
 
     // … all current combinators and terminals, unchanged in signature …
-    fn zip<B: StagedIterator>(self, other: B) -> Zip<Self, B> { Zip::new(self, other) }
-    fn chain<B: StagedIterator<Item = Self::Item>>(self, other: B) -> Chain<Self, B> { … }
+    // `zip`/`chain` take `IntoStagedIterator`, so a bare slice var still works:
+    fn zip<B: IntoStagedIterator>(self, other: B) -> Zip<Self, B::Iter> { … }
+    fn chain<B: IntoStagedIterator>(self, other: B) -> Chain<Self, B::Iter>
+        where B::Iter: StagedIterator<Item = Self::Item> { … }
     fn take<N: IntoStaged<u64>>(self, n: N) -> Take<Self, N::Staged> { … }
     fn skip<N: IntoStaged<u64>>(self, n: N) -> Skip<Self, N::Staged> { … }
-    fn flat_map<J, F>(self, f: F) -> FlatMap<Self, F> where F: Fn(Var<Self::Item>) -> J, J: StagedIterator { … }
-    fn peekable(self) -> Peekable<Self> { … }
-    fn merge_by<B, P>(self, other: B, le: P) -> MergeBy<Self, B, P> { … }
+    // Planned (increment 6): flat_map, peekable, merge_by.
 }
 
 /// An opened iterator: one staged advance.
@@ -624,13 +664,20 @@ pub trait Cursor: Sized {
     /// Contract (fused): once `done` has been taken, the caller never runs this
     /// step again. Callers (driver, chain, zip, merge) guarantee it, so sources
     /// don't need a "fused" flag.
-    fn next(self, ctx: &mut Ctx, done: Label<'_, ()>) -> (Var<Self::Item>, Self::Close);
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
+
+    /// Stage-0 random-access probe (§6.2). Asked by `zip` while it opens,
+    /// before the loop, so any length code (a range's count) lands there.
+    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> { None }
+
+    /// Element at an external index — only after `indexed_len` said `Some`.
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close);
 }
 
 /// Releases resources. `Copy` (vars and extern refs only), because some
 /// combinators emit it at more than one site (flat_map: on inner exhaustion
 /// and at final close).
-pub trait Close: Copy + 'static { fn close(self, ctx: &mut Ctx); }
+pub trait Close: Copy { fn close(self, ctx: &mut Ctx); }
 impl Close for () { fn close(self, _: &mut Ctx) {} }
 impl<A: Close, B: Close> Close for (A, B) { … }
 ```
@@ -672,7 +719,7 @@ inside one.
 fn open(self, ctx) -> SliceCursor { let s = ctx.bind_lt(self.slice);
     let n = ctx.bind_lt(s.reborrow().len()); let i = ctx.var(0u64); SliceCursor { s, n, i } }
 fn next(self, ctx, done) {
-    ctx.if_then(not(lt(self.i, self.n)), |ctx| ctx.goto(done, ()));
+    ctx.if_then(not(lt(self.i, self.n)), |ctx| ctx.exit(done));
     let x = ctx.bind_lt(unsafe { self.s.reborrow().get_unchecked(self.i) }); // SAFETY: i < n
     ctx.store(self.i, add(self.i, 1u64));
     (x, ())
@@ -682,7 +729,7 @@ fn next(self, ctx, done) {
 fn open(self, ctx) -> OpaqueCursor { let h = ctx.bind(self.handle); OpaqueCursor { h, next, drop } }
 fn next(self, ctx, done) {
     let opt = ctx.bind(unsafe { call_extern1_unchecked(self.next, self.h) }); // COption<Item>
-    ctx.if_then(not(opt.is_some()), |ctx| ctx.goto(done, ()));
+    ctx.if_then(not(opt.is_some()), |ctx| ctx.exit(done));
     (ctx.bind(opt.payload_unchecked()), DropHandle { h: self.h, drop: self.drop })
 }
 // Close for DropHandle: emit drop(h). The driver emits it after the loop exit,
@@ -743,7 +790,7 @@ fn next(self, ctx, done) {
 // take_while: exhaustion IS the stop; no break_loop
 fn next(self, ctx, done) {
     let (x, c) = self.inner.next(ctx, done);
-    ctx.if_then(not((self.p)(x)), |ctx| ctx.goto(done, ()));
+    ctx.if_then(not((self.p)(x)), |ctx| ctx.exit(done));
     (x, c)
 }
 
@@ -790,7 +837,7 @@ fn next(self, ctx, done) {
     let (mut ca, mut cb) = (None, None);
     let x = ctx.join(|ctx, got| {
         ctx.if_then(not(self.in_b), |ctx| {
-            ctx.join::<(), _, _>(|ctx, a_done| {
+            ctx.block(|ctx, a_done| {
                 let (x, c) = self.a.next(ctx, a_done); ca = Some(c);
                 ctx.goto(got, x);
             });
@@ -832,7 +879,7 @@ fn next(self, ctx, done) {
             ctx.store(self.active, true);
         });
         let inner = inner.unwrap();
-        ctx.join::<(), _, _>(|ctx, inner_done| {
+        ctx.block(|ctx, inner_done| {
             let (y, ic) = inner.next(ctx, inner_done);
             ctx.goto(got, y);
         });
@@ -866,11 +913,11 @@ reason `flat_map` couldn't be added safely.
 //   ha, hb: Var<T>; need_a, need_b = true; a_live, b_live = true
 fn next(self, ctx, done) {
     ctx.if_then(and(self.need_a, self.a_live), |ctx| {
-        ctx.join::<(), _, _>(|ctx, pulled| {
-            ctx.join::<(), _, _>(|ctx, a_done| {
+        ctx.block(|ctx, pulled| {
+            ctx.block(|ctx, a_done| {
                 let (x, _) = a.next(ctx, a_done);
                 ctx.store(self.ha, x); ctx.store(self.need_a, false);
-                ctx.goto(pulled, ());            // got a head: skip the a_done tail
+                ctx.exit(pulled);            // got a head: skip the a_done tail
             });
             ctx.store(self.a_live, false);        // reached only via a_done
         });
@@ -880,7 +927,7 @@ fn next(self, ctx, done) {
         ctx.if_then(and(self.a_live, or(not(self.b_live), le(self.ha, self.hb))), |ctx| {
             ctx.store(self.need_a, true); ctx.goto(got, self.ha) });
         ctx.if_then(self.b_live, |ctx| { ctx.store(self.need_b, true); ctx.goto(got, self.hb) });
-        ctx.goto(done, ()); unreachable_value()
+        ctx.exit(done); unreachable_value()
     })
 }
 ```
@@ -932,45 +979,49 @@ merged.
 
 ### 6.2 Specialise at stage 0 (the LMS way)
 
-Rust can't specialise `impl StagedIterator for Zip<A, B>` for
-`A, B: IndexedSource`. **At stage 0 it doesn't need to**: the choice is ordinary
-Rust code running while the kernel is built, and it costs nothing at runtime.
+Rust can't specialise `impl StagedIterator for Zip<A, B>` for indexed `A, B`.
+**At stage 0 it doesn't need to**: the choice is ordinary Rust code running
+while the kernel is built, and it costs nothing at runtime.
+
+*As implemented*, the probe lives on the **cursor**, not on the iterator:
 
 ```rust
-/// Random access, type-erased at stage 0 (a Box buys a clean type, per CLAUDE.md).
-pub struct Indexed<T: StagedType> {
-    len: Box<dyn Staged<Out = u64>>,
-    get: Box<dyn Fn(Var<u64>) -> Box<dyn Staged<Out = T>>>,  // unchecked; caller keeps i < len
+pub trait Cursor {
+    …
+    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> { None }
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close);
 }
 
-impl<A, B> StagedIterator for Zip<A, B> /* … */ {
-    type Cursor = ZipCursor<A, B>;               // enum: Indexed{ i, n, ga, gb } | General{ ca, cb }
-    fn open(self, ctx) -> Self::Cursor {
-        match (self.a.into_indexed(), self.b.into_indexed()) {
-            (Ok(ia), Ok(ib)) => { /* one counter, n = min(len_a, len_b), as today's Zip */ }
-            (a, b) => { /* reopen each side as a cursor (Err gives back the iterator) */ }
-        }
-    }
-    fn into_indexed(self) -> Result<Indexed<Self::Item>, Self> { /* both indexed → indexed pair */ }
-}
+// Zip::open
+let mut a = self.iter.open(ctx);
+let mut b = self.other.open(ctx);
+let shared = match (a.indexed_len(ctx), b.indexed_len(ctx)) {
+    (Some(len_a), Some(len_b)) => Some(SharedIndex {
+        len: ctx.bind(ZipLen::new(len_a, len_b)),   // min, hoisted
+        pos: ctx.var(0u64),
+    }),
+    _ => None,                                      // each side pulls
+};
+// ZipCursor::next: shared → exit_if(pos ≥ len); a.next_at(pos); b.next_at(pos); pos += 1
+//                  none   → a.next(done); b.next(done)
 ```
 
-- `SliceIter`, `RangeIter<u64>`, `Map` (`get = f ∘ inner.get`), `Enumerate`
-  (`get(i) = (i, inner.get(i))`), `Zip`, `Take`/`Skip` (bound arithmetic) and
-  `Rev` return `Ok`. `Filter`, `FilterMap`, `TakeWhile`, `SkipWhile`, `Scan`,
-  `Chain`, `FlatMap` and every extern source return `Err`.
-- This fixes review problem 1 for free: `map` preserves random access, so
-  `a.map(f).zip(b)` becomes indexed.
-- `IndexedStagedIterator` collapses into this probe plus `IndexedSource` as the
-  typed capability `rev` and `Var<R>` use. That's one concept instead of two.
-- The `ZipCursor` enum is a stage-0 enum: `next` matches on it while staging, and
-  only the chosen arm's code is emitted.
-- The mixed case (indexed × extern) can reuse the extern's pull and the indexed
-  side's `get(i)` with one counter `i` and a single `i < n` check. That's the same
-  as today's `zip` with a pull on the other side.
+Why the cursor rather than the `Indexed<T>` box first sketched here: the boxed
+`get` closure would have to own the source, but a slice source is bound with
+`bind_lt` and may carry a borrow (an `SVec` view), which a `'static` box can't
+hold. The opened cursor already holds the bound slice, so `next_at` just loads
+from it. No boxes, no lifetime erasure.
 
-`dyn Staged` is already object-safe and used this way (`ChunkedIter` stores
-`Box<dyn Staged<Out = ()>>`).
+- **Random access, as implemented:** `SliceCursor` (its hoisted `len`),
+  `RangeCursor` for `u64` *and* `i64` (the `RangeStep::count`/`nth` hooks; the
+  count is only emitted when a zip asks), `RevCursor`, and the combinators that
+  preserve it: `map`, `enumerate`, `take` (`min(len, n)`), `skip` (`index + n`)
+  and `zip` itself (so nested zips share one counter). `Filter`, `FilterMap`,
+  `TakeWhile`, `SkipWhile`, `Scan`, `Chain` and every extern source answer
+  `None`.
+- This fixes review problem 1: `a.map(f).zip(b)` compiles, and it is indexed.
+- `IndexedStagedIterator` + `IndexedSource` remain as the *typed* capability
+  behind `rev` (only `zip` moved off them).
 
 ### 6.3 `size_hint` at stage 0
 

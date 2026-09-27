@@ -398,11 +398,9 @@ where
     Rt<K::Item>: Copy,
 {
     type Item = K::Item;
+    type Cursor = ChunkedCursor<K>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<K::Item>),
-    {
+    fn open(self, ctx: &mut Ctx) -> ChunkedCursor<K> {
         let ChunkedIter { fns, init } = self;
         let slot = SlotView::<K::Item>::reserve(ctx);
         slot.reset(ctx);
@@ -410,28 +408,88 @@ where
         ctx.emit(init(start));
 
         let (len, done) = slot.read_head();
-        let n = ctx.var(len);
-        let finished = ctx.var(done);
-        let i = ctx.var(0u64);
+        ChunkedCursor {
+            slot,
+            n: ctx.var(len),
+            finished: ctx.var(done),
+            i: ctx.var(0u64),
+            fns,
+        }
+    }
+}
+
+/// The cursor of a [`ChunkedIter`]: an index into the current chunk, with a
+/// cold refill branch. See the module docs for the loop it emits.
+pub struct ChunkedCursor<K: ChunkedIterKind> {
+    slot: SlotView<K::Item>,
+    n: Var<u64>,
+    finished: Var<u64>,
+    i: Var<u64>,
+    fns: ChunkedIterFns<K>,
+}
+
+impl<K: ChunkedIterKind> Cursor for ChunkedCursor<K>
+where
+    Rt<K::Item>: Copy,
+{
+    type Item = K::Item;
+    type Close = ChunkedClose<K>;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, ChunkedClose<K>) {
+        let ChunkedCursor {
+            slot,
+            n,
+            finished,
+            i,
+            fns,
+        } = self;
         let fill = fns.fill;
-        ctx.while_loop(true, move |ctx| {
-            ctx.if_then(eq(i, n), move |ctx| {
-                ctx.if_then(eq(finished, 1u64), |ctx| ctx.break_loop());
-                // SAFETY: `finished == 0`, so a `start` initialized the slot.
-                ctx.emit(unsafe { call_extern1_unchecked(fill, slot.slot_arg()) });
-                let (len, done) = slot.read_head();
-                ctx.store(n, len);
-                ctx.store(finished, done);
-                ctx.store(i, 0u64);
-                ctx.if_then(eq(n, 0u64), |ctx| ctx.break_loop());
-            });
-            // SAFETY: `i < n`, the item count of the last start/fill.
-            let elem = unsafe { slot.item(ctx, i) };
-            ctx.store(i, add(i, 1u64));
-            consumer(ctx, elem);
+        ctx.if_then(eq(i, n), move |ctx| {
+            ctx.exit_if(eq(finished, 1u64), done);
+            // SAFETY: `finished == 0`, so a `start` initialized the slot.
+            ctx.emit(unsafe { call_extern1_unchecked(fill, slot.slot_arg()) });
+            let (len, is_done) = slot.read_head();
+            ctx.store(n, len);
+            ctx.store(finished, is_done);
+            ctx.store(i, 0u64);
+            ctx.exit_if(eq(n, 0u64), done);
         });
-        let drop = fns.drop;
-        ctx.if_then(eq(finished, 0u64), move |ctx| {
+        // SAFETY: `i < n`, the item count of the last start/fill.
+        let elem = unsafe { slot.item(ctx, i) };
+        ctx.store(i, add(i, 1u64));
+        (
+            elem,
+            ChunkedClose {
+                slot,
+                finished,
+                drop: fns.drop,
+            },
+        )
+    }
+}
+
+/// Drops the iterator after an early exit: when the traversal stopped before
+/// the source reported its end, the iterator is still live in the slot.
+pub struct ChunkedClose<K: ChunkedIterKind> {
+    slot: SlotView<K::Item>,
+    finished: Var<u64>,
+    drop: ExternRef<ChunkDropExtern<Rt<K::Item>>>,
+}
+
+impl<K: ChunkedIterKind> Clone for ChunkedClose<K> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<K: ChunkedIterKind> Copy for ChunkedClose<K> {}
+
+impl<K: ChunkedIterKind> Close for ChunkedClose<K>
+where
+    Rt<K::Item>: Copy,
+{
+    fn close(self, ctx: &mut Ctx) {
+        let (slot, drop) = (self.slot, self.drop);
+        ctx.if_then(eq(self.finished, 0u64), move |ctx| {
             // SAFETY: `finished == 0`, so a `start` initialized the slot and the
             // iterator is still live.
             ctx.emit(unsafe { call_extern1_unchecked(drop, slot.slot_arg()) });

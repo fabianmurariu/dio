@@ -7,7 +7,10 @@ use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
 use crate::types::{ConstantType, CopyType, StagedType};
 
-use super::{Filter, FilterMap, Map, Scan, SkipWhile, TakeWhile, Zip};
+use crate::label::Label;
+use crate::staged::IntoStaged;
+
+use super::{Chain, Filter, FilterMap, Map, Scan, Skip, SkipWhile, Take, TakeWhile, Zip};
 
 // =============================================================================
 // MinMax sentinels for min/max reductions
@@ -100,14 +103,104 @@ impl MinMax for u32 {
 }
 
 // =============================================================================
+// Cursor / Close: the pull protocol
+// =============================================================================
+
+/// An opened iterator: one staged advance (see `docs/pull_iter.md`).
+///
+/// [`next`](Self::next) emits code that either jumps to `done` (exhausted) or
+/// falls through with the next item bound. It consumes the cursor, so each
+/// cursor's step is staged **at most once** and code size stays linear in the
+/// pipeline — the runtime loop re-runs that one piece of code.
+///
+/// The step is written in *direct style*: the caller decides what exhaustion
+/// means by choosing the label it passes (`iterate`'s exit, a chain's "switch
+/// to the second half", a merge's "this side is dry").
+///
+/// **Fused contract:** once `done` has been taken, the caller never runs the
+/// step again. The callers (the driver, `chain`, `zip`) guarantee it, so
+/// sources need no "fused" flag.
+pub trait Cursor: Sized {
+    type Item: StagedType;
+    /// What must run after the traversal, on every exit (see [`Close`]).
+    type Close: Close;
+
+    /// Emit one advance: jump to `done`, or fall through with the item.
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
+
+    /// Stage-0 probe for random access: `Some(len)` when this cursor can also
+    /// be driven by an external index through [`next_at`](Self::next_at).
+    ///
+    /// `zip` asks while it opens, before the driving loop, so any code needed
+    /// for the length (a range's element count) lands there and is emitted only
+    /// when someone asks. The decision itself is ordinary Rust at stage 0, so it
+    /// costs nothing at runtime.
+    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+        let _ = ctx;
+        None
+    }
+
+    /// Emit the element at `index`, instead of the cursor's own position.
+    ///
+    /// # Safety
+    ///
+    /// Only valid when [`indexed_len`](Self::indexed_len) returned `Some(len)`,
+    /// and `index < len` at execution.
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+        let _ = (ctx, index);
+        unreachable!("next_at on a cursor without random access")
+    }
+}
+
+/// Releases what a traversal holds (an extern iterator handle, …).
+///
+/// Emitted once after the driving loop, which both exhaustion and an early
+/// `break_loop` reach, so every opened resource is released exactly once on
+/// every exit. `Copy` because it is only stage-0 handles (vars, extern refs).
+pub trait Close: Copy {
+    fn close(self, ctx: &mut Ctx);
+}
+
+impl Close for () {
+    fn close(self, _ctx: &mut Ctx) {}
+}
+
+impl<A: Close, B: Close> Close for (A, B) {
+    fn close(self, ctx: &mut Ctx) {
+        self.0.close(ctx);
+        self.1.close(ctx);
+    }
+}
+
+/// The one push driver: open, loop over `next`, close.
+///
+/// `done` and a consumer's `break_loop` both leave through `iterate`'s exit, so
+/// the close runs on every path out of the loop.
+pub(crate) fn drive<C, F>(cursor: C, ctx: &mut Ctx, consumer: F)
+where
+    C: Cursor,
+    F: FnOnce(&mut Ctx, Var<C::Item>),
+{
+    let mut close = None;
+    ctx.iterate(|ctx, done| {
+        let (item, c) = cursor.next(ctx, done);
+        close = Some(c);
+        consumer(ctx, item);
+    });
+    close.expect("the step is staged exactly once").close(ctx);
+}
+
+// =============================================================================
 // StagedIterator
 // =============================================================================
 
-/// A staged iterator that generates imperative loop code.
+/// A staged iterator.
 ///
-/// The consumer closure is called **once at staging time** to build the loop
-/// body. Call side-effecting methods on the `Ctx` it receives (`ctx.assign`,
-/// `ctx.if_then`, etc.) to emit per-iteration code.
+/// The required method is the pull protocol, [`open`](Self::open), which
+/// returns a [`Cursor`]. Everything else is provided: [`for_each`](Self::for_each)
+/// drives the cursor in one loop, the combinators wrap cursors, and the
+/// terminals are built on `for_each`. An iterator with a better push loop may
+/// override `for_each`.
 ///
 /// # Example
 /// ```ignore
@@ -119,6 +212,11 @@ impl MinMax for u32 {
 /// ```
 pub trait StagedIterator: Sized {
     type Item: StagedType;
+    type Cursor: Cursor<Item = Self::Item>;
+
+    /// Emit the setup — bind handles, call producers, declare state vars — and
+    /// return the cursor. Runs once, before the loop that drives it.
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor;
 
     /// Drive a loop over all elements.
     ///
@@ -126,7 +224,11 @@ pub trait StagedIterator: Sized {
     /// body via the `Ctx` it receives. No `Clone` constraint required.
     fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>);
+        F: FnOnce(&mut Ctx, Var<Self::Item>),
+    {
+        let cursor = self.open(ctx);
+        drive(cursor, ctx, consumer);
+    }
 
     // =========================================================================
     // Combinators
@@ -193,6 +295,46 @@ pub trait StagedIterator: Sized {
         Cond: Staged<Out = bool>,
     {
         SkipWhile::new(self, p)
+    }
+
+    /// Pair elements of two iterators, stopping at the shorter one — any two
+    /// iterators, indexed or not (a slice, an extern stream, a filtered view…).
+    ///
+    /// When both sides have random access the pair shares one counter against
+    /// the hoisted `min` of the lengths, exactly like a hand-written zip loop.
+    fn zip<B>(self, other: B) -> Zip<Self, B::Iter>
+    where
+        B: IntoStagedIterator,
+    {
+        Zip::new(self, other.staged_iter())
+    }
+
+    /// All elements of `self`, then all elements of `other`.
+    ///
+    /// The consumer is emitted once; a phase flag picks the side. An early exit
+    /// (`any`, `take_while`, …) leaves the whole chain.
+    fn chain<B>(self, other: B) -> Chain<Self, B::Iter>
+    where
+        B: IntoStagedIterator,
+        B::Iter: StagedIterator<Item = Self::Item>,
+    {
+        Chain::new(self, other.staged_iter())
+    }
+
+    /// At most the first `n` elements.
+    fn take<N>(self, n: N) -> Take<Self, N::Staged>
+    where
+        N: IntoStaged<u64>,
+    {
+        Take::new(self, n.into_staged())
+    }
+
+    /// All but the first `n` elements.
+    fn skip<N>(self, n: N) -> Skip<Self, N::Staged>
+    where
+        N: IntoStaged<u64>,
+    {
+        Skip::new(self, n.into_staged())
     }
 
     // =========================================================================
@@ -431,7 +573,7 @@ pub trait StagedIterator: Sized {
 // IndexedStagedIterator
 // =============================================================================
 
-/// A staged iterator that tracks element positions, enabling `zip`.
+/// A staged iterator with a length known before iterating, enabling `rev`.
 #[allow(clippy::len_without_is_empty)]
 pub trait IndexedStagedIterator: StagedIterator {
     /// The type of the length expression (e.g. `SliceLen<S>`, `Sub<End, Start>`).
@@ -442,28 +584,13 @@ pub trait IndexedStagedIterator: StagedIterator {
 
     /// Iterate from the last element to the first.
     ///
-    /// Needs random access, so it is bounded on `IndexedSource` like
-    /// [`zip`](Self::zip): a push-based iterator cannot be run backwards.
+    /// Needs random access, so it is bounded on `IndexedSource`: a stream can
+    /// only be pulled forwards.
     fn rev(self) -> super::Rev<Self>
     where
         Self: IndexedSource,
     {
         super::Rev::new(self)
-    }
-
-    /// Zip this (indexed) iterator with a secondary random-access source.
-    ///
-    /// Both sources are accessed at the same 0-based position each iteration.
-    /// Iteration stops at the shorter source, matching [`std::iter::Zip`].
-    ///
-    /// Only available for iterators that also implement `IndexedSource` (slice
-    /// iterators and slice variable references).
-    fn zip<S>(self, other: S) -> Zip<Self, S>
-    where
-        Self: IndexedSource,
-        S: IndexedSource,
-    {
-        Zip::new(self, other)
     }
 }
 
@@ -471,8 +598,8 @@ pub trait IndexedStagedIterator: StagedIterator {
 // IndexedSource
 // =============================================================================
 
-/// A random-access data source usable as the secondary input to `zip`, or as
-/// the primary when it also implements `IndexedStagedIterator`.
+/// A typed random-access data source: element `i` as an expression. Powers
+/// `rev` and random access into zipped pairs.
 pub trait IndexedSource: Clone + 'static {
     type Item: StagedType;
     type LenExpr: Staged<Out = u64> + Clone + 'static;

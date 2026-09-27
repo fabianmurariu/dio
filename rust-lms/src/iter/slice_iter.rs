@@ -12,12 +12,15 @@
 use std::marker::PhantomData;
 
 use crate::func::Ctx;
-use crate::num::{add, lt};
+use crate::label::Label;
+use crate::num::{add, ge};
 use crate::slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType};
 use crate::staged::{LifetimeErased, Staged, Var, VarUse};
 use crate::types::{ConstantType, CopyType, StagedType};
 
-use super::traits::{IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator};
+use super::traits::{
+    Cursor, IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator,
+};
 
 /// Iterator over the elements of any trusted staged slice.
 ///
@@ -77,6 +80,7 @@ where
     T::RuntimeValue: Default,
 {
     type Item = T;
+    type Cursor = SliceCursor<T, S::Out>;
 
     /// Binds the slice once and reborrows per use rather than requiring
     /// `S: Clone`. A unique slice expression is deliberately not `Clone` — that
@@ -86,33 +90,82 @@ where
     /// Bound with [`bind_lt`](Ctx::bind_lt), so a borrowing source — an `SVec`
     /// view — iterates through this same path. The borrow ends with the loop,
     /// because every value handed on is a borrow-free `Var`.
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<T>),
-    {
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
         let mut slice = ctx.bind_lt(self.slice);
         // Hoisted: the length is loop-invariant (the source's borrow forbids
         // growth while it is live), so this reads the descriptor once instead of
         // once per iteration.
-        let n = ctx.bind_lt(slice.reborrow().len());
-        let i = ctx.var(0u64);
-
-        ctx.while_loop(lt(i, n), move |ctx| {
-            // Bind the element *inside* the loop: no dead pre-loop init, and the
-            // frontend resolves this single-def var to the loaded value with no
-            // copy — so the emitted body matches a hand-written `while_loop`.
-            // SAFETY: the loop condition proves `i < len`.
-            let elem = ctx.bind_lt(unsafe { slice.reborrow().get_unchecked(i) });
-            consumer(ctx, elem);
-            ctx.store(i, add(i, 1u64));
-        });
+        let len = ctx.bind_lt(slice.reborrow().len());
+        let pos = ctx.var(0u64);
+        SliceCursor {
+            slice,
+            len,
+            pos,
+            _elem: PhantomData,
+        }
     }
 }
 
-// The indexed paths (`zip`, and anything needing the length without consuming
-// the source) do keep `S: Clone`: `IndexedSource` takes `&self` and its
-// supertrait requires `Clone`, so a unique origin cannot participate. Shared
-// origins — which is every origin `zip` is used with — are unaffected.
+/// The cursor of a [`SliceIter`]: the bound slice, its hoisted length and the
+/// position. Random access, so a `zip` of slices shares one counter.
+pub struct SliceCursor<T, R: StagedType> {
+    slice: Var<R>,
+    len: Var<u64>,
+    pos: Var<u64>,
+    _elem: PhantomData<T>,
+}
+
+impl<T, R> SliceCursor<T, R>
+where
+    T: StagedType + CopyType + 'static,
+    R: TrustedSliceType<Elem = T>,
+    VarUse<R>: LifetimeErased<Out = R>,
+    <VarUse<R> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
+{
+    /// # Safety
+    ///
+    /// `index < len` at execution.
+    unsafe fn load(mut self, ctx: &mut Ctx, index: Var<u64>) -> Var<T> {
+        // Bind the element where it is used: the frontend resolves this
+        // single-def var to the loaded value with no copy.
+        // SAFETY: forwarded from the caller.
+        ctx.bind_lt(unsafe { self.slice.reborrow().get_unchecked(index) })
+    }
+}
+
+impl<T, R> Cursor for SliceCursor<T, R>
+where
+    T: StagedType + CopyType + 'static,
+    R: TrustedSliceType<Elem = T>,
+    VarUse<R>: LifetimeErased<Out = R>,
+    <VarUse<R> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
+{
+    type Item = T;
+    type Close = ();
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<T>, ()) {
+        let (len, pos) = (self.len, self.pos);
+        ctx.exit_if(ge(pos, len), done);
+        // SAFETY: the exit above proves `pos < len`.
+        let elem = unsafe { self.load(ctx, pos) };
+        ctx.store(pos, add(pos, 1u64));
+        (elem, ())
+    }
+
+    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+        Some(self.len)
+    }
+
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<T>, ()) {
+        // SAFETY: forwarded from the caller (`index < len`).
+        (unsafe { self.load(ctx, index) }, ())
+    }
+}
+
+// The typed indexed paths (`rev`, `len` without consuming the source) do keep
+// `S: Clone`: `IndexedSource` takes `&self` and its supertrait requires
+// `Clone`, so a unique origin cannot participate. `zip` needs none of this —
+// it reaches random access through the cursor (`Cursor::indexed_len`).
 
 impl<T, S> IndexedStagedIterator for SliceIter<T, S>
 where

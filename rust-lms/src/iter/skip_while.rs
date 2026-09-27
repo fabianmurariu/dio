@@ -1,11 +1,12 @@
 //! SkipWhile combinator — drops a leading run, yields the rest.
 
-use crate::control::not;
 use crate::func::Ctx;
 use crate::staged::{Staged, Var};
 use crate::types::CopyType;
 
-use super::traits::StagedIterator;
+use crate::label::Label;
+
+use super::traits::{Cursor, StagedIterator};
 
 /// Iterator adapter that skips leading elements while a predicate holds, then
 /// yields every element from the first failure onward.
@@ -28,24 +29,46 @@ where
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
+    type Cursor = SkipWhileCursor<I::Cursor, P>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
-    {
-        let pred = self.pred;
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
         // `skipping` starts true and latches to false at the first element where
-        // the predicate fails; from then on every element is emitted.
+        // the predicate fails; from then on every element is yielded.
         let skipping = ctx.var(true);
-        self.inner.for_each(ctx, move |ctx, elem| {
+        SkipWhileCursor {
+            inner: self.inner.open(ctx),
+            pred: self.pred,
+            skipping,
+        }
+    }
+}
+
+/// The cursor of a [`SkipWhile`]: retry while the leading run lasts.
+pub struct SkipWhileCursor<C, P> {
+    inner: C,
+    pred: P,
+    skipping: Var<bool>,
+}
+
+impl<C, P, Cond> Cursor for SkipWhileCursor<C, P>
+where
+    C: Cursor,
+    C::Item: CopyType + 'static,
+    P: Fn(Var<C::Item>) -> Cond + 'static,
+    Cond: Staged<Out = bool> + 'static,
+{
+    type Item = C::Item;
+    type Close = C::Close;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
+        let (inner, pred, skipping) = (self.inner, self.pred, self.skipping);
+        ctx.repeat(|ctx, again| {
+            let (elem, close) = inner.next(ctx, done);
             ctx.if_then(skipping, move |ctx| {
-                ctx.if_then(not(pred(elem)), move |ctx| {
-                    ctx.store(skipping, false);
-                });
+                ctx.again_if(pred(elem), again);
+                ctx.store(skipping, false);
             });
-            ctx.if_then(not(skipping), move |ctx| {
-                consumer(ctx, elem);
-            });
-        });
+            (elem, close)
+        })
     }
 }

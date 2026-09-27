@@ -93,3 +93,42 @@ impl Again<'_> {
         }
     }
 }
+
+// =============================================================================
+// Dead: the fall-through value of a join whose every path already jumped
+// =============================================================================
+
+use crate::staged::{CompilationContext, Staged, Value, ValueId};
+use crate::types::{ScalarType, StagedType};
+
+/// A placeholder `T` for code that is never reached — the fall-through of a
+/// [`join`](crate::func::Ctx::join) body whose every path ends in a jump.
+/// Emitted into a dead block, so its (zero) value is never observed.
+pub(crate) struct Dead<T>(PhantomData<fn() -> T>);
+
+pub(crate) fn dead<T>() -> Dead<T> {
+    Dead(PhantomData)
+}
+
+fn zero_leaf(ctx: &mut CompilationContext, ty: ScalarType) -> ValueId {
+    match ty {
+        ScalarType::F32 => ctx.f32const(0.0),
+        ScalarType::F64 => ctx.f64const(0.0),
+        ScalarType::Ptr => ctx.null_ptr(),
+        ty => ctx.iconst(ty, 0),
+    }
+}
+
+// SAFETY: the value is only ever produced in unreachable code; it has `T`'s
+// leaf layout (fat → ptr + len, otherwise `T::scalar_type`).
+unsafe impl<T: StagedType> Staged for Dead<T> {
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        if T::is_fat_pointer() {
+            Value::fat(ctx.null_ptr(), ctx.iconst(ScalarType::I64, 0))
+        } else {
+            Value::scalar(zero_leaf(ctx, T::scalar_type()))
+        }
+    }
+}

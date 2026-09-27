@@ -6,7 +6,9 @@ use crate::func::Ctx;
 use crate::staged::{Staged, Var};
 use crate::types::{ConstantType, CopyType, StagedType};
 
-use super::traits::{IndexedStagedIterator, StagedIterator};
+use crate::label::Label;
+
+use super::traits::{Cursor, IndexedStagedIterator, StagedIterator};
 
 /// Iterator adapter that transforms each element.
 ///
@@ -36,16 +38,47 @@ where
     U::RuntimeValue: Default,
 {
     type Item = U;
+    type Cursor = MapCursor<I::Cursor, F, U>;
 
-    fn for_each<G>(self, ctx: &mut Ctx, consumer: G)
-    where
-        G: FnOnce(&mut Ctx, Var<U>),
-    {
-        let map_fn = self.map_fn;
-        self.inner.for_each(ctx, move |ctx, inner_elem| {
-            let mapped = ctx.bind(map_fn(inner_elem));
-            consumer(ctx, mapped);
-        });
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+        MapCursor {
+            inner: self.inner.open(ctx),
+            map_fn: self.map_fn,
+            _phantom: PhantomData,
+        }
+    }
+}
+
+/// The cursor of a [`Map`]: the inner step, then `f`. Keeps random access.
+pub struct MapCursor<C, F, U> {
+    inner: C,
+    map_fn: F,
+    _phantom: PhantomData<U>,
+}
+
+impl<C, F, U, MapOut> Cursor for MapCursor<C, F, U>
+where
+    C: Cursor,
+    F: Fn(Var<C::Item>) -> MapOut + 'static,
+    MapOut: Staged<Out = U> + 'static,
+    U: StagedType + 'static,
+{
+    type Item = U;
+    type Close = C::Close;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<U>, C::Close) {
+        let (elem, close) = self.inner.next(ctx, done);
+        (ctx.bind((self.map_fn)(elem)), close)
+    }
+
+    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+        self.inner.indexed_len(ctx)
+    }
+
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<U>, C::Close) {
+        // SAFETY: forwarded from the caller.
+        let (elem, close) = unsafe { self.inner.next_at(ctx, index) };
+        (ctx.bind((self.map_fn)(elem)), close)
     }
 }
 

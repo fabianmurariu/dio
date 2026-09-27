@@ -6,7 +6,9 @@ use crate::func::Ctx;
 use crate::staged::Var;
 use crate::staged_opt::StagedOpt;
 
-use super::traits::StagedIterator;
+use crate::label::{Label, dead};
+
+use super::traits::{Cursor, StagedIterator};
 
 /// A source with no length, driven by a producer that reports exhaustion.
 ///
@@ -32,9 +34,11 @@ pub struct FromFn<F, O> {
 /// .for_each(ctx, |ctx, item| { /* ... */ });
 /// ```
 ///
-/// `next` may emit whatever it likes before yielding, including an early
-/// [`break_loop`](Ctx::break_loop) — a guard checked *before* the pull, which a
-/// `take_while` on the produced item could not express.
+/// `next` may emit whatever it likes before yielding. To stop *before* pulling
+/// — a guard a `take_while` on the produced item could not express — return
+/// `None` from the guard (`guard.then_some(..)` is lazy, so the pull is only
+/// emitted on the `Some` side). Don't `break_loop` from `next`: inside a
+/// `chain` that would end the whole pipeline instead of this stream.
 pub fn from_fn<F, O>(next: F) -> FromFn<F, O>
 where
     F: FnOnce(&mut Ctx) -> O,
@@ -50,17 +54,31 @@ impl<F, O> StagedIterator for FromFn<F, O>
 where
     F: FnOnce(&mut Ctx) -> O,
     O: StagedOpt,
+    O::Item: 'static,
 {
     type Item = O::Item;
+    type Cursor = Self;
 
-    fn for_each<C>(self, ctx: &mut Ctx, consumer: C)
-    where
-        C: FnOnce(&mut Ctx, Var<Self::Item>),
-    {
+    fn open(self, _ctx: &mut Ctx) -> Self {
+        self
+    }
+}
+
+impl<F, O> Cursor for FromFn<F, O>
+where
+    F: FnOnce(&mut Ctx) -> O,
+    O: StagedOpt,
+    O::Item: 'static,
+{
+    type Item = O::Item;
+    type Close = ();
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<O::Item>, ()) {
         let next = self.next;
-        ctx.while_loop(true, move |ctx| {
-            let produced = next(ctx);
-            produced.eliminate(ctx, consumer, |ctx| ctx.break_loop());
+        let item = ctx.join(|ctx, got| {
+            next(ctx).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.exit(done));
+            dead::<O::Item>()
         });
+        (item, ())
     }
 }

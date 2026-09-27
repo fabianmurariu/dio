@@ -22,13 +22,14 @@ use std::marker::PhantomData;
 
 use crate::ffi::{ExternFn, ExternRef, call_extern1_unchecked};
 use crate::func::{Compiler, Ctx};
-use crate::num::{add, lt};
-use crate::option::{COption, COptionType};
-use crate::refer::SMutPtr;
-use crate::staged::{Staged, ValueId, Var};
-use crate::types::{CopyType, StagedType};
+use crate::label::Label;
+use crate::num::{add, ge};
+use crate::option::{COption, COptionType, is_none, payload_unchecked};
+use crate::refer::{SMutPtr, load_mut, ptr_cast_mut};
+use crate::staged::{SigSpec, Staged, Value, ValueId, Var};
+use crate::types::{CopyType, ScalarType, StagedType};
 
-use super::traits::StagedIterator;
+use super::traits::{Close, Cursor, StagedIterator};
 
 /// The staged type of an opaque iterator handle: a thin `*mut ()` pointer.
 ///
@@ -189,19 +190,74 @@ where
     H: Staged<Out = OpaqueHandle> + 'static,
 {
     type Item = K::Item;
+    type Cursor = OpaqueCursor<K>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<K::Item>),
-    {
-        // Bind the handle once, then drive the storage-pointer loop.
-        let handle = ctx.bind(self.handle);
-        ctx.opaque_for_each::<K::Item, F>(
-            handle,
-            self.next.extern_id,
-            self.drop.extern_id,
-            consumer,
-        );
+    fn open(self, ctx: &mut Ctx) -> OpaqueCursor<K> {
+        // Bind the handle once; every step and the final drop use it.
+        OpaqueCursor {
+            handle: ctx.bind(self.handle),
+            next: self.next,
+            drop: self.drop,
+        }
+    }
+}
+
+/// The cursor of an [`OpaqueIter`]: one `next` extern call per step.
+pub struct OpaqueCursor<K: OpaqueIterKind> {
+    handle: Var<OpaqueHandle>,
+    next: ExternRef<K::Next>,
+    drop: ExternRef<K::Drop>,
+}
+
+impl<K: OpaqueIterKind> Cursor for OpaqueCursor<K> {
+    type Item = K::Item;
+    type Close = DropHandle<K::Drop>;
+
+    /// ```text
+    /// opt = next(h)              ; Rust thunk writes COption<Item>
+    /// if opt is None → done
+    /// elem = opt.payload
+    /// ```
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
+        // SAFETY: `handle` is the live handle this kind's producer returned; it
+        // stays live until `DropHandle::close`, emitted after the loop.
+        let mut opt = ctx.bind(unsafe {
+            call_extern1_unchecked::<K::Next, _, OpaqueHandle>(self.next, self.handle)
+        });
+        ctx.exit_if(is_none(opt.reborrow()), done);
+        // SAFETY: the exit above leaves only the `Some` path.
+        let elem = ctx.bind(unsafe { payload_unchecked(opt) });
+        (
+            elem,
+            DropHandle {
+                handle: self.handle,
+                drop: self.drop,
+            },
+        )
+    }
+}
+
+/// Frees an opaque iterator handle: the `drop` extern, emitted once after the
+/// loop — reached by exhaustion and by any early `break_loop` alike.
+pub struct DropHandle<D: ExternFn> {
+    handle: Var<OpaqueHandle>,
+    drop: ExternRef<D>,
+}
+
+impl<D: ExternFn> Clone for DropHandle<D> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+impl<D: ExternFn> Copy for DropHandle<D> {}
+
+impl<D> Close for DropHandle<D>
+where
+    D: ExternFn<Args = (OpaqueHandle,), Ret = ()> + 'static,
+{
+    fn close(self, ctx: &mut Ctx) {
+        // SAFETY: the matching drop for the live handle, after its final use.
+        ctx.emit(unsafe { call_extern1_unchecked::<D, _, OpaqueHandle>(self.drop, self.handle) });
     }
 }
 
@@ -243,28 +299,53 @@ where
     H: Staged<Out = OpaqueHandle> + 'static,
 {
     type Item = K::Item;
+    type Cursor = ExactSizeOpaqueCursor<K>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<K::Item>),
-    {
+    fn open(self, ctx: &mut Ctx) -> ExactSizeOpaqueCursor<K> {
         let handle = ctx.bind(self.handle);
-        // SAFETY: all calls use the live handle produced for this iterator kind.
-        let n = ctx
+        // SAFETY: `handle` is the live handle produced for this iterator kind.
+        let len = ctx
             .bind(unsafe { call_extern1_unchecked::<K::Len, _, OpaqueHandle>(self.len, handle) });
-        let i = ctx.var(0u64);
-        let next_value = self.next_value;
-        ctx.while_loop(lt(i, n), move |ctx| {
-            // SAFETY: the loop executes exactly the length reported for this
-            // handle, so `next_value` is never called past the end.
-            let v = ctx.bind(unsafe {
-                call_extern1_unchecked::<K::NextValue, _, OpaqueHandle>(next_value, handle)
-            });
-            consumer(ctx, v);
-            ctx.store(i, add(i, 1u64));
+        ExactSizeOpaqueCursor {
+            handle,
+            len,
+            pos: ctx.var(0u64),
+            next_value: self.next_value,
+            drop: self.drop,
+        }
+    }
+}
+
+/// The cursor of an [`ExactSizeOpaqueIter`]: a counted loop over `next_value`.
+///
+/// Not random access — `next_value` can only advance — so a `zip` pulls it.
+pub struct ExactSizeOpaqueCursor<K: ExactSizeOpaqueIterKind> {
+    handle: Var<OpaqueHandle>,
+    len: Var<u64>,
+    pos: Var<u64>,
+    next_value: ExternRef<K::NextValue>,
+    drop: ExternRef<K::Drop>,
+}
+
+impl<K: ExactSizeOpaqueIterKind> Cursor for ExactSizeOpaqueCursor<K> {
+    type Item = K::Item;
+    type Close = DropHandle<K::Drop>;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
+        let pos = self.pos;
+        ctx.exit_if(ge(pos, self.len), done);
+        // SAFETY: `pos < len`, so `next_value` is never called past the end.
+        let elem = ctx.bind(unsafe {
+            call_extern1_unchecked::<K::NextValue, _, OpaqueHandle>(self.next_value, self.handle)
         });
-        // SAFETY: this is the matching drop after the final use of the handle.
-        ctx.emit(unsafe { call_extern1_unchecked::<K::Drop, _, OpaqueHandle>(self.drop, handle) });
+        ctx.store(pos, add(pos, 1u64));
+        (
+            elem,
+            DropHandle {
+                handle: self.handle,
+                drop: self.drop,
+            },
+        )
     }
 }
 
@@ -679,35 +760,136 @@ pub struct ReusedOpaqueIter<K: ReusedOpaqueIterKind> {
 
 impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
     type Item = K::Item;
+    type Cursor = ReusedOpaqueCursor<K>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<K::Item>),
-    {
-        type Slot<K> =
-            OpaqueIterSlot<<<K as ReusedOpaqueIterKind>::Item as StagedType>::RuntimeValue>;
-        let slot_size = std::mem::size_of::<Slot<K>>() as u32;
-        let align_shift = std::mem::align_of::<Slot<K>>().trailing_zeros() as u8;
-        let next_off = std::mem::offset_of!(Slot<K>, next) as i32;
-        let drop_off = std::mem::offset_of!(Slot<K>, drop) as i32;
-        let data_off = std::mem::offset_of!(Slot<K>, data) as i32;
-
+    /// Reserve this traversal's slot in the JIT frame (one per nesting level,
+    /// reused every outer iteration) and let the producer build the iterator
+    /// into it — which fills the slot's `next`/`drop` mini-vtable.
+    fn open(self, ctx: &mut Ctx) -> ReusedOpaqueCursor<K> {
+        let layout = SlotLayout::of::<K>();
         let init_id = self.init.extern_id;
         let args = self.args;
-        ctx.reused_opaque_for_each::<K::Item, _, F>(
-            slot_size,
-            align_shift,
-            next_off,
-            drop_off,
-            data_off,
-            move |cctx, slot_ptr| {
-                let mut a = (args)(cctx);
-                crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
-                let init_ref = cctx.declare_extern_func(init_id);
-                crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
+        let slot = ctx.bind_raw::<OpaqueHandle>(move |cctx| {
+            let slot = cctx.alloc_stack_slot(layout.size, layout.align_shift);
+            let slot_ptr = cctx.stack_addr(slot, 0);
+            let mut a = (args)(cctx);
+            crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
+            let init_ref = cctx.declare_extern_func(init_id);
+            crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
+            Value::scalar(slot_ptr)
+        });
+        // Scratch for the storage-pointer ABI of the indirect calls: the data
+        // pointer argument, and the `COption<Item>` result.
+        let scratch = ctx.bind_raw::<OpaqueHandle>(|cctx| {
+            let s = cctx.alloc_stack_slot(8, 3);
+            Value::scalar(cctx.stack_addr(s, 0))
+        });
+        let option = ctx.bind_raw::<OpaqueHandle>(|cctx| {
+            let s = cctx.alloc_stack_slot(
+                COptionType::<K::Item>::size_of() as u32,
+                COptionType::<K::Item>::align_of().trailing_zeros() as u8,
+            );
+            Value::scalar(cctx.stack_addr(s, 0))
+        });
+        ReusedOpaqueCursor {
+            slot: SlotVars {
+                slot,
+                scratch,
+                option,
+                layout,
             },
-            consumer,
-        );
+            _kind: PhantomData,
+        }
+    }
+}
+
+/// Offsets into an `OpaqueIterSlot<Item::RuntimeValue>`.
+#[derive(Clone, Copy)]
+struct SlotLayout {
+    size: u32,
+    align_shift: u8,
+    next: i32,
+    drop: i32,
+    data: i32,
+}
+
+impl SlotLayout {
+    fn of<K: ReusedOpaqueIterKind>() -> Self {
+        type Slot<K> =
+            OpaqueIterSlot<<<K as ReusedOpaqueIterKind>::Item as StagedType>::RuntimeValue>;
+        SlotLayout {
+            size: std::mem::size_of::<Slot<K>>() as u32,
+            align_shift: std::mem::align_of::<Slot<K>>().trailing_zeros() as u8,
+            next: std::mem::offset_of!(Slot<K>, next) as i32,
+            drop: std::mem::offset_of!(Slot<K>, drop) as i32,
+            data: std::mem::offset_of!(Slot<K>, data) as i32,
+        }
+    }
+}
+
+/// The per-traversal stack storage of a reused-slot iterator.
+#[derive(Clone, Copy)]
+pub struct SlotVars {
+    slot: Var<OpaqueHandle>,
+    scratch: Var<OpaqueHandle>,
+    option: Var<OpaqueHandle>,
+    layout: SlotLayout,
+}
+
+impl SlotVars {
+    /// Call the slot's `next` (`at = next`) or `drop` (`at = drop`) through its
+    /// mini-vtable: `f(&slot.data, &option)`.
+    fn call_indirect(self, cctx: &mut CompilationContext, fn_off: i32) {
+        let slot = cctx.resolve_var::<OpaqueHandle>(self.slot.id).leaf();
+        let scratch = cctx.resolve_var::<OpaqueHandle>(self.scratch.id).leaf();
+        let option = cctx.resolve_var::<OpaqueHandle>(self.option.id).leaf();
+        // Canonical storage-pointer signature: (data slot ptr, output ptr) -> void.
+        let sig = cctx.import_signature(&SigSpec {
+            params: vec![ScalarType::Ptr, ScalarType::Ptr],
+            ret: None,
+        });
+        let data = cctx.load(ScalarType::Ptr, slot, self.layout.data);
+        let f = cctx.load(ScalarType::Ptr, slot, fn_off);
+        cctx.store(data, scratch, 0);
+        cctx.call_indirect(sig, f, &[scratch, option]);
+    }
+}
+
+impl Close for SlotVars {
+    /// Drop the iterator in place (and free it, if it was heap-boxed).
+    fn close(self, ctx: &mut Ctx) {
+        ctx.emit_raw(move |cctx| self.call_indirect(cctx, self.layout.drop));
+    }
+}
+
+/// The cursor of a [`ReusedOpaqueIter`]: an indirect `next` per step through the
+/// slot's mini-vtable.
+///
+/// ```text
+/// (tag, val) = call_indirect slot.next (slot.data)   ; COption in the scratch
+/// if tag == None → done
+/// elem = val
+/// ```
+pub struct ReusedOpaqueCursor<K: ReusedOpaqueIterKind> {
+    slot: SlotVars,
+    _kind: PhantomData<K>,
+}
+
+impl<K: ReusedOpaqueIterKind> Cursor for ReusedOpaqueCursor<K> {
+    type Item = K::Item;
+    type Close = SlotVars;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, SlotVars) {
+        let slot = self.slot;
+        ctx.emit_raw(move |cctx| slot.call_indirect(cctx, slot.layout.next));
+        // The COption the call wrote, read as a staged value.
+        let opt = ptr_cast_mut::<COptionType<K::Item>, (), _>(slot.option);
+        // SAFETY: `option` is this traversal's COption scratch, just written.
+        let mut opt = ctx.bind(unsafe { load_mut(opt) });
+        ctx.exit_if(is_none(opt.reborrow()), done);
+        // SAFETY: the exit above leaves only the `Some` path.
+        let elem = ctx.bind(unsafe { payload_unchecked(opt) });
+        (elem, slot)
     }
 }
 

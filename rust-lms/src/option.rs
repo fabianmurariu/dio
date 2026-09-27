@@ -450,6 +450,36 @@ unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for IsNone<E>
     }
 }
 
+/// The payload of a `COption` without checking its tag.
+///
+/// Crate-internal: the opaque-iterator cursors read the payload only on the
+/// path where the tag was just tested `Some`.
+pub(crate) struct PayloadUnchecked<E> {
+    opt: E,
+}
+
+// SAFETY: reads `T` at `COptionType::payload_offset`, the single source of
+// truth for the payload position; callers only use it after a `Some` test.
+unsafe impl<T: StagedType, E: Staged<Out = COptionType<T>>> Staged for PayloadUnchecked<E> {
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let opt_ptr = self.opt.codegen(ctx).leaf();
+        let offset = COptionType::<T>::payload_offset() as i64;
+        let payload = ctx.ptr_offset_const(opt_ptr, offset);
+        ctx.load_value::<T>(payload)
+    }
+}
+
+/// # Safety
+///
+/// `opt` must be `Some` at execution.
+pub(crate) unsafe fn payload_unchecked<T: StagedType, E: Staged<Out = COptionType<T>>>(
+    opt: E,
+) -> PayloadUnchecked<E> {
+    PayloadUnchecked { opt }
+}
+
 /// Check if a `COption` is `None`.
 pub fn is_none<T: StagedType, E: Staged<Out = COptionType<T>>>(opt: E) -> IsNone<E> {
     IsNone { opt }

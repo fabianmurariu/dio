@@ -1,14 +1,15 @@
 //! TakeWhile combinator — yields a prefix, stops at the first failing element.
 
-use crate::control::not;
 use crate::func::Ctx;
 use crate::staged::{Staged, Var};
 use crate::types::CopyType;
 
-use super::traits::StagedIterator;
+use crate::label::Label;
 
-/// Iterator adapter that yields elements while a predicate holds, then stops
-/// the entire iteration (short-circuits via `break_loop`).
+use super::traits::{Cursor, StagedIterator};
+
+/// Iterator adapter that yields elements while a predicate holds, and ends at
+/// the first element where it fails.
 pub struct TakeWhile<I, P> {
     inner: I,
     pred: P,
@@ -28,20 +29,38 @@ where
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
+    type Cursor = TakeWhileCursor<I::Cursor, P>;
 
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
-    {
-        let pred = self.pred;
-        self.inner.for_each(ctx, move |ctx, elem| {
-            // Break out of the source loop at the first failing element. On the
-            // passing path control falls through to `consumer`; the merge block
-            // after the `if_then` is only reachable when `pred` held.
-            ctx.if_then(not(pred(elem)), move |ctx| {
-                ctx.break_loop();
-            });
-            consumer(ctx, elem);
-        });
+    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+        TakeWhileCursor {
+            inner: self.inner.open(ctx),
+            pred: self.pred,
+        }
+    }
+}
+
+/// The cursor of a [`TakeWhile`]: the first failing element *is* exhaustion.
+///
+/// No `break_loop`: jumping to `done` ends exactly this stream, so
+/// `a.take_while(p).chain(b)` moves on to `b` and a `zip` stops cleanly.
+pub struct TakeWhileCursor<C, P> {
+    inner: C,
+    pred: P,
+}
+
+impl<C, P, Cond> Cursor for TakeWhileCursor<C, P>
+where
+    C: Cursor,
+    C::Item: CopyType + 'static,
+    P: Fn(Var<C::Item>) -> Cond + 'static,
+    Cond: Staged<Out = bool> + 'static,
+{
+    type Item = C::Item;
+    type Close = C::Close;
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
+        let (elem, close) = self.inner.next(ctx, done);
+        ctx.exit_unless((self.pred)(elem), done);
+        (elem, close)
     }
 }
