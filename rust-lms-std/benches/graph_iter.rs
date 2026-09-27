@@ -28,8 +28,8 @@
 //! 100k — mostly tiny lists, occasionally huge), and a uniform degree-10 control.
 //!
 //! Every kernel's result is checked against `native` before it is timed.
-//! `native` is a reference line, not a like-for-like baseline: its `sum` is one
-//! flat (vectorized) pass over `targets` that ignores node boundaries.
+//! `native` does the same per-node work as the kernels (a loop per node over its
+//! CSR range), so it is a like-for-like baseline for every workload.
 //!
 //! Run:
 //!   cargo bench -p rust-lms-std --bench graph_iter                  # Cranelift
@@ -365,7 +365,7 @@ impl Workload {
     fn native(self, g: &Graph) -> u64 {
         let nodes = 0..NODES as u64;
         match self {
-            Workload::Sum => g.targets.iter().sum(),
+            Workload::Sum => nodes.map(|n| g.nbrs(n).iter().sum::<u64>()).sum(),
             Workload::DstGtSrc => nodes
                 .map(|n| g.nbrs(n).iter().filter(|&&d| d > n).count() as u64)
                 .sum(),
