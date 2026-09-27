@@ -406,6 +406,19 @@ pub trait Backend {
     ) -> Option<ValueId>;
     fn func_addr(&mut self, func: FuncRefId) -> ValueId;
     fn import_signature(&mut self, sig: &SigSpec) -> SigRefId;
+    /// Call `func` with results in registers (register-ABI spike): `rets` are the
+    /// result types, at most two.
+    fn call_multi(&mut self, func: FuncRefId, args: &[ValueId], rets: &[ScalarType])
+    -> Vec<ValueId>;
+    /// Call through `callee` with signature `params -> rets`, results in registers
+    /// (register-ABI spike).
+    fn call_indirect_multi(
+        &mut self,
+        params: &[ScalarType],
+        rets: &[ScalarType],
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Vec<ValueId>;
     /// Get a callable reference to an internal (JIT-defined) function by our function id.
     fn declare_func(&mut self, func_id: usize) -> FuncRefId;
     /// Get a callable reference to a registered extern function by our extern id.

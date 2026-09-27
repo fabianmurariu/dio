@@ -353,6 +353,9 @@ pub(crate) struct MlirExecutable {
 /// the *shared, neutral* [`crate::func::emit_function_body`], so the AST lowers identically to
 /// the Cranelift path. Internal/extern references resolve through id-aligned symbol tables
 /// pre-registered on each backend; extern host addresses are bound by symbol at JIT time.
+/// An extern's symbol, parameter types and result types.
+type ExternMeta = (String, Vec<ScalarType>, Vec<ScalarType>);
+
 pub(crate) fn assemble(
     functions: Vec<Option<FunDef>>,
     externs: &[ExternFnDef],
@@ -367,9 +370,12 @@ pub(crate) fn assemble(
         .iter()
         .map(|f| f.as_ref().map(|d| (d.name.clone(), d.param_infos.len())))
         .collect();
-    let extern_meta: Vec<(String, usize)> = externs
+    let extern_meta: Vec<ExternMeta> = externs
         .iter()
-        .map(|e| (e.name.clone(), e.num_params))
+        .map(|e| match &e.register_abi {
+            Some(abi) => (e.name.clone(), abi.params.clone(), abi.rets.clone()),
+            None => (e.name.clone(), vec![ScalarType::Ptr; e.num_params + 1], Vec::new()),
+        })
         .collect();
 
     let mut ops = Vec::new();
@@ -422,7 +428,7 @@ fn build_function<'c>(
     body: impl FnOnce(&mut CompilationContext) -> Value,
     return_info: &TypeInfo,
     internal_meta: &[Option<(String, usize)>],
-    extern_meta: &[(String, usize)],
+    extern_meta: &[ExternMeta],
 ) -> (Operation<'c>, Vec<backend::FuncDecl>) {
     let num_params = param_infos.len();
     let mut mlir = MlirBackend::new(context, vec![ScalarType::Ptr; num_params + 1]);
@@ -439,9 +445,8 @@ fn build_function<'c>(
             }
         }
     }
-    for (extern_name, extern_params) in extern_meta {
-        let sig = vec![ScalarType::Ptr; extern_params + 1];
-        mlir.declare_extern(extern_name, &sig, None);
+    for (extern_name, params, rets) in extern_meta {
+        mlir.declare_extern_multi(extern_name, params, rets);
     }
 
     let params: Vec<ValueId> = (0..=num_params).map(|i| mlir.param(i)).collect();

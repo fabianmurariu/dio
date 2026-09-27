@@ -13,7 +13,8 @@ use melior::dialect::arith::{self, CmpfPredicate, CmpiPredicate};
 use melior::dialect::llvm::{self, AllocaOptions, LoadStoreOptions};
 use melior::dialect::{cf, func};
 use melior::ir::attribute::{
-    DenseI32ArrayAttribute, FlatSymbolRefAttribute, IntegerAttribute, StringAttribute,
+    DenseI32ArrayAttribute, DenseI64ArrayAttribute, FlatSymbolRefAttribute, IntegerAttribute,
+    StringAttribute,
     TypeAttribute,
 };
 use melior::ir::block::BlockLike;
@@ -77,7 +78,16 @@ fn float_predicate(cc: FloatCmp) -> CmpfPredicate {
 pub(super) struct FuncDecl {
     name: String,
     params: Vec<ScalarType>,
-    ret: Option<ScalarType>,
+    /// Results: none, one, or (register-ABI externs only) two.
+    rets: Vec<ScalarType>,
+}
+
+impl FuncDecl {
+    /// The single result a storage-pointer/internal call returns, if any.
+    fn ret(&self) -> Option<ScalarType> {
+        assert!(self.rets.len() <= 1, "{}: multi-result function called as single-result", self.name);
+        self.rets.first().copied()
+    }
 }
 
 /// The MLIR code generator: builds one function body across `cf` blocks, mapping opaque
@@ -170,11 +180,22 @@ impl<'c> MlirBackend<'c> {
         params: &[ScalarType],
         ret: Option<ScalarType>,
     ) -> usize {
+        self.declare_extern_multi(name, params, &ret.into_iter().collect::<Vec<_>>())
+    }
+
+    /// [`declare_extern`](Self::declare_extern) with any number of results (the
+    /// register-ABI spike returns two-word slices in two registers).
+    pub fn declare_extern_multi(
+        &mut self,
+        name: &str,
+        params: &[ScalarType],
+        rets: &[ScalarType],
+    ) -> usize {
         let id = self.externs.len();
         self.externs.push(FuncDecl {
             name: name.to_string(),
             params: params.to_vec(),
-            ret,
+            rets: rets.to_vec(),
         });
         id
     }
@@ -192,7 +213,7 @@ impl<'c> MlirBackend<'c> {
         self.internal_funcs.push(FuncDecl {
             name: name.to_string(),
             params: params.to_vec(),
-            ret,
+            rets: ret.into_iter().collect(),
         });
         id
     }
@@ -799,7 +820,7 @@ impl<'c> Backend for MlirBackend<'c> {
         let decl = &self.func_refs[func.as_u32() as usize];
         let name = decl.name.clone();
         let params = decl.params.clone();
-        let ret = decl.ret;
+        let ret = decl.ret();
         expect_arguments("call", args, &params);
         let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
         let result_types: Vec<Type> = ret
@@ -878,6 +899,89 @@ impl<'c> Backend for MlirBackend<'c> {
         };
         raw.map(|raw| self.intern(raw, sig.return_type().unwrap()))
     }
+    fn call_multi(
+        &mut self,
+        func: FuncRefId,
+        args: &[ValueId],
+        rets: &[ScalarType],
+    ) -> Vec<ValueId> {
+        let decl = &self.func_refs[func.as_u32() as usize];
+        assert_eq!(decl.rets, rets, "call_multi: result types");
+        let name = decl.name.clone();
+        let params = decl.params.clone();
+        expect_arguments("call_multi", args, &params);
+        let operands: Vec<Value> = args.iter().map(|id| self.get(*id)).collect();
+        let result_types: Vec<Type> = rets.iter().map(|t| scalar_to_mlir(self.context, *t)).collect();
+        let callee = FlatSymbolRefAttribute::new(self.context, &name);
+        // `func.call` with several results lowers to an LLVM call returning a
+        // literal struct, which AArch64 returns in x0:x1 — the C ABI of a 16-byte
+        // integer composite such as `FatSlice`.
+        let operation = func::call(self.context, callee, &operands, &result_types, self.location);
+        let raws: Vec<MlirValue> = {
+            let call_ref = self.blocks[self.current].append_operation(operation);
+            (0..rets.len())
+                .map(|i| call_ref.result(i).expect("call result").to_raw())
+                .collect()
+        };
+        raws.into_iter()
+            .zip(rets)
+            .map(|(raw, &ty)| self.intern(raw, ty))
+            .collect()
+    }
+    fn call_indirect_multi(
+        &mut self,
+        params: &[ScalarType],
+        rets: &[ScalarType],
+        callee: ValueId,
+        args: &[ValueId],
+    ) -> Vec<ValueId> {
+        expect_arguments("call_indirect_multi", args, params);
+        let mut operands: Vec<Value> = Vec::with_capacity(1 + args.len());
+        operands.push(self.get(callee));
+        operands.extend(args.iter().map(|id| self.get(*id)));
+        let field_types: Vec<Type> = rets.iter().map(|t| scalar_to_mlir(self.context, *t)).collect();
+        // `llvm.call` has at most one result: return a literal struct and split it.
+        let result_types: Vec<Type> = match field_types.len() {
+            0 | 1 => field_types.clone(),
+            _ => vec![llvm::r#type::r#struct(self.context, &field_types, false)],
+        };
+        let seg = DenseI32ArrayAttribute::new(self.context, &[operands.len() as i32, 0]);
+        let bundle_sizes = DenseI32ArrayAttribute::new(self.context, &[]);
+        let operation = OperationBuilder::new("llvm.call", self.location)
+            .add_operands(&operands)
+            .add_results(&result_types)
+            .add_attributes(&[
+                (Identifier::new(self.context, "operandSegmentSizes"), seg.into()),
+                (Identifier::new(self.context, "op_bundle_sizes"), bundle_sizes.into()),
+            ])
+            .build()
+            .expect("valid llvm.call");
+        let raw = {
+            let call_ref = self.blocks[self.current].append_operation(operation);
+            (!result_types.is_empty()).then(|| call_ref.result(0).expect("call result").to_raw())
+        };
+        match (raw, rets.len()) {
+            (None, _) => Vec::new(),
+            (Some(raw), 1) => vec![self.intern(raw, rets[0])],
+            (Some(raw), _) => rets
+                .iter()
+                .enumerate()
+                .map(|(i, &ty)| {
+                    // SAFETY: `raw` is the call result just appended to the current block.
+                    let container = unsafe { Value::from_raw(raw) };
+                    let position = DenseI64ArrayAttribute::new(self.context, &[i as i64]);
+                    let op = llvm::extract_value(
+                        self.context,
+                        container,
+                        position,
+                        scalar_to_mlir(self.context, ty),
+                        self.location,
+                    );
+                    self.emit_value(op, ty)
+                })
+                .collect(),
+        }
+    }
     fn func_addr(&mut self, func: FuncRefId) -> ValueId {
         let decl = &self.func_refs[func.as_u32() as usize];
         let name = decl.name.clone();
@@ -887,7 +991,7 @@ impl<'c> Backend for MlirBackend<'c> {
             .map(|t| scalar_to_mlir(self.context, *t))
             .collect();
         let results: Vec<Type> = decl
-            .ret
+            .rets
             .iter()
             .map(|t| scalar_to_mlir(self.context, *t))
             .collect();
@@ -926,9 +1030,9 @@ impl<'c> Backend for MlirBackend<'c> {
         let resolved = FuncDecl {
             name: decl.name.clone(),
             params: decl.params.clone(),
-            ret: decl.ret,
+            rets: decl.rets.clone(),
         };
-        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.ret);
+        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.rets.first().copied());
         self.func_refs.push(resolved);
         id
     }
@@ -937,9 +1041,9 @@ impl<'c> Backend for MlirBackend<'c> {
         let resolved = FuncDecl {
             name: decl.name.clone(),
             params: decl.params.clone(),
-            ret: decl.ret,
+            rets: decl.rets.clone(),
         };
-        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.ret);
+        let id = FuncRefId::from_u32(self.func_refs.len() as u32, decl.rets.first().copied());
         self.func_refs.push(resolved);
         id
     }
@@ -950,12 +1054,12 @@ impl<'c> Backend for MlirBackend<'c> {
 fn emit_extern_declarations(context: &Context, module: &Module, externs: &[FuncDecl]) {
     let location = Location::unknown(context);
     let mut seen = std::collections::HashSet::new();
-    for FuncDecl { name, params, ret } in externs {
+    for FuncDecl { name, params, rets } in externs {
         if !seen.insert(name.as_str()) {
             continue;
         }
         let params: Vec<Type> = params.iter().map(|t| scalar_to_mlir(context, *t)).collect();
-        let results: Vec<Type> = ret.iter().map(|t| scalar_to_mlir(context, *t)).collect();
+        let results: Vec<Type> = rets.iter().map(|t| scalar_to_mlir(context, *t)).collect();
         let signature = FunctionType::new(context, &params, &results);
         let declaration = func::func(
             context,

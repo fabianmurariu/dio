@@ -461,12 +461,21 @@ mod extern_args_sealed {
 pub trait ExternArgs: extern_args_sealed::Sealed {
     /// Number of logical parameters in the tuple.
     const LEN: usize;
+
+    /// The parameters' register types, if every one can be passed in a register
+    /// under the register ABI (see [`register_abi`]).
+    #[doc(hidden)]
+    fn register_params() -> Option<Vec<ScalarType>>;
 }
 
 impl extern_args_sealed::Sealed for () {}
 
 impl ExternArgs for () {
     const LEN: usize = 0;
+
+    fn register_params() -> Option<Vec<ScalarType>> {
+        Some(Vec::new())
+    }
 }
 
 macro_rules! impl_extern_args {
@@ -475,6 +484,10 @@ macro_rules! impl_extern_args {
 
         impl<$($T: StagedType),+> ExternArgs for ($($T,)+) {
             const LEN: usize = $len;
+
+            fn register_params() -> Option<Vec<ScalarType>> {
+                Some(vec![$(register_scalar::<$T>()?),+])
+            }
         }
     };
 }
@@ -515,6 +528,11 @@ pub unsafe trait ExternFn {
 
     /// Function pointer as raw bytes
     const FN_PTR: *const u8;
+
+    /// The underlying `extern "C"` function itself (not its storage-pointer
+    /// thunk), callable directly under the register ABI when `Args` and `Ret`
+    /// qualify (see [`register_abi`]). `#[extern_fn]` fills it in.
+    const DIRECT_FN_PTR: Option<*const u8> = None;
 }
 
 /// An [`ExternFn`] whose target can be invoked by safe Rust when every value in
@@ -703,6 +721,9 @@ where
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
+        if let Some(abi) = register_abi::<S>() {
+            return emit_register_call(ctx, func_ref, &[], &abi.rets);
+        }
         emit_extern_call::<S::Ret>(ctx, func_ref, Vec::new())
     }
 }
@@ -740,9 +761,12 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
+        let a0 = extern_arg_leaf(ctx, &self.arg);
+        if let Some(abi) = register_abi::<S>() {
+            return emit_register_call(ctx, func_ref, &[a0], &abi.rets);
+        }
         let mut args = Vec::new();
-        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg);
-
+        push_extern_value::<AType>(ctx, &mut args, a0);
         emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
@@ -879,10 +903,14 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
+        let a0 = extern_arg_leaf(ctx, &self.arg0);
+        let a1 = extern_arg_leaf(ctx, &self.arg1);
+        if let Some(abi) = register_abi::<S>() {
+            return emit_register_call(ctx, func_ref, &[a0, a1], &abi.rets);
+        }
         let mut args = Vec::new();
-        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
-        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
-
+        push_extern_value::<AType>(ctx, &mut args, a0);
+        push_extern_value::<BType>(ctx, &mut args, a1);
         emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
@@ -951,20 +979,6 @@ where
     CallExtern2 { func, arg0, arg1 }
 }
 
-/// Append a pointer to `arg`'s canonical ABI storage to `args`.
-fn push_extern_arg<A, AType>(ctx: &mut CompilationContext, args: &mut Vec<ValueId>, arg: &A)
-where
-    A: Staged,
-    A::Out: UncheckedExternArg<AType>,
-    AType: StagedType,
-{
-    let arg_value = arg.codegen(ctx);
-    // Materialize to the arg's ABI leaf: a scalar passes through; a fat (slice) value becomes
-    // a pointer to a `{ptr,len}` stack slot — exactly the storage a slice extern arg expects.
-    let arg_leaf = ctx.materialize_value(arg_value);
-    push_extern_value::<AType>(ctx, args, arg_leaf);
-}
-
 pub(crate) fn push_extern_value<T: StagedType>(
     ctx: &mut CompilationContext,
     args: &mut Vec<ValueId>,
@@ -982,6 +996,93 @@ pub(crate) fn push_extern_value<T: StagedType>(
             ctx.store(value, slot_ptr, 0);
         }
         args.push(slot_ptr);
+    }
+}
+
+// =============================================================================
+// SPIKE: register ABI for extern calls (aarch64-apple-darwin only)
+// =============================================================================
+//
+// Instead of the storage-pointer thunk, call the `extern "C"` function itself with
+// arguments and results in registers. Restricted to what AAPCS64 (Apple) passes the
+// same way for every such signature, so no aggregate classification is needed:
+//
+// - parameters: 32/64-bit integers, pointers, f32/f64 scalars (no i8/i16/bool —
+//   Apple requires the caller to extend those);
+// - result: nothing, one such scalar, or a two-word slice `{ptr, len}` (a 16-byte
+//   integer composite, returned in x0:x1).
+//
+// Off unless `RUST_LMS_REGISTER_ABI=1`, so the same binary can A/B both ABIs.
+
+/// A register-ABI signature: parameter and result register types.
+#[derive(Clone, Debug)]
+pub(crate) struct RegAbi {
+    pub params: Vec<ScalarType>,
+    pub rets: Vec<ScalarType>,
+}
+
+/// Whether the register ABI is on for this process (spike toggle).
+pub(crate) fn register_abi_enabled() -> bool {
+    static ENABLED: std::sync::OnceLock<bool> = std::sync::OnceLock::new();
+    cfg!(all(target_arch = "aarch64", target_os = "macos"))
+        && *ENABLED.get_or_init(|| std::env::var("RUST_LMS_REGISTER_ABI").as_deref() == Ok("1"))
+}
+
+/// The register type of `T` when it is a register-ABI scalar.
+pub(crate) fn register_scalar<T: StagedType>() -> Option<ScalarType> {
+    if T::is_copy_struct() || T::is_fat_pointer() || T::size_of() == 0 {
+        return None;
+    }
+    match T::scalar_type() {
+        ScalarType::I32 | ScalarType::I64 | ScalarType::F32 | ScalarType::F64 | ScalarType::Ptr => {
+            Some(T::scalar_type())
+        }
+        ScalarType::Bool | ScalarType::I8 | ScalarType::I16 => None,
+    }
+}
+
+/// The result registers of `R` under the register ABI.
+fn register_rets<R: StagedType>() -> Option<Vec<ScalarType>> {
+    if R::size_of() == 0 {
+        Some(Vec::new())
+    } else if R::is_fat_pointer() {
+        Some(vec![ScalarType::Ptr, ScalarType::I64])
+    } else {
+        register_scalar::<R>().map(|t| vec![t])
+    }
+}
+
+/// `S`'s register-ABI signature, if the register ABI is on and `S` qualifies.
+pub(crate) fn register_abi<S: ExternFn>() -> Option<RegAbi> {
+    if !register_abi_enabled() {
+        return None;
+    }
+    S::DIRECT_FN_PTR?;
+    Some(RegAbi {
+        params: <S::Args as ExternArgs>::register_params()?,
+        rets: register_rets::<S::Ret>()?,
+    })
+}
+
+/// Codegen one extern argument down to its ABI leaf.
+fn extern_arg_leaf<A: Staged>(ctx: &mut CompilationContext, arg: &A) -> ValueId {
+    let value = arg.codegen(ctx);
+    ctx.materialize_value(value)
+}
+
+/// Call a register-ABI extern and rebuild its result `Value`.
+pub(crate) fn emit_register_call(
+    ctx: &mut CompilationContext,
+    func_ref: FuncRefId,
+    args: &[ValueId],
+    rets: &[ScalarType],
+) -> Value {
+    let results = ctx.call_multi(func_ref, args, rets);
+    match results.as_slice() {
+        [] => Value::scalar(ctx.get_unit_value()),
+        [v] => Value::scalar(*v),
+        [ptr, len] => Value::fat(*ptr, *len),
+        _ => unreachable!("register ABI results are at most two words"),
     }
 }
 
@@ -1036,11 +1137,16 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
+        let a0 = extern_arg_leaf(ctx, &self.arg0);
+        let a1 = extern_arg_leaf(ctx, &self.arg1);
+        let a2 = extern_arg_leaf(ctx, &self.arg2);
+        if let Some(abi) = register_abi::<S>() {
+            return emit_register_call(ctx, func_ref, &[a0, a1, a2], &abi.rets);
+        }
         let mut args = Vec::new();
-        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
-        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
-        push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
-
+        push_extern_value::<AType>(ctx, &mut args, a0);
+        push_extern_value::<BType>(ctx, &mut args, a1);
+        push_extern_value::<CType>(ctx, &mut args, a2);
         emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }
@@ -1133,12 +1239,18 @@ where
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let func_ref = ctx.declare_extern_func(self.func.extern_id);
 
+        let a0 = extern_arg_leaf(ctx, &self.arg0);
+        let a1 = extern_arg_leaf(ctx, &self.arg1);
+        let a2 = extern_arg_leaf(ctx, &self.arg2);
+        let a3 = extern_arg_leaf(ctx, &self.arg3);
+        if let Some(abi) = register_abi::<S>() {
+            return emit_register_call(ctx, func_ref, &[a0, a1, a2, a3], &abi.rets);
+        }
         let mut args = Vec::new();
-        push_extern_arg::<_, AType>(ctx, &mut args, &self.arg0);
-        push_extern_arg::<_, BType>(ctx, &mut args, &self.arg1);
-        push_extern_arg::<_, CType>(ctx, &mut args, &self.arg2);
-        push_extern_arg::<_, DType>(ctx, &mut args, &self.arg3);
-
+        push_extern_value::<AType>(ctx, &mut args, a0);
+        push_extern_value::<BType>(ctx, &mut args, a1);
+        push_extern_value::<CType>(ctx, &mut args, a2);
+        push_extern_value::<DType>(ctx, &mut args, a3);
         emit_extern_call::<S::Ret>(ctx, func_ref, args)
     }
 }

@@ -26,7 +26,7 @@ use crate::num::{add, lt};
 use crate::option::{COption, COptionType};
 use crate::refer::SMutPtr;
 use crate::staged::{Staged, ValueId, Var};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, ScalarType, StagedType};
 
 use super::traits::StagedIterator;
 
@@ -200,6 +200,7 @@ where
             handle,
             self.next.extern_id,
             self.drop.extern_id,
+            crate::ffi::register_abi::<K::Drop>().is_some(),
             consumer,
         );
     }
@@ -525,6 +526,8 @@ pub struct OpaqueIterSlot<T> {
     next: Option<unsafe extern "C" fn(*const u8, *mut u8)>,
     drop: Option<unsafe extern "C" fn(*const u8, *mut u8)>,
     data: *mut u8,
+    /// Register-ABI `next` (spike): `data` in x0, `COption<T>` back in x0:x1.
+    next_regs: Option<unsafe extern "C" fn(*mut u8) -> COption<T>>,
     _item: PhantomData<T>,
 }
 
@@ -554,6 +557,11 @@ where
             let result: COption<T> = unsafe { (*(data as *mut I)).next().into() };
             unsafe { output.cast::<COption<T>>().write(result) };
         }
+        unsafe extern "C" fn next_regs_thunk<T: Copy, I: Iterator<Item = T>>(
+            data: *mut u8,
+        ) -> COption<T> {
+            unsafe { (*(data as *mut I)).next().into() }
+        }
         unsafe extern "C" fn drop_inline<I>(data: *const u8, _output: *mut u8) {
             let data = unsafe { data.cast::<*mut u8>().read() };
             unsafe { std::ptr::drop_in_place(data as *mut I) };
@@ -570,6 +578,7 @@ where
         let slot = slot.as_mut_ptr();
         std::ptr::addr_of_mut!((*slot)._item).write(PhantomData);
         std::ptr::addr_of_mut!((*slot).next).write(Some(next_thunk::<T, I>));
+        std::ptr::addr_of_mut!((*slot).next_regs).write(Some(next_regs_thunk::<T, I>));
         if std::mem::size_of::<I>() <= OPAQUE_ITER_INLINE_CAP
             && std::mem::align_of::<I>() <= std::mem::align_of::<OpaqueIterSlot<T>>()
         {
@@ -622,10 +631,13 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     {
         ReusedOpaqueIter {
             init: self.init,
-            args: Box::new(move |c| {
+            args: Box::new(move |c, register| {
                 let value = a.codegen(c);
-                let mut args = Vec::with_capacity(1);
                 let value = c.materialize_value(value);
+                if register {
+                    return vec![value];
+                }
+                let mut args = Vec::with_capacity(1);
                 crate::ffi::push_extern_value::<AType>(c, &mut args, value);
                 args
             }),
@@ -643,12 +655,15 @@ impl<K: ReusedOpaqueIterKind> ReusedOpaqueIterFns<K> {
     {
         ReusedOpaqueIter {
             init: self.init,
-            args: Box::new(move |c| {
+            args: Box::new(move |c, register| {
                 let a = a.codegen(c);
                 let b = b.codegen(c);
-                let mut args = Vec::with_capacity(2);
                 let a = c.materialize_value(a);
                 let b = c.materialize_value(b);
+                if register {
+                    return vec![a, b];
+                }
+                let mut args = Vec::with_capacity(2);
                 crate::ffi::push_extern_value::<AType>(c, &mut args, a);
                 crate::ffi::push_extern_value::<BType>(c, &mut args, b);
                 args
@@ -669,8 +684,9 @@ impl Compiler {
 /// A [`StagedIterator`] backed by reused per-level storage. Each `for_each`
 /// reserves one slot, so nested traversals allocate `O(depth)` (or zero, when
 /// the iterators fit the inline budget) rather than once per inner set.
-/// Codegens a producer's args (everything before the slot ptr) at compile time.
-type ArgsCodegen = Box<dyn Fn(&mut CompilationContext) -> Vec<ValueId>>;
+/// Codegens a producer's args (everything before the slot ptr) at compile time:
+/// register leaves when the flag is set (register ABI), else storage pointers.
+type ArgsCodegen = Box<dyn Fn(&mut CompilationContext, bool) -> Vec<ValueId>>;
 
 pub struct ReusedOpaqueIter<K: ReusedOpaqueIterKind> {
     init: ExternRef<K::Init>,
@@ -691,19 +707,34 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
         let next_off = std::mem::offset_of!(Slot<K>, next) as i32;
         let drop_off = std::mem::offset_of!(Slot<K>, drop) as i32;
         let data_off = std::mem::offset_of!(Slot<K>, data) as i32;
+        // Register-ABI `next` only for 8-byte integer/pointer items: their
+        // `COption` is a 16-byte integer composite, returned in x0:x1.
+        let next_regs = crate::ffi::register_abi_enabled()
+            .then(|| crate::ffi::register_scalar::<K::Item>())
+            .flatten()
+            .filter(|t| matches!(t, ScalarType::I64 | ScalarType::Ptr))
+            .map(|t| (std::mem::offset_of!(Slot<K>, next_regs) as i32, t));
 
         let init_id = self.init.extern_id;
         let args = self.args;
+        let init_abi = crate::ffi::register_abi::<K::Init>();
         ctx.reused_opaque_for_each::<K::Item, _, F>(
             slot_size,
             align_shift,
             next_off,
             drop_off,
             data_off,
+            next_regs,
             move |cctx, slot_ptr| {
-                let mut a = (args)(cctx);
-                crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
                 let init_ref = cctx.declare_extern_func(init_id);
+                if let Some(abi) = &init_abi {
+                    let mut a = (args)(cctx, true);
+                    a.push(slot_ptr);
+                    crate::ffi::emit_register_call(cctx, init_ref, &a, &abi.rets);
+                    return;
+                }
+                let mut a = (args)(cctx, false);
+                crate::ffi::push_extern_value::<OpaqueHandle>(cctx, &mut a, slot_ptr);
                 crate::ffi::emit_extern_call::<()>(cctx, init_ref, a);
             },
             consumer,
