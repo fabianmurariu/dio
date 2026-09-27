@@ -84,6 +84,21 @@ runs on both Cranelift and LLVM (rust-lms 337 tests, sql-gen 113, rust-lms-std
 has the same loop as before, and filter adds only the one trivial jump predicted
 in §8.1.
 
+**Benchmarks** (`rust-lms-std/benches/graph_iter.rs`, Cranelift, 1M-node graphs,
+master vs `pull-iter`; the untouched `native` baseline moves ±6% run to run, so
+that's the noise floor):
+
+- Two-level traversals (`sum`, `dst_gt_src`, `any_mod16`, `window`) are the
+  same or faster everywhere: `csr`/`slice_ffi` −10% to −47%, `chunked` −5% to
+  −23%, `unbuffered` −9% to +4%. The old loops' dead blocks after `break_loop`
+  left 8–13 block parameters on loop headers; the cursor loops carry 3–4.
+- Three-level `two_hop`: `csr`/`slice_ffi` −4% to −17%, `unbuffered` within
+  noise. **Open regression:** `two_hop/uniform/chunked` is +14–15%
+  (44.2 → 50.5 ms, three alternating paired runs). The branch's IR for that
+  kernel is structurally simpler than master's, so the cause is below the IR
+  (register allocation or block layout). The next step is a disassembly hook
+  (Cranelift `set_disasm`) to compare machine code.
+
 ---
 
 ## 1. What's there today (review of `rust-lms/src/iter/`)
