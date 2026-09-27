@@ -2,7 +2,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{Num, add, gt, lt, select};
+use crate::num::{Le, Num, add, gt, le, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
 use crate::types::{ConstantType, CopyType, StagedType};
@@ -10,7 +10,9 @@ use crate::types::{ConstantType, CopyType, StagedType};
 use crate::label::Label;
 use crate::staged::IntoStaged;
 
-use super::{Chain, Filter, FilterMap, Map, Scan, Skip, SkipWhile, Take, TakeWhile, Zip};
+use super::{
+    Chain, Filter, FilterMap, FlatMap, Map, MergeBy, Scan, Skip, SkipWhile, Take, TakeWhile, Zip,
+};
 
 // =============================================================================
 // MinMax sentinels for min/max reductions
@@ -319,6 +321,49 @@ pub trait StagedIterator: Sized {
         B::Iter: StagedIterator<Item = Self::Item>,
     {
         Chain::new(self, other.staged_iter())
+    }
+
+    /// Map each element to an iterator and yield the inner elements in order.
+    ///
+    /// Consumed directly (a terminal, `for_each`) it is two nested loops; pulled
+    /// (inside `zip`/`chain`/`merge_by`/`take`…) it is a state machine over one
+    /// loop. Either way an early exit releases the open inner iterator.
+    fn flat_map<J, F>(self, f: F) -> FlatMap<Self, F>
+    where
+        F: Fn(Var<Self::Item>) -> J,
+        J: IntoStagedIterator,
+    {
+        FlatMap::new(self, f)
+    }
+
+    /// Stable merge of two streams sorted by `le` (`le(x, y)`: `x` may come
+    /// before `y`). On ties the element of `self` comes first.
+    fn merge_by<B, P, Cond>(self, other: B, le: P) -> MergeBy<Self, B::Iter, P>
+    where
+        B: IntoStagedIterator,
+        B::Iter: StagedIterator<Item = Self::Item>,
+        P: Fn(Var<Self::Item>, Var<Self::Item>) -> Cond,
+        Cond: Staged<Out = bool> + 'static,
+    {
+        MergeBy::new(self, other.staged_iter(), le)
+    }
+
+    /// Stable merge of two ascending numeric streams.
+    #[allow(clippy::type_complexity)]
+    fn merge<B>(
+        self,
+        other: B,
+    ) -> MergeBy<
+        Self,
+        B::Iter,
+        fn(Var<Self::Item>, Var<Self::Item>) -> Le<Var<Self::Item>, Var<Self::Item>>,
+    >
+    where
+        B: IntoStagedIterator,
+        B::Iter: StagedIterator<Item = Self::Item>,
+        Self::Item: Num,
+    {
+        MergeBy::new(self, other.staged_iter(), le)
     }
 
     /// At most the first `n` elements.

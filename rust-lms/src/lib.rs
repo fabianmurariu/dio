@@ -102,8 +102,8 @@ pub mod prelude {
     pub use crate::iter::{
         Chain, Close, Cursor, DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner,
         ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap,
-        FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MinMax,
-        OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem,
+        FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MergeBy,
+        MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem,
         OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter, RangeStep,
         ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, Skip, SkipWhile,
         SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess,

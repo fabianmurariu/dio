@@ -17,6 +17,7 @@ use common::for_each_backend;
 pub struct Graph {
     nodes: Vec<u64>,
     other: Vec<u64>,
+    adj: Vec<Vec<u64>>,
     opened: Cell<u64>,
     live: Cell<i64>,
 }
@@ -25,6 +26,7 @@ fn graph(nodes: &[u64], other: &[u64]) -> Graph {
     Graph {
         nodes: nodes.to_vec(),
         other: other.to_vec(),
+        adj: Vec::new(),
         opened: Cell::new(0),
         live: Cell::new(0),
     }
@@ -72,6 +74,19 @@ pub extern "C" fn pull_graph_nodes(g: &Graph) -> *mut () {
 #[unsafe(no_mangle)]
 pub extern "C" fn pull_graph_other(g: &Graph) -> *mut () {
     open_counted(g, &g.other)
+}
+
+/// Neighbours of node `n` (an adjacency list per node).
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn pull_graph_nbrs(g: &Graph, n: u64) -> *mut () {
+    open_counted(g, &g.adj[n as usize])
+}
+
+fn adj_graph(nodes: &[u64], adj: &[&[u64]]) -> Graph {
+    let mut g = graph(nodes, &[]);
+    g.adj = adj.iter().map(|l| l.to_vec()).collect();
+    g
 }
 
 type G = SRef<Opaque<Graph>>;
@@ -409,5 +424,260 @@ fn rev_of_an_empty_range_is_empty() {
         let f = compiled.as_fn();
         assert_eq!(f.call(2, 5), 3);
         assert_eq!(f.call(5, 3), 0);
+    });
+}
+
+// =============================================================================
+// flat_map
+// =============================================================================
+
+#[test]
+fn flat_map_consumed_as_nested_loops() {
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let nbrs = compiler.extern_fn::<PullGraphNbrsExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun1("nbr_sum", move |ctx, g: Var<G>| {
+            // SAFETY: fresh `DynIter<u64>` handles from the producers.
+            unsafe { it.iter(call_extern1(nodes, g)) }
+                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        let g = adj_graph(&[0, 1, 2], &[&[1, 2], &[], &[10]]);
+        assert_eq!(f.call(&g), 13);
+        assert_all_dropped(&g, 4); // the node list + three neighbour lists
+    });
+}
+
+#[test]
+fn flat_map_early_exit_leaves_the_whole_traversal() {
+    // `position` breaks from inside the inner loop: the break must end the
+    // outer loop too (not just the current list), and release the open lists.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let nbrs = compiler.extern_fn::<PullGraphNbrsExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("find", move |ctx, g: Var<G>, t: Var<u64>| {
+            // SAFETY: fresh `DynIter<u64>` handles from the producers.
+            unsafe { it.iter(call_extern1(nodes, g)) }
+                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .position(ctx, move |x| eq(x, t))
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        let adj: &[&[u64]] = &[&[5, 6], &[], &[7, 8], &[9]];
+        let g = adj_graph(&[0, 1, 2, 3], adj);
+        assert_eq!(f.call(&g, 8), 3); // in the third list: lists 0 and 2 opened, 1 too
+        assert_all_dropped(&g, 4); // node list + lists 0, 1, 2 — list 3 never opened
+
+        let g = adj_graph(&[0, 1, 2, 3], adj);
+        assert_eq!(f.call(&g, 5), 0);
+        assert_all_dropped(&g, 2);
+
+        let g = adj_graph(&[0, 1, 2, 3], adj);
+        assert_eq!(f.call(&g, 42), 5); // not found: the total count
+        assert_all_dropped(&g, 5);
+    });
+}
+
+#[test]
+fn flat_map_pulled_by_zip() {
+    // Zipped, the flat_map is a state machine; the zip ends with an inner list
+    // still open, which the close must release.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let nbrs = compiler.extern_fn::<PullGraphNbrsExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("zip_flat", move |ctx, g: Var<G>, w: Var<S>| {
+            let acc = ctx.var(0u64);
+            // SAFETY: fresh `DynIter<u64>` handles from the producers.
+            unsafe { it.iter(call_extern1(nodes, g)) }
+                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .zip(w)
+                .for_each(ctx, move |ctx, x, y| ctx.store(acc, acc * 100u64 + x * y));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        let adj: &[&[u64]] = &[&[1, 2], &[], &[3, 4]];
+        let g = adj_graph(&[0, 1, 2], adj);
+        // flattened: 1 2 3 4 ; w: 10 1 1 → 10, 2, 3 (list 2 left open)
+        assert_eq!(f.call(&g, &[10u64, 1, 1][..]), 100203);
+        assert_all_dropped(&g, 4);
+
+        let g = adj_graph(&[0, 1, 2], adj);
+        // w longer than the flattened stream: the flat_map is exhausted.
+        assert_eq!(f.call(&g, &[1u64, 1, 1, 1, 1][..]), 1020304);
+        assert_all_dropped(&g, 4);
+    });
+}
+
+#[test]
+fn flat_map_pulled_by_chain_and_take() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("tri_then", |ctx, n: Var<u64>, tail: Var<S>| {
+            let acc = ctx.var(0u64);
+            range(0u64, n)
+                .flat_map(|i| range(0u64, i))
+                .chain(tail)
+                .take(7u64)
+                .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x + 1u64));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        // n = 4: [], [0], [0 1], [0 1 2] → 0 0 1 0 1 2, then 7 7 → take 7
+        // (digits are x + 1, so zeros show)
+        assert_eq!(f.call(4, &[7u64, 7][..]), 1121238);
+        assert_eq!(f.call(0, &[7u64][..]), 8);
+    });
+}
+
+#[test]
+fn flat_map_counts_triangles_of_ranges() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("tri", |ctx, n: Var<u64>| {
+            range(0u64, n).flat_map(|i| range(0u64, i)).count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        assert_eq!(f.call(0), 0);
+        assert_eq!(f.call(5), 10);
+    });
+}
+
+// =============================================================================
+// merge_by / merge
+// =============================================================================
+
+#[test]
+fn merge_two_sorted_slices() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("merge", |ctx, a: Var<S>, b: Var<S>| {
+            let acc = ctx.var(0u64);
+            a.staged_iter()
+                .merge(b)
+                .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        assert_eq!(f.call(&[1u64, 4, 6][..], &[2u64, 3, 7, 8][..]), 1234678);
+        assert_eq!(f.call(&[][..], &[2u64, 3][..]), 23);
+        assert_eq!(f.call(&[5u64][..], &[][..]), 5);
+        assert_eq!(f.call(&[][..], &[][..]), 0);
+    });
+}
+
+#[test]
+fn merge_by_is_stable() {
+    // Keys `x / 10`, tags `x % 10`: 1 for the left stream, 2 for the right.
+    // Equal keys must come out left first.
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("stable", |ctx, a: Var<S>, b: Var<S>| {
+            let acc = ctx.var(0u64);
+            a.staged_iter()
+                .map(|x| x * 10u64 + 1u64)
+                .merge_by(b.staged_iter().map(|x| x * 10u64 + 2u64), |x, y| {
+                    le(div(x, 10u64), div(y, 10u64))
+                })
+                .for_each(ctx, move |ctx, x| {
+                    ctx.store(acc, acc * 10u64 + rem(x, 10u64))
+                });
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        // a: 1 2 2 ; b: 2 3 → keys 1 2 2 2 3, tags 1 1 1 2 2
+        assert_eq!(f.call(&[1u64, 2, 2][..], &[2u64, 3][..]), 11122);
+    });
+}
+
+#[test]
+fn merge_extern_with_slice_and_stop_early() {
+    // Memory layer (extern) merged with a disk layer (slice) by time; a
+    // downstream `take_while` stops mid-merge and both sides are released.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun3(
+            "window",
+            move |ctx, g: Var<G>, disk: Var<S>, t1: Var<u64>| {
+                let acc = ctx.var(0u64);
+                // SAFETY: a fresh `DynIter<u64>` handle from the producer.
+                unsafe { it.iter(call_extern1(nodes, g)) }
+                    .merge(disk)
+                    .take_while(move |t| lt(t, t1))
+                    .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x));
+                acc
+            },
+        );
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, &[2u64, 5, 6, 9][..], 7), 12456);
+        assert_all_dropped(&g, 1);
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, &[2u64][..], 100), 1248);
+        assert_all_dropped(&g, 1);
+    });
+}
+
+#[test]
+fn three_way_merge() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun3("merge3", |ctx, a: Var<S>, b: Var<S>, c: Var<S>| {
+            let acc = ctx.var(0u64);
+            a.staged_iter()
+                .merge(b)
+                .merge(c)
+                .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        assert_eq!(
+            f.call(&[1u64, 5][..], &[2u64, 6][..], &[3u64, 4, 7][..]),
+            1234567
+        );
+    });
+}
+
+#[test]
+fn three_level_flat_map_early_exit() {
+    // Two-hop paths: the re-raised break must cross both levels, and every
+    // list opened on the way must be released.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let nbrs = compiler.extern_fn::<PullGraphNbrsExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("two_hop_find", move |ctx, g: Var<G>, t: Var<u64>| {
+            // SAFETY: fresh `DynIter<u64>` handles from the producers.
+            let (pos, found) = unsafe { it.iter(call_extern1(nodes, g)) }
+                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
+                .enumerate()
+                .find_map(ctx, move |p| eq(p.second(), t).then_some(p.first()));
+            select(found, pos, 99u64)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        // 0 → {1, 2}; 1 → {2}; 2 → {0}. Two-hop from 0: 1→2, 2→0 ; from 1: 2→0.
+        let adj: &[&[u64]] = &[&[1, 2], &[2], &[0]];
+        let g = adj_graph(&[0, 1], adj);
+        assert_eq!(f.call(&g, 0), 1); // second two-hop element
+        // nodes, nbrs(0), nbrs(1), nbrs(2) — the search stops inside nbrs(2).
+        assert_all_dropped(&g, 4);
+        let g = adj_graph(&[0, 1], adj);
+        assert_eq!(f.call(&g, 7), 99);
+        // Exhausted: nodes, nbrs(0), nbrs(1), nbrs(2), then nbrs(1), nbrs(2).
+        assert_all_dropped(&g, 6);
     });
 }

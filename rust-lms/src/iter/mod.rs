@@ -27,8 +27,10 @@ mod chain;
 mod enumerate;
 mod filter;
 mod filter_map;
+mod flat_map;
 mod from_fn;
 mod map;
+mod merge;
 pub mod opaque;
 mod range_iter;
 mod rev;
@@ -44,8 +46,10 @@ pub use chain::{Chain, ChainCursor};
 pub use enumerate::{Enumerate, EnumerateCursor};
 pub use filter::{Filter, FilterCursor};
 pub use filter_map::{FilterMap, FilterMapCursor};
+pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
 pub use map::{Map, MapCursor};
+pub use merge::{MergeBy, MergeCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
     ExactSizeOpaqueIterKind, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns,
@@ -87,8 +91,10 @@ into_staged_iter_is_self!(
     Enumerate<I>,
     Filter<I, P>,
     FilterMap<I, F>,
+    FlatMap<I, F>,
     FromFn<F, O>,
     Map<I, F, U>,
+    MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,
     Skip<I, N>,
