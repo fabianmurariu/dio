@@ -13,3 +13,11 @@ rust-lms = { workspace = true }
 cranelift-codegen = { workspace = true }
 # Inline storage for a pool slot's type-erased iterator (heap fallback when large).
 smallbox = { workspace = true }
+
+[dev-dependencies]
+criterion = { workspace = true }
+rand = { workspace = true }
+
+[[bench]]
+name = "graph_iter"
+harness = false
