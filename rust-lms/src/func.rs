@@ -18,6 +18,7 @@
 //! aggregate classification to Cranelift.
 
 use crate::cranelift::CraneliftBackend;
+use crate::label::{Again, Label};
 use crate::staged::{
     CompilationContext, LifetimeErased, SigSpec, Staged, Value, ValueId, Var, VarValue, assign,
 };
@@ -262,43 +263,222 @@ impl Ctx {
         F: FnOnce(&mut Ctx),
     {
         let cond = cond.into_staged();
-        let mut child = Ctx::new(self.next_var_id);
-        body(&mut child);
-        self.next_var_id = child.next_var_id;
-        let body_actions = child.actions;
-
+        let (body_actions, ()) = self.child(body);
         self.actions.push(Box::new(move |ctx| {
-            let loop_header = ctx.create_block();
-            let loop_body = ctx.create_block();
-            let loop_exit = ctx.create_block();
-
-            ctx.jump(loop_header, &[]);
-
-            ctx.switch_to_block(loop_header);
-            let cond_val = cond.codegen(ctx);
-            ctx.brif(cond_val.leaf(), loop_body, &[], loop_exit, &[]);
-
-            ctx.switch_to_block(loop_body);
-            ctx.seal_block(loop_body);
-            // Expose this loop's exit block so `break_loop` inside the body can
-            // jump to it; pop once the body is fully emitted.
-            ctx.loop_exit_stack.push(loop_exit);
-            for action in body_actions {
-                action(ctx);
-            }
-            ctx.loop_exit_stack.pop();
-            ctx.jump(loop_header, &[]);
-            ctx.seal_block(loop_header);
-
-            ctx.switch_to_block(loop_exit);
-            ctx.seal_block(loop_exit);
+            emit_loop(ctx, Some(cond), None, body_actions);
         }));
     }
 
-    /// Break out of the innermost enclosing loop.
+    /// Stage `body` into a child context and return its actions, keeping
+    /// variable ids disjoint from the parent's.
+    fn child<R>(&mut self, body: impl FnOnce(&mut Ctx) -> R) -> (Vec<CodegenAction>, R) {
+        let mut child = Ctx::new(self.next_var_id);
+        let result = body(&mut child);
+        self.next_var_id = child.next_var_id;
+        (child.actions, result)
+    }
+
+    /// A fresh label id. Labels share the variable id counter, which is unique
+    /// per function body, so ids never collide across nested scopes.
+    fn label_id(&mut self) -> usize {
+        let id = self.next_var_id;
+        self.next_var_id += 1;
+        id
+    }
+
+    // =========================================================================
+    // Scoped labels (see `crate::label`)
+    // =========================================================================
+
+    /// The iteration loop: `'done: loop { body }`.
     ///
-    /// Emits a jump to the current loop's exit block. Typically used inside an
-    /// `if_then` to exit early. Panics at codegen time if called outside a loop.
+    /// `body` receives the loop's exit as `done`; [`exit`](Self::exit) to it (or
+    /// [`break_loop`](Self::break_loop), which targets the same block) to leave.
+    /// Falling off the end of `body` runs it again.
+    ///
+    /// ```ignore
+    /// let i = ctx.var(0u64);
+    /// ctx.iterate(|ctx, done| {
+    ///     ctx.exit_if(ge(i, n), done);
+    ///     ctx.store(i, i + 1u64);
+    /// });
+    /// ```
+    pub fn iterate<F>(&mut self, body: F)
+    where
+        F: for<'s> FnOnce(&mut Ctx, Label<'s>),
+    {
+        let id = self.label_id();
+        let (body_actions, ()) = self.child(|ctx| body(ctx, Label::new(id)));
+        self.actions.push(Box::new(move |ctx| {
+            emit_loop::<crate::staged::Const<bool>>(ctx, None, Some(id), body_actions);
+        }));
+    }
+
+    /// A forward label with no value: `'out: { body }`.
+    ///
+    /// [`exit`](Self::exit)`(out)` anywhere inside `body` — however deeply
+    /// nested — continues after the block. Not a loop scope: `break_loop`
+    /// passes through it.
+    pub fn block<F>(&mut self, body: F)
+    where
+        F: for<'s> FnOnce(&mut Ctx, Label<'s>),
+    {
+        let id = self.label_id();
+        let (body_actions, ()) = self.child(|ctx| body(ctx, Label::new(id)));
+        self.actions.push(Box::new(move |ctx| {
+            let out = ctx.create_block();
+            ctx.labels.insert(id, out);
+            for action in body_actions {
+                action(ctx);
+            }
+            ctx.labels.remove(&id);
+            ctx.jump(out, &[]);
+            ctx.switch_to_block(out);
+            // Every predecessor — each `exit` and the fall-through — is emitted.
+            ctx.seal_block(out);
+        }));
+    }
+
+    /// A forward label carrying a value: `'out: { body }` where `body` either
+    /// [`goto`](Self::goto)s `out` with a `T` or falls through with its result.
+    /// Returns the merged value (the merge block's parameters — a phi).
+    ///
+    /// ```ignore
+    /// let sign = ctx.join(|ctx, out| {
+    ///     ctx.if_then(lt(x, 0i64), |ctx| ctx.goto(out, -1i64));
+    ///     ctx.if_then(gt(x, 0i64), |ctx| ctx.goto(out, 1i64));
+    ///     0i64
+    /// });
+    /// ```
+    pub fn join<T, E, F>(&mut self, body: F) -> Var<T>
+    where
+        T: StagedType + 'static,
+        E: crate::staged::IntoStaged<T>,
+        E::Staged: 'static,
+        F: for<'s> FnOnce(&mut Ctx, Label<'s, T>) -> E,
+    {
+        let id = self.label_id();
+        let (body_actions, fall_through) = self.child(|ctx| body(ctx, Label::new(id)));
+        let fall_through = fall_through.into_staged();
+        let result = self.alloc::<T>();
+        let result_id = result.id;
+        self.actions.push(Box::new(move |ctx| {
+            let out = ctx.create_block();
+            ctx.append_value_block_params::<T>(out);
+            ctx.labels.insert(id, out);
+            for action in body_actions {
+                action(ctx);
+            }
+            let value = fall_through.codegen(ctx);
+            ctx.labels.remove(&id);
+            ctx.jump_value(out, value);
+            ctx.switch_to_block(out);
+            ctx.seal_block(out);
+            let merged = ctx.block_value::<T>(out);
+            ctx.assign_var::<T>(result_id, merged, true);
+        }));
+        result
+    }
+
+    /// A retry point: `'again: loop { body; break }`.
+    ///
+    /// [`again`](Self::again) re-runs `body` from the top; falling off the end
+    /// leaves. Not a loop scope — `break_loop` inside passes through to the
+    /// enclosing `iterate`/`while_loop` — which is what separates it from
+    /// `while_loop`. Returns `body`'s stage-0 result.
+    ///
+    /// ```ignore
+    /// let x = ctx.repeat(|ctx, again| {
+    ///     let x = ctx.bind(pull(h));
+    ///     ctx.again_if(is_tombstone(x), again);
+    ///     x
+    /// });
+    /// ```
+    pub fn repeat<R, F>(&mut self, body: F) -> R
+    where
+        F: for<'s> FnOnce(&mut Ctx, Again<'s>) -> R,
+    {
+        let id = self.label_id();
+        let (body_actions, result) = self.child(|ctx| body(ctx, Again::new(id)));
+        self.actions.push(Box::new(move |ctx| {
+            let head = ctx.create_block();
+            ctx.jump(head, &[]);
+            ctx.switch_to_block(head);
+            ctx.labels.insert(id, head);
+            for action in body_actions {
+                action(ctx);
+            }
+            ctx.labels.remove(&id);
+            // Every back-edge (`again`) is inside the body, so all are emitted.
+            ctx.seal_block(head);
+        }));
+        result
+    }
+
+    /// Jump to `label` carrying `value` (`break 'label value`). Code staged
+    /// after it in the same block is unreachable.
+    pub fn goto<T, E>(&mut self, label: Label<'_, T>, value: E)
+    where
+        T: StagedType + 'static,
+        E: crate::staged::IntoStaged<T>,
+        E::Staged: 'static,
+    {
+        let id = label.id;
+        let value = value.into_staged();
+        self.actions.push(Box::new(move |ctx| {
+            let value = value.codegen(ctx);
+            let target = label_block(ctx, id);
+            ctx.jump_value(target, value);
+            switch_to_dead_block(ctx);
+        }));
+    }
+
+    /// Jump to a value-less `label` (`break 'label`).
+    pub fn exit(&mut self, label: Label<'_>) {
+        let id = label.id;
+        self.actions.push(Box::new(move |ctx| {
+            let target = label_block(ctx, id);
+            ctx.jump(target, &[]);
+            switch_to_dead_block(ctx);
+        }));
+    }
+
+    /// `if cond { break 'label }` as a single conditional branch.
+    pub fn exit_if<C>(&mut self, cond: C, label: Label<'_>)
+    where
+        C: Staged<Out = bool> + 'static,
+    {
+        let id = label.id;
+        self.actions.push(Box::new(move |ctx| {
+            let cond = cond.codegen(ctx);
+            let target = label_block(ctx, id);
+            branch_or_continue(ctx, cond.leaf(), target);
+        }));
+    }
+
+    /// Re-run the enclosing [`repeat`](Self::repeat)'s body (`continue 'again`).
+    pub fn again(&mut self, again: Again<'_>) {
+        let id = again.id;
+        self.actions.push(Box::new(move |ctx| {
+            let head = label_block(ctx, id);
+            ctx.jump(head, &[]);
+            switch_to_dead_block(ctx);
+        }));
+    }
+
+    /// `if cond { continue 'again }` as a single conditional branch.
+    pub fn again_if<C>(&mut self, cond: C, again: Again<'_>)
+    where
+        C: Staged<Out = bool> + 'static,
+    {
+        let id = again.id;
+        self.actions.push(Box::new(move |ctx| {
+            let cond = cond.codegen(ctx);
+            let head = label_block(ctx, id);
+            branch_or_continue(ctx, cond.leaf(), head);
+        }));
+    }
+
     /// Drive a push loop over an opaque external iterator via `next`/`drop`.
     ///
     /// Emits the storage-pointer loop (see `iter::opaque`):
@@ -494,6 +674,13 @@ impl Ctx {
         }));
     }
 
+    /// Break out of the innermost enclosing loop — an [`iterate`](Self::iterate)
+    /// or [`while_loop`](Self::while_loop). [`block`](Self::block),
+    /// [`join`](Self::join) and [`repeat`](Self::repeat) are not loops and are
+    /// passed through.
+    ///
+    /// Emits a jump to the loop's exit block. Typically used inside an
+    /// `if_then` to exit early. Panics at codegen time if called outside a loop.
     pub fn break_loop(&mut self) {
         self.actions.push(Box::new(move |ctx| {
             let exit = *ctx
@@ -501,11 +688,7 @@ impl Ctx {
                 .last()
                 .expect("break_loop called outside of a loop");
             ctx.jump(exit, &[]);
-            // The current block is now terminated; switch to a fresh (dead)
-            // block so any following emitted instructions remain well-formed.
-            let dead = ctx.create_block();
-            ctx.switch_to_block(dead);
-            ctx.seal_block(dead);
+            switch_to_dead_block(ctx);
         }));
     }
 
@@ -585,6 +768,84 @@ impl Ctx {
             ctx.seal_block(merge_block);
         }));
     }
+}
+
+// =============================================================================
+// Shared lowering for loops and labels
+// =============================================================================
+
+/// The one loop lowering, shared by `while_loop` (a header test) and `iterate`
+/// (no test; its exit doubles as the `done` label).
+///
+/// ```text
+/// jump header
+/// header: [brif cond, body, exit]   ; while_loop only
+/// body:   <actions> ; jump header    ; break_loop / exit(done) → exit
+/// exit:
+/// ```
+fn emit_loop<C: Staged<Out = bool>>(
+    ctx: &mut CompilationContext,
+    cond: Option<C>,
+    label: Option<usize>,
+    body_actions: Vec<CodegenAction>,
+) {
+    let header = ctx.create_block();
+    let exit = ctx.create_block();
+    ctx.jump(header, &[]);
+    ctx.switch_to_block(header);
+    if let Some(cond) = cond {
+        let body = ctx.create_block();
+        let cond_val = cond.codegen(ctx);
+        ctx.brif(cond_val.leaf(), body, &[], exit, &[]);
+        ctx.switch_to_block(body);
+        ctx.seal_block(body);
+    }
+    // Expose the exit to `break_loop` (and, for `iterate`, to `exit(done)`)
+    // while the body is emitted.
+    ctx.loop_exit_stack.push(exit);
+    if let Some(id) = label {
+        ctx.labels.insert(id, exit);
+    }
+    for action in body_actions {
+        action(ctx);
+    }
+    if let Some(id) = label {
+        ctx.labels.remove(&id);
+    }
+    ctx.loop_exit_stack.pop();
+    ctx.jump(header, &[]);
+    // All back-edges and exits are emitted now.
+    ctx.seal_block(header);
+    ctx.switch_to_block(exit);
+    ctx.seal_block(exit);
+}
+
+/// The block a label id names. Its scope is being emitted — the stage-0 brand
+/// guarantees that — so a miss is a library bug, not a user error.
+fn label_block(ctx: &CompilationContext, id: usize) -> crate::staged::BlockHandle {
+    *ctx.labels
+        .get(&id)
+        .expect("label used outside its scope (the lifetime brand should prevent this)")
+}
+
+/// After an unconditional jump the current block is terminated; continue in a
+/// fresh, unreachable block so any code staged afterwards stays well-formed.
+fn switch_to_dead_block(ctx: &mut CompilationContext) {
+    let dead = ctx.create_block();
+    ctx.switch_to_block(dead);
+    ctx.seal_block(dead);
+}
+
+/// `brif cond, target, cont` and continue in `cont` — one branch, no merge block.
+fn branch_or_continue(
+    ctx: &mut CompilationContext,
+    cond: ValueId,
+    target: crate::staged::BlockHandle,
+) {
+    let cont = ctx.create_block();
+    ctx.brif(cond, target, &[], cont, &[]);
+    ctx.switch_to_block(cont);
+    ctx.seal_block(cont);
 }
 
 // =============================================================================
@@ -1321,6 +1582,7 @@ impl Compiler {
                             unit_value: None,
                             block_params: HashMap::new(),
                             loop_exit_stack: Vec::new(),
+                            labels: HashMap::new(),
                         };
                         emit_function_body(
                             &mut ctx,
@@ -1390,6 +1652,7 @@ impl Compiler {
                         unit_value: None,
                         block_params: HashMap::new(),
                         loop_exit_stack: Vec::new(),
+                        labels: HashMap::new(),
                     };
                     emit_function_body(
                         &mut ctx,

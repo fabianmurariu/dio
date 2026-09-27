@@ -292,6 +292,7 @@ where
             unit_value: None,
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
+            labels: HashMap::new(),
         };
         body(&mut ctx)
     };
@@ -320,6 +321,7 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
             unit_value: None,
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
+            labels: HashMap::new(),
         };
         emit_body(&mut ctx)
     };
@@ -453,6 +455,7 @@ fn build_function<'c>(
             unit_value: None,
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
+            labels: HashMap::new(),
         };
         crate::func::emit_function_body(
             &mut ctx,

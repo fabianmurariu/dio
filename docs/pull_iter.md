@@ -322,6 +322,209 @@ impl Ctx {
 }
 ```
 
+### 4.1 Understanding the primitives by example
+
+#### They are Rust's labelled `break` and `continue`
+
+The primitives look foreign, but each one is a Rust construct you already use:
+
+| `Ctx` primitive | Plain-Rust equivalent | Meaning |
+|---|---|---|
+| `ctx.join(\|ctx, out\| … v)` | `'out: { … v }` (labelled block) | A block that produces a value |
+| `ctx.goto(out, x)` | `break 'out x` | Leave the block early with `x` |
+| `ctx.repeat(\|ctx, again\| … v)` | `'again: loop { …; break v }` | Code you can jump back to the start of |
+| `ctx.again(again)` | `continue 'again` | Jump back to the start |
+| `ctx.iterate(\|ctx, done\| …)` | `'done: loop { … }` | The one real iteration loop |
+
+There are two differences from Rust, and both are the reason these primitives
+exist:
+
+- **`repeat` exits by default.** If the body reaches its end, execution
+  continues after it; it only runs again when you call `again`. It's a "retry
+  point", not a loop.
+- **`join` and `repeat` are invisible to `break_loop`.** Only `iterate` (and
+  `while_loop`) catch it.
+
+#### `join` + `goto`: a block with several exits that share one result
+
+```rust
+// stage 0
+let sign = ctx.join::<i64, _, _>(|ctx, out| {
+    ctx.if_then(lt(x, 0i64), |ctx| ctx.goto(out, -1i64));
+    ctx.if_then(gt(x, 0i64), |ctx| ctx.goto(out,  1i64));
+    0i64                                   // the fall-through value also goes to `out`
+});
+// `sign: Var<i64>` here
+```
+
+The same thing in plain Rust:
+
+```rust
+let sign = 'out: {
+    if x < 0 { break 'out -1 }
+    if x > 0 { break 'out 1 }
+    0
+};
+```
+
+The Cranelift IR it emits (dead blocks omitted):
+
+```
+block0:  v1 = icmp slt x, 0 ; brif v1, block1, block2
+block1:  jump out(-1)
+block2:  v2 = icmp sgt x, 0 ; brif v2, block3, block4
+block3:  jump out(1)
+block4:  jump out(0)
+out(sign: i64):                            ; block parameter = the phi
+         ...
+```
+
+`join` creates one block (`out`) with a typed parameter. Each `goto` and the
+fall-through jump there with a value, and after the closure returns the block is
+sealed and code generation continues inside it. This is exactly what
+`IfThenElse` does with its merge block today
+(`append_value_block_params`/`jump_value`), except that the number of incoming
+edges isn't fixed at two.
+
+`Label<()>` carries no value; it's just a jump target. The iterator's `done`
+label is one of these.
+
+#### `repeat` + `again`: a retry point
+
+Suppose you need to skip tombstones in an extern stream:
+
+```rust
+let x = ctx.repeat(|ctx, again| {
+    let x = ctx.bind(unsafe { call_extern1_unchecked(next_raw, h) });
+    ctx.if_then(is_tombstone(x), |ctx| ctx.again(again));   // retry
+    x                                                         // otherwise continue with x
+});
+```
+
+```rust
+let x = 'again: loop {
+    let x = next_raw(h);
+    if is_tombstone(x) { continue 'again }
+    break x;
+};
+```
+
+```
+block0:  jump head
+head:    v1 = call next_raw(h) ; v2 = is_tombstone(v1) ; brif v2, block1, block2
+block1:  jump head                         ; again
+block2:  ...continue with x = v1           ; fall-through leaves the repeat
+```
+
+`head` is sealed when the closure ends, because every `again` back-edge has been
+emitted by then.
+
+**Why not `while_loop`?** `while_loop` is an iteration scope, so a `break_loop`
+staged inside its body jumps to *its* exit. If `filter` used a `while_loop` to
+retry, `slice.filter(p).any(q)` would break out of filter's retry loop instead of
+the whole iteration, and `any` would keep scanning. `repeat` is transparent, so
+`break_loop` goes past it to the real loop. This is exactly the bug that forces
+the current push code to follow the rule "combinators never add loops".
+
+#### `iterate` + `done`: the driver
+
+```rust
+ctx.iterate(|ctx, done| {
+    let x = cursor.next(ctx, done);   // source jumps to `done` when exhausted
+    consumer(ctx, x);                 // any/all/find_map may break_loop → the same exit
+});
+close.close(ctx);                     // reached by both exits → handles dropped once
+```
+
+`iterate` is `loop { … }` whose exit is available both as the `done` label and as
+the `break_loop` target. Exhaustion and early termination leave through the same
+block, which is what makes "drop the handle exactly once" structural.
+
+#### All three together: `slice.filter(p).any(q)`
+
+This is what the pieces stage into, with each part labelled by the iterator that
+emitted it:
+
+```rust
+// driver (any's for_each)              // Rust equivalent
+ctx.iterate(|ctx, done| {               // 'done: loop {
+  // Filter::next
+  let x = ctx.repeat(|ctx, again| {     //   let x = 'again: loop {
+    // SliceCursor::next
+    ctx.if_then(ge(i, n), |ctx|         //     if i >= n { break 'done }
+        ctx.goto(done, ()));
+    let x = ctx.bind(s[i]);             //     let x = s[i];
+    ctx.store(i, i + 1);                //     i += 1;
+    ctx.if_then(not(p(x)), |ctx|        //     if !p(x) { continue 'again }
+        ctx.again(again));
+    x                                   //     break x };
+  });
+  // any's consumer
+  ctx.if_then(q(x), |ctx| {             //   if q(x) {
+    ctx.store(found, true);             //     found = true;
+    ctx.break_loop();                   //     break 'done  ← skips 'again, as intended
+  });                                   //   }
+});                                     // }
+```
+
+`goto(done)` sits three closures deep, inside the slice's step, inside filter's
+`repeat`, but it still reaches the driver's exit. That's the ability push
+iterators lack: a source can say "I'm exhausted" from anywhere, and each
+combinator decides what that means by choosing which label to pass down.
+
+#### Why labels matter: `chain` in about 10 lines
+
+```rust
+let x = ctx.join(|ctx, got| {                        // 'got: {
+    ctx.if_then(not(in_b), |ctx| {                   //   if !in_b {
+        ctx.join::<(), _, _>(|ctx, a_done| {         //     'a_done: {
+            let x = a.next(ctx, a_done);             //       let x = a.next() else break 'a_done;
+            ctx.goto(got, x);                        //       break 'got x;
+        });                                          //     }
+        ctx.store(in_b, true);                       //     in_b = true;   // only via a_done
+    });                                              //   }
+    b.next(ctx, done)                                //   b.next() else break 'done  → falls to 'got
+});                                                  // }
+```
+
+`chain` passes `a` a *private* done label (`a_done`) that means "switch to `b`",
+and passes `b` the real `done`. Neither source knows it's inside a chain, and the
+consumer is emitted once, after `got`.
+
+#### The lifetime brand: why a label can't outlive its scope
+
+The closure is `for<'s> FnOnce(&mut Ctx, Label<'s, T>)`, so the label's lifetime
+is tied to that closure and can't be named outside it:
+
+```rust
+let mut leaked = None;
+ctx.join::<(), _, _>(|_ctx, l| { leaked = Some(l); });   // error[E0521]: borrowed data escapes the closure
+ctx.goto(leaked.unwrap(), ());
+```
+
+This matters because `join` seals its block when the closure returns. A `goto`
+staged afterwards would add a predecessor to a sealed block, which is the #1
+Cranelift panic in the CLAUDE.md invariants. The brand turns that runtime panic
+into a compile error. Generated code only ever sees the label's plain id, as with
+`bind_lt`.
+
+#### Rules and edge cases
+
+- **Code after `goto`/`again` is dead.** It's emitted into a fresh unreachable
+  block, as `break_loop` does today, so a closure can still return its
+  fall-through value afterwards.
+- **Values leave a `join` only through the label.** `goto(out, v)` is typed
+  (`v: IntoStaged<T>`), so every exit must supply a `T`. Don't define a var
+  inside the join and read it afterwards on the assumption that all paths set it;
+  route it through the label.
+- **`break_loop` rule after the change:** it targets the innermost
+  `iterate`/`while_loop` and passes through `join` and `repeat`.
+- **No new `unsafe`, no backend changes.** Everything lowers to `create_block`,
+  `append_block_param`, `jump`, `brif` and `seal_block`, which both backends
+  already implement.
+
+### 4.2 Lowering
+
 **Codegen for each primitive** (stage 1, replaying actions in order, as
 `while_loop` does):
 

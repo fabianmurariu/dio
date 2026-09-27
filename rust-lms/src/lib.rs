@@ -60,6 +60,7 @@ pub mod func;
 pub(crate) mod func_def;
 pub(crate) mod func_impl;
 pub mod iter;
+pub mod label;
 /// LLVM/MLIR backend (docs/llvm.md, Phase 1+). Compiled only with `--features llvm`.
 #[cfg(feature = "llvm")]
 pub mod llvm;
@@ -108,6 +109,7 @@ pub mod prelude {
         ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter,
         emplace_iter, from_fn, range, range_step,
     };
+    pub use crate::label::{Again, Label};
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne, Num,
         Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le,

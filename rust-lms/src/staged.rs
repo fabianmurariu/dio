@@ -306,6 +306,10 @@ pub struct CompilationContext<'c> {
     /// Stack of enclosing loops' exit blocks. The innermost loop's exit is on
     /// top; `break_loop` jumps to it. Pushed/popped by the loop codegen.
     pub(crate) loop_exit_stack: Vec<BlockHandle>,
+    /// Blocks targeted by the scoped labels of `Ctx::join`/`block`/`repeat`/
+    /// `iterate`, keyed by label id. An entry lives exactly as long as its scope
+    /// is being emitted; the stage-0 lifetime brand guarantees no jump outlives it.
+    pub(crate) labels: HashMap<usize, BlockHandle>,
 }
 
 /// The IR-emission backend: the single interface a code generator implements.
