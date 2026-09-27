@@ -460,3 +460,28 @@ fn from_fn_producer_can_break_before_pulling() {
         assert_eq!(unsafe { CAPPED_CURSOR }, 2);
     });
 }
+
+// =============================================================================
+// Generic extern functions: one marker instantiation per type argument
+// =============================================================================
+
+/// Widen any small integer to `i64` and double it. Each instantiation of the
+/// generated `GenericDoubleExtern<T>` gets its own monomorphic thunk. `T` is
+/// used directly as a parameter type, so it must be `StagedType` itself.
+#[extern_fn]
+pub extern "C" fn generic_double<T: StagedType + Copy + Into<i64>>(x: T) -> i64 {
+    2 * x.into()
+}
+
+#[test]
+fn generic_extern_fn_instantiates_per_type() {
+    for_each_backend(|mut compiler| {
+        let from_i32 = compiler.extern_fn::<GenericDoubleExtern<i32>>();
+        let from_u8 = compiler.extern_fn::<GenericDoubleExtern<u8>>();
+        let f = compiler.fun2("double_both", move |_ctx, a: Var<i32>, b: Var<u8>| {
+            add(call_extern1(from_i32, a), call_extern1(from_u8, b))
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        assert_eq!(compiled.call(-7, 200), 2 * -7 + 2 * 200);
+    });
+}

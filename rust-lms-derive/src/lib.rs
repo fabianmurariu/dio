@@ -591,6 +591,48 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         format_ident!("{}Extern", result)
     };
 
+    // Type parameters become parameters of the marker, so each instantiation is
+    // its own `ExternFn` with a monomorphic thunk. Lifetime and const parameters
+    // are not supported.
+    let generics = &input.sig.generics;
+    if let Some(param) = generics
+        .params
+        .iter()
+        .find(|p| !matches!(p, syn::GenericParam::Type(_)))
+    {
+        return syn::Error::new_spanned(
+            param,
+            "#[extern_fn] supports type parameters only (no lifetime or const parameters)",
+        )
+        .to_compile_error()
+        .into();
+    }
+    let type_params: Vec<_> = generics.type_params().map(|p| &p.ident).collect();
+    let (impl_generics, ty_generics, where_clause) = generics.split_for_impl();
+    let static_bounds = quote! { #(#type_params: 'static,)* };
+    let impl_where = match where_clause {
+        Some(w) => {
+            let preds = &w.predicates;
+            quote! { where #preds, #static_bounds }
+        }
+        None if type_params.is_empty() => quote! {},
+        None => quote! { where #static_bounds },
+    };
+    let marker_def = if type_params.is_empty() {
+        quote! { pub struct #type_name; }
+    } else {
+        quote! {
+            pub struct #type_name #impl_generics (
+                ::core::marker::PhantomData<fn() -> (#(#type_params,)*)>
+            ) #where_clause;
+        }
+    };
+    let turbofish = if type_params.is_empty() {
+        quote! {}
+    } else {
+        quote! { ::<#(#type_params),*> }
+    };
+
     // Extract parameter types
     let mut param_staged_types = Vec::new();
     let mut param_rust_types = Vec::new();
@@ -669,7 +711,8 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
     let safe_extern_impl =
         if input.sig.unsafety.is_none() && !has_reference_return && !has_slice_reference_param {
             quote! {
-                unsafe impl ::rust_lms::ffi::SafeExternFn for #type_name {}
+                unsafe impl #impl_generics ::rust_lms::ffi::SafeExternFn
+                    for #type_name #ty_generics #impl_where {}
             }
         } else {
             quote! {}
@@ -691,20 +734,20 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
         ///
         /// Use with `compiler.extern_fn::<#type_name>()` to get a callable handle.
         #[allow(non_camel_case_types)]
-        pub struct #type_name;
+        #marker_def
 
         #[doc(hidden)]
-        unsafe extern "C" fn #thunk_name(
+        unsafe extern "C" fn #thunk_name #impl_generics (
             #(#thunk_arg_ptrs: *const u8,)*
             __rust_lms_output: *mut u8,
-        ) {
+        ) #where_clause {
             #(
                 let #thunk_args: #param_rust_types = unsafe {
                     #thunk_arg_ptrs.cast::<#param_rust_types>().read()
                 };
             )*
             let __rust_lms_result: #return_rust_type = unsafe {
-                #fn_name(#(#thunk_args),*)
+                #fn_name #turbofish (#(#thunk_args),*)
             };
             if ::core::mem::size_of::<#return_rust_type>() != 0 {
                 unsafe {
@@ -715,12 +758,14 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
             }
         }
 
-        unsafe impl ::rust_lms::ffi::ExternFn for #type_name {
+        unsafe impl #impl_generics ::rust_lms::ffi::ExternFn
+            for #type_name #ty_generics #impl_where
+        {
             type Args = #args_staged_type;
             type Ret = #return_staged_type;
 
             const NAME: &'static str = #fn_name_str;
-            const FN_PTR: *const u8 = #thunk_name as *const u8;
+            const FN_PTR: *const u8 = #thunk_name #turbofish as *const u8;
         }
 
         #safe_extern_impl

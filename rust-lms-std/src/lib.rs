@@ -10,17 +10,17 @@
 //! - [`RecordLayout`] / [`FieldId`] / [`DynamicRecord`] — a record whose *field set*
 //!   is chosen at query-compile time but whose every field *access* stays typed.
 //!   Reads/writes take a typed, layout-bound token; the raw `*mut u8` never surfaces.
-//! - [`IterPool`] / [`StagedIterPool`] / [`PooledIterFns`] — Rust iterators driven
-//!   from staged code a chunk at a time, through reused per-nesting-level slots
-//!   assigned at stage 0.
+//! - [`ChunkedIterFns`] / [`ChunkedIter`] — Rust iterators driven from staged code a
+//!   chunk at a time through a stack-frame slot per nesting level: one extern call
+//!   per list of up to [`CHUNK`] items.
 
-pub mod iter_pool;
+pub mod chunked;
 pub mod record;
 pub mod svec;
 
-pub use iter_pool::{
-    Chunk, ChunkSlot, ChunkSlotRef, IterPool, IterPoolRef, PoolSlot, PoolSlotRef, PooledIter,
-    PooledIterFns, PooledIterKind, StagedIterPool,
+pub use chunked::{
+    CHUNK, ChunkHead, ChunkStart, ChunkStartRef, ChunkedIter, ChunkedIterFns, ChunkedIterKind,
+    ChunkedSlot,
 };
 pub use record::{DynamicRecord, FieldId, RecordLayout};
 pub use svec::{HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern, svec_grow};

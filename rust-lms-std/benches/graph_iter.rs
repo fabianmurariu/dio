@@ -1,4 +1,4 @@
-//! **Graph neighbour access: visible slices vs pooled chunks vs per-element FFI.**
+//! **Graph neighbour access: visible slices vs chunked vs per-element FFI.**
 //!
 //! One CSR graph (`offsets`, `targets`, per-edge `ts`) sits behind every variant;
 //! only *how staged code reaches a node's neighbours* changes:
@@ -8,7 +8,7 @@
 //! | `native`      | plain Rust over the CSR arrays (reference line, not staged)     |
 //! | `csr`         | the CSR slices themselves: pointer + offset loops, no FFI       |
 //! | `slice_ffi`   | one extern call per node returning its neighbours as a slice    |
-//! | `pooled/C`    | [`IterPool`] chunks of `C` items: one extern call per chunk     |
+//! | `chunked`     | [`ChunkedIter`]: stack-slot chunks; one call per list ≤ 64      |
 //! | `unbuffered`  | [`ReusedOpaqueIter`]: one indirect extern call per neighbour    |
 //!
 //! Each workload is written once, generic over the stage-0 [`Nbrs`] strategy, so
@@ -44,14 +44,12 @@ use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_m
 use rand::rngs::StdRng;
 use rand::{Rng, SeedableRng};
 use rust_lms::prelude::*;
-use rust_lms_std::{ChunkSlot, IterPool, IterPoolRef, PooledIterFns, PooledIterKind, StagedIterPool};
+use rust_lms_std::{ChunkStart, ChunkedIterFns, ChunkedIterKind};
 
 const NODES: usize = 1_000_000;
 const MAX_DEGREE: usize = 100_000;
 const WINDOW: u64 = 250; // `ts` is uniform in 0..1000, so ~25% of edges pass
 const TWO_HOP_SOURCES: u64 = 100_000;
-const CHUNK_SWEEP: &[u64] = &[16, 256, 4096];
-const DEFAULT_CHUNK: u64 = 256;
 
 // =============================================================================
 // Graph
@@ -72,7 +70,9 @@ impl Graph {
             targets.extend((0..d).map(|_| rng.random_range(0..NODES as u64)));
             offsets.push(targets.len() as u64);
         }
-        let ts = (0..targets.len()).map(|_| rng.random_range(0..1000)).collect();
+        let ts = (0..targets.len())
+            .map(|_| rng.random_range(0..1000))
+            .collect();
         Graph {
             offsets,
             targets,
@@ -115,7 +115,10 @@ impl Graph {
 
     fn describe(&self, name: &str) {
         let n = self.offsets.len() - 1;
-        let max = (0..n as u64).map(|v| self.range(v).len()).max().unwrap_or(0);
+        let max = (0..n as u64)
+            .map(|v| self.range(v).len())
+            .max()
+            .unwrap_or(0);
         let small = (0..n as u64).filter(|&v| self.range(v).len() <= 4).count();
         eprintln!(
             "graph {name}: {n} nodes, {} edges, mean degree {:.1}, max {max}, {:.0}% of nodes with ≤4 neighbours",
@@ -145,18 +148,6 @@ pub extern "C" fn ts_slice(g: &Graph, n: u64) -> FatSlice<u64> {
 }
 
 #[extern_fn]
-pub unsafe extern "C" fn pooled_nbrs(g: &Graph, n: u64, slot: &mut ChunkSlot<u64>) {
-    // SAFETY: the graph outlives every kernel call.
-    unsafe { slot.emplace_borrowed(g.nbrs(n).iter().copied()) };
-}
-
-#[extern_fn]
-pub unsafe extern "C" fn pooled_window(g: &Graph, n: u64, slot: &mut ChunkSlot<u64>) {
-    // SAFETY: the graph outlives every kernel call.
-    unsafe { slot.emplace_borrowed(g.window_nbrs(n)) };
-}
-
-#[extern_fn]
 pub unsafe extern "C" fn reused_nbrs(g: &Graph, n: u64, slot: *mut ()) {
     // SAFETY: `slot` is the reused slot the kernel reserved for this level, and
     // the graph outlives every kernel call.
@@ -169,16 +160,28 @@ pub unsafe extern "C" fn reused_window(g: &Graph, n: u64, slot: *mut ()) {
     unsafe { emplace_iter(slot as *mut OpaqueIterSlot<u64>, g.window_nbrs(n)) };
 }
 
-struct PooledNbrs;
-impl PooledIterKind for PooledNbrs {
-    type Item = u64;
-    type Init = PooledNbrsExtern;
+#[extern_fn]
+pub unsafe extern "C" fn chunked_nbrs(g: &Graph, n: u64, slot: &mut ChunkStart<u64>) {
+    // SAFETY: the graph outlives every kernel call.
+    unsafe { slot.start_borrowed(g.nbrs(n).iter().copied()) };
 }
 
-struct PooledWindow;
-impl PooledIterKind for PooledWindow {
+#[extern_fn]
+pub unsafe extern "C" fn chunked_window(g: &Graph, n: u64, slot: &mut ChunkStart<u64>) {
+    // SAFETY: the graph outlives every kernel call.
+    unsafe { slot.start_borrowed(g.window_nbrs(n)) };
+}
+
+struct ChunkedNbrs;
+impl ChunkedIterKind for ChunkedNbrs {
     type Item = u64;
-    type Init = PooledWindowExtern;
+    type Init = ChunkedNbrsExtern;
+}
+
+struct ChunkedWindow;
+impl ChunkedIterKind for ChunkedWindow {
+    type Item = u64;
+    type Init = ChunkedWindowExtern;
 }
 
 struct ReusedNbrs;
@@ -265,22 +268,20 @@ impl Nbrs for SliceFfi {
     }
 }
 
-/// `pooled/C`: chunks through the kernel's [`IterPool`].
-struct Pooled<'p> {
-    pool: &'p StagedIterPool,
+/// `chunked`: chunks through a stack slot per nesting level.
+struct Chunked {
     g: Var<G>,
-    chunk: u64,
-    nbrs: PooledIterFns<PooledNbrs>,
-    window: PooledIterFns<PooledWindow>,
+    nbrs: ChunkedIterFns<ChunkedNbrs>,
+    window: ChunkedIterFns<ChunkedWindow>,
 }
 
-impl Nbrs for Pooled<'_> {
+impl Nbrs for Chunked {
     fn nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
-        self.nbrs.iter2(self.pool, self.g, n, self.chunk)
+        self.nbrs.iter2(self.g, n)
     }
 
     fn window_nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
-        self.window.iter2(self.pool, self.g, n, self.chunk)
+        self.window.iter2(self.g, n)
     }
 }
 
@@ -325,13 +326,6 @@ impl Workload {
         }
     }
 
-    fn chunks(self) -> &'static [u64] {
-        match self {
-            Workload::Sum | Workload::TwoHop => CHUNK_SWEEP,
-            _ => &[DEFAULT_CHUNK],
-        }
-    }
-
     fn stage<S: Nbrs>(self, ctx: &mut Ctx, s: &S) -> Var<u64> {
         let acc = ctx.var(0u64);
         let nodes = NODES as u64;
@@ -345,9 +339,7 @@ impl Workload {
                 ctx.store(acc, add(acc, c));
             }),
             Workload::AnyMod16 => range(0u64, nodes).for_each(ctx, |ctx, n| {
-                let hit = s
-                    .nbrs(ctx, n)
-                    .any(ctx, |d| eq(bitand(d, 15u64), 0u64));
+                let hit = s.nbrs(ctx, n).any(ctx, |d| eq(bitand(d, 15u64), 0u64));
                 ctx.store(acc, add(acc, select(hit, 1u64, 0u64)));
             }),
             Workload::Window => range(0u64, nodes).for_each(ctx, |ctx, n| {
@@ -402,13 +394,13 @@ impl Workload {
 // Kernels
 // =============================================================================
 
-type Kernel = Box<dyn Fn(&Graph, &mut IterPool) -> u64>;
+type Kernel = Box<dyn Fn(&Graph) -> u64>;
 
 #[derive(Clone, Copy)]
 enum Variant {
     Csr,
     SliceFfi,
-    Pooled(u64),
+    Chunked,
     Unbuffered,
 }
 
@@ -417,7 +409,7 @@ impl Variant {
         match self {
             Variant::Csr => "csr".into(),
             Variant::SliceFfi => "slice_ffi".into(),
-            Variant::Pooled(c) => format!("pooled/{c}"),
+            Variant::Chunked => "chunked".into(),
             Variant::Unbuffered => "unbuffered".into(),
         }
     }
@@ -426,18 +418,18 @@ impl Variant {
         let mut compiler = Compiler::new().with_backend(backend);
         match self {
             Variant::Csr => {
-                let f = compiler.fun3(
-                    "csr",
-                    move |ctx, offsets: U64s, targets: U64s, ts: U64s| {
-                        w.stage(ctx, &Csr {
+                let f = compiler.fun3("csr", move |ctx, offsets: U64s, targets: U64s, ts: U64s| {
+                    w.stage(
+                        ctx,
+                        &Csr {
                             offsets,
                             targets,
                             ts,
-                        })
-                    },
-                );
+                        },
+                    )
+                });
                 let k = compiler.compile(f).expect("compile");
-                Box::new(move |g, _| k.as_fn().call(&g.offsets, &g.targets, &g.ts))
+                Box::new(move |g| k.as_fn().call(&g.offsets, &g.targets, &g.ts))
             }
             Variant::SliceFfi => {
                 let nbrs = compiler.extern_fn();
@@ -446,23 +438,16 @@ impl Variant {
                     w.stage(ctx, &SliceFfi { g, nbrs, ts })
                 });
                 let k = compiler.compile(f).expect("compile");
-                Box::new(move |g, _| k.as_fn().call(g))
+                Box::new(move |g| k.as_fn().call(g))
             }
-            Variant::Pooled(chunk) => {
-                let nbrs = PooledIterFns::register(&mut compiler);
-                let window = PooledIterFns::register(&mut compiler);
-                let f = compiler.fun2("pooled", move |ctx, g: Var<G>, pool: Var<IterPoolRef>| {
-                    let pool = StagedIterPool::new(pool);
-                    w.stage(ctx, &Pooled {
-                        pool: &pool,
-                        g,
-                        chunk,
-                        nbrs,
-                        window,
-                    })
+            Variant::Chunked => {
+                let nbrs = ChunkedIterFns::register(&mut compiler);
+                let window = ChunkedIterFns::register(&mut compiler);
+                let f = compiler.fun1("chunked", move |ctx, g: Var<G>| {
+                    w.stage(ctx, &Chunked { g, nbrs, window })
                 });
                 let k = compiler.compile(f).expect("compile");
-                Box::new(move |g, pool| k.as_fn().call(g, pool))
+                Box::new(move |g| k.as_fn().call(g))
             }
             Variant::Unbuffered => {
                 let nbrs = compiler.reused_opaque_iter_fns();
@@ -471,7 +456,7 @@ impl Variant {
                     w.stage(ctx, &Unbuffered { g, nbrs, window })
                 });
                 let k = compiler.compile(f).expect("compile");
-                Box::new(move |g, _| k.as_fn().call(g))
+                Box::new(move |g| k.as_fn().call(g))
             }
         }
     }
@@ -498,11 +483,13 @@ const WORKLOADS: &[Workload] = &[
 ];
 
 fn bench_graph_iter(c: &mut Criterion) {
-    let graphs = [("power_law", Graph::power_law(7)), ("uniform", Graph::uniform(11))];
+    let graphs = [
+        ("power_law", Graph::power_law(7)),
+        ("uniform", Graph::uniform(11)),
+    ];
     for (name, g) in &graphs {
         g.describe(name);
     }
-    let mut pool = IterPool::new();
 
     for &w in WORKLOADS {
         for (graph_name, g) in &graphs {
@@ -512,22 +499,24 @@ fn bench_graph_iter(c: &mut Criterion) {
 
             group.bench_function("native", |b| b.iter(|| black_box(w.native(black_box(g)))));
 
-            let variants = [Variant::Csr, Variant::SliceFfi]
-                .into_iter()
-                .chain(w.chunks().iter().map(|&c| Variant::Pooled(c)))
-                .chain([Variant::Unbuffered]);
+            let variants = [
+                Variant::Csr,
+                Variant::SliceFfi,
+                Variant::Chunked,
+                Variant::Unbuffered,
+            ];
             for v in variants {
                 for (backend_name, backend) in backends() {
                     let k = v.build(backend, w);
                     assert_eq!(
-                        k(g, &mut pool),
+                        k(g),
                         expected,
                         "{}/{backend_name} computed the wrong {} on {graph_name}",
                         v.name(),
                         w.name()
                     );
                     group.bench_function(BenchmarkId::new(backend_name, v.name()), |b| {
-                        b.iter(|| black_box(k(black_box(g), &mut pool)))
+                        b.iter(|| black_box(k(black_box(g))))
                     });
                 }
             }
