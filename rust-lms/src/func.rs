@@ -1682,6 +1682,35 @@ impl<T: StagedType> Compiled<T> {
 /// };
 /// assert_eq!(*escaped, 42);
 /// ```
+///
+/// Like a Rust `fn`, a compiled function is contravariant in its arguments. A
+/// function that accepts shorter-lived data can stand in for one that needs
+/// longer-lived data:
+///
+/// ```
+/// use rust_lms::prelude::*;
+/// use rust_lms::slice::BorrowedSlice;
+///
+/// type Kernel<'arg> = CompiledFn<FunType1<BorrowedSlice<'arg, u64>, BorrowedSlice<'static, u64>>>;
+///
+/// fn lengthen_argument<'a>(f: Kernel<'a>) -> Kernel<'static> {
+///     f
+/// }
+/// ```
+///
+/// but not the reverse: a kernel staged for `'static` input, whose result may
+/// be that input, cannot be called with shorter-lived data:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::slice::BorrowedSlice;
+///
+/// type Kernel<'arg> = CompiledFn<FunType1<BorrowedSlice<'arg, u64>, BorrowedSlice<'static, u64>>>;
+///
+/// fn shorten_argument<'a>(f: Kernel<'static>) -> Kernel<'a> {
+///     f
+/// }
+/// ```
 #[must_use = "a compiled entry point does nothing until it is called"]
 pub struct CompiledFn<F> {
     function: unsafe extern "C" fn(),

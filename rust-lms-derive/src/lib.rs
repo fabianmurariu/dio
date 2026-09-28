@@ -52,6 +52,23 @@ fn is_supported_erased_field(field_ty: &Type, staged_ty: &Type) -> bool {
         || (matches!(field_ty, Type::Ptr(_)) && is_path(staged_ty, "u64"))
 }
 
+/// The `RuntimeValue` a field's staged marker must have.
+///
+/// Normally the field's own type. A shared slice reference `&'a [E]` is instead
+/// matched against `*const [E]` (the `RuntimeValue` of `SRef<Slice<_>>`): same
+/// layout, and the element type is still checked exactly by the emitted
+/// `RuntimeValue = *const [E]` predicate. The lifetime stays on the struct, so
+/// by-value parameters are borrow-checked at every call.
+fn expected_runtime_value(field_ty: &Type) -> Type {
+    match field_ty {
+        Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Slice(_)) => {
+            let elem = &r.elem;
+            parse_quote!(*const #elem)
+        }
+        _ => field_ty.clone(),
+    }
+}
+
 fn is_marker_runtime_value(field_ty: &Type, staged_ty: &Type) -> bool {
     quote!(#field_ty).to_string() == quote!(#staged_ty :: RuntimeValue).to_string()
 }
@@ -190,7 +207,8 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     // The derive itself emits unsafe trait implementations, so safe input must
     // prove the representation facts those traits require. Ordinary fields use
     // exact RuntimeValue equality. The small allowlist above covers the existing
-    // pointer/usize-to-integer erasures and is checked by LAYOUT_VALID below.
+    // pointer/usize-to-integer erasures and is checked by LAYOUT_VALID below;
+    // shared slice references are matched via `expected_runtime_value`.
     let mut trusted_generics = input.generics.clone();
     trusted_generics
         .make_where_clause()
@@ -201,11 +219,12 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         if !is_supported_erased_field(field_ty, staged_ty)
             && !is_marker_runtime_value(field_ty, staged_ty)
         {
+            let runtime_ty = expected_runtime_value(field_ty);
             trusted_generics
                 .make_where_clause()
                 .predicates
                 .push(parse_quote!(
-                    #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #field_ty>
+                    #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #runtime_ty>
                 ));
         }
     }

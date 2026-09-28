@@ -188,6 +188,51 @@ impl FloatCmp {
 ///     byte: u8,
 /// }
 /// ```
+///
+/// A shared slice field `&'a [E]` may be staged as `SRef<Slice<E>>`. Staging
+/// requires `'static` types (`fun1`'s body is `'static`), so a kernel over such
+/// a struct takes `'static` data:
+///
+/// ```
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct Borrowed<'a> {
+///     #[staged(SRef<Slice<u64>>)]
+///     values: &'a [u64],
+/// }
+///
+/// static DATA: [u64; 3] = [1, 2, 3];
+///
+/// fn main() {
+///     let mut compiler = Compiler::new();
+///     let len = compiler.fun1("len", |_ctx, b: Var<Borrowed<'_>>| {
+///         b.get(BorrowedType::values()).len()
+///     });
+///     let compiled = compiler.compile(len).unwrap();
+///     assert_eq!(compiled.call(Borrowed { values: &DATA }), 3);
+/// }
+/// ```
+///
+/// The element type must match exactly; equal layout is not enough:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct WrongElement<'a> {
+///     #[staged(SRef<Slice<u64>>)]
+///     bytes: &'a [u8],
+/// }
+///
+/// fn main() {}
+/// ```
 pub unsafe trait StagedType {
     /// The actual runtime type (e.g., i64 for i64)
     type RuntimeValue;

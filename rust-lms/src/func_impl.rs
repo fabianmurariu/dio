@@ -219,7 +219,7 @@ macro_rules! impl_fun_n {
         /// Function type marker
         #[derive(Clone, Copy, Debug, PartialEq, Eq)]
         pub struct $FunType<$($T,)+ OUT> {
-            _phantom: PhantomData<($($T,)+ OUT)>,
+            _phantom: PhantomData<fn($($T,)+) -> OUT>,
         }
 
         unsafe impl<$($T: StagedType,)+ OUT: StagedType> StagedType for $FunType<$($T,)+ OUT> {
@@ -234,7 +234,7 @@ macro_rules! impl_fun_n {
         #[derive(Clone, Copy)]
         pub struct $FunRef<$($T: StagedType,)+ OUT: StagedType> {
             pub(crate) id: usize,
-            _phantom: PhantomData<($($T,)+ OUT)>,
+            _phantom: PhantomData<fn($($T,)+) -> OUT>,
         }
 
         impl<$($T: StagedType,)+ OUT: StagedType> $FunRef<$($T,)+ OUT> {

@@ -10,6 +10,33 @@ use rust_lms::refer::{SRef, SRefMut};
 mod common;
 use common::for_each_backend;
 
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct FfiAdjList<'a> {
+    #[staged(SRef<Slice<u64>>)]
+    offsets: &'a [u64],
+    #[staged(SRef<Slice<u64>>)]
+    neighbours: &'a [u64],
+}
+
+#[test]
+fn small_graph_staged() {
+    let offsets = vec![0u64, 1, 3];
+    let neighbours = vec![1u64, 2, 3];
+
+    let ffi_adj_list = FfiAdjList {
+        offsets: &offsets,
+        neighbours: &neighbours,
+    };
+
+    for_each_backend(|mut compiler| {
+        let sum_deg = compiler.fun1("sum_degrees", |_ctx, g: Var<FfiAdjList<'_>>| {
+            g.get(FfiAdjListType::neighbours()).len()
+        });
+        let compiled = compiler.compile(sum_deg).expect("compilation failed");
+        assert_eq!(compiled.call(ffi_adj_list), 3);
+    })
+}
 // Test with simple Copy struct
 // Note: Structs MUST be Copy for pass-by-value semantics
 #[derive(StagedType, Copy, Clone)]
