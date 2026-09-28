@@ -5,7 +5,7 @@ use crate::func::Ctx;
 use crate::num::{Le, Num, add, gt, le, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
-use crate::types::{ConstantType, CopyType, StagedType};
+use crate::types::{ConstantType, CopyType, DirectValue, StagedType};
 
 use crate::label::Label;
 use crate::staged::IntoStaged;
@@ -299,6 +299,15 @@ pub trait StagedIterator: Sized {
         SkipWhile::new(self, p)
     }
 
+    /// Pair each element with its zero-based position.
+    ///
+    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
+    /// element separately; used through the combinators the item is a
+    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
+    fn enumerate(self) -> super::Enumerate<Self> {
+        super::Enumerate::new(self)
+    }
+
     /// Pair elements of two iterators, stopping at the shorter one — any two
     /// iterators, indexed or not (a slice, an extern stream, a filtered view…).
     ///
@@ -386,17 +395,71 @@ pub trait StagedIterator: Sized {
     // Terminal operations
     // =========================================================================
 
-    /// Sum all elements. Accumulator starts at `T::RuntimeValue::default()` (zero).
+    /// Fold every element into an accumulator: `acc = f(acc, elem)`, starting
+    /// from `init`. Returns the accumulator.
+    ///
+    /// `f` is called once at staging time and builds the update expression; the
+    /// accumulator lives in a register across the loop.
+    ///
+    /// ```ignore
+    /// let total = slice.staged_iter().fold(ctx, 0i64, |acc, x| acc + x);
+    /// ```
+    ///
+    /// Several accumulators at once, or updates with side effects, are a
+    /// [`for_each`](Self::for_each) over vars declared before the loop.
+    fn fold<A, Init, F, E>(self, ctx: &mut Ctx, init: Init, f: F) -> Var<A>
+    where
+        A: StagedType + CopyType + 'static,
+        Init: IntoStaged<A>,
+        Init::Staged: 'static,
+        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        E: Staged<Out = A> + 'static,
+    {
+        let acc = ctx.var(init);
+        self.for_each(ctx, move |ctx, elem| {
+            ctx.store(acc, f(acc, elem));
+        });
+        acc
+    }
+
+    /// Branchless conditional fold: `acc = if pred(elem) { f(acc, elem) } else
+    /// { acc }`, lowered as a `select` rather than a branch.
+    ///
+    /// Equivalent to `self.filter(pred).fold(ctx, init, f)`, but the loop body
+    /// has no data-dependent branch, so it stays vectorizable/unrollable (and
+    /// `count_if` becomes a single conditional increment, e.g. `csinc`).
+    ///
+    /// **`f` is evaluated for every element**, whether `pred` holds or not, so
+    /// it must be cheap and total — no division `pred` is guarding against a
+    /// zero, no load `pred` is guarding against being out of range. For those,
+    /// use `filter(..).fold(..)`, which branches.
+    fn fold_if<A, Init, P, Cond, F, E>(self, ctx: &mut Ctx, init: Init, pred: P, f: F) -> Var<A>
+    where
+        A: DirectValue + 'static,
+        Init: IntoStaged<A>,
+        Init::Staged: 'static,
+        Self::Item: CopyType + 'static,
+        P: FnOnce(Var<Self::Item>) -> Cond,
+        Cond: Staged<Out = bool> + 'static,
+        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        E: Staged<Out = A> + 'static,
+    {
+        self.fold(ctx, init, move |acc, elem| {
+            select(pred(elem), f(acc, elem), acc)
+        })
+    }
+
+    /// Sum all elements, starting from zero.
     fn sum(self, ctx: &mut Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: Default,
     {
-        let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
-        self.for_each(ctx, move |ctx, elem| {
-            ctx.store(acc, acc + elem);
-        });
-        acc
+        self.fold(
+            ctx,
+            Const::<Self::Item>::new(Default::default()),
+            |acc, x| acc + x,
+        )
     }
 
     /// Count elements passing through (including any upstream filter).
@@ -404,60 +467,29 @@ pub trait StagedIterator: Sized {
     where
         Self::Item: 'static,
     {
-        let acc = ctx.var(0u64);
-        self.for_each(ctx, move |ctx, _elem| {
-            ctx.store(acc, acc + 1u64);
-        });
-        acc
+        self.fold(ctx, 0u64, |acc, _| acc + 1u64)
     }
 
-    /// Pair each element with its zero-based position.
-    ///
-    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
-    /// element separately; used through the combinators the item is a
-    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
-    fn enumerate(self) -> super::Enumerate<Self>
-    where
-        Self: Sized,
-    {
-        super::Enumerate::new(self)
-    }
-
-    /// Branchless count of elements satisfying `pred`.
-    ///
-    /// Equivalent to `self.filter(pred).count(ctx)` but adds a predicated
-    /// `0/1` (via cmov) every iteration instead of branching — so the loop
-    /// body has no data-dependent branch and stays vectorizable.
+    /// Branchless count of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
     fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
     where
-        Self::Item: 'static,
+        Self::Item: CopyType + 'static,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
         Cond: Staged<Out = bool> + 'static,
     {
-        let acc = ctx.var(0u64);
-        self.for_each(ctx, move |ctx, elem| {
-            ctx.store(acc, acc + select(pred(elem), 1u64, 0u64));
-        });
-        acc
+        self.fold_if(ctx, 0u64, pred, |acc, _| acc + 1u64)
     }
 
-    /// Branchless sum of elements satisfying `pred`.
-    ///
-    /// Equivalent to `self.filter(pred).sum(ctx)` but adds `select(pred, elem,
-    /// 0)` every iteration instead of branching.
+    /// Branchless sum of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
     fn sum_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<Self::Item>
     where
-        Self::Item: Num,
+        Self::Item: Num + DirectValue,
         <Self::Item as StagedType>::RuntimeValue: Default,
         P: Fn(Var<Self::Item>) -> Cond + 'static,
         Cond: Staged<Out = bool> + 'static,
     {
-        let acc = ctx.var(Const::<Self::Item>::new(Default::default()));
-        self.for_each(ctx, move |ctx, elem| {
-            let zero = Const::<Self::Item>::new(Default::default());
-            ctx.store(acc, acc + select(pred(elem), elem, zero));
-        });
-        acc
+        let zero = Const::<Self::Item>::new(Default::default());
+        self.fold_if(ctx, zero, pred, |acc, x| acc + x)
     }
 
     /// Find the minimum element. Starts at the type's maximum sentinel.
@@ -467,14 +499,11 @@ pub trait StagedIterator: Sized {
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
-        let acc = ctx.var(Const::<Self::Item>::new(sentinel));
-        self.for_each(ctx, move |ctx, elem| {
-            // Branchless: unconditional store of a cmov. Both arms are already
-            // in registers, so there's no downside, and the body stays
-            // vectorizable/unrollable.
-            ctx.store(acc, select(lt(elem, acc), elem, acc));
-        });
-        acc
+        // Branchless: an unconditional store of a cmov keeps the body
+        // vectorizable/unrollable.
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+            select(lt(x, acc), x, acc)
+        })
     }
 
     /// Find the maximum element. Starts at the type's minimum sentinel.
@@ -484,39 +513,9 @@ pub trait StagedIterator: Sized {
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
-        let acc = ctx.var(Const::<Self::Item>::new(sentinel));
-        self.for_each(ctx, move |ctx, elem| {
-            // Branchless: see `min`.
-            ctx.store(acc, select(gt(elem, acc), elem, acc));
-        });
-        acc
-    }
-
-    /// Fold with a user-managed accumulator.
-    ///
-    /// `acc` is any `Copy + 'static` value — typically a `Var<T>` or a tuple
-    /// of `Var`s you declared via `ctx.var()` before calling `fold`.
-    /// `f` receives `(ctx, acc, elem)` and emits the per-iteration update.
-    ///
-    /// After `fold` returns the accumulator vars hold the final result.
-    ///
-    /// # Example — count + sum simultaneously
-    /// ```ignore
-    /// let count = ctx.var(0u64);
-    /// let sum   = ctx.var(0.0f64);
-    /// slice.staged_iter().fold(ctx, (count, sum), |ctx, (c, s), elem| {
-    ///     ctx.assign(c, add(c, 1u64));
-    ///     ctx.assign(s, add(s, elem));
-    /// });
-    /// ```
-    fn fold<Acc, F>(self, ctx: &mut Ctx, acc: Acc, f: F)
-    where
-        Acc: Copy + 'static,
-        F: FnOnce(&mut Ctx, Acc, Var<Self::Item>) + 'static,
-    {
-        self.for_each(ctx, move |ctx, elem| {
-            f(ctx, acc, elem);
-        });
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+            select(gt(x, acc), x, acc)
+        })
     }
 
     // =========================================================================

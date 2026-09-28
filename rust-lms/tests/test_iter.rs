@@ -154,23 +154,74 @@ fn test_iter_min_max_filtered() {
 }
 
 // =============================================================================
-// fold (multi-accumulator via user-managed vars)
+// fold / fold_if
 // =============================================================================
 
 #[test]
-fn test_iter_fold_count_and_sum() {
+fn test_iter_fold_returns_the_accumulator() {
+    for_each_backend(|mut compiler| {
+        // Horner: digits → number.
+        let f = compiler.fun1("horner", |ctx, arr: Var<SRef<Slice<u64>>>| {
+            arr.staged_iter().fold(ctx, 0u64, |acc, d| acc * 10u64 + d)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let f = compiled.as_fn();
+        assert_eq!(f.call(&[1u64, 2, 3][..]), 123);
+        assert_eq!(f.call(&[][..]), 0);
+    });
+}
+
+#[test]
+fn test_iter_fold_with_a_bool_accumulator() {
+    // The accumulator need not be numeric: "is the slice sorted?".
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("sorted", |ctx, arr: Var<SRef<Slice<i64>>>| {
+            let prev = ctx.var(i64::MIN);
+            arr.staged_iter()
+                .scan(true, move |ctx, ok, x| {
+                    ctx.store(ok, select(gt(prev, x), false, ok));
+                    ctx.store(prev, x);
+                })
+                .fold(ctx, true, |_, ok| ok)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let f = compiled.as_fn();
+        assert!(f.call(&[1i64, 2, 2, 5][..]));
+        assert!(!f.call(&[1i64, 3, 2][..]));
+        assert!(f.call(&[][..]));
+    });
+}
+
+#[test]
+fn test_iter_fold_if_matches_filter_fold() {
+    for_each_backend(|mut compiler| {
+        let branchless = compiler.fun1("fold_if", |ctx, arr: Var<SRef<Slice<f64>>>| {
+            arr.staged_iter()
+                .fold_if(ctx, 0.0f64, |x| gt(x, 0.0f64), |acc, x| acc + x * x)
+        });
+        let compiled = compiler.compile(branchless).expect("compile failed");
+        let data = [1.5f64, -2.0, 3.0, -0.5, 2.0];
+        let expected: f64 = data.iter().filter(|&&x| x > 0.0).map(|x| x * x).sum();
+        assert!((compiled.as_fn().call(&data[..]) - expected).abs() < 1e-12);
+    });
+}
+
+// =============================================================================
+// several accumulators: for_each over vars declared before the loop
+// =============================================================================
+
+#[test]
+fn test_iter_for_each_count_and_sum() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("count_and_sum", |ctx, arr: Var<SRef<Slice<f64>>>| {
-            // Declare accumulator vars BEFORE fold
+            // Several accumulators at once: vars declared before the loop,
+            // updated by `for_each`.
             let count = ctx.var(0u64);
             let sum = ctx.var(0.0f64);
-
-            // fold uses user-managed vars — no Accumulator trait needed
-            arr.staged_iter()
-                .fold(ctx, (count, sum), |ctx, (c, s), elem| {
-                    ctx.store(c, c + 1u64);
-                    ctx.store(s, s + elem);
-                });
+            arr.staged_iter().for_each(ctx, move |ctx, elem| {
+                ctx.store(count, count + 1u64);
+                ctx.store(sum, sum + elem);
+            });
 
             count // return count as the function result
         });

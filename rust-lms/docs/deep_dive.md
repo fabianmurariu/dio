@@ -613,10 +613,11 @@ gone after staging — only the emitted instructions remain.
 | **Structs** | `#[derive(StagedType)]` struct | the struct | `I64` pointer to exact aggregate storage (§10) |
 | | field `get` / `get_ref` / `field_mut` / `store` | `T` / `&field` / — / `()` | `load` / offset / offset / `store` |
 | | `split_fields_mut(s, f1, f2)` | two disjoint `&mut` | two field offsets (distinct fields only — else a compile error) |
-| **Iterators** | `arr.staged_iter()`, `range(a,b)` | — | a loop *source* (no runtime object) |
-| | `.map`/`.filter`/`.filter_map`/`.scan`/`.take_while`/`.skip_while`/`.zip` | — | wrap the consumer with `if_then`s — **no new loop** |
-| | `.sum`/`.count`/`.min`/`.max`/`.fold(ctx)` | reduced `T` | ONE fused loop |
-| | `.sum_if`/`.count_if` | `T`/`u64` | fused loop, branchless `select` add |
+| **Iterators** | `arr.staged_iter()`, `range(a,b)`, opaque/extern iterators | — | a *source*: `open` → a cursor (no runtime object); see `docs/pull_iter.md` |
+| | `.map`/`.filter`/`.filter_map`/`.scan`/`.take_while`/`.skip_while`/`.take`/`.skip`/`.enumerate` | — | wrap the cursor's step — **no new loop** |
+| | `.zip`/`.chain`/`.merge_by`/`.flat_map` | — | any iterators; `zip` of indexed sides shares one counter; a consumed `flat_map` is nested loops |
+| | `.fold(ctx, init, f)` (and `.sum`/`.count`/`.min`/`.max` on it) | reduced `A` | ONE fused loop, accumulator in a register |
+| | `.fold_if(ctx, init, pred, f)` (and `.sum_if`/`.count_if` on it) | reduced `A` | fused loop, branchless `select` update (`f` runs for every element) |
 | | `.any`/`.all`/`.position`/`.find_map` | `bool`/…/`StagedOpt` | fused loop + `break_loop` |
 | **Optionals** | `StagedOpt` (`then_some`, `s_some`/`s_none`) | — (not a `StagedType`) | control flow only — no memory |
 | | `COption<T>` | `#[repr(C, u64)]` value | discriminant + payload in memory |
