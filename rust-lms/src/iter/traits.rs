@@ -2,7 +2,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{Le, Num, add, gt, le, lt, select};
+use crate::num::{Le, Lt, Num, add, gt, le, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
 use crate::types::{ConstantType, CopyType, DirectValue, StagedType};
@@ -11,7 +11,8 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
-    Chain, Filter, FilterMap, FlatMap, Map, MergeBy, Scan, Skip, SkipWhile, Take, TakeWhile, Zip,
+    Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile, Take,
+    TakeWhile, Zip,
 };
 
 // =============================================================================
@@ -373,6 +374,38 @@ pub trait StagedIterator: Sized {
         Self::Item: Num,
     {
         MergeBy::new(self, other.staged_iter(), le)
+    }
+
+    /// The elements `self` and `other` have in common, both sorted by the
+    /// strict order `lt` — a merge join. One-to-one in order (multiset
+    /// intersection); yields `self`'s element; ends when either side does.
+    fn intersect_by<B, P, Cond>(self, other: B, lt: P) -> IntersectBy<Self, B::Iter, P>
+    where
+        B: IntoStagedIterator,
+        B::Iter: StagedIterator<Item = Self::Item>,
+        P: Fn(Var<Self::Item>, Var<Self::Item>) -> Cond,
+        Cond: Staged<Out = bool> + 'static,
+    {
+        IntersectBy::new(self, other.staged_iter(), lt)
+    }
+
+    /// Common elements of two ascending numeric streams (e.g. common
+    /// neighbours from two sorted adjacency lists).
+    #[allow(clippy::type_complexity)]
+    fn intersect<B>(
+        self,
+        other: B,
+    ) -> IntersectBy<
+        Self,
+        B::Iter,
+        fn(Var<Self::Item>, Var<Self::Item>) -> Lt<Var<Self::Item>, Var<Self::Item>>,
+    >
+    where
+        B: IntoStagedIterator,
+        B::Iter: StagedIterator<Item = Self::Item>,
+        Self::Item: Num,
+    {
+        IntersectBy::new(self, other.staged_iter(), lt)
     }
 
     /// At most the first `n` elements.

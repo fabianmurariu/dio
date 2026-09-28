@@ -681,3 +681,103 @@ fn three_level_flat_map_early_exit() {
         assert_all_dropped(&g, 6);
     });
 }
+
+// =============================================================================
+// intersect_by / intersect
+// =============================================================================
+
+#[test]
+fn intersect_two_sorted_slices() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("common", |ctx, a: Var<S>, b: Var<S>| {
+            a.staged_iter()
+                .intersect(b)
+                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        assert_eq!(
+            f.call(&[1u64, 3, 4, 6, 8][..], &[2u64, 3, 6, 7, 8, 9][..]),
+            368
+        );
+        assert_eq!(f.call(&[1u64, 2][..], &[3u64, 4][..]), 0);
+        assert_eq!(f.call(&[][..], &[3u64][..]), 0);
+        // Multiset: each match is used once.
+        assert_eq!(f.call(&[1u64, 1, 2][..], &[1u64, 2, 2][..]), 12);
+        assert_eq!(f.call(&[5u64, 5][..], &[5u64, 5, 5][..]), 55);
+    });
+}
+
+#[test]
+fn intersect_by_a_descending_order() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("common_desc", |ctx, a: Var<S>, b: Var<S>| {
+            a.staged_iter()
+                .intersect_by(b, gt)
+                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        assert_eq!(f.call(&[9u64, 7, 4, 1][..], &[8u64, 7, 4, 2][..]), 74);
+    });
+}
+
+#[test]
+fn intersect_extern_with_slice_releases_the_handle() {
+    // The slice runs out first: the extern side is left mid-stream.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("mem_disk", move |ctx, g: Var<G>, disk: Var<S>| {
+            // SAFETY: a fresh `DynIter<u64>` handle from the producer.
+            unsafe { it.iter(call_extern1(nodes, g)) }
+                .intersect(disk)
+                .count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+        let g = graph(&[1, 2, 3, 5, 8, 13], &[]);
+        assert_eq!(f.call(&g, &[2u64, 3, 4][..]), 2);
+        assert_all_dropped(&g, 1);
+    });
+}
+
+#[test]
+fn triangle_count_by_intersecting_adjacency_lists() {
+    // For each edge u < v, count the w > v adjacent to both: every triangle
+    // u < v < w is counted exactly once. All lists are extern iterators.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let nbrs = compiler.extern_fn::<PullGraphNbrsExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun1("triangles", move |ctx, g: Var<G>| {
+            let acc = ctx.var(0u64);
+            // SAFETY: fresh `DynIter<u64>` handles from the producers.
+            unsafe { it.iter(call_extern1(nodes, g)) }.for_each(ctx, move |ctx, u| {
+                unsafe { it.iter(call_extern2(nbrs, g, u)) }
+                    .filter(move |v| gt(v, u))
+                    .for_each(ctx, move |ctx, v| {
+                        let c = unsafe { it.iter(call_extern2(nbrs, g, u)) }
+                            .intersect(unsafe { it.iter(call_extern2(nbrs, g, v)) })
+                            .count_if(ctx, move |w| gt(w, v));
+                        ctx.store(acc, acc + c);
+                    });
+            });
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        // K4 has 4 triangles.
+        let k4: &[&[u64]] = &[&[1, 2, 3], &[0, 2, 3], &[0, 1, 3], &[0, 1, 2]];
+        let g = adj_graph(&[0, 1, 2, 3], k4);
+        assert_eq!(f.call(&g), 4);
+        assert_eq!(g.live.get(), 0, "every adjacency list released");
+
+        // A square with one diagonal (0-2): triangles 0-1-2 and 0-2-3.
+        let sq: &[&[u64]] = &[&[1, 2, 3], &[0, 2], &[0, 1, 3], &[0, 2]];
+        let g = adj_graph(&[0, 1, 2, 3], sq);
+        assert_eq!(f.call(&g), 2);
+        assert_eq!(g.live.get(), 0, "every adjacency list released");
+    });
+}

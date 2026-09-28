@@ -62,7 +62,7 @@ migration plan (§10), and risks and open questions (§11).
 | 2–5. Pull protocol as the required method of `StagedIterator`; every source and combinator a cursor; `for_each` provided | **done** — went straight to the merged trait (no temporary parallel trait); `opaque_for_each`/`reused_opaque_for_each` deleted from `Ctx` |
 | 4. `zip` for any two iterators (shared counter when both indexed), `chain`, `take`, `skip` | **done** — `tests/test_pull_iter.rs` |
 | 6a. `flat_map` (nested loops when consumed, state machine when pulled), `merge_by` / `merge` | **done** — `iter/flat_map.rs`, `iter/merge.rs`; tests in `tests/test_pull_iter.rs` |
-| 6b. `peekable`, `intersect_sorted` | next |
+| 6b. `intersect_by` / `intersect` (sorted intersection = merge join); shared `Lookahead` under merge and intersect | **done** — `iter/sorted.rs`. No public `peekable`: a consumer closure only receives items, never the cursor, so a peek is only usable inside an operator — `Lookahead` is that internal peek |
 | `flat_map` + `break_loop` | The push `for_each` `for_each` fixes the §5.7 caveat: a consumer's `break_loop` exits the inner loop, the open inner iterator is closed, and the break is re-raised on the outer loop, so `find_map`/`position`/`any` over a `flat_map` stop the whole traversal (tested 3 levels deep) |
 | 7. Item representation (3-arg consumers, register tuples) | open (the 3-arg `Zip::for_each`/`Enumerate::for_each` remain) |
 | §6.3 stage-0 `size_hint` | open |

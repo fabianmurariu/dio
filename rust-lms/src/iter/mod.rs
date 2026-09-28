@@ -30,13 +30,13 @@ mod filter_map;
 mod flat_map;
 mod from_fn;
 mod map;
-mod merge;
 pub mod opaque;
 mod range_iter;
 mod rev;
 mod scan;
 mod skip_while;
 mod slice_iter;
+mod sorted;
 mod take;
 mod take_while;
 mod traits;
@@ -49,7 +49,6 @@ pub use filter_map::{FilterMap, FilterMapCursor};
 pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
 pub use map::{Map, MapCursor};
-pub use merge::{MergeBy, MergeCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
     ExactSizeOpaqueIterKind, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns,
@@ -61,6 +60,7 @@ pub use rev::{Rev, RevCursor};
 pub use scan::{Scan, ScanCursor};
 pub use skip_while::{SkipWhile, SkipWhileCursor};
 pub use slice_iter::{SliceCursor, SliceIter};
+pub use sorted::{IntersectBy, IntersectCursor, Lookahead, MergeBy, MergeCursor};
 pub use take::{Skip, SkipCursor, Take, TakeCursor};
 pub use take_while::{TakeWhile, TakeWhileCursor};
 pub use traits::{
@@ -94,6 +94,7 @@ into_staged_iter_is_self!(
     FlatMap<I, F>,
     FromFn<F, O>,
     Map<I, F, U>,
+    IntersectBy<A, B, P>,
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,
