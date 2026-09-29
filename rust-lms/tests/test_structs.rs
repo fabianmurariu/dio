@@ -28,12 +28,13 @@ pub struct FfiAdjList<'a> {
 fn test_borrowed_struct_of_slices() {
     for_each_backend(|mut compiler| {
         // Sum of degrees: offsets[num_nodes] - offsets[0].
-        let sum_deg = compiler.fun1("sum_degrees", |_ctx, g: Var<FfiAdjListStaged>| {
+        let sum_deg = compiler.fun1("sum_degrees", |ctx, g: Var<FfiAdjListStaged>| {
             let offsets = g.get(FfiAdjListType::offsets());
             let n = g.get(FfiAdjListType::num_nodes());
-            // let a = offsets.len();
-            // SAFETY: the host passes `num_nodes + 1` offsets.
-            unsafe { offsets.get_unchecked(n) - offsets.get_unchecked(0u64) }
+            range(0, n).fold(ctx, 0, |acc, i| {
+                let deg = unsafe { offsets.get_unchecked(i + 1) - offsets.get_unchecked(i) };
+                acc + deg
+            })
         });
         let compiled = compiler.compile(sum_deg).expect("compilation failed");
 
@@ -66,6 +67,210 @@ fn test_borrowed_struct_returned_by_value() {
         let back = compiled.call(graph);
         assert_eq!(back.neighbours, &[7, 8]);
         assert_eq!(back.num_nodes, 1);
+    });
+}
+
+/// Stage-0 view of an [`FfiAdjList`] inside a kernel: its fields, bound once.
+///
+/// Row `i` is the staged slice `neighbours[offsets[i]..offsets[i + 1]]`, and
+/// [`rows`](Self::rows) iterates them with random access, so it composes with
+/// `enumerate` and `zip` like a slice iterator does.
+#[derive(Clone, Copy)]
+struct AdjListStaged {
+    offsets: Var<SRef<Slice<u64>>>,
+    neighbours: Var<SRef<Slice<u64>>>,
+    num_nodes: Var<u64>,
+}
+
+impl AdjListStaged {
+    /// # Safety
+    ///
+    /// At execution the graph must be a valid CSR: `offsets` holds at least
+    /// `num_nodes + 1` non-decreasing entries, and `offsets[num_nodes] <=
+    /// neighbours.len()`. Rows are read without bounds checks.
+    unsafe fn new(ctx: &mut Ctx, graph: Var<FfiAdjListStaged>) -> Self {
+        AdjListStaged {
+            offsets: ctx.bind(graph.get(FfiAdjListType::offsets())),
+            neighbours: ctx.bind(graph.get(FfiAdjListType::neighbours())),
+            num_nodes: ctx.bind(graph.get(FfiAdjListType::num_nodes())),
+        }
+    }
+
+    fn num_nodes(self) -> Var<u64> {
+        self.num_nodes
+    }
+
+    /// The adjacency list of `node`.
+    ///
+    /// # Safety
+    ///
+    /// `node < num_nodes` at execution.
+    unsafe fn row(self, ctx: &mut Ctx, node: Var<u64>) -> Var<SRef<Slice<u64>>> {
+        // SAFETY: `node < num_nodes` (caller) and the CSR invariant of `new`
+        // make both offsets readable and `start <= end <= neighbours.len()`.
+        unsafe {
+            let start = ctx.bind(self.offsets.get_unchecked(node));
+            let end = ctx.bind(self.offsets.get_unchecked(node + 1u64));
+            ctx.bind(self.neighbours.subslice_unchecked(start, end))
+        }
+    }
+
+    /// Iterate the rows, in node order.
+    fn rows(self) -> AdjRows {
+        AdjRows { graph: self }
+    }
+}
+
+/// Iterator over the rows of an [`AdjListStaged`]; item `i` is row `i`.
+#[derive(Clone, Copy)]
+struct AdjRows {
+    graph: AdjListStaged,
+}
+
+impl StagedIterator for AdjRows {
+    type Item = SRef<Slice<u64>>;
+    type Cursor = AdjRowsCursor;
+
+    fn open(self, ctx: &mut Ctx) -> AdjRowsCursor {
+        AdjRowsCursor {
+            graph: self.graph,
+            pos: ctx.var(0u64),
+        }
+    }
+}
+
+impl IndexedStagedIterator for AdjRows {
+    type LenExpr = Var<u64>;
+
+    fn len(&self) -> Var<u64> {
+        self.graph.num_nodes()
+    }
+}
+
+struct AdjRowsCursor {
+    graph: AdjListStaged,
+    pos: Var<u64>,
+}
+
+impl Cursor for AdjRowsCursor {
+    type Item = SRef<Slice<u64>>;
+    type Close = ();
+
+    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<SRef<Slice<u64>>>, ()) {
+        let pos = self.pos;
+        ctx.exit_if(ge(pos, self.graph.num_nodes()), done);
+        // SAFETY: the exit above proves `pos < num_nodes`.
+        let row = unsafe { self.graph.row(ctx, pos) };
+        ctx.store(pos, pos + 1u64);
+        (row, ())
+    }
+
+    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+        Some(self.graph.num_nodes())
+    }
+
+    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<SRef<Slice<u64>>>, ()) {
+        // SAFETY: forwarded from the caller (`index < num_nodes`).
+        (unsafe { self.graph.row(ctx, index) }, ())
+    }
+}
+
+/// A 4-node CSR graph: 0 -> {1, 2}, 1 -> {}, 2 -> {0, 1, 3}, 3 -> {2}.
+fn small_csr() -> (Vec<u64>, Vec<u64>) {
+    (vec![0, 2, 2, 5, 6], vec![1, 2, 0, 1, 3, 2])
+}
+
+#[test]
+fn test_adj_rows_enumerate_degrees() {
+    for_each_backend(|mut compiler| {
+        let degrees = compiler.fun2(
+            "degrees",
+            |ctx, graph: Var<FfiAdjListStaged>, out: Var<SRefMut<Slice<u64>>>| {
+                // SAFETY: the host passes a valid CSR.
+                let graph = unsafe { AdjListStaged::new(ctx, graph) };
+                graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+                    // SAFETY: `out` has one slot per node.
+                    ctx.emit(unsafe { out.set_unchecked(node, row.len()) });
+                });
+                Const::<()>::new(())
+            },
+        );
+        let compiled = compiler.compile(degrees).expect("compilation failed");
+
+        let (offsets, neighbours) = small_csr();
+        let mut out = vec![0u64; 4];
+        let graph = FfiAdjList {
+            offsets: &offsets,
+            neighbours: &neighbours,
+            num_nodes: 4,
+        };
+        compiled.call(graph, &mut out);
+        assert_eq!(out, [2, 0, 3, 1]);
+    });
+}
+
+#[test]
+fn test_adj_rows_nested_iteration() {
+    for_each_backend(|mut compiler| {
+        // Sum over nodes of (node * sum of its neighbour ids).
+        let weighted = compiler.fun1("weighted", |ctx, graph: Var<FfiAdjListStaged>| {
+            // SAFETY: the host passes a valid CSR.
+            let graph = unsafe { AdjListStaged::new(ctx, graph) };
+            let total = ctx.var(0u64);
+            graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+                let row_sum = row.staged_iter().sum(ctx);
+                ctx.store(total, total + node * row_sum);
+            });
+            total
+        });
+        let compiled = compiler.compile(weighted).expect("compilation failed");
+
+        // One kernel over fresh graphs: the full graph, then an empty one.
+        let (offsets, neighbours) = small_csr();
+        let graph = FfiAdjList {
+            offsets: &offsets,
+            neighbours: &neighbours,
+            num_nodes: 4,
+        };
+        // 0*(1+2) + 1*0 + 2*(0+1+3) + 3*2
+        assert_eq!(compiled.call(graph), 14);
+
+        let empty = vec![0u64];
+        let graph = FfiAdjList {
+            offsets: &empty,
+            neighbours: &[],
+            num_nodes: 0,
+        };
+        assert_eq!(compiled.call(graph), 0);
+    });
+}
+
+#[test]
+fn test_adj_rows_zip_random_access() {
+    for_each_backend(|mut compiler| {
+        // zip with a per-node weight slice drives the rows by index (`next_at`).
+        let score = compiler.fun2(
+            "score",
+            |ctx, graph: Var<FfiAdjListStaged>, weights: Var<SRef<Slice<u64>>>| {
+                // SAFETY: the host passes a valid CSR.
+                let graph = unsafe { AdjListStaged::new(ctx, graph) };
+                let total = ctx.var(0u64);
+                graph.rows().zip(weights).for_each(ctx, |ctx, row, weight| {
+                    ctx.store(total, total + row.len() * weight);
+                });
+                total
+            },
+        );
+        let compiled = compiler.compile(score).expect("compilation failed");
+
+        let (offsets, neighbours) = small_csr();
+        let graph = FfiAdjList {
+            offsets: &offsets,
+            neighbours: &neighbours,
+            num_nodes: 4,
+        };
+        // degrees [2, 0, 3, 1] . weights [1, 10, 100]: zip stops at 3 rows.
+        assert_eq!(compiled.call(graph, &[1, 10, 100]), 2 + 300);
     });
 }
 
