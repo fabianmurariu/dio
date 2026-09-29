@@ -52,23 +52,6 @@ fn is_supported_erased_field(field_ty: &Type, staged_ty: &Type) -> bool {
         || (matches!(field_ty, Type::Ptr(_)) && is_path(staged_ty, "u64"))
 }
 
-/// The `RuntimeValue` a field's staged marker must have.
-///
-/// Normally the field's own type. A shared slice reference `&'a [E]` is instead
-/// matched against `*const [E]` (the `RuntimeValue` of `SRef<Slice<_>>`): same
-/// layout, and the element type is still checked exactly by the emitted
-/// `RuntimeValue = *const [E]` predicate. The lifetime stays on the struct, so
-/// by-value parameters are borrow-checked at every call.
-fn expected_runtime_value(field_ty: &Type) -> Type {
-    match field_ty {
-        Type::Reference(r) if r.mutability.is_none() && matches!(&*r.elem, Type::Slice(_)) => {
-            let elem = &r.elem;
-            parse_quote!(*const #elem)
-        }
-        _ => field_ty.clone(),
-    }
-}
-
 fn is_marker_runtime_value(field_ty: &Type, staged_ty: &Type) -> bool {
     quote!(#field_ty).to_string() == quote!(#staged_ty :: RuntimeValue).to_string()
 }
@@ -98,6 +81,26 @@ fn is_marker_runtime_value(field_ty: &Type, staged_ty: &Type) -> bool {
 /// - `StagedType` impl with `RuntimeValue = Point` (owned, not reference)
 /// - By-value `RuntimeParam` and `RuntimeResult` impls
 /// - `CopyType` impl
+///
+/// # Borrowed structs
+///
+/// A struct with exactly one lifetime may hold `&'a [E]` fields staged as
+/// `SRef<Slice<E>>`. It gets no `StagedType` impl of its own; instead the derive
+/// generates the lifetime-free marker `NameStaged`, used as `Var<NameStaged>`
+/// in kernels, and each call takes and returns `Name<'call>`:
+///
+/// ```ignore
+/// #[derive(StagedType, Copy, Clone)]
+/// #[repr(C)]
+/// struct Graph<'a> {
+///     #[staged(SRef<Slice<u64>>)]
+///     offsets: &'a [u64],
+/// }
+///
+/// let f = compiler.fun1("n", |_ctx, g: Var<GraphStaged>| g.get(GraphType::offsets()).len());
+/// let offsets = vec![0u64, 1, 3];
+/// compiler.compile(f)?.call(Graph { offsets: &offsets });
+/// ```
 #[proc_macro_derive(StagedType, attributes(staged))]
 pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     let input = parse_macro_input!(input as DeriveInput);
@@ -204,11 +207,42 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     // `PointType::x()`), with generic params inferred from the receiver.
     let staged_types: Vec<Type> = named_fields.iter().map(&resolve_staged_ty).collect();
 
+    // A struct with a lifetime borrows host data: it gets a lifetime-free staged
+    // marker instead of a `StagedType` impl of its own (see `derive_borrowed`).
+    let mut lifetimes = generics.lifetimes();
+    if let Some(first) = lifetimes.next() {
+        if let Some(second) = lifetimes.next() {
+            return syn::Error::new_spanned(
+                second,
+                "a borrowed StagedType struct may have only one lifetime parameter",
+            )
+            .to_compile_error()
+            .into();
+        }
+        if generics.params.len() != 1 || generics.where_clause.is_some() {
+            return syn::Error::new_spanned(
+                generics,
+                "a borrowed StagedType struct cannot also have type or const parameters or a where clause",
+            )
+            .to_compile_error()
+            .into();
+        }
+        return derive_borrowed(
+            struct_name,
+            visibility,
+            &field_visibility,
+            named_fields,
+            &staged_types,
+            &first.lifetime,
+        )
+        .unwrap_or_else(syn::Error::into_compile_error)
+        .into();
+    }
+
     // The derive itself emits unsafe trait implementations, so safe input must
     // prove the representation facts those traits require. Ordinary fields use
     // exact RuntimeValue equality. The small allowlist above covers the existing
-    // pointer/usize-to-integer erasures and is checked by LAYOUT_VALID below;
-    // shared slice references are matched via `expected_runtime_value`.
+    // pointer/usize-to-integer erasures and is checked by LAYOUT_VALID below.
     let mut trusted_generics = input.generics.clone();
     trusted_generics
         .make_where_clause()
@@ -219,12 +253,11 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
         if !is_supported_erased_field(field_ty, staged_ty)
             && !is_marker_runtime_value(field_ty, staged_ty)
         {
-            let runtime_ty = expected_runtime_value(field_ty);
             trusted_generics
                 .make_where_clause()
                 .predicates
                 .push(parse_quote!(
-                    #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #runtime_ty>
+                    #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #field_ty>
                 ));
         }
     }
@@ -368,6 +401,275 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     };
 
     TokenStream::from(expanded)
+}
+
+// =============================================================================
+// Borrowed structs: one lifetime, rebound per call
+// =============================================================================
+
+/// Whether `tokens` mention the lifetime `lt` anywhere, including nested groups.
+fn mentions_lifetime(tokens: proc_macro2::TokenStream, lt: &syn::Lifetime) -> bool {
+    let mut after_apostrophe = false;
+    for token in tokens {
+        match token {
+            proc_macro2::TokenTree::Group(group) => {
+                if mentions_lifetime(group.stream(), lt) {
+                    return true;
+                }
+                after_apostrophe = false;
+            }
+            proc_macro2::TokenTree::Punct(punct) => after_apostrophe = punct.as_char() == '\'',
+            proc_macro2::TokenTree::Ident(ident) => {
+                if after_apostrophe && ident == lt.ident {
+                    return true;
+                }
+                after_apostrophe = false;
+            }
+            proc_macro2::TokenTree::Literal(_) => after_apostrophe = false,
+        }
+    }
+    false
+}
+
+/// Whether `tokens` mention the identifier `ident` anywhere, including nested
+/// groups.
+fn mentions_ident(tokens: proc_macro2::TokenStream, ident: &syn::Ident) -> bool {
+    tokens.into_iter().any(|token| match token {
+        proc_macro2::TokenTree::Group(group) => mentions_ident(group.stream(), ident),
+        proc_macro2::TokenTree::Ident(found) => found == *ident,
+        _ => false,
+    })
+}
+
+/// The element type `E` of a field declared `&'lt [E]`.
+fn borrowed_slice_elem<'t>(ty: &'t Type, lt: &syn::Lifetime) -> Option<&'t Type> {
+    match ty {
+        Type::Reference(r) if r.mutability.is_none() && r.lifetime.as_ref() == Some(lt) => {
+            match &*r.elem {
+                Type::Slice(slice) => Some(&slice.elem),
+                _ => None,
+            }
+        }
+        _ => None,
+    }
+}
+
+/// `#[derive(StagedType)]` for a struct with one lifetime, `Name<'a>`.
+///
+/// The struct borrows host data, so it must not become a staged type itself:
+/// staging requires `'static` types, and a staged `Name<'static>` would claim
+/// the data lives forever. Like `[T]` and its marker `Slice<T>`, the lifetime
+/// exists only at the call boundary:
+///
+/// - `NameStaged`, an uninhabited, lifetime-free marker, is the staged type
+///   (`Var<NameStaged>`). Field descriptors (`NameType::field()`) have
+///   `Parent = NameStaged`.
+/// - Its `RuntimeValue` is a hidden `repr(C)` twin whose fields are the
+///   markers' raw `RuntimeValue`s (`*const [E]` for `&'a [E]`). The twin has no
+///   constructor, so `SRef`/`SRefMut` parameters over the marker cannot be fed
+///   from safe code, and a kernel cannot write a per-call slice into a host
+///   `&'static [E]`.
+/// - `RuntimeParam::Arg<'call>` / `RuntimeResult::Output<'call>` are
+///   `Name<'call>`: every call borrow-checks its own data, and a result cannot
+///   outlive the call's arguments.
+///
+/// Fields may borrow only as `&'a [E]` staged as a shared slice; any other
+/// mention of `'a` is rejected.
+fn derive_borrowed(
+    struct_name: &syn::Ident,
+    visibility: &syn::Visibility,
+    field_visibility: &proc_macro2::TokenStream,
+    named_fields: &Punctuated<syn::Field, Token![,]>,
+    staged_types: &[Type],
+    lt: &syn::Lifetime,
+) -> syn::Result<proc_macro2::TokenStream> {
+    let marker_name = format_ident!("{}Staged", struct_name);
+    let raw_module = format_ident!("__{}_raw", struct_name);
+    let field_module_name = format_ident!("{}Type", struct_name);
+    let host_static = quote! { #struct_name<'static> };
+
+    let mut predicates = vec![quote! { #host_static: ::core::marker::Copy }];
+    let mut static_field_types = Vec::new();
+    for (field, staged_ty) in named_fields.iter().zip(staged_types) {
+        let field_ty = &field.ty;
+        if mentions_lifetime(quote!(#staged_ty), lt) {
+            return Err(syn::Error::new_spanned(
+                staged_ty,
+                format!("the staged type of a field cannot mention `{lt}`"),
+            ));
+        }
+        let (static_ty, runtime_ty): (Type, Type) = match borrowed_slice_elem(field_ty, lt) {
+            Some(elem) if !mentions_lifetime(quote!(#elem), lt) => {
+                (parse_quote!(&'static [#elem]), parse_quote!(*const [#elem]))
+            }
+            _ if mentions_lifetime(quote!(#field_ty), lt) => {
+                return Err(syn::Error::new_spanned(
+                    field_ty,
+                    format!(
+                        "a borrowed StagedType struct can borrow only through `&{lt} [T]` fields"
+                    ),
+                ));
+            }
+            _ => (field_ty.clone(), field_ty.clone()),
+        };
+        if !is_supported_erased_field(field_ty, staged_ty)
+            && !is_marker_runtime_value(field_ty, staged_ty)
+        {
+            predicates.push(quote! {
+                #staged_ty: ::rust_lms::types::StagedType<RuntimeValue = #runtime_ty>
+            });
+        }
+        static_field_types.push(static_ty);
+    }
+
+    let field_names: Vec<_> = named_fields
+        .iter()
+        .map(|field| field.ident.as_ref().unwrap())
+        .collect();
+    let raw_field_types = staged_types
+        .iter()
+        .map(|staged_ty| quote! { <#staged_ty as ::rust_lms::types::StagedType>::RuntimeValue });
+
+    // The raw twin must match the host struct exactly: every field's size,
+    // alignment and offset, and the whole struct's size and alignment.
+    let layout_checks = field_names.iter().zip(&static_field_types).zip(staged_types).map(
+        |((name, static_ty), staged_ty)| {
+            quote! {
+                assert!(
+                    ::core::mem::size_of::<#static_ty>()
+                        == ::core::mem::size_of::<<#staged_ty as ::rust_lms::types::StagedType>::RuntimeValue>()
+                );
+                assert!(
+                    ::core::mem::align_of::<#static_ty>()
+                        == ::core::mem::align_of::<<#staged_ty as ::rust_lms::types::StagedType>::RuntimeValue>()
+                );
+                assert!(
+                    ::core::mem::offset_of!(Raw, #name)
+                        == ::core::mem::offset_of!(#host_static, #name)
+                );
+            }
+        },
+    );
+
+    let field_markers: Vec<_> = field_names
+        .iter()
+        .map(|name| format_ident!("__field_{}", name))
+        .collect();
+    let field_items = field_names
+        .iter()
+        .zip(&field_markers)
+        .zip(staged_types)
+        .enumerate()
+        .map(|(idx, ((name, marker), staged_ty))| {
+            quote! {
+                #field_visibility struct #marker;
+
+                impl ::core::clone::Clone for #marker {
+                    fn clone(&self) -> Self { *self }
+                }
+                impl ::core::marker::Copy for #marker {}
+
+                unsafe impl ::rust_lms::_internal::Field for #marker where #(#predicates),* {
+                    type Parent = #marker_name;
+                    type Out = #staged_ty;
+                    const OFFSET: usize = {
+                        let () = <#marker_name as ::rust_lms::types::StagedType>::LAYOUT_VALID;
+                        ::core::mem::offset_of!(#host_static, #name)
+                    };
+                    const INDEX: usize = #idx;
+                }
+
+                #field_visibility fn #name() -> #marker {
+                    #marker
+                }
+            }
+        });
+
+    let mut disjoint_field_impls = Vec::new();
+    for (left_index, left) in field_markers.iter().enumerate() {
+        for (right_index, right) in field_markers.iter().enumerate() {
+            if left_index != right_index {
+                disjoint_field_impls.push(quote! {
+                    unsafe impl ::rust_lms::_internal::DisjointField<#right> for #left
+                        where #(#predicates),*
+                    {}
+                });
+            }
+        }
+    }
+
+    Ok(quote! {
+        /// Staged marker for a borrowed struct: use `Var<` this `>` in kernels.
+        /// Generated by `#[derive(StagedType)]`; each call passes the borrowed
+        /// struct itself.
+        #[derive(Clone, Copy)]
+        #visibility enum #marker_name {}
+
+        #[doc(hidden)]
+        #[allow(non_snake_case)]
+        mod #raw_module {
+            use super::*;
+
+            /// Layout twin of the host struct with raw fields. It has no
+            /// constructor (its fields are private), so safe code never holds one.
+            #[repr(C)]
+            #[derive(Clone, Copy)]
+            pub struct Raw {
+                #(#field_names: #raw_field_types,)*
+            }
+
+            pub(super) const LAYOUT_VALID: () = {
+                #(#layout_checks)*
+                assert!(::core::mem::size_of::<Raw>() == ::core::mem::size_of::<#host_static>());
+                assert!(::core::mem::align_of::<Raw>() == ::core::mem::align_of::<#host_static>());
+            };
+        }
+
+        #[allow(non_camel_case_types, non_snake_case)]
+        #visibility mod #field_module_name {
+            use super::*;
+
+            #(#field_items)*
+            #(#disjoint_field_impls)*
+        }
+
+        unsafe impl ::rust_lms::types::StagedType for #marker_name where #(#predicates),* {
+            type RuntimeValue = #raw_module::Raw;
+
+            const LAYOUT_VALID: () = #raw_module::LAYOUT_VALID;
+
+            fn scalar_type() -> ::rust_lms::types::ScalarType {
+                // A derived staged struct is a pointer to its stack slot.
+                ::rust_lms::types::ScalarType::Ptr
+            }
+
+            fn size_of() -> usize {
+                let () = Self::LAYOUT_VALID;
+                ::std::mem::size_of::<#raw_module::Raw>()
+            }
+
+            fn align_of() -> usize {
+                let () = Self::LAYOUT_VALID;
+                ::std::mem::align_of::<#raw_module::Raw>()
+            }
+
+            fn is_copy_struct() -> bool {
+                true
+            }
+        }
+
+        unsafe impl ::rust_lms::types::RuntimeParam for #marker_name where #(#predicates),* {
+            type Arg<'call> = #struct_name<'call>;
+        }
+
+        unsafe impl ::rust_lms::types::RuntimeResult for #marker_name where #(#predicates),* {
+            type Output<'call> = #struct_name<'call>;
+        }
+
+        unsafe impl ::rust_lms::types::CopyType for #marker_name
+            where #(#predicates,)* #(#staged_types: ::rust_lms::types::CopyType),*
+        {}
+    })
 }
 
 // =============================================================================
@@ -753,6 +1055,41 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
             quote! {}
         };
 
+    // The thunk reads each argument (and writes the result) as its declared Rust
+    // type, so that type must be the runtime value of the staged type it maps to.
+    // Most mappings are to a different marker (`&T` -> `SRef<T>`) whose runtime
+    // value is fixed by rust-lms. A type that maps to itself, a struct path, must
+    // prove it: this rejects staged markers such as the uninhabited
+    // `NameStaged` of a borrowed struct, whose runtime value is a raw twin.
+    let self_mapped = |ty: &Type| -> bool {
+        let Type::Path(type_path) = ty else {
+            return false;
+        };
+        let Some(last) = type_path.path.segments.last() else {
+            return false;
+        };
+        let special = ["usize", "isize", "COption", "FatSlice", "FatSliceMut"];
+        !special.iter().any(|name| last.ident == name)
+            && !type_params
+                .iter()
+                .any(|param| mentions_ident(quote!(#ty), param))
+    };
+    let runtime_value_checks: Vec<_> = input
+        .sig
+        .inputs
+        .iter()
+        .filter_map(|arg| match arg {
+            FnArg::Typed(pat_type) => Some(&*pat_type.ty),
+            FnArg::Receiver(_) => None,
+        })
+        .chain(match &input.sig.output {
+            ReturnType::Type(_, ty) => Some(&**ty),
+            ReturnType::Default => None,
+        })
+        .filter(|ty| self_mapped(ty))
+        .map(|ty| quote! { __rust_lms_is_runtime_value::<#ty, #ty>(); })
+        .collect();
+
     let thunk_name = format_ident!("__rust_lms_thunk_{}", fn_name);
     let thunk_args: Vec<_> = (0..param_rust_types.len())
         .map(|index| format_ident!("__rust_lms_arg_{index}"))
@@ -776,6 +1113,12 @@ pub fn extern_fn(_attr: TokenStream, item: TokenStream) -> TokenStream {
             #(#thunk_arg_ptrs: *const u8,)*
             __rust_lms_output: *mut u8,
         ) #where_clause {
+            fn __rust_lms_is_runtime_value<S, R>()
+            where
+                S: ::rust_lms::types::StagedType<RuntimeValue = R>,
+            {
+            }
+            #(#runtime_value_checks)*
             #(
                 let #thunk_args: #param_rust_types = unsafe {
                     #thunk_arg_ptrs.cast::<#param_rust_types>().read()

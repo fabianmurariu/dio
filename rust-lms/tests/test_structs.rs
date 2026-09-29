@@ -10,6 +10,9 @@ use rust_lms::refer::{SRef, SRefMut};
 mod common;
 use common::for_each_backend;
 
+// A borrowed struct: `#[derive(StagedType)]` on a struct with one lifetime
+// generates the lifetime-free marker `FfiAdjListStaged` for kernels, and each
+// call takes `FfiAdjList<'call>`, so short-lived host data can be passed.
 #[derive(StagedType, Copy, Clone)]
 #[repr(C)]
 pub struct FfiAdjList<'a> {
@@ -17,26 +20,55 @@ pub struct FfiAdjList<'a> {
     offsets: &'a [u64],
     #[staged(SRef<Slice<u64>>)]
     neighbours: &'a [u64],
+    #[staged(u64)]
+    num_nodes: u64,
 }
 
 #[test]
-fn small_graph_staged() {
-    let offsets = vec![0u64, 1, 3];
-    let neighbours = vec![1u64, 2, 3];
-
-    let ffi_adj_list = FfiAdjList {
-        offsets: &offsets,
-        neighbours: &neighbours,
-    };
-
+fn test_borrowed_struct_of_slices() {
     for_each_backend(|mut compiler| {
-        let sum_deg = compiler.fun1("sum_degrees", |_ctx, g: Var<FfiAdjList<'_>>| {
-            g.get(FfiAdjListType::neighbours()).len()
+        // Sum of degrees: offsets[num_nodes] - offsets[0].
+        let sum_deg = compiler.fun1("sum_degrees", |_ctx, g: Var<FfiAdjListStaged>| {
+            let offsets = g.get(FfiAdjListType::offsets());
+            let n = g.get(FfiAdjListType::num_nodes());
+            // let a = offsets.len();
+            // SAFETY: the host passes `num_nodes + 1` offsets.
+            unsafe { offsets.get_unchecked(n) - offsets.get_unchecked(0u64) }
         });
         let compiled = compiler.compile(sum_deg).expect("compilation failed");
-        assert_eq!(compiled.call(ffi_adj_list), 3);
-    })
+
+        // One kernel, fresh short-lived graphs on every call.
+        for extra in 0..3u64 {
+            let offsets = vec![0u64, 1, 3 + extra];
+            let neighbours: Vec<u64> = (0..3 + extra).collect();
+            let graph = FfiAdjList {
+                offsets: &offsets,
+                neighbours: &neighbours,
+                num_nodes: 2,
+            };
+            assert_eq!(compiled.call(graph), neighbours.len() as u64);
+        }
+    });
 }
+
+#[test]
+fn test_borrowed_struct_returned_by_value() {
+    for_each_backend(|mut compiler| {
+        let id = compiler.fun1("id", |_ctx, g: Var<FfiAdjListStaged>| g);
+        let compiled = compiler.compile(id).expect("compilation failed");
+        let offsets = vec![0u64, 2];
+        let neighbours = vec![7u64, 8];
+        let graph = FfiAdjList {
+            offsets: &offsets,
+            neighbours: &neighbours,
+            num_nodes: 1,
+        };
+        let back = compiled.call(graph);
+        assert_eq!(back.neighbours, &[7, 8]);
+        assert_eq!(back.num_nodes, 1);
+    });
+}
+
 // Test with simple Copy struct
 // Note: Structs MUST be Copy for pass-by-value semantics
 #[derive(StagedType, Copy, Clone)]

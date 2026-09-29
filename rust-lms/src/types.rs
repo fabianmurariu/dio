@@ -189,9 +189,13 @@ impl FloatCmp {
 /// }
 /// ```
 ///
-/// A shared slice field `&'a [E]` may be staged as `SRef<Slice<E>>`. Staging
-/// requires `'static` types (`fun1`'s body is `'static`), so a kernel over such
-/// a struct takes `'static` data:
+/// # Borrowed structs
+///
+/// A struct with one lifetime can borrow host slices as `&'a [E]` fields staged
+/// as `SRef<Slice<E>>`. It works like `&[T]` and its marker `Slice<T>`: the
+/// struct itself is never a staged type. The derive generates a lifetime-free
+/// marker `NameStaged` for kernels, and each call takes `Name<'call>`, so short-lived
+/// data can be passed and a result cannot outlive the call:
 ///
 /// ```
 /// use rust_lms::prelude::*;
@@ -200,21 +204,88 @@ impl FloatCmp {
 ///
 /// #[repr(C)]
 /// #[derive(Clone, Copy, StagedType)]
-/// struct Borrowed<'a> {
+/// struct Graph<'a> {
 ///     #[staged(SRef<Slice<u64>>)]
-///     values: &'a [u64],
+///     offsets: &'a [u64],
 /// }
-///
-/// static DATA: [u64; 3] = [1, 2, 3];
 ///
 /// fn main() {
 ///     let mut compiler = Compiler::new();
-///     let len = compiler.fun1("len", |_ctx, b: Var<Borrowed<'_>>| {
-///         b.get(BorrowedType::values()).len()
+///     let len = compiler.fun1("len", |_ctx, g: Var<GraphStaged>| {
+///         g.get(GraphType::offsets()).len()
 ///     });
 ///     let compiled = compiler.compile(len).unwrap();
-///     assert_eq!(compiled.call(Borrowed { values: &DATA }), 3);
+///     for n in 1..4 {
+///         let offsets: Vec<u64> = (0..n).collect();
+///         assert_eq!(compiled.call(Graph { offsets: &offsets }), n);
+///     }
 /// }
+/// ```
+///
+/// A result is bounded by the call, so it cannot escape the data it came from:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct Graph<'a> {
+///     #[staged(SRef<Slice<u64>>)]
+///     offsets: &'a [u64],
+/// }
+///
+/// fn main() {
+///     let mut compiler = Compiler::new();
+///     let id = compiler.fun1("id", |_ctx, g: Var<GraphStaged>| g);
+///     let compiled = compiler.compile(id).unwrap();
+///     let escaped = {
+///         let offsets = vec![0u64, 1];
+///         compiled.call(Graph { offsets: &offsets })
+///     };
+///     println!("{:?}", escaped.offsets);
+/// }
+/// ```
+///
+/// The marker is not a runtime value, so host code called from a kernel cannot
+/// receive the struct by value and keep it:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct Graph<'a> {
+///     #[staged(SRef<Slice<u64>>)]
+///     offsets: &'a [u64],
+/// }
+///
+/// #[extern_fn]
+/// pub extern "C" fn keep(_graph: GraphStaged) {}
+///
+/// fn main() {}
+/// ```
+///
+/// A borrowed struct has exactly one lifetime:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct TwoLifetimes<'a, 'b> {
+///     #[staged(SRef<Slice<u64>>)]
+///     left: &'a [u64],
+///     #[staged(SRef<Slice<u64>>)]
+///     right: &'b [u64],
+/// }
+///
+/// fn main() {}
 /// ```
 ///
 /// The element type must match exactly; equal layout is not enough:
@@ -229,6 +300,24 @@ impl FloatCmp {
 /// struct WrongElement<'a> {
 ///     #[staged(SRef<Slice<u64>>)]
 ///     bytes: &'a [u8],
+/// }
+///
+/// fn main() {}
+/// ```
+///
+/// A struct without a lifetime cannot hold `&'static [E]`: a kernel given
+/// `&mut` to it could store a slice that lives only for the call:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// use rust_lms::refer::SRef;
+/// use rust_lms::slice::Slice;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// struct StaticSlice {
+///     #[staged(SRef<Slice<u64>>)]
+///     values: &'static [u64],
 /// }
 ///
 /// fn main() {}

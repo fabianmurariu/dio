@@ -344,6 +344,26 @@ statically-disjoint* field references at once. Asking for the same field twice i
 **compile error**: the derive only emits a disjointness witness for distinct
 fields, so overlapping `&mut`s can't be expressed.
 
+**Borrowed structs.** A struct with exactly one lifetime (`Graph<'a>` holding
+`&'a [u64]` fields staged as `SRef<Slice<u64>>`) works the way `&[T]` and its marker
+`Slice<T>` do: the struct is never a staged type itself. The derive generates a
+lifetime-free, uninhabited marker `GraphStaged` for kernels (`Var<GraphStaged>`;
+field tokens have `Parent = GraphStaged`) whose `RuntimeValue` is a hidden raw twin
+with no constructor. `RuntimeParam::Arg<'call>` and `RuntimeResult::Output<'call>`
+are `Graph<'call>`, so each call borrow-checks its own data and a result cannot
+outlive it. Three rules keep this sound:
+
+- The marker must never stand for `'static` data. So `#[extern_fn]` requires a
+  by-value struct parameter or result to be its staged type's `RuntimeValue`,
+  which the marker is not: host code cannot receive the struct and keep it.
+- The raw twin cannot be built, so `SRef`/`SRefMut<GraphStaged>` parameters can't
+  be fed from safe code. A kernel therefore cannot write a per-call slice into a
+  host `&'static [u64]`.
+- For the same reason, a struct *without* a lifetime cannot hold `&'static [E]`.
+
+Only by-value passing is per-call. Wrapped uses (`SRef<…>`, slices of structs,
+`COption<…>`) go through the blanket impls, which still require `'static`.
+
 ---
 
 ## 9. The ABI: how values cross the boundary
