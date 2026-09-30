@@ -1499,6 +1499,37 @@ where
             index: index.into_staged(),
         }
     }
+
+    /// The index of the first element for which `pred` is false, like
+    /// [`<[T]>::partition_point`](slice::partition_point).
+    ///
+    /// The slice must be partitioned: `pred` holds for a prefix and fails for
+    /// the rest. Otherwise the result is some index in `0..=len`, unspecified.
+    /// The search is branchless, so `pred` is staged once.
+    fn partition_point<P, C>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    where
+        Self: 'static,
+        Self::Out: CopyType + 'static,
+        ElemOf<Self>: CopyType + 'static,
+        P: FnOnce(&mut Ctx, Var<ElemOf<Self>>) -> C,
+        C: Staged<Out = bool> + 'static,
+    {
+        let slice = ctx.bind(self);
+        let first = ctx.var(0u64);
+        let len = ctx.var(slice.len());
+        ctx.while_loop(crate::num::gt(len, 0u64), |ctx| {
+            let half = ctx.bind(crate::num::shr(len, 1u64));
+            let mid = ctx.bind(first + half);
+            // SAFETY: `first + len <= slice.len()` holds on entry and every step
+            // keeps it, so `mid = first + len / 2 < slice.len()`.
+            let elem = ctx.bind(unsafe { slice.get_unchecked(mid) });
+            let before = pred(ctx, elem);
+            let before = ctx.bind(before);
+            ctx.store(first, crate::num::select(before, mid + 1u64, first));
+            ctx.store(len, crate::num::select(before, len - half - 1u64, half));
+        });
+        first
+    }
 }
 
 impl<S> TrustedSliceOps for S

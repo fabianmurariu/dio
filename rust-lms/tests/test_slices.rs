@@ -471,3 +471,68 @@ fn test_slice_element_can_be_a_fat_slice() {
         assert_eq!(compiler.compile(inner_len).unwrap().call(outer), 3);
     });
 }
+
+#[test]
+fn test_partition_point_matches_std() {
+    for_each_backend(|mut compiler| {
+        let lower_bound = compiler.fun2(
+            "lower_bound",
+            |ctx, values: Var<SRef<Slice<i64>>>, key: Var<i64>| {
+                values.partition_point(ctx, |_ctx, value| lt(value, key))
+            },
+        );
+        let lower_bound = compiler.compile(lower_bound).expect("compilation failed");
+
+        let inputs: [&[i64]; 6] = [
+            &[],
+            &[5],
+            &[1, 2, 3],
+            &[1, 1, 1, 1],
+            &[1, 3, 3, 3, 7, 9],
+            &[-4, 0, 0, 8],
+        ];
+        for values in inputs {
+            for key in -5..=10 {
+                let expected = values.partition_point(|&value| value < key) as u64;
+                assert_eq!(
+                    lower_bound.call(values, key),
+                    expected,
+                    "{values:?} < {key}"
+                );
+            }
+        }
+    });
+}
+
+#[repr(C)]
+#[derive(StagedType, Copy, Clone)]
+pub struct Stamp {
+    #[staged(i64)]
+    t: i64,
+    #[staged(u64)]
+    i: u64,
+}
+
+#[test]
+fn test_partition_point_on_struct_field() {
+    for_each_backend(|mut compiler| {
+        let first_at_or_after = compiler.fun2(
+            "first_at_or_after",
+            |ctx, stamps: Var<SRef<Slice<Stamp>>>, t: Var<i64>| {
+                stamps.partition_point(ctx, |_ctx, stamp| lt(stamp.get(StampType::t()), t))
+            },
+        );
+        let first_at_or_after = compiler
+            .compile(first_at_or_after)
+            .expect("compilation failed");
+
+        let stamps: Vec<Stamp> = [(1, 0), (1, 1), (4, 0), (6, 2), (6, 3)]
+            .into_iter()
+            .map(|(t, i)| Stamp { t, i })
+            .collect();
+        for t in 0..=7 {
+            let expected = stamps.partition_point(|stamp| stamp.t < t) as u64;
+            assert_eq!(first_at_or_after.call(&stamps[..], t), expected, "t = {t}");
+        }
+    });
+}

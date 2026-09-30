@@ -26,7 +26,7 @@ cranelift-frontend = "0.134"
 cranelift-codegen = "0.134"
 cranelift-native = "0.134"
 
-arrow = "58.3.0"
+arrow = "58.4.0"
 datafusion-sql = "54.1.0"
 
 # Performance utilities
