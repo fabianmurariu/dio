@@ -77,7 +77,7 @@ impl Agg {
     // `Expr::Wildcard` is deprecated in datafusion but still appears as
     // `count(*)`'s argument, so we match it deliberately.
     #[allow(deprecated)]
-    pub(crate) fn init(ctx: &mut Ctx, expr: &Expr, out_field: &Field) -> Agg {
+    pub(crate) fn init(ctx: &Ctx, expr: &Expr, out_field: &Field) -> Agg {
         let (name, arg) = match expr {
             Expr::AggregateFunction(af) => (
                 af.func.name().to_ascii_lowercase(),
@@ -124,7 +124,7 @@ impl Agg {
         }
     }
 
-    pub(crate) fn update(&self, ctx: &mut Ctx, row: &Row, schema: &SchemaRef, cx: &CodegenCtx) {
+    pub(crate) fn update(&self, ctx: &Ctx, row: &Row, schema: &SchemaRef, cx: &CodegenCtx) {
         let arg = self.arg.as_ref().map(|e| gen_expr(ctx, e, schema, row, cx));
         // The row contributes iff its argument is non-null (always, for count(*)).
         let row_valid = match arg.map(|cv| cv.nullness()) {
@@ -180,7 +180,7 @@ impl Agg {
         }
     }
 
-    fn mark_seen(&self, ctx: &mut Ctx, row_valid: Var<bool>) {
+    fn mark_seen(&self, ctx: &Ctx, row_valid: Var<bool>) {
         ctx.store(
             self.seen,
             select(self.seen, Const::<bool>::new(true), row_valid),
@@ -190,7 +190,7 @@ impl Agg {
     /// Finalize into the output row's `ColVal`: `count` is never null; the others
     /// are null when nothing was folded (`seen == false`). `avg` divides its
     /// running sum by its count here (once, for the single output row).
-    pub(crate) fn finalize(&self, ctx: &mut Ctx) -> ColVal {
+    pub(crate) fn finalize(&self, ctx: &Ctx) -> ColVal {
         let null = match self.kind {
             AggKind::Count => Nullness::NonNull,
             _ => Nullness::Nullable(self.seen),

@@ -129,7 +129,7 @@ pub trait Cursor: Sized {
     type Close: Close;
 
     /// Emit one advance: jump to `done`, or fall through with the item.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
 
     /// Stage-0 probe for random access: `Some(len)` when this cursor can also
     /// be driven by an external index through [`next_at`](Self::next_at).
@@ -138,7 +138,7 @@ pub trait Cursor: Sized {
     /// for the length (a range's element count) lands there and is emitted only
     /// when someone asks. The decision itself is ordinary Rust at stage 0, so it
     /// costs nothing at runtime.
-    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, ctx: &Ctx) -> Option<Var<u64>> {
         let _ = ctx;
         None
     }
@@ -149,7 +149,7 @@ pub trait Cursor: Sized {
     ///
     /// Only valid when [`indexed_len`](Self::indexed_len) returned `Some(len)`,
     /// and `index < len` at execution.
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
         let _ = (ctx, index);
         unreachable!("next_at on a cursor without random access")
     }
@@ -161,15 +161,15 @@ pub trait Cursor: Sized {
 /// `break_loop` reach, so every opened resource is released exactly once on
 /// every exit. `Copy` because it is only stage-0 handles (vars, extern refs).
 pub trait Close: Copy {
-    fn close(self, ctx: &mut Ctx);
+    fn close(self, ctx: &Ctx);
 }
 
 impl Close for () {
-    fn close(self, _ctx: &mut Ctx) {}
+    fn close(self, _ctx: &Ctx) {}
 }
 
 impl<A: Close, B: Close> Close for (A, B) {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         self.0.close(ctx);
         self.1.close(ctx);
     }
@@ -179,10 +179,10 @@ impl<A: Close, B: Close> Close for (A, B) {
 ///
 /// `done` and a consumer's `break_loop` both leave through `iterate`'s exit, so
 /// the close runs on every path out of the loop.
-pub(crate) fn drive<C, F>(cursor: C, ctx: &mut Ctx, consumer: F)
+pub(crate) fn drive<C, F>(cursor: C, ctx: &Ctx, consumer: F)
 where
     C: Cursor,
-    F: FnOnce(&mut Ctx, Var<C::Item>),
+    F: FnOnce(&Ctx, Var<C::Item>),
 {
     let mut close = None;
     ctx.iterate(|ctx, done| {
@@ -219,15 +219,15 @@ pub trait StagedIterator: Sized {
 
     /// Emit the setup — bind handles, call producers, declare state vars — and
     /// return the cursor. Runs once, before the loop that drives it.
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor;
+    fn open(self, ctx: &Ctx) -> Self::Cursor;
 
     /// Drive a loop over all elements.
     ///
     /// `consumer` is called once at staging time; it emits the per-element
     /// body via the `Ctx` it receives. No `Clone` constraint required.
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
+    fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
+        F: FnOnce(&Ctx, Var<Self::Item>),
     {
         let cursor = self.open(ctx);
         drive(cursor, ctx, consumer);
@@ -264,7 +264,7 @@ pub trait StagedIterator: Sized {
     where
         St: StagedType + crate::types::CopyType + 'static,
         Init: crate::staged::IntoStaged<St>,
-        F: Fn(&mut Ctx, Var<St>, Var<Self::Item>) + 'static,
+        F: Fn(&Ctx, Var<St>, Var<Self::Item>),
     {
         Scan::new(self, init, f)
     }
@@ -441,12 +441,12 @@ pub trait StagedIterator: Sized {
     ///
     /// Several accumulators at once are a [`for_each`](Self::for_each) over
     /// vars declared before the loop.
-    fn fold<A, Init, F, E>(self, ctx: &mut Ctx, init: Init, f: F) -> Var<A>
+    fn fold<A, Init, F, E>(self, ctx: &Ctx, init: Init, f: F) -> Var<A>
     where
         A: StagedType + CopyType + 'static,
         Init: IntoStaged<A>,
         Init::Staged: 'static,
-        F: FnOnce(&mut Ctx, Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
         let acc = ctx.var(init);
@@ -472,15 +472,15 @@ pub trait StagedIterator: Sized {
     /// it must be cheap and total — no division `pred` is guarding against a
     /// zero, no load `pred` is guarding against being out of range. For those,
     /// use `filter(..).fold(..)`, which branches.
-    fn fold_if<A, Init, P, Cond, F, E>(self, ctx: &mut Ctx, init: Init, pred: P, f: F) -> Var<A>
+    fn fold_if<A, Init, P, Cond, F, E>(self, ctx: &Ctx, init: Init, pred: P, f: F) -> Var<A>
     where
         A: DirectValue + 'static,
         Init: IntoStaged<A>,
         Init::Staged: 'static,
         Self::Item: CopyType + 'static,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
-        F: FnOnce(&mut Ctx, Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
         self.fold(ctx, init, move |ctx, acc, elem| {
@@ -492,7 +492,7 @@ pub trait StagedIterator: Sized {
     }
 
     /// Sum all elements, starting from zero.
-    fn sum(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn sum(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: Default,
@@ -505,7 +505,7 @@ pub trait StagedIterator: Sized {
     }
 
     /// Count elements passing through (including any upstream filter).
-    fn count(self, ctx: &mut Ctx) -> Var<u64>
+    fn count(self, ctx: &Ctx) -> Var<u64>
     where
         Self::Item: 'static,
     {
@@ -513,21 +513,21 @@ pub trait StagedIterator: Sized {
     }
 
     /// Branchless count of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
-    fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    fn count_if<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<u64>
     where
         Self::Item: CopyType + 'static,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         self.fold_if(ctx, 0u64, pred, |_, acc, _| acc + 1u64)
     }
 
     /// Branchless sum of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
-    fn sum_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<Self::Item>
+    fn sum_if<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<Self::Item>
     where
         Self::Item: Num + DirectValue,
         <Self::Item as StagedType>::RuntimeValue: Default,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let zero = Const::<Self::Item>::new(Default::default());
@@ -535,7 +535,7 @@ pub trait StagedIterator: Sized {
     }
 
     /// Find the minimum element. Starts at the type's maximum sentinel.
-    fn min(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn min(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
@@ -549,7 +549,7 @@ pub trait StagedIterator: Sized {
     }
 
     /// Find the maximum element. Starts at the type's minimum sentinel.
-    fn max(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn max(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
@@ -574,10 +574,10 @@ pub trait StagedIterator: Sized {
     // =========================================================================
 
     /// `true` as soon as any element satisfies `pred` (short-circuits).
-    fn any<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    fn any<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let found = ctx.var(false);
@@ -593,10 +593,10 @@ pub trait StagedIterator: Sized {
 
     /// `true` only if every element satisfies `pred` (short-circuits on the
     /// first failure).
-    fn all<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    fn all<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let result = ctx.var(true);
@@ -613,10 +613,10 @@ pub trait StagedIterator: Sized {
     /// Index (in this iterator's sequence, i.e. after any `filter`) of the
     /// first element satisfying `pred`, or the total element count if none
     /// match (short-circuits).
-    fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    fn position<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<u64>
     where
         Self::Item: 'static,
-        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         // `idx` counts elements seen; on a match we break *before* incrementing,
@@ -637,9 +637,9 @@ pub trait StagedIterator: Sized {
     /// default — check `found` before using `value`. No `Option` is
     /// materialized; `f` is typically `|_, x| cond.then_some(mapped)`, and may
     /// emit statements through its `ctx` first.
-    fn find_map<F, O>(self, ctx: &mut Ctx, f: F) -> (Var<O::Item>, Var<bool>)
+    fn find_map<F, O>(self, ctx: &Ctx, f: F) -> (Var<O::Item>, Var<bool>)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>) -> O,
+        F: FnOnce(&Ctx, Var<Self::Item>) -> O,
         O: StagedOpt + 'static,
         O::Item: ConstantType + CopyType + 'static,
         <O::Item as StagedType>::RuntimeValue: Default,

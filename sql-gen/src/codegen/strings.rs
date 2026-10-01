@@ -15,7 +15,7 @@ use super::numeric::tag;
 /// literal or produced string) is already resolved. Takes the extern handle (not
 /// `&CodegenCtx`) so it can be called from `'static` branch closures.
 pub(crate) fn resolve(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     sv: StrVal,
     str_ptr: ExternRef<StrPtrExtern>,
 ) -> (Var<SPtr<u8>>, Var<u64>) {
@@ -57,7 +57,7 @@ pub(crate) unsafe fn resolved_bytes(
 /// The 16-byte view halves of a string, as staged `u64`s — for the equality fast
 /// path. A `Column` has them as `Var`s; a literal's are host constants baked in.
 /// A produced `Bytes` (no precomputed view) has none → resolve to bytes instead.
-fn view_of(ctx: &mut Ctx, sv: StrVal) -> Option<(Var<u64>, Var<u64>)> {
+fn view_of(ctx: &Ctx, sv: StrVal) -> Option<(Var<u64>, Var<u64>)> {
     match sv {
         StrVal::Column { lo, hi, .. } => Some((lo, hi)),
         StrVal::Bytes {
@@ -79,7 +79,7 @@ fn view_of(ctx: &mut Ctx, sv: StrVal) -> Option<(Var<u64>, Var<u64>)> {
 /// This is correct across containers: a column row and a literal share the same
 /// `lo`/`hi` encoding, and step 3 never trusts the array-relative `hi`. Only when
 /// an operand has no view (a produced string) do we resolve outright.
-pub(crate) fn str_eq(ctx: &mut Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Var<bool> {
+pub(crate) fn str_eq(ctx: &Ctx, l: StrVal, r: StrVal, cx: &CodegenCtx) -> Var<bool> {
     let str_ptr = cx.rt.str_ptr;
     let bytes_eq = cx.rt.bytes_eq;
     match (view_of(ctx, l), view_of(ctx, r)) {
@@ -155,7 +155,7 @@ fn literal_view_halves(s: &str) -> (u64, u64) {
 /// address in the `BytesPool` (interned once at build time — see [`CodegenCtx::lits`]),
 /// and `view` carries the view halves (for *any* length) so `str_eq`'s length +
 /// prefix fast-reject and inline compare apply.
-pub(crate) fn gen_str_literal(ctx: &mut Ctx, s: &str, cx: &CodegenCtx) -> ColVal {
+pub(crate) fn gen_str_literal(ctx: &Ctx, s: &str, cx: &CodegenCtx) -> ColVal {
     let ptr = *cx
         .lits
         .get(s)

@@ -46,9 +46,9 @@ where
     /// Shadows [`StagedIterator::for_each`] with a three-argument consumer, so
     /// the index and the element arrive as separate vars rather than through a
     /// pair that would round-trip a stack slot.
-    pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
+    pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<u64>, Var<I::Item>),
+        F: FnOnce(&Ctx, Var<u64>, Var<I::Item>),
     {
         let index = ctx.var(0u64);
         let cursor = self.iter.open(ctx);
@@ -67,7 +67,7 @@ where
     type Item = ZipItem<u64, I::Item>;
     type Cursor = EnumerateCursor<I::Cursor>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let index = ctx.var(0u64);
         EnumerateCursor {
             inner: self.iter.open(ctx),
@@ -91,7 +91,7 @@ where
     type Item = ZipItem<u64, C::Item>;
     type Close = C::Close;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, C::Close) {
         let (elem, close) = self.inner.next(ctx, done);
         let index = self.index;
         // The pair captures the index's current value before the increment.
@@ -100,11 +100,11 @@ where
         (pair, close)
     }
 
-    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, ctx: &Ctx) -> Option<Var<u64>> {
         self.inner.indexed_len(ctx)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, C::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<Self::Item>, C::Close) {
         // SAFETY: forwarded from the caller.
         let (elem, close) = unsafe { self.inner.next_at(ctx, index) };
         (ctx.bind(Pair::new(index, elem)), close)

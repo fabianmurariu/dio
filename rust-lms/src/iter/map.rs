@@ -32,7 +32,7 @@ impl<I, F, U> Map<I, F, U> {
 impl<I, F, U, MapOut> StagedIterator for Map<I, F, U>
 where
     I: StagedIterator,
-    F: Fn(Var<I::Item>) -> MapOut + 'static,
+    F: Fn(Var<I::Item>) -> MapOut,
     MapOut: Staged<Out = U> + 'static,
     U: StagedType + ConstantType + CopyType + 'static,
     U::RuntimeValue: Default,
@@ -40,7 +40,7 @@ where
     type Item = U;
     type Cursor = MapCursor<I::Cursor, F, U>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         MapCursor {
             inner: self.inner.open(ctx),
             map_fn: self.map_fn,
@@ -59,23 +59,23 @@ pub struct MapCursor<C, F, U> {
 impl<C, F, U, MapOut> Cursor for MapCursor<C, F, U>
 where
     C: Cursor,
-    F: Fn(Var<C::Item>) -> MapOut + 'static,
+    F: Fn(Var<C::Item>) -> MapOut,
     MapOut: Staged<Out = U> + 'static,
     U: StagedType + 'static,
 {
     type Item = U;
     type Close = C::Close;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<U>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<U>, C::Close) {
         let (elem, close) = self.inner.next(ctx, done);
         (ctx.bind((self.map_fn)(elem)), close)
     }
 
-    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, ctx: &Ctx) -> Option<Var<u64>> {
         self.inner.indexed_len(ctx)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<U>, C::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<U>, C::Close) {
         // SAFETY: forwarded from the caller.
         let (elem, close) = unsafe { self.inner.next_at(ctx, index) };
         (ctx.bind((self.map_fn)(elem)), close)
@@ -85,7 +85,7 @@ where
 impl<I, F, U, MapOut> IndexedStagedIterator for Map<I, F, U>
 where
     I: IndexedStagedIterator,
-    F: Fn(Var<I::Item>) -> MapOut + 'static,
+    F: Fn(Var<I::Item>) -> MapOut,
     MapOut: Staged<Out = U> + 'static,
     U: StagedType + ConstantType + CopyType + 'static,
     U::RuntimeValue: Default,

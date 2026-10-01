@@ -27,10 +27,10 @@ pub trait RangeStep: Num {
 
     /// Element count of `[start, end)` stepping by `step`: 0 when the range is
     /// empty (`start >= end`), otherwise `ceil((end - start) / step)`.
-    fn count(ctx: &mut Ctx, start: Var<Self>, end: Var<Self>, step: Var<Self>) -> Var<u64>;
+    fn count(ctx: &Ctx, start: Var<Self>, end: Var<Self>, step: Var<Self>) -> Var<u64>;
 
     /// The `index`-th element: `start + index * step`.
-    fn nth(ctx: &mut Ctx, start: Var<Self>, step: Var<Self>, index: Var<u64>) -> Var<Self>;
+    fn nth(ctx: &Ctx, start: Var<Self>, step: Var<Self>, index: Var<u64>) -> Var<Self>;
 }
 
 impl RangeStep for u64 {
@@ -38,13 +38,13 @@ impl RangeStep for u64 {
         1
     }
 
-    fn count(ctx: &mut Ctx, start: Var<u64>, end: Var<u64>, step: Var<u64>) -> Var<u64> {
+    fn count(ctx: &Ctx, start: Var<u64>, end: Var<u64>, step: Var<u64>) -> Var<u64> {
         // Guarded: `end - start` would wrap for an empty range.
         let span = add(sub(end, start), sub(step, 1u64));
         ctx.bind(select(lt(start, end), div(span, step), 0u64))
     }
 
-    fn nth(ctx: &mut Ctx, start: Var<u64>, step: Var<u64>, index: Var<u64>) -> Var<u64> {
+    fn nth(ctx: &Ctx, start: Var<u64>, step: Var<u64>, index: Var<u64>) -> Var<u64> {
         ctx.bind(add(start, mul(index, step)))
     }
 }
@@ -54,14 +54,14 @@ impl RangeStep for i64 {
         1
     }
 
-    fn count(ctx: &mut Ctx, start: Var<i64>, end: Var<i64>, step: Var<i64>) -> Var<u64> {
+    fn count(ctx: &Ctx, start: Var<i64>, end: Var<i64>, step: Var<i64>) -> Var<u64> {
         // Non-negative whenever `start < end`, so the cast is exact there.
         let span = add(sub(end, start), sub(step, 1i64));
         let n = int_cast::<u64, i64, _>(div(span, step));
         ctx.bind(select(lt(start, end), n, 0u64))
     }
 
-    fn nth(ctx: &mut Ctx, start: Var<i64>, step: Var<i64>, index: Var<u64>) -> Var<i64> {
+    fn nth(ctx: &Ctx, start: Var<i64>, step: Var<i64>, index: Var<u64>) -> Var<i64> {
         ctx.bind(add(start, mul(int_cast::<i64, u64, _>(index), step)))
     }
 }
@@ -134,7 +134,7 @@ where
     type Item = T;
     type Cursor = RangeCursor<T>;
 
-    fn open(self, ctx: &mut Ctx) -> RangeCursor<T> {
+    fn open(self, ctx: &Ctx) -> RangeCursor<T> {
         // Bounds are evaluated once, like `std`'s `Range`: a body that changes
         // the variable the range was built from does not move its end.
         let start = ctx.bind(self.start);
@@ -162,7 +162,7 @@ impl<T: RangeStep> Cursor for RangeCursor<T> {
     type Item = T;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<T>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<T>, ()) {
         let i = self.counter;
         ctx.exit_if(ge(i, self.end), done);
         // Hand out a *copy* of the counter: a consumer that stores to its item
@@ -173,11 +173,11 @@ impl<T: RangeStep> Cursor for RangeCursor<T> {
         (item, ())
     }
 
-    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, ctx: &Ctx) -> Option<Var<u64>> {
         Some(T::count(ctx, self.start, self.end, self.step))
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<T>, ()) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<T>, ()) {
         (T::nth(ctx, self.start, self.step, index), ())
     }
 }

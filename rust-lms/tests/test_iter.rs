@@ -800,7 +800,7 @@ fn test_iter_rev_slice() {
 // =============================================================================
 
 /// Stages `x` is a power of two by halving it in a loop.
-fn is_power_of_two(ctx: &mut Ctx, x: Var<u64>) -> Var<bool> {
+fn is_power_of_two(ctx: &Ctx, x: Var<u64>) -> Var<bool> {
     let rest = ctx.var(x);
     ctx.while_loop(
         select(gt(rest, 1u64), eq(rest % 2u64, 0u64), false),
@@ -880,4 +880,72 @@ fn test_find_map_with_a_loop() {
         assert_eq!(compiled.call(&[3u64, 5, 12, 16, 32][..]), 16);
         assert_eq!(compiled.call(&[3u64, 5, 7][..]), 0);
     });
+}
+
+// =============================================================================
+// Closures that capture `ctx`: whatever they emit lands in the scope open at the
+// time of the call, which for a combinator is the loop body.
+// =============================================================================
+
+fn popcount(ctx: &Ctx, x: Var<u64>) -> Var<u64> {
+    let rest = ctx.var(x);
+    let bits = ctx.var(0u64);
+    ctx.while_loop(gt(rest, 0u64), |ctx| {
+        ctx.store(bits, bits + (rest % 2u64));
+        ctx.store(rest, rest / 2u64);
+    });
+    bits
+}
+
+#[test]
+fn test_map_and_filter_capture_ctx() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("popcount_of_powers", |ctx, arr: Var<SRef<Slice<u64>>>| {
+            arr.staged_iter()
+                .filter(|x| is_power_of_two(ctx, x))
+                .map(|x| popcount(ctx, x))
+                .sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compilation failed");
+        // Every power of two has one bit set.
+        let values = [0u64, 1, 3, 4, 6, 8, 1 << 40, u64::MAX];
+        let expected = values.iter().filter(|v| v.is_power_of_two()).count() as u64;
+        assert_eq!(compiled.call(&values[..]), expected);
+    });
+}
+
+#[test]
+fn test_map_capturing_ctx_through_random_access() {
+    // `zip` of two indexed sides drives the map by index (`next_at`).
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "weighted_popcount",
+            |ctx, bits: Var<SRef<Slice<u64>>>, weights: Var<SRef<Slice<u64>>>| {
+                let total = ctx.var(0u64);
+                bits.staged_iter()
+                    .map(|x| popcount(ctx, x))
+                    .zip(weights)
+                    .for_each(ctx, |ctx, ones, weight| {
+                        ctx.store(total, total + ones * weight)
+                    });
+                total
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let bits = [1u64, 3, 255, 0];
+        let weights = [10u64, 100, 1000];
+        assert_eq!(compiled.call(&bits[..], &weights[..]), 10 + 200 + 8000);
+    });
+}
+
+#[test]
+#[should_panic(expected = "Ctx used after its function body was finished")]
+fn test_ctx_leaked_out_of_its_body_panics() {
+    let mut compiler = Compiler::new();
+    let mut leaked = None;
+    let _ = compiler.fun0("leak", |ctx| {
+        leaked = Some(ctx.clone());
+        Const::<i64>::new(1)
+    });
+    leaked.unwrap().var(0i64);
 }

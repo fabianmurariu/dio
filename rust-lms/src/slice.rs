@@ -1425,10 +1425,10 @@ where
 {
     type Item = S::Out;
 
-    fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
+    fn eliminate<F, N>(self, ctx: &Ctx, on_some: F, on_none: N)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
-        N: FnOnce(&mut Ctx),
+        F: FnOnce(&Ctx, Var<Self::Item>),
+        N: FnOnce(&Ctx),
     {
         let mut slice = ctx.bind(self.slice);
         let start = ctx.bind(self.start);
@@ -1506,12 +1506,12 @@ where
     /// The slice must be partitioned: `pred` holds for a prefix and fails for
     /// the rest. Otherwise the result is some index in `0..=len`, unspecified.
     /// The search is branchless, so `pred` is staged once.
-    fn partition_point<P, C>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    fn partition_point<P, C>(self, ctx: &Ctx, pred: P) -> Var<u64>
     where
         Self: 'static,
         Self::Out: CopyType + 'static,
         ElemOf<Self>: CopyType + 'static,
-        P: FnOnce(&mut Ctx, Var<ElemOf<Self>>) -> C,
+        P: FnOnce(&Ctx, Var<ElemOf<Self>>) -> C,
         C: Staged<Out = bool> + 'static,
     {
         let slice = ctx.bind(self);
@@ -1619,7 +1619,7 @@ where
     /// a staged iterator yields values and has nowhere to put them back. Binds
     /// the slice once and reborrows per element, so a unique — and therefore
     /// non-`Clone` — origin works.
-    fn map_in_place<F, E>(self, ctx: &mut Ctx, f: F)
+    fn map_in_place<F, E>(self, ctx: &Ctx, f: F)
     where
         Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
         VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
@@ -1646,7 +1646,7 @@ where
     /// Emits only the store — routing this through
     /// [`map_in_place`](Self::map_in_place) would emit a per-element load whose
     /// result is never used, and the frontend does not remove it.
-    fn fill<V>(self, ctx: &mut Ctx, value: V)
+    fn fill<V>(self, ctx: &Ctx, value: V)
     where
         Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
         VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,

@@ -88,7 +88,7 @@ impl AdjListStaged {
     /// At execution the graph must be a valid CSR: `offsets` holds at least
     /// `num_nodes + 1` non-decreasing entries, and `offsets[num_nodes] <=
     /// neighbours.len()`. Rows are read without bounds checks.
-    unsafe fn new(ctx: &mut Ctx, graph: Var<FfiAdjListStaged>) -> Self {
+    unsafe fn new(ctx: &Ctx, graph: Var<FfiAdjListStaged>) -> Self {
         AdjListStaged {
             offsets: ctx.bind(graph.get(FfiAdjListType::offsets())),
             neighbours: ctx.bind(graph.get(FfiAdjListType::neighbours())),
@@ -105,7 +105,7 @@ impl AdjListStaged {
     /// # Safety
     ///
     /// `node < num_nodes` at execution.
-    unsafe fn row(self, ctx: &mut Ctx, node: Var<u64>) -> Var<SRef<Slice<u64>>> {
+    unsafe fn row(self, ctx: &Ctx, node: Var<u64>) -> Var<SRef<Slice<u64>>> {
         // SAFETY: `node < num_nodes` (caller) and the CSR invariant of `new`
         // make both offsets readable and `start <= end <= neighbours.len()`.
         unsafe {
@@ -131,7 +131,7 @@ impl StagedIterator for AdjRows {
     type Item = SRef<Slice<u64>>;
     type Cursor = AdjRowsCursor;
 
-    fn open(self, ctx: &mut Ctx) -> AdjRowsCursor {
+    fn open(self, ctx: &Ctx) -> AdjRowsCursor {
         AdjRowsCursor {
             graph: self.graph,
             pos: ctx.var(0u64),
@@ -156,7 +156,7 @@ impl Cursor for AdjRowsCursor {
     type Item = SRef<Slice<u64>>;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<SRef<Slice<u64>>>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<SRef<Slice<u64>>>, ()) {
         let pos = self.pos;
         ctx.exit_if(ge(pos, self.graph.num_nodes()), done);
         // SAFETY: the exit above proves `pos < num_nodes`.
@@ -165,11 +165,11 @@ impl Cursor for AdjRowsCursor {
         (row, ())
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         Some(self.graph.num_nodes())
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<SRef<Slice<u64>>>, ()) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<SRef<Slice<u64>>>, ()) {
         // SAFETY: forwarded from the caller (`index < num_nodes`).
         (unsafe { self.graph.row(ctx, index) }, ())
     }

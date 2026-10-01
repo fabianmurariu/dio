@@ -12,7 +12,7 @@ use crate::array::ValidityView;
 use crate::ffi::{FfiValidityMut, FfiValidityMutType};
 
 fn bit_location_mut(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     validity: &mut Var<SRefMut<FfiValidityMut>>,
     index: Var<u64>,
 ) -> (Var<u64>, Var<u64>) {
@@ -51,7 +51,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
     /// # Safety
     ///
     /// At execution, `i` must be less than the prepared bitmap's bit length.
-    pub unsafe fn set_null(&mut self, ctx: &mut Ctx, i: Var<u64>) {
+    pub unsafe fn set_null(&mut self, ctx: &Ctx, i: Var<u64>) {
         let (byte_index, mask) = bit_location_mut(ctx, &mut self.validity, i);
         let byte_index = ctx.bind(byte_index);
         // SAFETY: `i` is in range by this method's contract, so its computed
@@ -83,7 +83,7 @@ impl ValidityView<Var<SRefMut<FfiValidityMut>>> {
     /// # Safety
     ///
     /// At execution, `i` must be less than the prepared bitmap's bit length.
-    pub unsafe fn set_valid(&mut self, ctx: &mut Ctx, i: Var<u64>) {
+    pub unsafe fn set_valid(&mut self, ctx: &Ctx, i: Var<u64>) {
         let (byte_index, mask) = bit_location_mut(ctx, &mut self.validity, i);
         let byte_index = ctx.bind(byte_index);
         // SAFETY: `i` is in range by this method's contract, so its computed

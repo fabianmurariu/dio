@@ -19,11 +19,11 @@ macro_rules! impl_make_fun {
             ) -> $FunRef<OUT>
             where
                 OUT: StagedType,
-                F: FnOnce(&mut Ctx) -> Ret,
+                F: FnOnce(&Ctx) -> Ret,
                 Ret: Staged<Out = OUT> + 'static,
             {
-                let mut ctx = Ctx::new(*next_var_id);
-                let ret = body_fn(&mut ctx);
+                let ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(&ctx);
                 *next_var_id = ctx.final_id();
 
                 let func_id = functions.len();
@@ -45,15 +45,15 @@ macro_rules! impl_make_fun {
             ) -> $FunRef<OUT>
             where
                 OUT: StagedType,
-                F: FnOnce($FunRef<OUT>, &mut Ctx) -> Ret,
+                F: FnOnce($FunRef<OUT>, &Ctx) -> Ret,
                 Ret: Staged<Out = OUT> + 'static,
             {
                 let func_id = functions.len();
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let mut ctx = Ctx::new(*next_var_id);
-                let ret = body_fn(func_ref, &mut ctx);
+                let ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(func_ref, &ctx);
                 *next_var_id = ctx.final_id();
 
                 functions[func_id] = Some(FunDef {
@@ -80,7 +80,7 @@ macro_rules! impl_make_fun {
             where
                 $($T: StagedType,)+
                 OUT: StagedType,
-                FN: FnOnce(&mut Ctx, $(Var<$T>),+) -> Ret,
+                FN: FnOnce(&Ctx, $(Var<$T>),+) -> Ret,
                 Ret: Staged<Out = OUT> + 'static,
             {
                 $(
@@ -92,8 +92,8 @@ macro_rules! impl_make_fun {
                 )+
                 let param_var_ids = vec![$($var.id),+];
 
-                let mut ctx = Ctx::new(*next_var_id);
-                let ret = body_fn(&mut ctx, $($var),+);
+                let ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(&ctx, $($var),+);
                 *next_var_id = ctx.final_id();
 
                 let func_id = functions.len();
@@ -116,7 +116,7 @@ macro_rules! impl_make_fun {
             where
                 $($T: StagedType,)+
                 OUT: StagedType,
-                FN: FnOnce($FunRef<$($T,)+ OUT>, &mut Ctx, $(Var<$T>),+) -> Ret,
+                FN: FnOnce($FunRef<$($T,)+ OUT>, &Ctx, $(Var<$T>),+) -> Ret,
                 Ret: Staged<Out = OUT> + 'static,
             {
                 $(
@@ -132,8 +132,8 @@ macro_rules! impl_make_fun {
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let mut ctx = Ctx::new(*next_var_id);
-                let ret = body_fn(func_ref, &mut ctx, $($var),+);
+                let ctx = Ctx::new(*next_var_id);
+                let ret = body_fn(func_ref, &ctx, $($var),+);
                 *next_var_id = ctx.final_id();
 
                 functions[func_id] = Some(FunDef {

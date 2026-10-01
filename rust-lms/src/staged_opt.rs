@@ -30,11 +30,11 @@ pub trait StagedOpt {
     /// Emit code that runs `on_some(ctx, value)` when this is `Some`, or
     /// `on_none(ctx)` when it is `None`. The payload is bound (in a register)
     /// only inside the `Some` arm.
-    fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, on_none: N)
+    fn eliminate<S, N>(self, ctx: &Ctx, on_some: S, on_none: N)
     where
         Self: Sized,
-        S: FnOnce(&mut Ctx, Var<Self::Item>),
-        N: FnOnce(&mut Ctx);
+        S: FnOnce(&Ctx, Var<Self::Item>),
+        N: FnOnce(&Ctx);
 }
 
 // =============================================================================
@@ -57,10 +57,10 @@ where
 {
     type Item = T;
 
-    fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, on_none: N)
+    fn eliminate<S, N>(self, ctx: &Ctx, on_some: S, on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>),
-        N: FnOnce(&mut Ctx),
+        S: FnOnce(&Ctx, Var<T>),
+        N: FnOnce(&Ctx),
     {
         let value = self.value;
         ctx.if_then_else(
@@ -111,10 +111,10 @@ where
 {
     type Item = T;
 
-    fn eliminate<S, N>(self, ctx: &mut Ctx, on_some: S, _on_none: N)
+    fn eliminate<S, N>(self, ctx: &Ctx, on_some: S, _on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>),
-        N: FnOnce(&mut Ctx),
+        S: FnOnce(&Ctx, Var<T>),
+        N: FnOnce(&Ctx),
     {
         let v = ctx.bind(self.value);
         on_some(ctx, v);
@@ -144,10 +144,10 @@ where
 {
     type Item = T;
 
-    fn eliminate<S, N>(self, ctx: &mut Ctx, _on_some: S, on_none: N)
+    fn eliminate<S, N>(self, ctx: &Ctx, _on_some: S, on_none: N)
     where
-        S: FnOnce(&mut Ctx, Var<T>),
-        N: FnOnce(&mut Ctx),
+        S: FnOnce(&Ctx, Var<T>),
+        N: FnOnce(&Ctx),
     {
         on_none(ctx);
     }

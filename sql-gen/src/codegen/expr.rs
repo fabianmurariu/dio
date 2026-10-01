@@ -14,7 +14,7 @@ use super::numeric::{as_bool, tag, to_i64};
 use super::strings::{gen_str_literal, is_str, str_eq};
 
 pub(crate) fn gen_predicate(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     e: &Expr,
     schema: &SchemaRef,
     row: &Row,
@@ -30,7 +30,7 @@ pub(crate) fn gen_predicate(
 }
 
 pub(crate) fn gen_expr(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     e: &Expr,
     schema: &SchemaRef,
     row: &Row,
@@ -54,7 +54,7 @@ pub(crate) fn gen_expr(
 }
 
 fn gen_scalar_fn(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     f: &ScalarFunction,
     schema: &SchemaRef,
     row: &Row,
@@ -77,14 +77,14 @@ fn gen_scalar_fn(
     }
 }
 /// Equality: string operands compare by view/bytes, numeric operands by value.
-fn gen_eq(ctx: &mut Ctx, l: ColVal, r: ColVal, cx: &CodegenCtx) -> Var<bool> {
+fn gen_eq(ctx: &Ctx, l: ColVal, r: ColVal, cx: &CodegenCtx) -> Var<bool> {
     match (l, r) {
         (ColVal::Str(a, _), ColVal::Str(b, _)) => str_eq(ctx, a, b, cx),
         _ if is_str(l) || is_str(r) => panic!("string compared with non-string"),
         _ => num_cmp(ctx, Cmp::Eq, l, r),
     }
 }
-fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue, cx: &CodegenCtx) -> ColVal {
+fn gen_literal(ctx: &Ctx, sv: &ScalarValue, cx: &CodegenCtx) -> ColVal {
     match sv {
         ScalarValue::Int32(Some(v)) => ColVal::I32(ctx.var(*v), Nullness::NonNull),
         ScalarValue::Int64(Some(v)) => ColVal::I64(ctx.var(*v), Nullness::NonNull),
@@ -99,7 +99,7 @@ fn gen_literal(ctx: &mut Ctx, sv: &ScalarValue, cx: &CodegenCtx) -> ColVal {
     }
 }
 fn gen_binary(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     be: &BinaryExpr,
     schema: &SchemaRef,
     row: &Row,
@@ -140,7 +140,7 @@ fn gen_binary(
 }
 
 /// `NonNull` unless an operand is nullable; two nullable operands AND their bits.
-fn combine_null(ctx: &mut Ctx, a: Nullness, b: Nullness) -> Nullness {
+fn combine_null(ctx: &Ctx, a: Nullness, b: Nullness) -> Nullness {
     match (a, b) {
         (Nullness::NonNull, Nullness::NonNull) => Nullness::NonNull,
         (Nullness::Nullable(v), Nullness::NonNull) | (Nullness::NonNull, Nullness::Nullable(v)) => {
@@ -159,7 +159,7 @@ enum Cmp {
 }
 
 /// Compare two values -> bool. Floats compare as `f64`; ints widen to `i64`.
-fn num_cmp(ctx: &mut Ctx, kind: Cmp, l: ColVal, r: ColVal) -> Var<bool> {
+fn num_cmp(ctx: &Ctx, kind: Cmp, l: ColVal, r: ColVal) -> Var<bool> {
     if let (ColVal::F64(x, _), ColVal::F64(y, _)) = (l, r) {
         return match kind {
             Cmp::Eq => ctx.bind(eq(x, y)),
@@ -183,7 +183,7 @@ enum Arith {
 }
 
 /// Arithmetic -> numeric ColVal. Floats stay `f64`; ints widen to `i64`.
-fn arith(ctx: &mut Ctx, kind: Arith, l: ColVal, r: ColVal, null: Nullness) -> ColVal {
+fn arith(ctx: &Ctx, kind: Arith, l: ColVal, r: ColVal, null: Nullness) -> ColVal {
     if let (ColVal::F64(x, _), ColVal::F64(y, _)) = (l, r) {
         let v = match kind {
             Arith::Add => ctx.bind(add(x, y)),

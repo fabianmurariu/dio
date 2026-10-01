@@ -44,7 +44,7 @@ where
     type Item = <Inner<J> as StagedIterator>::Item;
     type Cursor = FlatMapCursor<I::Cursor, F, J>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let active = ctx.var(false);
         FlatMapCursor {
             outer: self.outer.open(ctx),
@@ -74,9 +74,9 @@ where
     ///   close(cursor)                        ; normal end of this inner list
     /// }
     /// ```
-    fn for_each<G>(self, ctx: &mut Ctx, consumer: G)
+    fn for_each<G>(self, ctx: &Ctx, consumer: G)
     where
-        G: FnOnce(&mut Ctx, Var<Self::Item>),
+        G: FnOnce(&Ctx, Var<Self::Item>),
     {
         let f = self.f;
         self.outer.for_each(ctx, move |ctx, o| {
@@ -133,7 +133,7 @@ where
     /// ```
     /// Each step — outer, inner, and the inner open — is staged once; the inner
     /// cursor's state is defined in the `!active` branch and loop-carried after.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
         let (outer, f, active) = (self.outer, self.f, self.active);
         let (mut outer_close, mut inner_close) = (None, None);
         let item = ctx.join(|ctx, got| {
@@ -187,7 +187,7 @@ impl<C: Copy> Clone for CloseIfActive<C> {
 impl<C: Copy> Copy for CloseIfActive<C> {}
 
 impl<C: Close> Close for CloseIfActive<C> {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         let inner = self.inner;
         ctx.if_then(self.active, move |ctx| inner.close(ctx));
     }

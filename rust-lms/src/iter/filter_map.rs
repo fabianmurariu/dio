@@ -24,14 +24,14 @@ impl<I, F> FilterMap<I, F> {
 impl<I, F, O> StagedIterator for FilterMap<I, F>
 where
     I: StagedIterator,
-    F: Fn(Var<I::Item>) -> O + 'static,
+    F: Fn(Var<I::Item>) -> O,
     O: StagedOpt + 'static,
     O::Item: 'static,
 {
     type Item = O::Item;
     type Cursor = FilterMapCursor<I::Cursor, F>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         FilterMapCursor {
             inner: self.inner.open(ctx),
             f: self.f,
@@ -48,7 +48,7 @@ pub struct FilterMapCursor<C, F> {
 impl<C, F, O> Cursor for FilterMapCursor<C, F>
 where
     C: Cursor,
-    F: Fn(Var<C::Item>) -> O + 'static,
+    F: Fn(Var<C::Item>) -> O,
     O: StagedOpt + 'static,
     O::Item: 'static,
 {
@@ -61,7 +61,7 @@ where
     ///          match f(elem) { Some(v) → got(v), None → again }
     /// }
     /// ```
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<O::Item>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<O::Item>, C::Close) {
         let (inner, f) = (self.inner, self.f);
         let mut close = None;
         let value = ctx.join(|ctx, got| {

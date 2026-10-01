@@ -192,7 +192,7 @@ where
     type Item = K::Item;
     type Cursor = OpaqueCursor<K>;
 
-    fn open(self, ctx: &mut Ctx) -> OpaqueCursor<K> {
+    fn open(self, ctx: &Ctx) -> OpaqueCursor<K> {
         // Bind the handle once; every step and the final drop use it.
         OpaqueCursor {
             handle: ctx.bind(self.handle),
@@ -218,7 +218,7 @@ impl<K: OpaqueIterKind> Cursor for OpaqueCursor<K> {
     /// if opt is None → done
     /// elem = opt.payload
     /// ```
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
         // SAFETY: `handle` is the live handle this kind's producer returned; it
         // stays live until `DropHandle::close`, emitted after the loop.
         let mut opt = ctx.bind(unsafe {
@@ -255,7 +255,7 @@ impl<D> Close for DropHandle<D>
 where
     D: ExternFn<Args = (OpaqueHandle,), Ret = ()> + 'static,
 {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         // SAFETY: the matching drop for the live handle, after its final use.
         ctx.emit(unsafe { call_extern1_unchecked::<D, _, OpaqueHandle>(self.drop, self.handle) });
     }
@@ -281,7 +281,7 @@ where
     H: Staged<Out = OpaqueHandle> + 'static,
 {
     /// O(1) element count: `len(it)`, then `drop(it)` — no iteration.
-    pub fn count(self, ctx: &mut Ctx) -> Var<u64> {
+    pub fn count(self, ctx: &Ctx) -> Var<u64> {
         let handle = ctx.bind(self.handle);
         // SAFETY: `handle` came from this iterator kind's producer and remains
         // live until the matching drop call below.
@@ -301,7 +301,7 @@ where
     type Item = K::Item;
     type Cursor = ExactSizeOpaqueCursor<K>;
 
-    fn open(self, ctx: &mut Ctx) -> ExactSizeOpaqueCursor<K> {
+    fn open(self, ctx: &Ctx) -> ExactSizeOpaqueCursor<K> {
         let handle = ctx.bind(self.handle);
         // SAFETY: `handle` is the live handle produced for this iterator kind.
         let len = ctx
@@ -331,7 +331,7 @@ impl<K: ExactSizeOpaqueIterKind> Cursor for ExactSizeOpaqueCursor<K> {
     type Item = K::Item;
     type Close = DropHandle<K::Drop>;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<K::Item>, Self::Close) {
         let pos = self.pos;
         ctx.exit_if(ge(pos, self.len), done);
         // SAFETY: `pos < len`, so `next_value` is never called past the end.
@@ -765,7 +765,7 @@ impl<K: ReusedOpaqueIterKind> StagedIterator for ReusedOpaqueIter<K> {
     /// Reserve this traversal's slot in the JIT frame (one per nesting level,
     /// reused every outer iteration) and let the producer build the iterator
     /// into it — which fills the slot's `next`/`drop` mini-vtable.
-    fn open(self, ctx: &mut Ctx) -> ReusedOpaqueCursor<K> {
+    fn open(self, ctx: &Ctx) -> ReusedOpaqueCursor<K> {
         let layout = SlotLayout::of::<K>();
         let init_id = self.init.extern_id;
         let args = self.args;
@@ -857,7 +857,7 @@ impl SlotVars {
 
 impl Close for SlotVars {
     /// Drop the iterator in place (and free it, if it was heap-boxed).
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         ctx.emit_raw(move |cctx| self.call_indirect(cctx, self.layout.drop));
     }
 }
@@ -879,7 +879,7 @@ impl<K: ReusedOpaqueIterKind> Cursor for ReusedOpaqueCursor<K> {
     type Item = K::Item;
     type Close = SlotVars;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, SlotVars) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<K::Item>, SlotVars) {
         let slot = self.slot;
         ctx.emit_raw(move |cctx| slot.call_indirect(cctx, slot.layout.next));
         // The COption the call wrote, read as a staged value.

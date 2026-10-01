@@ -230,6 +230,18 @@ let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<i64>, b: Var<i64>| {
 `funN_rec` passes the function's own `FunRefN` in as the first closure argument so
 the body can call itself.
 
+The builder is passed as `&Ctx`, a handle to shared state (`Rc<RefCell<..>>`).
+Statements go into the innermost scope open at the moment of the call: a loop
+body, a branch, a block. So a closure can capture `ctx` and emit through it, even
+a combinator's closure:
+
+```rust
+arr.staged_iter().map(|x| popcount(ctx, x)).sum(ctx) // popcount emits a loop
+```
+
+`map` runs its closure inside the consumer's loop body, so the loop lands there.
+A `Ctx` kept past the end of its function body panics if used.
+
 ### Calling and compiling
 
 - `FunRefN<…, OUT>` is a type-safe handle. `call0`…`call3` (`src/func_impl.rs`)

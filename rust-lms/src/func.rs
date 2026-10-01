@@ -28,9 +28,11 @@ use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
 use cranelift_jit::{JITBuilder, JITModule};
 use cranelift_module::{FuncId, Linkage, Module, default_libcall_names};
+use std::cell::{RefCell, RefMut};
 use std::collections::HashMap;
 use std::marker::PhantomData;
 use std::mem::MaybeUninit;
+use std::rc::Rc;
 use std::sync::Arc;
 
 pub use crate::func_impl::*;
@@ -63,31 +65,65 @@ type CodegenAction = Box<dyn FnOnce(&mut CompilationContext) + 'static>;
 /// Passed to closures in `fun1`, `fun2`, etc. Call methods to emit code in
 /// declaration order.
 ///
+/// A `Ctx` is a cheap handle (`Rc`) to one function body's builder. Clone it
+/// freely, including into closures: whatever the clone emits lands in the
+/// innermost scope (loop body, branch, block) open at the time of the call.
+/// The builder is only borrowed while a statement is appended, so nested and
+/// captured uses never conflict; a `Ctx` used after its function body was
+/// finished panics.
+///
 /// # Example
 /// ```ignore
 /// compiler.fun1("sum", |ctx, arr: Var<SRef<Slice<f64>>>| {
 ///     let acc = ctx.var(0.0f64);
 ///     arr.staged_iter().for_each(ctx, |ctx, elem| {
-///         ctx.assign(acc, add(acc, elem));
+///         ctx.store(acc, add(acc, elem));
 ///     });
 ///     acc
 /// });
 /// ```
-pub struct Ctx {
-    pub(crate) next_var_id: usize,
-    actions: Vec<CodegenAction>,
+#[derive(Clone)]
+pub struct Ctx(Rc<RefCell<CtxInner>>);
+
+/// The state behind a [`Ctx`].
+struct CtxInner {
+    next_var_id: usize,
+    /// One action list per open scope; statements are appended to the last.
+    frames: Vec<Vec<CodegenAction>>,
 }
 
 impl Ctx {
     pub(crate) fn new(start: usize) -> Self {
-        Ctx {
+        Ctx(Rc::new(RefCell::new(CtxInner {
             next_var_id: start,
-            actions: Vec::new(),
-        }
+            frames: vec![Vec::new()],
+        })))
+    }
+
+    fn inner(&self) -> RefMut<'_, CtxInner> {
+        self.0
+            .try_borrow_mut()
+            .expect("rust-lms bug: Ctx re-entered while appending a statement")
     }
 
     pub(crate) fn final_id(&self) -> usize {
-        self.next_var_id
+        self.inner().next_var_id
+    }
+
+    /// Append a statement to the innermost open scope.
+    fn push(&self, action: CodegenAction) {
+        self.inner()
+            .frames
+            .last_mut()
+            .expect("Ctx used after its function body was finished")
+            .push(action);
+    }
+
+    fn next_id(&self) -> usize {
+        let mut inner = self.inner();
+        let id = inner.next_var_id;
+        inner.next_var_id += 1;
+        id
     }
 
     /// Consume this context, producing a `FunDef.body` closure that replays
@@ -99,7 +135,12 @@ impl Ctx {
     where
         Ret: Staged + 'static,
     {
-        let actions = self.actions;
+        let actions = {
+            let mut inner = self.inner();
+            assert_eq!(inner.frames.len(), 1, "rust-lms bug: a scope was left open");
+            // Leave no frame behind, so a leaked clone panics instead of emitting.
+            inner.frames.pop().expect("the body's own frame")
+        };
         Box::new(move |ctx| {
             for action in actions {
                 action(ctx);
@@ -108,26 +149,22 @@ impl Ctx {
         })
     }
 
-    fn alloc<T: StagedType>(&mut self) -> Var<T> {
-        let id = self.next_var_id;
-        self.next_var_id += 1;
-        Var::new(id)
+    fn alloc<T: StagedType>(&self) -> Var<T> {
+        Var::new(self.next_id())
     }
 
     /// Allocate a variable ID without registering an initialization action.
     ///
     /// # Safety
     /// Caller must ensure the variable is assigned before it is used in codegen.
-    pub(crate) unsafe fn var_unchecked<T: StagedType>(&mut self) -> Var<T> {
-        let id = self.next_var_id;
-        self.next_var_id += 1;
-        Var::new(id)
+    pub(crate) unsafe fn var_unchecked<T: StagedType>(&self) -> Var<T> {
+        Var::new(self.next_id())
     }
 
     /// Declare a new variable initialized to `init` at this point in the body.
     ///
     /// Returns a `Var<T>` that can be used in expressions and passed to `assign`.
-    pub fn var<T, E>(&mut self, init: E) -> Var<T>
+    pub fn var<T, E>(&self, init: E) -> Var<T>
     where
         T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
@@ -136,7 +173,7 @@ impl Ctx {
         let v = self.alloc::<T>();
         let init_staged = init.into_staged();
         let id = v.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let value = init_staged.codegen(ctx);
             ctx.assign_var::<T>(id, value, false);
         }));
@@ -145,14 +182,14 @@ impl Ctx {
 
     /// Evaluate a complex staged expression once, binding the result to a new
     /// variable. Avoids recomputing the expression if used in multiple places.
-    pub fn bind<T, E>(&mut self, expr: E) -> Var<T>
+    pub fn bind<T, E>(&self, expr: E) -> Var<T>
     where
         T: StagedType + 'static,
         E: Staged<Out = T> + 'static,
     {
         let v = self.alloc::<T>();
         let id = v.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
             ctx.assign_var::<T>(id, value, true);
         }));
@@ -179,7 +216,7 @@ impl Ctx {
     /// `push`. Binding the length of a slice yields `Var<u64>`, which carries
     /// no borrow and therefore does not restrict later growth; binding the
     /// slice itself yields `Var<BorrowedSlice<'a, _>>`, which does.
-    pub fn bind_lt<E>(&mut self, expr: E) -> Var<E::Out>
+    pub fn bind_lt<E>(&self, expr: E) -> Var<E::Out>
     where
         E: LifetimeErased,
     {
@@ -193,7 +230,7 @@ impl Ctx {
             std::any::type_name::<E::ErasedOut>(),
         );
         let expr = expr.erase_lifetime();
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
             ctx.assign_var_layout(id, value, is_fat, scalar, name, true);
         }));
@@ -204,14 +241,14 @@ impl Ctx {
     ///
     /// Accepts any value that implements `IntoStaged<T>` — primitives like
     /// `42i64` work directly, as do staged expressions.
-    pub fn store<T, E>(&mut self, var: Var<T>, expr: E)
+    pub fn store<T, E>(&self, var: Var<T>, expr: E)
     where
         T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
         E::Staged: 'static,
     {
         let staged_expr = expr.into_staged();
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             assign(var, staged_expr).codegen(ctx);
         }));
     }
@@ -219,13 +256,13 @@ impl Ctx {
     /// [`store`](Self::store) for an expression that borrows. `T` is the
     /// variable's own type, which carries no borrow, so nothing survives the
     /// assignment holding one.
-    pub fn store_lt<T, E>(&mut self, var: Var<T>, expr: E)
+    pub fn store_lt<T, E>(&self, var: Var<T>, expr: E)
     where
         T: StagedType + 'static,
         E: LifetimeErased<Out = T, ErasedOut = T>,
     {
         let expr = expr.erase_lifetime();
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             assign(var, expr).codegen(ctx);
         }));
     }
@@ -234,37 +271,37 @@ impl Ctx {
     /// borrowed slice, say. Same split as [`bind_lt`](Self::bind_lt): the
     /// statement is erased to enter the `'static` queue, and because its `Out` is
     /// `()` there is nothing left holding the borrow afterwards.
-    pub fn emit_lt<S>(&mut self, stmt: S)
+    pub fn emit_lt<S>(&self, stmt: S)
     where
         S: LifetimeErased<Out = (), ErasedOut = ()>,
     {
         let stmt = stmt.erase_lifetime();
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             stmt.codegen(ctx);
         }));
     }
 
     /// Emit any unit-typed staged expression (e.g. a store, an extern call).
-    pub fn emit<S: Staged<Out = ()> + 'static>(&mut self, stmt: S) {
-        self.actions.push(Box::new(move |ctx| {
+    pub fn emit<S: Staged<Out = ()> + 'static>(&self, stmt: S) {
+        self.push(Box::new(move |ctx| {
             stmt.codegen(ctx);
         }));
     }
 
     /// Crate-internal: emit backend code directly, for sources whose step has
     /// no staged-expression form (an indirect call through a slot's vtable).
-    pub(crate) fn emit_raw(&mut self, f: impl FnOnce(&mut CompilationContext) + 'static) {
-        self.actions.push(Box::new(f));
+    pub(crate) fn emit_raw(&self, f: impl FnOnce(&mut CompilationContext) + 'static) {
+        self.push(Box::new(f));
     }
 
     /// Crate-internal: bind the value produced by raw backend code.
     pub(crate) fn bind_raw<T: StagedType + 'static>(
-        &mut self,
+        &self,
         f: impl FnOnce(&mut CompilationContext) -> Value + 'static,
     ) -> Var<T> {
         let v = self.alloc::<T>();
         let id = v.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let value = f(ctx);
             ctx.assign_var::<T>(id, value, true);
         }));
@@ -276,34 +313,41 @@ impl Ctx {
     /// `body` is called once at staging time; the closure emits the per-iteration
     /// side effects into a child `Ctx`. `cond` accepts `IntoStaged<bool>`
     /// so `false` and `true` work directly.
-    pub fn while_loop<C, F>(&mut self, cond: C, body: F)
+    pub fn while_loop<C, F>(&self, cond: C, body: F)
     where
         C: crate::staged::IntoStaged<bool>,
         C::Staged: 'static,
-        F: FnOnce(&mut Ctx),
+        F: FnOnce(&Ctx),
     {
         let cond = cond.into_staged();
         let (body_actions, ()) = self.child(body);
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             emit_loop(ctx, Some(cond), None, body_actions);
         }));
     }
 
-    /// Stage `body` into a child context and return its actions, keeping
-    /// variable ids disjoint from the parent's.
-    fn child<R>(&mut self, body: impl FnOnce(&mut Ctx) -> R) -> (Vec<CodegenAction>, R) {
-        let mut child = Ctx::new(self.next_var_id);
-        let result = body(&mut child);
-        self.next_var_id = child.next_var_id;
-        (child.actions, result)
+    /// Stage `body` into a new innermost scope and return its actions.
+    fn child<R>(&self, body: impl FnOnce(&Ctx) -> R) -> (Vec<CodegenAction>, R) {
+        let depth = {
+            let mut inner = self.inner();
+            inner.frames.push(Vec::new());
+            inner.frames.len()
+        };
+        let result = body(self);
+        let mut inner = self.inner();
+        assert_eq!(
+            inner.frames.len(),
+            depth,
+            "rust-lms bug: a scope was left open"
+        );
+        let actions = inner.frames.pop().expect("the scope opened above");
+        (actions, result)
     }
 
     /// A fresh label id. Labels share the variable id counter, which is unique
     /// per function body, so ids never collide across nested scopes.
-    fn label_id(&mut self) -> usize {
-        let id = self.next_var_id;
-        self.next_var_id += 1;
-        id
+    fn label_id(&self) -> usize {
+        self.next_id()
     }
 
     // =========================================================================
@@ -323,13 +367,13 @@ impl Ctx {
     ///     ctx.store(i, i + 1u64);
     /// });
     /// ```
-    pub fn iterate<F>(&mut self, body: F)
+    pub fn iterate<F>(&self, body: F)
     where
-        F: for<'s> FnOnce(&mut Ctx, Label<'s>),
+        F: for<'s> FnOnce(&Ctx, Label<'s>),
     {
         let id = self.label_id();
         let (body_actions, ()) = self.child(|ctx| body(ctx, Label::new(id)));
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             emit_loop::<crate::staged::Const<bool>>(ctx, None, Some(id), body_actions);
         }));
     }
@@ -339,13 +383,13 @@ impl Ctx {
     /// [`exit`](Self::exit)`(out)` anywhere inside `body` — however deeply
     /// nested — continues after the block. Not a loop scope: `break_loop`
     /// passes through it.
-    pub fn block<F>(&mut self, body: F)
+    pub fn block<F>(&self, body: F)
     where
-        F: for<'s> FnOnce(&mut Ctx, Label<'s>),
+        F: for<'s> FnOnce(&Ctx, Label<'s>),
     {
         let id = self.label_id();
         let (body_actions, ()) = self.child(|ctx| body(ctx, Label::new(id)));
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let out = ctx.create_block();
             ctx.labels.insert(id, out);
             for action in body_actions {
@@ -370,19 +414,19 @@ impl Ctx {
     ///     0i64
     /// });
     /// ```
-    pub fn join<T, E, F>(&mut self, body: F) -> Var<T>
+    pub fn join<T, E, F>(&self, body: F) -> Var<T>
     where
         T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
         E::Staged: 'static,
-        F: for<'s> FnOnce(&mut Ctx, Label<'s, T>) -> E,
+        F: for<'s> FnOnce(&Ctx, Label<'s, T>) -> E,
     {
         let id = self.label_id();
         let (body_actions, fall_through) = self.child(|ctx| body(ctx, Label::new(id)));
         let fall_through = fall_through.into_staged();
         let result = self.alloc::<T>();
         let result_id = result.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let out = ctx.create_block();
             ctx.append_value_block_params::<T>(out);
             ctx.labels.insert(id, out);
@@ -414,13 +458,13 @@ impl Ctx {
     ///     x
     /// });
     /// ```
-    pub fn repeat<R, F>(&mut self, body: F) -> R
+    pub fn repeat<R, F>(&self, body: F) -> R
     where
-        F: for<'s> FnOnce(&mut Ctx, Again<'s>) -> R,
+        F: for<'s> FnOnce(&Ctx, Again<'s>) -> R,
     {
         let id = self.label_id();
         let (body_actions, result) = self.child(|ctx| body(ctx, Again::new(id)));
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let head = ctx.create_block();
             ctx.jump(head, &[]);
             ctx.switch_to_block(head);
@@ -437,7 +481,7 @@ impl Ctx {
 
     /// Jump to `label` carrying `value` (`break 'label value`). Code staged
     /// after it in the same block is unreachable.
-    pub fn goto<T, E>(&mut self, label: Label<'_, T>, value: E)
+    pub fn goto<T, E>(&self, label: Label<'_, T>, value: E)
     where
         T: StagedType + 'static,
         E: crate::staged::IntoStaged<T>,
@@ -445,7 +489,7 @@ impl Ctx {
     {
         let id = label.id;
         let value = value.into_staged();
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let value = value.codegen(ctx);
             let target = label_block(ctx, id);
             ctx.jump_value(target, value);
@@ -454,9 +498,9 @@ impl Ctx {
     }
 
     /// Jump to a value-less `label` (`break 'label`).
-    pub fn exit(&mut self, label: Label<'_>) {
+    pub fn exit(&self, label: Label<'_>) {
         let id = label.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let target = label_block(ctx, id);
             ctx.jump(target, &[]);
             switch_to_dead_block(ctx);
@@ -464,7 +508,7 @@ impl Ctx {
     }
 
     /// `if cond { break 'label }` as a single conditional branch.
-    pub fn exit_if<C>(&mut self, cond: C, label: Label<'_>)
+    pub fn exit_if<C>(&self, cond: C, label: Label<'_>)
     where
         C: Staged<Out = bool> + 'static,
     {
@@ -472,7 +516,7 @@ impl Ctx {
     }
 
     /// `if !cond { break 'label }` — branches on `cond` itself, no negation.
-    pub fn exit_unless<C>(&mut self, cond: C, label: Label<'_>)
+    pub fn exit_unless<C>(&self, cond: C, label: Label<'_>)
     where
         C: Staged<Out = bool> + 'static,
     {
@@ -480,11 +524,11 @@ impl Ctx {
     }
 
     /// Jump to label `id` when `cond == when`, else continue.
-    fn branch_to<C>(&mut self, cond: C, id: usize, when: bool)
+    fn branch_to<C>(&self, cond: C, id: usize, when: bool)
     where
         C: Staged<Out = bool> + 'static,
     {
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let cond = cond.codegen(ctx);
             let target = label_block(ctx, id);
             branch_or_continue(ctx, cond.leaf(), target, when);
@@ -492,9 +536,9 @@ impl Ctx {
     }
 
     /// Re-run the enclosing [`repeat`](Self::repeat)'s body (`continue 'again`).
-    pub fn again(&mut self, again: Again<'_>) {
+    pub fn again(&self, again: Again<'_>) {
         let id = again.id;
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let head = label_block(ctx, id);
             ctx.jump(head, &[]);
             switch_to_dead_block(ctx);
@@ -502,7 +546,7 @@ impl Ctx {
     }
 
     /// `if cond { continue 'again }` as a single conditional branch.
-    pub fn again_if<C>(&mut self, cond: C, again: Again<'_>)
+    pub fn again_if<C>(&self, cond: C, again: Again<'_>)
     where
         C: Staged<Out = bool> + 'static,
     {
@@ -510,7 +554,7 @@ impl Ctx {
     }
 
     /// `if !cond { continue 'again }` — branches on `cond` itself, no negation.
-    pub fn again_unless<C>(&mut self, cond: C, again: Again<'_>)
+    pub fn again_unless<C>(&self, cond: C, again: Again<'_>)
     where
         C: Staged<Out = bool> + 'static,
     {
@@ -524,8 +568,8 @@ impl Ctx {
     ///
     /// Emits a jump to the loop's exit block. Typically used inside an
     /// `if_then` to exit early. Panics at codegen time if called outside a loop.
-    pub fn break_loop(&mut self) {
-        self.actions.push(Box::new(move |ctx| {
+    pub fn break_loop(&self) {
+        self.push(Box::new(move |ctx| {
             let exit = *ctx
                 .loop_exit_stack
                 .last()
@@ -536,17 +580,14 @@ impl Ctx {
     }
 
     /// Emit a one-sided conditional: `if cond { then }`.
-    pub fn if_then<C, F>(&mut self, cond: C, then: F)
+    pub fn if_then<C, F>(&self, cond: C, then: F)
     where
         C: Staged<Out = bool> + 'static,
-        F: FnOnce(&mut Ctx),
+        F: FnOnce(&Ctx),
     {
-        let mut child = Ctx::new(self.next_var_id);
-        then(&mut child);
-        self.next_var_id = child.next_var_id;
-        let then_actions = child.actions;
+        let (then_actions, ()) = self.child(then);
 
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let then_block = ctx.create_block();
             let merge_block = ctx.create_block();
 
@@ -570,22 +611,16 @@ impl Ctx {
     /// Both branches are side-effecting (they emit into the `Ctx` they receive)
     /// and the construct yields no value — sequence with `ctx.var`/`ctx.store`
     /// if you need a result out.
-    pub fn if_then_else<C, T, E>(&mut self, cond: C, then: T, els: E)
+    pub fn if_then_else<C, T, E>(&self, cond: C, then: T, els: E)
     where
         C: Staged<Out = bool> + 'static,
-        T: FnOnce(&mut Ctx),
-        E: FnOnce(&mut Ctx),
+        T: FnOnce(&Ctx),
+        E: FnOnce(&Ctx),
     {
-        // Stage both branches into child contexts, keeping var ids disjoint.
-        let mut then_child = Ctx::new(self.next_var_id);
-        then(&mut then_child);
-        let mut else_child = Ctx::new(then_child.next_var_id);
-        els(&mut else_child);
-        self.next_var_id = else_child.next_var_id;
-        let then_actions = then_child.actions;
-        let else_actions = else_child.actions;
+        let (then_actions, ()) = self.child(then);
+        let (else_actions, ()) = self.child(els);
 
-        self.actions.push(Box::new(move |ctx| {
+        self.push(Box::new(move |ctx| {
             let then_block = ctx.create_block();
             let else_block = ctx.create_block();
             let merge_block = ctx.create_block();
@@ -894,7 +929,7 @@ impl Compiler {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut Ctx, Var<A>) -> BODY,
+        F: FnOnce(&Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun1(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -919,7 +954,7 @@ impl Compiler {
     where
         A: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef1<A, OUT>, &mut Ctx, Var<A>) -> BODY,
+        F: FnOnce(FunRef1<A, OUT>, &Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun1_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -929,7 +964,7 @@ impl Compiler {
     pub fn fun0<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
     where
         OUT: StagedType,
-        F: FnOnce(&mut Ctx) -> BODY,
+        F: FnOnce(&Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun0(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -939,7 +974,7 @@ impl Compiler {
     pub fn fun0_rec<OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef0<OUT>
     where
         OUT: StagedType,
-        F: FnOnce(FunRef0<OUT>, &mut Ctx) -> BODY,
+        F: FnOnce(FunRef0<OUT>, &Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun0_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -951,7 +986,7 @@ impl Compiler {
         A: StagedType,
         B: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut Ctx, Var<A>, Var<B>) -> BODY,
+        F: FnOnce(&Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun2(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -963,7 +998,7 @@ impl Compiler {
         A: StagedType,
         B: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef2<A, B, OUT>, &mut Ctx, Var<A>, Var<B>) -> BODY,
+        F: FnOnce(FunRef2<A, B, OUT>, &Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun2_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -976,7 +1011,7 @@ impl Compiler {
         B: StagedType,
         C: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
+        F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun3(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -993,7 +1028,7 @@ impl Compiler {
         B: StagedType,
         C: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef3<A, B, C, OUT>, &mut Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
+        F: FnOnce(FunRef3<A, B, C, OUT>, &Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun3_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1011,7 +1046,7 @@ impl Compiler {
         C: StagedType,
         D: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun4(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1029,7 +1064,7 @@ impl Compiler {
         C: StagedType,
         D: StagedType,
         OUT: StagedType,
-        F: FnOnce(FunRef4<A, B, C, D, OUT>, &mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
+        F: FnOnce(FunRef4<A, B, C, D, OUT>, &Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun4_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1048,7 +1083,7 @@ impl Compiler {
         D: StagedType,
         E: StagedType,
         OUT: StagedType,
-        F: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
+        F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun5(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1069,7 +1104,7 @@ impl Compiler {
         OUT: StagedType,
         F: FnOnce(
             FunRef5<A, B, C, D, E, OUT>,
-            &mut Ctx,
+            &Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -1095,7 +1130,7 @@ impl Compiler {
         E: StagedType,
         FF: StagedType,
         OUT: StagedType,
-        FN: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
+        FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun6(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1117,7 +1152,7 @@ impl Compiler {
         OUT: StagedType,
         FN: FnOnce(
             FunRef6<A, B, C, D, E, FF, OUT>,
-            &mut Ctx,
+            &Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -1145,7 +1180,7 @@ impl Compiler {
         FF: StagedType,
         G: StagedType,
         OUT: StagedType,
-        FN: FnOnce(&mut Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
+        FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun7(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1168,7 +1203,7 @@ impl Compiler {
         OUT: StagedType,
         FN: FnOnce(
             FunRef7<A, B, C, D, E, FF, G, OUT>,
-            &mut Ctx,
+            &Ctx,
             Var<A>,
             Var<B>,
             Var<C>,
@@ -1198,17 +1233,7 @@ impl Compiler {
         G: StagedType,
         H: StagedType,
         OUT: StagedType,
-        FN: FnOnce(
-            &mut Ctx,
-            Var<A>,
-            Var<B>,
-            Var<C>,
-            Var<D>,
-            Var<E>,
-            Var<FF>,
-            Var<G>,
-            Var<H>,
-        ) -> BODY,
+        FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
         FunDef::make_fun8(&mut self.next_var_id, &mut self.functions, name, body_fn)
@@ -1232,7 +1257,7 @@ impl Compiler {
         OUT: StagedType,
         FN: FnOnce(
             FunRef8<A, B, C, D, E, FF, G, H, OUT>,
-            &mut Ctx,
+            &Ctx,
             Var<A>,
             Var<B>,
             Var<C>,

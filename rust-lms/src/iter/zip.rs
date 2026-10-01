@@ -300,7 +300,7 @@ where
     /// access, one shared counter against the hoisted `min` of the lengths —
     /// the loop a hand-written zip over two slices would be. Otherwise each
     /// side pulls its own element.
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let mut a = self.iter.open(ctx);
         let mut b = self.other.open(ctx);
         let shared = match (a.indexed_len(ctx), b.indexed_len(ctx)) {
@@ -337,7 +337,7 @@ type ZipStep<A, B> = (
 
 impl<A: Cursor, B: Cursor> ZipCursor<A, B> {
     /// One step, yielding both elements as separate vars (no pair slot).
-    fn next_parts(self, ctx: &mut Ctx, done: Label<'_>) -> ZipStep<A, B> {
+    fn next_parts(self, ctx: &Ctx, done: Label<'_>) -> ZipStep<A, B> {
         match self.shared {
             Some(SharedIndex { len, pos }) => {
                 ctx.exit_if(ge(pos, len), done);
@@ -369,16 +369,16 @@ where
     type Item = ZipItem<A::Item, B::Item>;
     type Close = (A::Close, B::Close);
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
         let ((x, y), close) = self.next_parts(ctx, done);
         (ctx.bind(Pair::new(x, y)), close)
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         self.shared.map(|s| s.len)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
         // SAFETY: `index < len = min(len_a, len_b)`, forwarded from the caller.
         let (x, ca) = unsafe { self.a.next_at(ctx, index) };
         // SAFETY: as above.
@@ -445,9 +445,9 @@ where
     /// Shadows [`StagedIterator::for_each`] with a three-argument consumer: the
     /// two elements arrive as separate vars, so no `ZipItem` is written to a
     /// stack slot and read back. Iteration stops at the shorter side.
-    pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
+    pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<A::Item>, Var<B::Item>),
+        F: FnOnce(&Ctx, Var<A::Item>, Var<B::Item>),
     {
         let cursor = StagedIterator::open(self, ctx);
         let mut close = None;

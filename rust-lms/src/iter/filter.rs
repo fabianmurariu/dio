@@ -24,13 +24,13 @@ impl<I, P, Cond> StagedIterator for Filter<I, P>
 where
     I: StagedIterator,
     I::Item: crate::types::CopyType + 'static,
-    P: Fn(Var<I::Item>) -> Cond + 'static,
+    P: Fn(Var<I::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
     type Cursor = FilterCursor<I::Cursor, P>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         FilterCursor {
             inner: self.inner.open(ctx),
             predicate: self.predicate,
@@ -48,7 +48,7 @@ impl<C, P, Cond> Cursor for FilterCursor<C, P>
 where
     C: Cursor,
     C::Item: crate::types::CopyType + 'static,
-    P: Fn(Var<C::Item>) -> Cond + 'static,
+    P: Fn(Var<C::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = C::Item;
@@ -60,7 +60,7 @@ where
     /// ```
     /// The retry is a `repeat`, not a loop scope, so a consumer's `break_loop`
     /// still leaves the whole iteration.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
         let (inner, predicate) = (self.inner, self.predicate);
         ctx.repeat(|ctx, again| {
             let (elem, close) = inner.next(ctx, done);

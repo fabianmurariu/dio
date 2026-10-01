@@ -167,14 +167,14 @@ trait Prim: StagedType + CopyType + 'static {
     /// Wrap a staged value of this type into a `ColVal`.
     fn wrap(value: Var<Self>, null: Nullness) -> ColVal;
     /// Coerce any numeric `ColVal` to a staged value of this type.
-    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self>;
+    fn coerce(ctx: &Ctx, cv: ColVal) -> Var<Self>;
 }
 
 impl Prim for i32 {
     fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
         ColVal::I32(value, null)
     }
-    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+    fn coerce(ctx: &Ctx, cv: ColVal) -> Var<Self> {
         coerce_i32(ctx, cv)
     }
 }
@@ -183,7 +183,7 @@ impl Prim for i64 {
     fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
         ColVal::I64(value, null)
     }
-    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+    fn coerce(ctx: &Ctx, cv: ColVal) -> Var<Self> {
         to_i64(ctx, cv)
     }
 }
@@ -192,7 +192,7 @@ impl Prim for f64 {
     fn wrap(value: Var<Self>, null: Nullness) -> ColVal {
         ColVal::F64(value, null)
     }
-    fn coerce(ctx: &mut Ctx, cv: ColVal) -> Var<Self> {
+    fn coerce(ctx: &Ctx, cv: ColVal) -> Var<Self> {
         coerce_f64(ctx, cv)
     }
 }
@@ -210,13 +210,13 @@ impl<T> InputsSource for T where T: Staged<Out = SMutPtr<Opaque<Inputs>>> + Copy
 
 /// Downstream continuation, invoked once per emitted row at code-generation
 /// time; the [`Row`] rides by value (cheap `Copy` handles).
-pub(crate) type Yld = Box<dyn FnOnce(&mut Ctx, Row) + 'static>;
+pub(crate) type Yld = Box<dyn FnOnce(&Ctx, Row) + 'static>;
 
 /// Emit a kernel that appends `plan`'s emitted rows into the baked output columns
 /// (`cx.out`) and returns the row count. The single entry point — a scalar
 /// `Aggregate` is just a push operator that emits one row (see `gen_op`).
 pub fn gen_collect<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     plan: &Operator,
     out_schema: &SchemaRef,
@@ -247,7 +247,7 @@ pub fn gen_collect<I: InputsSource>(
 
 pub(crate) fn gen_op<I: InputsSource>(
     op: &Operator,
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     cx: &CodegenCtx,
     yld: Yld,
@@ -423,12 +423,12 @@ where
 /// `table` is baked as a stage-0 constant, so `scan_next`'s multi-stream dispatch
 /// costs nothing.
 fn for_each_batch<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     table: u64,
     schema: SchemaRef,
     cx: &CodegenCtx,
-    body: impl FnOnce(&mut Ctx, ScanBatch, Var<u64>) + 'static,
+    body: impl FnOnce(&Ctx, ScanBatch, Var<u64>) + 'static,
 ) {
     let ncols = schema.fields().len() as u64;
     let key_dt = schema.field(0).data_type().clone();
@@ -464,7 +464,7 @@ fn for_each_batch<I: InputsSource>(
 /// accumulators live in registers/host state above this, so folding across the
 /// whole stream is free (see `docs/table_scan.md` §6).
 fn gen_scan<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     table: u64,
     schema: SchemaRef,
@@ -490,7 +490,7 @@ fn gen_scan<I: InputsSource>(
 /// caller never dereferences null and the batch loop unwinds to the driver — which
 /// then surfaces the recorded `DataFusionError`. No-op for helper kernels with no
 /// poison flag.
-pub(crate) fn stop_if_null(ctx: &mut Ctx, ptr: Var<SMutPtr<u8>>, cx: &CodegenCtx) {
+pub(crate) fn stop_if_null(ctx: &Ctx, ptr: Var<SMutPtr<u8>>, cx: &CodegenCtx) {
     if let Some(p) = cx.poison.get() {
         ctx.if_then(ptr_is_null(ptr), move |ctx| {
             ctx.store(p, true);
@@ -499,7 +499,7 @@ pub(crate) fn stop_if_null(ctx: &mut Ctx, ptr: Var<SMutPtr<u8>>, cx: &CodegenCtx
     }
 }
 
-pub(crate) fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) -> Var<u64> {
+pub(crate) fn gen_len<B: BatchSource>(ctx: &Ctx, batch: B, dt: &DataType) -> Var<u64> {
     // A `Utf8View` column's `values` holds one 16-byte view per row, so its
     // element count (read via any type) is the row count.
     if matches!(dt, DataType::Utf8View) {
@@ -515,7 +515,7 @@ pub(crate) fn gen_len<B: BatchSource>(ctx: &mut Ctx, batch: B, dt: &DataType) ->
 
 /// Read column `col` at row `i`, attaching validity iff the field is nullable.
 pub(crate) fn gen_read<B: BatchSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     batch: B,
     col: usize,
     field: &Field,
@@ -538,7 +538,7 @@ pub(crate) fn gen_read<B: BatchSource>(
 /// `u64` pairs (view `i` = elements `2i`/`2i+1`); the octet length is the low 32
 /// bits of the first half — no data-buffer access needed.
 fn gen_read_str<B: BatchSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     batch: B,
     col: usize,
     field: &Field,
@@ -570,7 +570,7 @@ fn gen_read_str<B: BatchSource>(
 }
 
 fn read_nullness<P, M>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     view: PrimitiveArrayView<P, M>,
     nullable: bool,
     i: Var<u64>,
@@ -596,7 +596,7 @@ where
 /// `bool` validity flag to a parallel `SVec` so the two stay length-aligned);
 /// string columns append through the builder. One append per emitted row, in
 /// order, so every column ends at the same length.
-pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: &CodegenCtx) {
+pub(crate) fn write_col(ctx: &Ctx, c: usize, field: &Field, cv: ColVal, cx: &CodegenCtx) {
     match &cx.out.cols[c] {
         OutColHandle::Str { builder } => write_str_col(ctx, *builder, cv, cx),
         OutColHandle::Fixed { values, validity } => {
@@ -628,7 +628,7 @@ pub(crate) fn write_col(ctx: &mut Ctx, c: usize, field: &Field, cv: ColVal, cx: 
 /// Append a `Utf8View` value to the baked output `StringViewBuilder`. Any string
 /// container works: the value is `resolve`d to bytes and appended; a null row
 /// appends a null.
-fn write_str_col(ctx: &mut Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx: &CodegenCtx) {
+fn write_str_col(ctx: &Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx: &CodegenCtx) {
     let sv = match cv {
         ColVal::Str(sv, _) => sv,
         other => panic!(
@@ -641,7 +641,7 @@ fn write_str_col(ctx: &mut Ctx, builder: *mut StringViewBuilder, cv: ColVal, cx:
     // `resolve` is safe even on a null row (its `str_ptr` reads an empty view), so
     // resolve unconditionally and branch only on which extern to call.
     let (ptr, len) = resolve(ctx, sv, cx.rt.str_ptr);
-    let emit_append = move |ctx: &mut Ctx| {
+    let emit_append = move |ctx: &Ctx| {
         // SAFETY: the resolved string owner remains live for this append call,
         // `len` is its byte length, and `OutCols` exclusively owns the builder.
         let bytes = unsafe { strings::resolved_bytes(ptr, len) };

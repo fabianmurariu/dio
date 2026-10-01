@@ -32,7 +32,7 @@ where
     type Item = A::Item;
     type Cursor = ChainCursor<A::Cursor, B::Cursor>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let a = self.a.open(ctx);
         let b = self.b.open(ctx);
         ChainCursor {
@@ -72,7 +72,7 @@ where
     /// ```
     /// `a` gets a private exhaustion label meaning "switch to `b`"; only `b`
     /// sees the real `done`. Neither side knows it is chained.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
         let (a, b, in_b) = (self.a, self.b, self.in_b);
         let (mut close_a, mut close_b) = (None, None);
         let item = ctx.join(|ctx, got| {

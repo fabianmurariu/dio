@@ -247,11 +247,11 @@ pub fn jit_eval_nullary_i64(expr: impl Staged<Out = i64>) -> i64 {
 /// hand-built `MlirBackend` calls. Var ids start at 0, matching a fresh `Compiler`.
 pub fn jit_eval_ctx_i64<R, F>(build: F) -> i64
 where
-    F: FnOnce(&mut Ctx) -> R,
+    F: FnOnce(&Ctx) -> R,
     R: Staged<Out = i64> + 'static,
 {
-    let mut builder = Ctx::new(0);
-    let ret = build(&mut builder);
+    let builder = Ctx::new(0);
+    let ret = build(&builder);
     let body = builder.into_body(ret);
     run_kernel_over_mlir(|ctx| body(ctx))
 }
@@ -265,14 +265,14 @@ where
 /// AST end to end on MLIR. Powers the parameterized differential tests.
 pub fn jit_eval_ctx_unary_i64<R, F>(build: F, arg: i64) -> i64
 where
-    F: FnOnce(&mut Ctx, Var<i64>) -> R,
+    F: FnOnce(&Ctx, Var<i64>) -> R,
     R: Staged<Out = i64> + 'static,
 {
     // Mirror `make_fun1`: the parameter takes var id 0; body locals start at id 1.
     let param = Var::<i64>::new(0);
     let param_id = param.id;
-    let mut builder = Ctx::new(1);
-    let ret = build(&mut builder, param);
+    let builder = Ctx::new(1);
+    let ret = build(&builder, param);
     let body = builder.into_body(ret);
 
     let context = make_context();
@@ -784,7 +784,7 @@ mod tests {
         use crate::num::{add, lt, mul};
         use crate::staged::Var;
 
-        fn both<R: Staged<Out = i64> + 'static>(build: fn(&mut Ctx) -> R) {
+        fn both<R: Staged<Out = i64> + 'static>(build: fn(&Ctx) -> R) {
             let cranelift = {
                 let mut c = Compiler::new();
                 let f = c.fun0("k", build);
@@ -798,7 +798,7 @@ mod tests {
         }
 
         // sum 0..10 == 45, via a mutable accumulator + induction var over a `while` loop.
-        fn sum_to_ten(ctx: &mut Ctx) -> Var<i64> {
+        fn sum_to_ten(ctx: &Ctx) -> Var<i64> {
             let acc = ctx.var(0i64);
             let i = ctx.var(0i64);
             ctx.while_loop(lt(i, 10i64), move |ctx| {
@@ -810,7 +810,7 @@ mod tests {
         both(sum_to_ten);
 
         // 6! == 720, a multiply-accumulate loop.
-        fn factorial_six(ctx: &mut Ctx) -> Var<i64> {
+        fn factorial_six(ctx: &Ctx) -> Var<i64> {
             let acc = ctx.var(1i64);
             let i = ctx.var(1i64);
             ctx.while_loop(lt(i, 7i64), move |ctx| {
@@ -832,7 +832,7 @@ mod tests {
         use crate::num::{add, lt, mul};
         use crate::staged::Var;
 
-        fn both<R: Staged<Out = i64> + 'static>(build: fn(&mut Ctx, Var<i64>) -> R, args: &[i64]) {
+        fn both<R: Staged<Out = i64> + 'static>(build: fn(&Ctx, Var<i64>) -> R, args: &[i64]) {
             for &x in args {
                 let cranelift = {
                     let mut c = Compiler::new();
@@ -844,18 +844,18 @@ mod tests {
             }
         }
 
-        fn square(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
+        fn square(_ctx: &Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
             mul(x, x)
         }
         both(square, &[-3, 0, 5, 1000]);
 
-        fn poly(_ctx: &mut Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
+        fn poly(_ctx: &Ctx, x: Var<i64>) -> impl Staged<Out = i64> + use<> {
             add(mul(x, 3i64), 7i64)
         }
         both(poly, &[-4, 0, 5, 100]);
 
         // sum 0..x — the loop trip count is the parameter (data-dependent control flow).
-        fn sum_to_x(ctx: &mut Ctx, x: Var<i64>) -> Var<i64> {
+        fn sum_to_x(ctx: &Ctx, x: Var<i64>) -> Var<i64> {
             let acc = ctx.var(0i64);
             let i = ctx.var(0i64);
             ctx.while_loop(lt(i, x), move |ctx| {

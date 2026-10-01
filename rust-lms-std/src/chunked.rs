@@ -304,7 +304,7 @@ where
     T: OpaqueIterItem,
     Rt<T>: Copy,
 {
-    fn reserve(ctx: &mut Ctx) -> Self {
+    fn reserve(ctx: &Ctx) -> Self {
         const {
             assert!(
                 std::mem::align_of::<ChunkedSlot<Rt<T>>>() <= 8,
@@ -323,7 +323,7 @@ where
 
     /// Mark the slot empty-and-done before the producer runs, so a producer that
     /// starts nothing reads as an empty iteration.
-    fn reset(self, ctx: &mut Ctx) {
+    fn reset(self, ctx: &Ctx) {
         // SAFETY: `head` is at offset 0 of this live, 8-aligned stack slot.
         unsafe {
             ctx.emit(store(
@@ -367,7 +367,7 @@ where
     /// # Safety
     ///
     /// `i < len` for the current head: the last start/fill wrote items `0..len`.
-    unsafe fn item(self, ctx: &mut Ctx, i: Var<u64>) -> Var<T> {
+    unsafe fn item(self, ctx: &Ctx, i: Var<u64>) -> Var<T> {
         let buf = std::mem::offset_of!(ChunkedSlot<Rt<T>>, buf) as i64;
         // SAFETY: `buf` is within the slot; `ChunkedSlot`'s layout aligns it for `T`.
         let data = ptr_cast::<T, u8, _>(ptr_as_const(unsafe {
@@ -400,7 +400,7 @@ where
     type Item = K::Item;
     type Cursor = ChunkedCursor<K>;
 
-    fn open(self, ctx: &mut Ctx) -> ChunkedCursor<K> {
+    fn open(self, ctx: &Ctx) -> ChunkedCursor<K> {
         let ChunkedIter { fns, init } = self;
         let slot = SlotView::<K::Item>::reserve(ctx);
         slot.reset(ctx);
@@ -435,7 +435,7 @@ where
     type Item = K::Item;
     type Close = ChunkedClose<K>;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<K::Item>, ChunkedClose<K>) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<K::Item>, ChunkedClose<K>) {
         let ChunkedCursor {
             slot,
             n,
@@ -487,7 +487,7 @@ impl<K: ChunkedIterKind> Close for ChunkedClose<K>
 where
     Rt<K::Item>: Copy,
 {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         let (slot, drop) = (self.slot, self.drop);
         ctx.if_then(eq(self.finished, 0u64), move |ctx| {
             // SAFETY: `finished == 0`, so a `start` initialized the slot and the

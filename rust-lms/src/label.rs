@@ -21,7 +21,7 @@
 //! # The brand
 //!
 //! Each scope hands its closure a handle whose lifetime `'s` is universally
-//! quantified (`for<'s> FnOnce(&mut Ctx, Label<'s, _>)`), so the handle cannot
+//! quantified (`for<'s> FnOnce(&Ctx, Label<'s, _>)`), so the handle cannot
 //! leave the closure. The target block is sealed when the closure's code has
 //! been emitted, so a jump staged after that would add a predecessor to a
 //! sealed block. The brand makes that a compile error:
@@ -29,7 +29,7 @@
 //! ```compile_fail
 //! use rust_lms::prelude::*;
 //!
-//! fn leak(ctx: &mut Ctx) {
+//! fn leak(ctx: &Ctx) {
 //!     let mut leaked = None;
 //!     ctx.block(|_ctx, out| leaked = Some(out));
 //!     ctx.exit(leaked.unwrap());

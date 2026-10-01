@@ -30,7 +30,7 @@ use super::traits::{
 /// ```compile_fail
 /// use rust_lms::prelude::*;
 ///
-/// fn raw_cannot_iterate(d: Var<RawSlice<i64>>, ctx: &mut Ctx) {
+/// fn raw_cannot_iterate(d: Var<RawSlice<i64>>, ctx: &Ctx) {
 ///     let _ = d.staged_iter().sum(ctx);
 /// }
 /// ```
@@ -90,7 +90,7 @@ where
     /// Bound with [`bind_lt`](Ctx::bind_lt), so a borrowing source — an `SVec`
     /// view — iterates through this same path. The borrow ends with the loop,
     /// because every value handed on is a borrow-free `Var`.
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let mut slice = ctx.bind_lt(self.slice);
         // Hoisted: the length is loop-invariant (the source's borrow forbids
         // growth while it is live), so this reads the descriptor once instead of
@@ -125,7 +125,7 @@ where
     /// # Safety
     ///
     /// `index < len` at execution.
-    unsafe fn load(mut self, ctx: &mut Ctx, index: Var<u64>) -> Var<T> {
+    unsafe fn load(mut self, ctx: &Ctx, index: Var<u64>) -> Var<T> {
         // Bind the element where it is used: the frontend resolves this
         // single-def var to the loaded value with no copy.
         // SAFETY: forwarded from the caller.
@@ -143,7 +143,7 @@ where
     type Item = T;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<T>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<T>, ()) {
         let (len, pos) = (self.len, self.pos);
         ctx.exit_if(ge(pos, len), done);
         // SAFETY: the exit above proves `pos < len`.
@@ -152,11 +152,11 @@ where
         (elem, ())
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         Some(self.len)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<T>, ()) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<T>, ()) {
         // SAFETY: forwarded from the caller (`index < len`).
         (unsafe { self.load(ctx, index) }, ())
     }

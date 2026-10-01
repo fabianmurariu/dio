@@ -25,13 +25,13 @@ impl<I, P, Cond> StagedIterator for SkipWhile<I, P>
 where
     I: StagedIterator,
     I::Item: CopyType + 'static,
-    P: Fn(Var<I::Item>) -> Cond + 'static,
+    P: Fn(Var<I::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
     type Cursor = SkipWhileCursor<I::Cursor, P>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         // `skipping` starts true and latches to false at the first element where
         // the predicate fails; from then on every element is yielded.
         let skipping = ctx.var(true);
@@ -54,13 +54,13 @@ impl<C, P, Cond> Cursor for SkipWhileCursor<C, P>
 where
     C: Cursor,
     C::Item: CopyType + 'static,
-    P: Fn(Var<C::Item>) -> Cond + 'static,
+    P: Fn(Var<C::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = C::Item;
     type Close = C::Close;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
         let (inner, pred, skipping) = (self.inner, self.pred, self.skipping);
         ctx.repeat(|ctx, again| {
             let (elem, close) = inner.next(ctx, done);
