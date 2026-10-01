@@ -3,6 +3,7 @@
 use rust_lms::prelude::*;
 mod common;
 use common::{for_each_backend, with_backends};
+use proptest::{prelude::*, test_runner::TestRunner};
 use std::sync::atomic::{AtomicUsize, Ordering};
 
 static CHECKED_GET_SLICE_CODEGENS: AtomicUsize = AtomicUsize::new(0);
@@ -534,5 +535,86 @@ fn test_partition_point_on_struct_field() {
             let expected = stamps.partition_point(|stamp| stamp.t < t) as u64;
             assert_eq!(first_at_or_after.call(&stamps[..], t), expected, "t = {t}");
         }
+    });
+}
+
+/// Sorted values: a narrow range forces duplicates, the full range covers the extremes.
+fn sorted_i64s() -> impl Strategy<Value = Vec<i64>> {
+    let values = prop_oneof![-8i64..8, any::<i64>()];
+    prop::collection::vec(values, 0..64).prop_map(|mut values| {
+        values.sort();
+        values
+    })
+}
+
+fn run_cases<S: Strategy>(strategy: S, test: impl Fn(S::Value) -> Result<(), TestCaseError>) {
+    TestRunner::new(ProptestConfig::with_cases(512))
+        .run(&strategy, test)
+        .unwrap();
+}
+
+#[test]
+fn proptest_partition_point_lower_bound() {
+    for_each_backend(|mut compiler| {
+        let lower_bound = compiler.fun2(
+            "lower_bound",
+            |ctx, values: Var<SRef<Slice<i64>>>, key: Var<i64>| {
+                values.partition_point(ctx, |_ctx, value| lt(value, key))
+            },
+        );
+        let lower_bound = compiler.compile(lower_bound).expect("compilation failed");
+
+        let key = prop_oneof![-10i64..10, any::<i64>()];
+        run_cases((sorted_i64s(), key), |(values, key)| {
+            let expected = values.partition_point(|&value| value < key) as u64;
+            prop_assert_eq!(lower_bound.call(&values[..], key), expected);
+            Ok(())
+        });
+    });
+}
+
+#[test]
+fn proptest_partition_point_any_partition() {
+    // Not an ordering: `pred` is a flag that holds for a prefix of arbitrary length.
+    for_each_backend(|mut compiler| {
+        let split = compiler.fun1("split", |ctx, flags: Var<SRef<Slice<u64>>>| {
+            flags.partition_point(ctx, |_ctx, flag| eq(flag, 1u64))
+        });
+        let split = compiler.compile(split).expect("compilation failed");
+
+        run_cases(
+            (0usize..200).prop_flat_map(|len| (Just(len), 0..=len)),
+            |(len, prefix)| {
+                let flags: Vec<u64> = (0..len).map(|i| u64::from(i < prefix)).collect();
+                prop_assert_eq!(split.call(&flags[..]), prefix as u64);
+                Ok(())
+            },
+        );
+    });
+}
+
+#[test]
+fn proptest_partition_point_on_struct_field() {
+    for_each_backend(|mut compiler| {
+        let first_at_or_after = compiler.fun2(
+            "first_at_or_after",
+            |ctx, stamps: Var<SRef<Slice<Stamp>>>, t: Var<i64>| {
+                stamps.partition_point(ctx, |_ctx, stamp| lt(stamp.get(StampType::t()), t))
+            },
+        );
+        let first_at_or_after = compiler
+            .compile(first_at_or_after)
+            .expect("compilation failed");
+
+        run_cases((sorted_i64s(), -10i64..10), |(ts, t)| {
+            let stamps: Vec<Stamp> = ts
+                .iter()
+                .enumerate()
+                .map(|(i, &t)| Stamp { t, i: i as u64 })
+                .collect();
+            let expected = stamps.partition_point(|stamp| stamp.t < t) as u64;
+            prop_assert_eq!(first_at_or_after.call(&stamps[..], t), expected);
+            Ok(())
+        });
     });
 }
