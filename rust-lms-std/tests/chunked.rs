@@ -209,7 +209,7 @@ fn any_breaks_and_drops() {
     for_each_backend(|mut compiler| {
         let tracked = ChunkedIterFns::<TrackedK>::register(&mut compiler);
         let f = compiler.fun3("any", move |ctx, g: Var<G>, n: Var<u64>, x: Var<u64>| {
-            tracked.iter2(g, n).any(ctx, move |v| eq(v, x))
+            tracked.iter2(g, n).any(ctx, move |_, v| eq(v, x))
         });
         let compiled = compiler.compile(f).expect("compile");
         let g = boundary_graph();

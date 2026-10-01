@@ -428,29 +428,31 @@ pub trait StagedIterator: Sized {
     // Terminal operations
     // =========================================================================
 
-    /// Fold every element into an accumulator: `acc = f(acc, elem)`, starting
-    /// from `init`. Returns the accumulator.
+    /// Fold every element into an accumulator: `acc = f(ctx, acc, elem)`,
+    /// starting from `init`. Returns the accumulator.
     ///
-    /// `f` is called once at staging time and builds the update expression; the
-    /// accumulator lives in a register across the loop.
+    /// `f` is called once at staging time. It may emit statements into the
+    /// loop body through `ctx` (loops, binds, branches) before returning the
+    /// update expression; the accumulator lives in a register across the loop.
     ///
     /// ```ignore
-    /// let total = slice.staged_iter().fold(ctx, 0i64, |acc, x| acc + x);
+    /// let total = slice.staged_iter().fold(ctx, 0i64, |_, acc, x| acc + x);
     /// ```
     ///
-    /// Several accumulators at once, or updates with side effects, are a
-    /// [`for_each`](Self::for_each) over vars declared before the loop.
+    /// Several accumulators at once are a [`for_each`](Self::for_each) over
+    /// vars declared before the loop.
     fn fold<A, Init, F, E>(self, ctx: &mut Ctx, init: Init, f: F) -> Var<A>
     where
         A: StagedType + CopyType + 'static,
         Init: IntoStaged<A>,
         Init::Staged: 'static,
-        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&mut Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
         let acc = ctx.var(init);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.store(acc, f(acc, elem));
+            let next = f(ctx, acc, elem);
+            ctx.store(acc, next);
         });
         acc
     }
@@ -462,6 +464,10 @@ pub trait StagedIterator: Sized {
     /// has no data-dependent branch, so it stays vectorizable/unrollable (and
     /// `count_if` becomes a single conditional increment, e.g. `csinc`).
     ///
+    /// `pred` and `f` may both emit statements through `ctx`; `pred` is staged
+    /// first. Only the accumulator update is branchless: any loops or branches
+    /// they emit themselves stay in the body.
+    ///
     /// **`f` is evaluated for every element**, whether `pred` holds or not, so
     /// it must be cheap and total — no division `pred` is guarding against a
     /// zero, no load `pred` is guarding against being out of range. For those,
@@ -472,13 +478,16 @@ pub trait StagedIterator: Sized {
         Init: IntoStaged<A>,
         Init::Staged: 'static,
         Self::Item: CopyType + 'static,
-        P: FnOnce(Var<Self::Item>) -> Cond,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
-        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&mut Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
-        self.fold(ctx, init, move |acc, elem| {
-            select(pred(elem), f(acc, elem), acc)
+        self.fold(ctx, init, move |ctx, acc, elem| {
+            let keep = pred(ctx, elem);
+            let keep = ctx.bind(keep);
+            let next = f(ctx, acc, elem);
+            select(keep, next, acc)
         })
     }
 
@@ -491,7 +500,7 @@ pub trait StagedIterator: Sized {
         self.fold(
             ctx,
             Const::<Self::Item>::new(Default::default()),
-            |acc, x| acc + x,
+            |_, acc, x| acc + x,
         )
     }
 
@@ -500,17 +509,17 @@ pub trait StagedIterator: Sized {
     where
         Self::Item: 'static,
     {
-        self.fold(ctx, 0u64, |acc, _| acc + 1u64)
+        self.fold(ctx, 0u64, |_, acc, _| acc + 1u64)
     }
 
     /// Branchless count of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
     fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
     where
         Self::Item: CopyType + 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
-        self.fold_if(ctx, 0u64, pred, |acc, _| acc + 1u64)
+        self.fold_if(ctx, 0u64, pred, |_, acc, _| acc + 1u64)
     }
 
     /// Branchless sum of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
@@ -518,11 +527,11 @@ pub trait StagedIterator: Sized {
     where
         Self::Item: Num + DirectValue,
         <Self::Item as StagedType>::RuntimeValue: Default,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let zero = Const::<Self::Item>::new(Default::default());
-        self.fold_if(ctx, zero, pred, |acc, x| acc + x)
+        self.fold_if(ctx, zero, pred, |_, acc, x| acc + x)
     }
 
     /// Find the minimum element. Starts at the type's maximum sentinel.
@@ -534,7 +543,7 @@ pub trait StagedIterator: Sized {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
         // Branchless: an unconditional store of a cmov keeps the body
         // vectorizable/unrollable.
-        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |_, acc, x| {
             select(lt(x, acc), x, acc)
         })
     }
@@ -546,7 +555,7 @@ pub trait StagedIterator: Sized {
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
-        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |_, acc, x| {
             select(gt(x, acc), x, acc)
         })
     }
@@ -558,20 +567,23 @@ pub trait StagedIterator: Sized {
     // the answer is known. Because combinators (`map`/`filter`/…) introduce
     // only `if_then`s — never loops — the `break_loop` always targets the
     // source's single iteration loop, so these compose freely after `filter`,
-    // `map`, etc. (Eager terminals like `sum`/`fold` emit no break and keep
-    // their optimal loop body.)
+    // `map`, etc. A predicate may run loops of its own: they are closed by the
+    // time it returns, so the break still leaves the iteration. (Eager
+    // terminals like `sum`/`fold` emit no break and keep their optimal loop
+    // body.)
     // =========================================================================
 
     /// `true` as soon as any element satisfies `pred` (short-circuits).
     fn any<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(pred(elem), move |ctx| {
+            let hit = pred(ctx, elem);
+            ctx.if_then(hit, move |ctx| {
                 ctx.store(found, true);
                 ctx.break_loop();
             });
@@ -584,12 +596,13 @@ pub trait StagedIterator: Sized {
     fn all<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let result = ctx.var(true);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(not(pred(elem)), move |ctx| {
+            let holds = pred(ctx, elem);
+            ctx.if_then(not(holds), move |ctx| {
                 ctx.store(result, false);
                 ctx.break_loop();
             });
@@ -603,14 +616,15 @@ pub trait StagedIterator: Sized {
     fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&mut Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         // `idx` counts elements seen; on a match we break *before* incrementing,
         // so it holds the match position. With no match it ends at the count.
         let idx = ctx.var(0u64);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(pred(elem), move |ctx| {
+            let hit = pred(ctx, elem);
+            ctx.if_then(hit, move |ctx| {
                 ctx.break_loop();
             });
             ctx.store(idx, add(idx, 1u64));
@@ -621,10 +635,11 @@ pub trait StagedIterator: Sized {
     /// First `Some` produced by `f`, short-circuiting. Returns `(value, found)`:
     /// when `found` is `false` the iterator was exhausted and `value` holds the
     /// default — check `found` before using `value`. No `Option` is
-    /// materialized; `f` is typically `|x| cond.then_some(mapped)`.
+    /// materialized; `f` is typically `|_, x| cond.then_some(mapped)`, and may
+    /// emit statements through its `ctx` first.
     fn find_map<F, O>(self, ctx: &mut Ctx, f: F) -> (Var<O::Item>, Var<bool>)
     where
-        F: Fn(Var<Self::Item>) -> O + 'static,
+        F: FnOnce(&mut Ctx, Var<Self::Item>) -> O,
         O: StagedOpt + 'static,
         O::Item: ConstantType + CopyType + 'static,
         <O::Item as StagedType>::RuntimeValue: Default,
@@ -632,7 +647,7 @@ pub trait StagedIterator: Sized {
         let result = ctx.var(Const::<O::Item>::new(Default::default()));
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
-            f(elem).eliminate(
+            f(ctx, elem).eliminate(
                 ctx,
                 move |ctx, v| {
                     ctx.store(result, v);

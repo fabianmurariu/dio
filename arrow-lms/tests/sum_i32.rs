@@ -105,7 +105,7 @@ fn is_valid_respects_sliced_bitmap_offset() {
         // SAFETY: the prepared batch has one Int32 column.
         let col = unsafe { batch.primitive::<i32>(0) };
         // Only the bitmap is read, so a range over positions drives this one.
-        let valid = range(0u64, col.len()).count_if(ctx, move |i| {
+        let valid = range(0u64, col.len()).count_if(ctx, move |_, i| {
             // SAFETY: `i < col.len()`, the range's bound.
             unsafe { col.validity().is_valid(i) }
         });

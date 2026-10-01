@@ -351,7 +351,7 @@ fn test_slice_count_all_larger_than_3() {
     for_each_backend(|mut compiler| {
         let count_greater_than_3 = compiler
             .fun1("count_greater_than_3", |ctx, arr: Var<SRef<Slice<i64>>>| {
-                arr.staged_iter().count_if(ctx, |x| gt(x, 3i64))
+                arr.staged_iter().count_if(ctx, |_, x| gt(x, 3i64))
             });
         let compiled = compiler
             .compile(count_greater_than_3)

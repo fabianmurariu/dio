@@ -31,7 +31,7 @@ fn test_borrowed_struct_of_slices() {
         let sum_deg = compiler.fun1("sum_degrees", |ctx, g: Var<FfiAdjListStaged>| {
             let offsets = g.get(FfiAdjListType::offsets());
             let n = g.get(FfiAdjListType::num_nodes());
-            range(0, n).fold(ctx, 0, |acc, i| {
+            range(0, n).fold(ctx, 0, |_, acc, i| {
                 let deg = unsafe { offsets.get_unchecked(i + 1) - offsets.get_unchecked(i) };
                 acc + deg
             })

@@ -131,7 +131,7 @@ fn filtered_iter(backend: JitBackend) -> SliceFn {
 fn filtered_branchless(backend: JitBackend) -> SliceFn {
     let mut compiler = Compiler::new().with_backend(backend);
     let f = compiler.fun1("filtered_branchless", |ctx, a: Var<SRef<Slice<i64>>>| {
-        a.staged_iter().sum_if(ctx, |v| gt(v, 0i64))
+        a.staged_iter().sum_if(ctx, |_, v| gt(v, 0i64))
     });
     let compiled = compiler.compile(f).expect("compile");
     Box::new(move |a| compiled.as_fn().call(a))

@@ -341,11 +341,11 @@ impl Workload {
                     .for_each(ctx, move |ctx, d| ctx.store(acc, add(acc, d)));
             }),
             Workload::DstGtSrc => range(0u64, nodes).for_each(ctx, |ctx, n| {
-                let c = s.nbrs(ctx, n).count_if(ctx, move |d| gt(d, n));
+                let c = s.nbrs(ctx, n).count_if(ctx, move |_, d| gt(d, n));
                 ctx.store(acc, add(acc, c));
             }),
             Workload::AnyMod16 => range(0u64, nodes).for_each(ctx, |ctx, n| {
-                let hit = s.nbrs(ctx, n).any(ctx, |d| eq(bitand(d, 15u64), 0u64));
+                let hit = s.nbrs(ctx, n).any(ctx, |_, d| eq(bitand(d, 15u64), 0u64));
                 ctx.store(acc, add(acc, select(hit, 1u64, 0u64)));
             }),
             Workload::Window => range(0u64, nodes).for_each(ctx, |ctx, n| {
@@ -354,7 +354,7 @@ impl Workload {
             }),
             Workload::TwoHop => range(0u64, TWO_HOP_SOURCES).for_each(ctx, |ctx, n| {
                 s.nbrs(ctx, n).for_each(ctx, |ctx, m| {
-                    let c = s.nbrs(ctx, m).count_if(ctx, move |w| gt(w, n));
+                    let c = s.nbrs(ctx, m).count_if(ctx, move |_, w| gt(w, n));
                     ctx.store(acc, add(acc, c));
                 });
             }),

@@ -168,7 +168,7 @@ fn zip_extern_with_extern() {
                 )
             };
             // Count pairs where the two streams agree.
-            a.zip(b).count_if(ctx, |p| eq(p.first(), p.second()))
+            a.zip(b).count_if(ctx, |_, p| eq(p.first(), p.second()))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -329,7 +329,7 @@ fn early_exit_in_first_half_drops_both_handles() {
                     it.iter(call_extern1(other, g)),
                 )
             };
-            a.chain(b).any(ctx, move |x| gt(x, t))
+            a.chain(b).any(ctx, move |_, x| gt(x, t))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -463,7 +463,7 @@ fn flat_map_early_exit_leaves_the_whole_traversal() {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
-                .position(ctx, move |x| eq(x, t))
+                .position(ctx, move |_, x| eq(x, t))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -663,7 +663,7 @@ fn three_level_flat_map_early_exit() {
                 .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .flat_map(move |m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
                 .enumerate()
-                .find_map(ctx, move |p| eq(p.second(), t).then_some(p.first()));
+                .find_map(ctx, move |_, p| eq(p.second(), t).then_some(p.first()));
             select(found, pos, 99u64)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -692,7 +692,7 @@ fn intersect_two_sorted_slices() {
         let f = compiler.fun2("common", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
                 .intersect(b)
-                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+                .fold(ctx, 0u64, |_, acc, x| acc * 10u64 + x)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -714,7 +714,7 @@ fn intersect_by_a_descending_order() {
         let f = compiler.fun2("common_desc", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
                 .intersect_by(b, gt)
-                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+                .fold(ctx, 0u64, |_, acc, x| acc * 10u64 + x)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -759,7 +759,7 @@ fn triangle_count_by_intersecting_adjacency_lists() {
                     .for_each(ctx, move |ctx, v| {
                         let c = unsafe { it.iter(call_extern2(nbrs, g, u)) }
                             .intersect(unsafe { it.iter(call_extern2(nbrs, g, v)) })
-                            .count_if(ctx, move |w| gt(w, v));
+                            .count_if(ctx, move |_, w| gt(w, v));
                         ctx.store(acc, acc + c);
                     });
             });

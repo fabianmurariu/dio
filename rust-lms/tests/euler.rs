@@ -36,7 +36,7 @@ fn euler_01_multiples_of_3_or_5() {
         // Branchless predicated sum over [1, n): keep i when divisible by 3 or 5.
         // `select(a, true, b)` is a logical OR of the two divisibility tests.
         let f = compiler.fun1("e01", |ctx, n: Var<i64>| {
-            range(1i64, n).sum_if(ctx, |i| {
+            range(1i64, n).sum_if(ctx, |_, i| {
                 select(eq(i % 3i64, 0i64), true, eq(i % 5i64, 0i64))
             })
         });
