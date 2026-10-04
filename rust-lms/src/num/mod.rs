@@ -15,7 +15,7 @@ pub use ops::{
     Add, BitAnd, BitOr, BitXor, Bitcast, Div, Eq, Ge, Gt, IntCast, IntToFloat, Le, Lt, Mul, Ne,
     Rem, Select, Shl, Shr, Sub,
 };
-pub use traits::{FloatNum, IntNum, Num};
+pub use traits::{Bits, FloatNum, IntNum, Num};
 
 pub use ops::{
     add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le, lt, max, min,

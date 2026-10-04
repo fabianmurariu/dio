@@ -133,6 +133,54 @@ fn ne_le_ge_on_unsigned() {
     });
 }
 
+/// `& | ^ !` on `Var<bool>` are logical and/or/xor/not. Each result is packed
+/// into its own bit (1*and + 2*or + 4*xor + 8*!a), checked over the full truth
+/// table.
+#[test]
+fn bool_logical_ops_truth_table() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("bool_ops", |ctx, a: Var<bool>, b: Var<bool>| {
+            let and = ctx.bind(select(a & b, 1i64, 0i64));
+            let or = ctx.bind(select(a | b, 2i64, 0i64));
+            let xor = ctx.bind(select(a ^ b, 4i64, 0i64));
+            let not_a = ctx.bind(select(!a, 8i64, 0i64));
+            and + or + xor + not_a
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let ops = compiled.as_fn();
+        for a in [false, true] {
+            for b in [false, true] {
+                let expected = (a & b) as i64
+                    + 2 * (a | b) as i64
+                    + 4 * (a ^ b) as i64
+                    + 8 * (!a) as i64;
+                assert_eq!(ops.call(a, b), expected, "a={a} b={b}");
+            }
+        }
+    });
+}
+
+/// Comparisons, `!` and bool literals compose into one predicate that is
+/// returned as a `bool` directly.
+#[test]
+fn bool_ops_compose_with_comparisons() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("in_range", |_ctx, x: Var<i64>, flip: Var<bool>| {
+            // (0 < x <= 10 && x != 5) || x == -1, then xor'd with `flip`.
+            let in_range = (gt(x, 0i64) & le(x, 10i64) & !eq(x, 5i64)) | eq(x, -1i64);
+            (in_range ^ flip) & true
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let pred = compiled.as_fn();
+        for x in -3i64..=12 {
+            let in_range = (x > 0 && x <= 10 && x != 5) || x == -1;
+            for flip in [false, true] {
+                assert_eq!(pred.call(x, flip), in_range ^ flip, "x={x} flip={flip}");
+            }
+        }
+    });
+}
+
 /// NaN is why `le` is not `!gt` and `ne` is not an ordered comparison: every
 /// ordered predicate is false against NaN, while `ne` must be true.
 #[test]

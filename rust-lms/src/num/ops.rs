@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::types::StagedType;
 
-use super::traits::{FloatNum, IntNum, Num};
+use super::traits::{Bits, FloatNum, IntNum, Num};
 
 // =============================================================================
 // Arithmetic Operations
@@ -122,10 +122,10 @@ where
 }
 
 // =============================================================================
-// Integer Bit Operations
+// Bit Operations — integers, and `bool` (logical and/or/xor)
 // =============================================================================
 
-/// Bitwise AND operation.
+/// Bitwise AND operation; logical AND on `bool`.
 #[derive(Clone)]
 pub struct BitAnd<L, R> {
     left: L,
@@ -136,18 +136,18 @@ unsafe impl<L, R, T> Staged for BitAnd<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitand(lv, rv, ctx)
+        Value::scalar(ctx.band(lv.leaf(), rv.leaf()))
     }
 }
 
-/// Bitwise OR operation.
+/// Bitwise OR operation; logical OR on `bool`.
 #[derive(Clone)]
 pub struct BitOr<L, R> {
     left: L,
@@ -158,18 +158,18 @@ unsafe impl<L, R, T> Staged for BitOr<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitor(lv, rv, ctx)
+        Value::scalar(ctx.bor(lv.leaf(), rv.leaf()))
     }
 }
 
-/// Bitwise XOR operation.
+/// Bitwise XOR operation; logical XOR (`!=`) on `bool`.
 #[derive(Clone)]
 pub struct BitXor<L, R> {
     left: L,
@@ -180,14 +180,14 @@ unsafe impl<L, R, T> Staged for BitXor<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitxor(lv, rv, ctx)
+        Value::scalar(ctx.bxor(lv.leaf(), rv.leaf()))
     }
 }
 
@@ -522,10 +522,10 @@ where
     }
 }
 
-/// Build a staged bitwise AND.
+/// Build a staged bitwise AND (logical AND on `bool`).
 pub fn bitand<T, L, R>(left: L, right: R) -> BitAnd<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -535,10 +535,10 @@ where
     }
 }
 
-/// Build a staged bitwise OR.
+/// Build a staged bitwise OR (logical OR on `bool`).
 pub fn bitor<T, L, R>(left: L, right: R) -> BitOr<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -548,10 +548,10 @@ where
     }
 }
 
-/// Build a staged bitwise XOR.
+/// Build a staged bitwise XOR (logical XOR on `bool`).
 pub fn bitxor<T, L, R>(left: L, right: R) -> BitXor<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -918,14 +918,16 @@ macro_rules! impl_rem_op_for {
     };
 }
 
-/// Impls `core::ops::{BitAnd, BitOr, BitXor, Shl, Shr}` for the given staged
-/// carrier. Operands must have the same staged integer type.
+/// Impls `core::ops::{BitAnd, BitOr, BitXor, Shl, Shr, Not}` for the given
+/// staged carrier. Operands must have the same staged type: `& | ^` need
+/// [`Bits`] (integers or `bool`), shifts need an integer, and `!` is logical
+/// negation of a `bool`.
 macro_rules! impl_bit_ops_for {
     ([$($gen:tt)*] $self:ty) => {
         impl<$($gen)*, __Out, __R> ::core::ops::BitAnd<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -938,7 +940,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::BitOr<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -951,7 +953,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::BitXor<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -984,6 +986,16 @@ macro_rules! impl_bit_ops_for {
             type Output = Shr<Self, __R::Staged>;
             fn shr(self, rhs: __R) -> Self::Output {
                 shr::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*> ::core::ops::Not for $self
+        where
+            $self: Staged<Out = bool> + 'static,
+        {
+            type Output = crate::control::Not<Self>;
+            fn not(self) -> Self::Output {
+                crate::control::not(self)
             }
         }
     };
@@ -1046,6 +1058,15 @@ impl_bit_ops_for!([E, TO] IntCast<E, TO>);
 impl_num_ops_for!([C, T, F] Select<C, T, F>);
 impl_rem_op_for!([C, T, F] Select<C, T, F>);
 impl_bit_ops_for!([C, T, F] Select<C, T, F>);
+
+// Boolean-producing carriers: comparisons and `!` compose with `& | ^ !`.
+impl_bit_ops_for!([L, R] Lt<L, R>);
+impl_bit_ops_for!([L, R] Gt<L, R>);
+impl_bit_ops_for!([L, R] Eq<L, R>);
+impl_bit_ops_for!([L, R] Ne<L, R>);
+impl_bit_ops_for!([L, R] Le<L, R>);
+impl_bit_ops_for!([L, R] Ge<L, R>);
+impl_bit_ops_for!([C] crate::control::Not<C>);
 
 // Slice access carriers (length, element reads). The carriers are now unified
 // across immutable and mutable slices, so one impl each covers both.
