@@ -521,6 +521,22 @@ impl<'c> Backend for MlirBackend<'c> {
         let (a, b) = (self.get(a), self.get(b));
         self.emit_value(arith::shrui(a, b, self.location), ty)
     }
+    fn ctz(&mut self, a: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let a = self.get(a);
+        let i1 = IntegerType::new(self.context, 1).into();
+        // Zero is defined (the bit width), like Cranelift's `ctz` and Rust's `trailing_zeros`.
+        let op = OperationBuilder::new("llvm.intr.cttz", self.location)
+            .add_operands(&[a])
+            .add_attributes(&[(
+                Identifier::new(self.context, "is_zero_poison"),
+                IntegerAttribute::new(i1, 0).into(),
+            )])
+            .add_results(&[scalar_to_mlir(self.context, ty)])
+            .build()
+            .expect("valid llvm.intr.cttz");
+        self.emit_value(op, ty)
+    }
 
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {

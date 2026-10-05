@@ -49,6 +49,27 @@ impl RangeStep for u64 {
     }
 }
 
+impl RangeStep for u32 {
+    fn one() -> u32 {
+        1
+    }
+
+    fn count(ctx: &Ctx, start: Var<u32>, end: Var<u32>, step: Var<u32>) -> Var<u64> {
+        // Widened so `end - start + step - 1` cannot wrap.
+        let (start, end, step) = (
+            int_cast::<u64, u32, _>(start),
+            int_cast::<u64, u32, _>(end),
+            int_cast::<u64, u32, _>(step),
+        );
+        let span = add(sub(end, start), sub(step, 1u64));
+        ctx.bind(select(lt(start, end), div(span, step), 0u64))
+    }
+
+    fn nth(ctx: &Ctx, start: Var<u32>, step: Var<u32>, index: Var<u64>) -> Var<u32> {
+        ctx.bind(add(start, mul(int_cast::<u32, u64, _>(index), step)))
+    }
+}
+
 impl RangeStep for i64 {
     fn one() -> i64 {
         1

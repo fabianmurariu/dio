@@ -114,7 +114,7 @@ pub mod prelude {
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne,
         Num, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast,
-        int_to_float, le, lt, max, min, mul, ne, rem, select, shl, shr, sub,
+        int_to_float, le, lt, max, min, mul, ne, rem, select, shl, shr, sub, trailing_zeros,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{

@@ -13,11 +13,11 @@ mod traits;
 
 pub use ops::{
     Add, BitAnd, BitOr, BitXor, Bitcast, Div, Eq, Ge, Gt, IntCast, IntToFloat, Le, Lt, Mul, Ne,
-    Rem, Select, Shl, Shr, Sub,
+    Rem, Select, Shl, Shr, Sub, TrailingZeros,
 };
 pub use traits::{Bits, FloatNum, IntNum, Num};
 
 pub use ops::{
     add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le, lt, max, min,
-    mul, ne, rem, select, shl, shr, sub,
+    mul, ne, rem, select, shl, shr, sub, trailing_zeros,
 };

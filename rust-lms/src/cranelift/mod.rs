@@ -190,6 +190,9 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             a.scalar_type(),
         )
     }
+    fn ctz(&mut self, a: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().ctz(a.cranelift()), a.scalar_type())
+    }
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
         ValueId::from_cranelift(

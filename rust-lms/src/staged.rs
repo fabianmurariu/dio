@@ -358,6 +358,8 @@ pub trait Backend {
     fn ishl(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn sshr(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    /// Count trailing zero bits; the bit width for zero.
+    fn ctz(&mut self, a: ValueId) -> ValueId;
     // compare / select
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId;
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId;

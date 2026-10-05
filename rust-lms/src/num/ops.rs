@@ -235,6 +235,36 @@ where
     }
 }
 
+/// Count of trailing zero bits, like Rust's `trailing_zeros`: the bit width for zero.
+#[derive(Clone, Copy)]
+pub struct TrailingZeros<E> {
+    expr: E,
+}
+
+unsafe impl<E, T> Staged for TrailingZeros<E>
+where
+    E: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let value = self.expr.codegen(ctx);
+        Value::scalar(ctx.ctz(value.leaf()))
+    }
+}
+
+/// Build a staged count of trailing zero bits. See [`TrailingZeros`].
+pub fn trailing_zeros<T, E>(expr: E) -> TrailingZeros<E::Staged>
+where
+    T: IntNum,
+    E: IntoStaged<T>,
+{
+    TrailingZeros {
+        expr: expr.into_staged(),
+    }
+}
+
 /// Integer cast with Rust-like truncation on narrowing and signedness-aware
 /// extension on widening.
 pub struct IntCast<E, TO> {
@@ -1049,6 +1079,10 @@ impl_bit_ops_for!([L, R] Shl<L, R>);
 impl_num_ops_for!([L, R] Shr<L, R>);
 impl_rem_op_for!([L, R] Shr<L, R>);
 impl_bit_ops_for!([L, R] Shr<L, R>);
+
+impl_num_ops_for!([E] TrailingZeros<E>);
+impl_rem_op_for!([E] TrailingZeros<E>);
+impl_bit_ops_for!([E] TrailingZeros<E>);
 
 impl_num_ops_for!([E, TO] IntCast<E, TO>);
 impl_rem_op_for!([E, TO] IntCast<E, TO>);
