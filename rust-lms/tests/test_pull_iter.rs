@@ -440,7 +440,7 @@ fn flat_map_consumed_as_nested_loops() {
         let f = compiler.fun1("nbr_sum", move |ctx, g: Var<G>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -462,7 +462,7 @@ fn flat_map_early_exit_leaves_the_whole_traversal() {
         let f = compiler.fun2("find", move |ctx, g: Var<G>, t: Var<u64>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .position(ctx, move |_, x| eq(x, t))
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -495,7 +495,7 @@ fn flat_map_pulled_by_zip() {
             let acc = ctx.var(0u64);
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .zip(w)
                 .for_each(ctx, move |ctx, x, y| ctx.store(acc, acc * 100u64 + x * y));
             acc
@@ -522,7 +522,7 @@ fn flat_map_pulled_by_chain_and_take() {
         let f = compiler.fun2("tri_then", |ctx, n: Var<u64>, tail: Var<S>| {
             let acc = ctx.var(0u64);
             range(0u64, n)
-                .flat_map(|i| range(0u64, i))
+                .flat_map(|_, i| range(0u64, i))
                 .chain(tail)
                 .take(7u64)
                 .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x + 1u64));
@@ -541,7 +541,7 @@ fn flat_map_pulled_by_chain_and_take() {
 fn flat_map_counts_triangles_of_ranges() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("tri", |ctx, n: Var<u64>| {
-            range(0u64, n).flat_map(|i| range(0u64, i)).count(ctx)
+            range(0u64, n).flat_map(|_, i| range(0u64, i)).count(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -660,8 +660,8 @@ fn three_level_flat_map_early_exit() {
         let f = compiler.fun2("two_hop_find", move |ctx, g: Var<G>, t: Var<u64>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             let (pos, found) = unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
-                .flat_map(move |m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
                 .enumerate()
                 .find_map(ctx, move |_, p| eq(p.second(), t).then_some(p.first()));
             select(found, pos, 99u64)

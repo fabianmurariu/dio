@@ -338,9 +338,12 @@ pub trait StagedIterator: Sized {
     /// Consumed directly (a terminal, `for_each`) it is two nested loops; pulled
     /// (inside `zip`/`chain`/`merge_by`/`take`…) it is a state machine over one
     /// loop. Either way an early exit releases the open inner iterator.
+    ///
+    /// `f` gets the `Ctx` it is staged in, so building the inner iterator can bind
+    /// values (load a row's bounds, say) once per outer element.
     fn flat_map<J, F>(self, f: F) -> FlatMap<Self, F>
     where
-        F: Fn(Var<Self::Item>) -> J,
+        F: Fn(&Ctx, Var<Self::Item>) -> J,
         J: IntoStagedIterator,
     {
         FlatMap::new(self, f)

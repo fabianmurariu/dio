@@ -36,7 +36,7 @@ type InnerCursor<J> = <Inner<J> as StagedIterator>::Cursor;
 impl<I, F, J> StagedIterator for FlatMap<I, F>
 where
     I: StagedIterator,
-    F: Fn(Var<I::Item>) -> J,
+    F: Fn(&Ctx, Var<I::Item>) -> J,
     J: IntoStagedIterator,
     Inner<J>: StagedIterator,
     <Inner<J> as StagedIterator>::Item: 'static,
@@ -80,7 +80,7 @@ where
     {
         let f = self.f;
         self.outer.for_each(ctx, move |ctx, o| {
-            let cursor = f(o).staged_iter().open(ctx);
+            let cursor = f(ctx, o).staged_iter().open(ctx);
             let mut close = None;
             ctx.block(|ctx, exhausted| {
                 ctx.iterate(|ctx, _| {
@@ -111,7 +111,7 @@ pub struct FlatMapCursor<C, F, J> {
 impl<C, F, J> Cursor for FlatMapCursor<C, F, J>
 where
     C: Cursor,
-    F: Fn(Var<C::Item>) -> J,
+    F: Fn(&Ctx, Var<C::Item>) -> J,
     J: IntoStagedIterator,
     Inner<J>: StagedIterator,
     <Inner<J> as StagedIterator>::Item: 'static,
@@ -142,7 +142,7 @@ where
                 ctx.if_then(not(active), |ctx| {
                     let (o, c) = outer.next(ctx, done);
                     outer_close = Some(c);
-                    inner = Some(f(o).staged_iter().open(ctx));
+                    inner = Some(f(ctx, o).staged_iter().open(ctx));
                     ctx.store(active, true);
                 });
                 let inner = inner.expect("the inner open is staged exactly once");
