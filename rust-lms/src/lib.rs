@@ -105,10 +105,10 @@ pub mod prelude {
         FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MergeBy,
         MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem,
         OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter, RangeStep,
-        ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, Skip, SkipWhile,
-        SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem, ZipItemAccess,
-        ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, from_fn, range,
-        range_step,
+        ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, SetBits, Skip,
+        SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem,
+        ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
+        from_fn, range, range_step, set_bits,
     };
     pub use crate::label::{Again, Label};
     pub use crate::num::{

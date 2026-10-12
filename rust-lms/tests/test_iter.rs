@@ -952,3 +952,50 @@ fn test_ctx_leaked_out_of_its_body_panics() {
     });
     leaked.unwrap().var(0i64);
 }
+
+// =============================================================================
+// set_bits
+// =============================================================================
+
+/// `sum(k * 64 + bit)` over the set bits of a word, `k` counting from 1 in the order
+/// they come, so a skipped, repeated or reordered bit changes the result.
+#[test]
+fn test_set_bits_in_order() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("set_bits_u32", |ctx, word: Var<u32>| {
+            let order = ctx.var(0u32);
+            set_bits(word)
+                .map(|ctx, bit| {
+                    ctx.store(order, order + 1u32);
+                    order * 64u32 + bit
+                })
+                .sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let f = compiled.as_fn();
+
+        for word in [0u32, 1, 0x8000_0000, u32::MAX, 0b1011_0100, 0xdead_beef] {
+            let expected: u32 = (0..32)
+                .filter(|bit| word >> bit & 1 == 1)
+                .enumerate()
+                .map(|(k, bit)| (k as u32 + 1) * 64 + bit)
+                .sum();
+            assert_eq!(f.call(word), expected, "{word:#x}");
+        }
+    });
+}
+
+#[test]
+fn test_set_bits_count_u64() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("set_bits_u64", |ctx, word: Var<u64>| {
+            set_bits(word).count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let f = compiled.as_fn();
+
+        for word in [0u64, 1, 1 << 63, u64::MAX, 0xdead_beef_0000_0001] {
+            assert_eq!(f.call(word), word.count_ones() as u64, "{word:#x}");
+        }
+    });
+}

@@ -34,6 +34,7 @@ pub mod opaque;
 mod range_iter;
 mod rev;
 mod scan;
+mod set_bits;
 mod skip_while;
 mod slice_iter;
 mod sorted;
@@ -58,6 +59,7 @@ pub use opaque::{
 pub use range_iter::{RangeCursor, RangeIter, RangeLen, RangeStep, range, range_step};
 pub use rev::{Rev, RevCursor};
 pub use scan::{Scan, ScanCursor};
+pub use set_bits::{SetBits, SetBitsCursor, set_bits};
 pub use skip_while::{SkipWhile, SkipWhileCursor};
 pub use slice_iter::{SliceCursor, SliceIter};
 pub use sorted::{IntersectBy, IntersectCursor, Lookahead, MergeBy, MergeCursor};
@@ -98,6 +100,7 @@ into_staged_iter_is_self!(
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,
+    SetBits<T, W>,
     Skip<I, N>,
     SkipWhile<I, P>,
     Take<I, N>,
