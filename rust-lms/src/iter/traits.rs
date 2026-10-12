@@ -240,7 +240,7 @@ pub trait StagedIterator: Sized {
     fn map<U, F, MapOut>(self, f: F) -> Map<Self, F, U>
     where
         U: StagedType,
-        F: Fn(Var<Self::Item>) -> MapOut,
+        F: Fn(&Ctx, Var<Self::Item>) -> MapOut,
         MapOut: Staged<Out = U>,
     {
         Map::new(self, f)

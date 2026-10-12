@@ -16,7 +16,7 @@ use crate::label::Label;
 use crate::num::{add, ge};
 use crate::slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType};
 use crate::staged::{LifetimeErased, Staged, Var, VarUse};
-use crate::types::{ConstantType, CopyType, StagedType};
+use crate::types::{CopyType, StagedType};
 
 use super::traits::{
     Cursor, IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator,
@@ -72,12 +72,11 @@ where
 
 impl<T, S> StagedIterator for SliceIter<T, S>
 where
-    T: StagedType + CopyType + ConstantType + 'static,
+    T: StagedType + CopyType + 'static,
     S: LifetimeErased,
     S::Out: TrustedSliceType<Elem = T>,
     VarUse<S::Out>: LifetimeErased<Out = S::Out>,
     <VarUse<S::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
-    T::RuntimeValue: Default,
 {
     type Item = T;
     type Cursor = SliceCursor<T, S::Out>;
@@ -169,12 +168,11 @@ where
 
 impl<T, S> IndexedStagedIterator for SliceIter<T, S>
 where
-    T: StagedType + CopyType + ConstantType + 'static,
+    T: StagedType + CopyType + 'static,
     S: Staged + Clone + 'static + LifetimeErased<Out = <S as Staged>::Out>,
     <S as Staged>::Out: TrustedSliceType<Elem = T>,
     VarUse<<S as Staged>::Out>: LifetimeErased<Out = <S as Staged>::Out>,
     <VarUse<<S as Staged>::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
-    T::RuntimeValue: Default,
 {
     type LenExpr = SliceLen<S>;
 
@@ -185,12 +183,11 @@ where
 
 impl<T, S> IndexedSource for SliceIter<T, S>
 where
-    T: StagedType + CopyType + ConstantType + 'static,
+    T: StagedType + CopyType + 'static,
     S: Staged + Clone + 'static + LifetimeErased<Out = <S as Staged>::Out>,
     <S as Staged>::Out: TrustedSliceType<Elem = T>,
     VarUse<<S as Staged>::Out>: LifetimeErased<Out = <S as Staged>::Out>,
     <VarUse<<S as Staged>::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
-    T::RuntimeValue: Default,
 {
     type Item = T;
     type LenExpr = SliceLen<S>;
@@ -215,7 +212,7 @@ where
 /// anyway.
 impl<T, R> IndexedSource for Var<R>
 where
-    T: StagedType + CopyType + ConstantType + 'static,
+    T: StagedType + CopyType + 'static,
     R: TrustedSliceType<Elem = T> + CopyType + 'static,
 {
     type Item = T;
@@ -240,12 +237,11 @@ where
 /// slice works as well as a shared one.
 impl<T, S> IntoStagedIterator for S
 where
-    T: StagedType + CopyType + ConstantType + 'static,
+    T: StagedType + CopyType + 'static,
     S: LifetimeErased,
     S::Out: TrustedSliceType<Elem = T>,
     VarUse<S::Out>: LifetimeErased<Out = S::Out>,
     <VarUse<S::Out> as LifetimeErased>::ErasedOut: TrustedSliceType<Elem = T>,
-    T::RuntimeValue: Default,
 {
     type Iter = SliceIter<T, S>;
 

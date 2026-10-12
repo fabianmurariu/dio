@@ -235,11 +235,11 @@ the body can call itself.
 
 The builder is passed as `&Ctx`, a handle to shared state (`Rc<RefCell<..>>`).
 Statements go into the innermost scope open at the moment of the call: a loop
-body, a branch, a block. So a closure can capture `ctx` and emit through it, even
-a combinator's closure:
+body, a branch, a block. Combinators that run a closure per element (`map`,
+`flat_map`, `fold`, …) pass it the `Ctx` to emit through:
 
 ```rust
-arr.staged_iter().map(|x| popcount(ctx, x)).sum(ctx) // popcount emits a loop
+arr.staged_iter().map(|ctx, x| popcount(ctx, x)).sum(ctx) // popcount emits a loop
 ```
 
 `map` runs its closure inside the consumer's loop body, so the loop lands there.
@@ -428,7 +428,7 @@ consumer closure runs **once at staging time** to build the loop body.
 ```rust
 let total = slice.staged_iter()
     .filter(move |x| gt(x, 0.0f64))
-    .map(move |x| x * x)
+    .map(move |_, x| x * x)
     .sum(ctx);                    // -> Var<f64>
 ```
 
@@ -523,7 +523,7 @@ let mut compiler = Compiler::new();
 let f = compiler.fun1("sum_pos_sq", |ctx, arr: Var<SRef<Slice<f64>>>| {
     arr.staged_iter()
        .filter(move |x| gt(x, 0.0f64))
-       .map(move |x| x * x)
+       .map(move |_, x| x * x)
        .sum(ctx)                       // Var<f64>
 });
 

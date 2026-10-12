@@ -237,7 +237,7 @@ impl Nbrs for Csr {
         let (start, end) = self.bounds(ctx, n);
         let targets = self.targets;
         // SAFETY: CSR offsets are within `targets`.
-        range(start, end).map(move |j| unsafe { targets.get_unchecked(j) })
+        range(start, end).map(move |_, j| unsafe { targets.get_unchecked(j) })
     }
 
     fn window_nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
@@ -246,7 +246,7 @@ impl Nbrs for Csr {
         // SAFETY: CSR offsets are within `targets` and `ts`.
         range(start, end)
             .filter(move |j| lt(unsafe { ts.get_unchecked(j) }, WINDOW))
-            .map(move |j| unsafe { targets.get_unchecked(j) })
+            .map(move |_, j| unsafe { targets.get_unchecked(j) })
     }
 }
 
@@ -261,7 +261,7 @@ impl Nbrs for SliceFfi {
     fn nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         let s = ctx.bind(call_extern2(self.nbrs, self.g, n));
         // SAFETY: `j < s.len()`, and the slice points into the live graph.
-        range(0u64, s.len()).map(move |j| unsafe { s.get_unchecked(j) })
+        range(0u64, s.len()).map(move |_, j| unsafe { s.get_unchecked(j) })
     }
 
     fn window_nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
@@ -270,7 +270,7 @@ impl Nbrs for SliceFfi {
         // SAFETY: both slices have the node's degree as length, into the live graph.
         range(0u64, s.len())
             .filter(move |j| lt(unsafe { t.get_unchecked(j) }, WINDOW))
-            .map(move |j| unsafe { s.get_unchecked(j) })
+            .map(move |_, j| unsafe { s.get_unchecked(j) })
     }
 }
 

@@ -167,7 +167,7 @@ fn chain_iter(backend: JitBackend) -> SliceFn {
     let f = compiler.fun1("chain_iter", |ctx, a: Var<SRef<Slice<i64>>>| {
         a.staged_iter()
             .filter(|v| gt(v, 0i64))
-            .map(|v| mul(v, 2i64))
+            .map(|_, v| mul(v, 2i64))
             .sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");

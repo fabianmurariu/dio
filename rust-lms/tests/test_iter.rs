@@ -44,7 +44,7 @@ fn test_iter_sum_f64() {
 fn test_iter_sum_with_map() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("doubled_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            arr.staged_iter().map(|x| x * 2i64).sum(ctx)
+            arr.staged_iter().map(|_, x| x * 2i64).sum(ctx)
         });
 
         let compiled = compiler.compile(f).expect("compile failed");
@@ -293,7 +293,7 @@ fn test_iter_zip_stops_at_shorter_primary_through_combinator() {
             |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
                 a.staged_iter()
                     .zip(b)
-                    .map(|pair| pair.first() * pair.second())
+                    .map(|_, pair| pair.first() * pair.second())
                     .sum(ctx)
             },
         );
@@ -338,7 +338,7 @@ fn test_iter_zip_composes_with_map_and_sum() {
             |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
                 a.staged_iter()
                     .zip(b)
-                    .map(|pair| pair.first() * pair.second())
+                    .map(|_, pair| pair.first() * pair.second())
                     .sum(ctx)
             },
         );
@@ -455,7 +455,10 @@ fn test_range_i64_sum() {
 fn test_range_into_staged_iter() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("range_into_iter", |ctx, n: Var<u64>| {
-            range(0u64, n).into_staged_iter().map(|x| x * 3u64).sum(ctx)
+            range(0u64, n)
+                .into_staged_iter()
+                .map(|_, x| x * 3u64)
+                .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile failed");
         let f = compiled.as_fn();
@@ -583,7 +586,7 @@ fn test_iter_position_after_map() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("pos_after_map", |ctx, arr: Var<SRef<Slice<i64>>>| {
             arr.staged_iter()
-                .map(|x| x * 2i64)
+                .map(|_, x| x * 2i64)
                 .position(ctx, |_, x| eq(x, 6i64))
         });
         let compiled = compiler.compile(f).expect("compile failed");
@@ -693,7 +696,7 @@ fn test_iter_enumerate_composes_with_map() {
         let f = compiler.fun1("indexed", |ctx, a: Var<SRef<Slice<i64>>>| {
             a.staged_iter()
                 .enumerate()
-                .map(|pair| pair.second() * int_cast::<i64, u64, _>(pair.first()))
+                .map(|_, pair| pair.second() * int_cast::<i64, u64, _>(pair.first()))
                 .sum(ctx)
         });
 
@@ -903,7 +906,7 @@ fn test_map_and_filter_capture_ctx() {
         let f = compiler.fun1("popcount_of_powers", |ctx, arr: Var<SRef<Slice<u64>>>| {
             arr.staged_iter()
                 .filter(|x| is_power_of_two(ctx, x))
-                .map(|x| popcount(ctx, x))
+                .map(|ctx, x| popcount(ctx, x))
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compilation failed");
@@ -923,7 +926,7 @@ fn test_map_capturing_ctx_through_random_access() {
             |ctx, bits: Var<SRef<Slice<u64>>>, weights: Var<SRef<Slice<u64>>>| {
                 let total = ctx.var(0u64);
                 bits.staged_iter()
-                    .map(|x| popcount(ctx, x))
+                    .map(|ctx, x| popcount(ctx, x))
                     .zip(weights)
                     .for_each(ctx, |ctx, ones, weight| {
                         ctx.store(total, total + ones * weight)

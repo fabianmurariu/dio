@@ -111,7 +111,7 @@ fn zip_extern_with_slice() {
             // SAFETY: a fresh `DynIter<u64>` handle from the producer.
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .zip(w)
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -206,7 +206,7 @@ fn zip_of_i64_range_and_slice_is_indexed() {
         let f = compiler.fun1("signed", |ctx, s: Var<SRef<Slice<i64>>>| {
             range(-2i64, 10i64)
                 .zip(s)
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -224,9 +224,9 @@ fn zip_of_mapped_slices() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2("mapped", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
-                .map(|x| x + 1u64)
-                .zip(b.staged_iter().map(|y| y * 2u64))
-                .map(|p| p.first() * p.second())
+                .map(|_, x| x + 1u64)
+                .zip(b.staged_iter().map(|_, y| y * 2u64))
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -269,7 +269,7 @@ fn chain_extern_then_slice() {
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .chain(disk)
                 .enumerate()
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -581,8 +581,8 @@ fn merge_by_is_stable() {
         let f = compiler.fun2("stable", |ctx, a: Var<S>, b: Var<S>| {
             let acc = ctx.var(0u64);
             a.staged_iter()
-                .map(|x| x * 10u64 + 1u64)
-                .merge_by(b.staged_iter().map(|x| x * 10u64 + 2u64), |x, y| {
+                .map(|_, x| x * 10u64 + 1u64)
+                .merge_by(b.staged_iter().map(|_, x| x * 10u64 + 2u64), |x, y| {
                     le(div(x, 10u64), div(y, 10u64))
                 })
                 .for_each(ctx, move |ctx, x| {

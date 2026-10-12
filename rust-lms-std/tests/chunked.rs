@@ -287,7 +287,7 @@ fn filter_map_into_output_svec() {
                 neigh
                     .iter2(g, n)
                     .filter(|b| eq(bitand(b, 1u64), 1u64))
-                    .map(move |b| add(mul(n, 1000u64), b))
+                    .map(move |_, b| add(mul(n, 1000u64), b))
                     .for_each(ctx, |ctx, row| svec.push(ctx, row));
             });
             svec.len(ctx)
