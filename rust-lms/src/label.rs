@@ -98,8 +98,8 @@ impl Again<'_> {
 // Dead: the fall-through value of a join whose every path already jumped
 // =============================================================================
 
-use crate::staged::{CompilationContext, Staged, Value, ValueId};
-use crate::types::{ScalarType, StagedType};
+use crate::staged::{CompilationContext, Staged, Value, ValueId, leaf_types, value_of};
+use crate::types::{ScalarType, Shape, StagedType};
 
 /// A placeholder `T` for code that is never reached — the fall-through of a
 /// [`join`](crate::func::Ctx::join) body whose every path ends in a jump.
@@ -125,10 +125,11 @@ unsafe impl<T: StagedType> Staged for Dead<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        if T::is_fat_pointer() {
-            Value::fat(ctx.null_ptr(), ctx.iconst(ScalarType::I64, 0))
-        } else {
-            Value::scalar(zero_leaf(ctx, T::scalar_type()))
-        }
+        let shape = Shape::of::<T>();
+        let leaves: Vec<_> = leaf_types(shape)
+            .into_iter()
+            .map(|ty| zero_leaf(ctx, ty))
+            .collect();
+        value_of(shape, &leaves)
     }
 }

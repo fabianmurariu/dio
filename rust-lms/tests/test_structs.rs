@@ -789,3 +789,116 @@ fn test_return_mixed_struct() {
         assert_eq!(result, 42);
     });
 }
+
+// =============================================================================
+// Structs held in leaves (up to `MAX_LEAVES` scalars) and in memory (more)
+// =============================================================================
+
+#[test]
+fn test_struct_shapes() {
+    assert_eq!(
+        Shape::of::<Point>(),
+        Shape::Leaves({
+            let mut leaves = Leaves::empty();
+            assert!(leaves.append_field::<i64>(0));
+            assert!(leaves.append_field::<f64>(8));
+            leaves
+        })
+    );
+    assert!(matches!(Shape::of::<Outer>(), Shape::Leaves(leaves) if leaves.len() == 2));
+    assert!(matches!(
+        Shape::of::<Wide>(),
+        Shape::Memory { size: 40, align: 8 }
+    ));
+}
+
+/// A struct read from a slice into a variable is a copy: overwriting the element
+/// afterwards does not change it.
+#[test]
+fn test_struct_read_from_slice_is_a_copy() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1(
+            "copy_then_overwrite",
+            |ctx, mut points: Var<SRefMut<Slice<Point>>>| {
+                // SAFETY: called with two points.
+                let first = ctx.bind(unsafe { points.reborrow().get_unchecked(0u64) });
+                let second = ctx.bind(unsafe { points.reborrow().get_unchecked(1u64) });
+                ctx.emit(unsafe { points.set_unchecked(0u64, second) });
+                first.get(PointType::x())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let mut points = [Point { x: 1, y: 1.5 }, Point { x: 2, y: 2.5 }];
+        assert_eq!(compiled.as_fn().call(&mut points[..]), 1);
+        assert_eq!(points[0].x, 2);
+        assert_eq!(points[0].y, 2.5);
+    });
+}
+
+#[test]
+fn test_struct_select() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun3(
+            "pick",
+            |ctx, left: Var<bool>, a: Var<Point>, b: Var<Point>| {
+                let picked = ctx.bind(select(left, a, b));
+                picked.get(PointType::x())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let (a, b) = (Point { x: 3, y: 0.0 }, Point { x: 4, y: 0.0 });
+        assert_eq!(compiled.call(true, a, b), 3);
+        assert_eq!(compiled.call(false, a, b), 4);
+    });
+}
+
+#[test]
+fn test_struct_returned_by_value() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("larger", |ctx, a: Var<Point>, b: Var<Point>| {
+            let a_x = ctx.bind(a.get(PointType::x()));
+            let b_x = ctx.bind(b.get(PointType::x()));
+            select(gt(a_x, b_x), a, b)
+        });
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let larger = compiled.call(Point { x: 9, y: 1.25 }, Point { x: 5, y: 7.5 });
+        assert_eq!((larger.x, larger.y), (9, 1.25));
+    });
+}
+
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct Wide {
+    #[staged(i64)]
+    a: i64,
+    #[staged(i64)]
+    b: i64,
+    #[staged(i64)]
+    c: i64,
+    #[staged(i64)]
+    d: i64,
+    #[staged(i64)]
+    e: i64,
+}
+
+#[test]
+fn test_wide_struct_held_in_memory() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("sum_wide", |_ctx, wide: Var<Wide>| {
+            wide.get(WideType::a())
+                + wide.get(WideType::b())
+                + wide.get(WideType::c())
+                + wide.get(WideType::d())
+                + wide.get(WideType::e())
+        });
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let wide = Wide {
+            a: 1,
+            b: 2,
+            c: 3,
+            d: 4,
+            e: 5,
+        };
+        assert_eq!(compiled.as_fn().call(wide), 15);
+    });
+}

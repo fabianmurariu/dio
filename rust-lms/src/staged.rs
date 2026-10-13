@@ -13,7 +13,9 @@ use std::ops::{Deref, DerefMut};
 use cranelift_codegen::ir::{Block, FuncRef, SigRef, StackSlot, Value as CraneliftValue};
 use cranelift_frontend::Variable;
 
-use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, ScalarType, StagedType};
+use crate::types::{
+    ConstantType, CopyType, FloatCmp, IntCmp, MAX_LEAVES, ScalarType, Shape, StagedType,
+};
 
 /// An opaque, typed handle to a scalar value produced during codegen.
 ///
@@ -29,21 +31,44 @@ pub struct ValueId {
 
 /// A neutral staged value — the result of [`Staged::codegen`] and the AST-level currency.
 ///
-/// A `Value` is a value's *shape*, tracked by the neutral layer itself so the AST can stop
-/// smuggling multi-value shapes past a single-value contract (docs/post_llvm_plan.md, A′):
+/// A `Value` is a value's *shape* ([`Shape`]), tracked by the neutral layer itself:
 ///
-/// - [`Scalar`](Value::Scalar) — one backend SSA leaf ([`ValueId`]); every non-slice value.
-/// - [`Fat`](Value::Fat) — a slice as **two** SSA leaves `(data ptr, len)` directly, instead
-///   of a pointer to a `{ptr,len}` pair threaded through a side-channel. On Cranelift these
-///   are two registers; on LLVM two SSA values. Materialized as `{ptr,len}` when canonical
-///   memory storage is required (for example at an ABI boundary or inside an aggregate).
+/// - [`Scalar`](Value::Scalar) — one backend SSA leaf ([`ValueId`]): a scalar, a unit, or
+///   the pointer to a value held in memory.
+/// - [`Leaves`](Value::Leaves) — several SSA leaves held directly: a slice's `(data ptr,
+///   len)`, a small struct's fields. On Cranelift these are registers; on LLVM SSA values.
+///   Written to memory only where canonical storage is required (an ABI boundary, a store
+///   through a pointer, a field address).
 ///
 /// Backends still speak only in leaves — a `Value` is composed/destructured entirely in the
 /// neutral layer.
 #[derive(Clone, Copy, Debug)]
 pub enum Value {
     Scalar(ValueId),
-    Fat { ptr: ValueId, len: ValueId },
+    Leaves(Inline<ValueId>),
+}
+
+/// Up to [`MAX_LEAVES`] backend handles, inline so values stay `Copy`.
+#[derive(Clone, Copy, Debug)]
+pub struct Inline<T: Copy> {
+    items: [T; MAX_LEAVES],
+    len: u8,
+}
+
+impl<T: Copy> Inline<T> {
+    fn new(items: &[T], filler: T) -> Self {
+        assert!(items.len() <= MAX_LEAVES, "at most {MAX_LEAVES} leaves");
+        let mut inline = Self {
+            items: [filler; MAX_LEAVES],
+            len: items.len() as u8,
+        };
+        inline.items[..items.len()].copy_from_slice(items);
+        inline
+    }
+
+    pub(crate) fn as_slice(&self) -> &[T] {
+        &self.items[..self.len as usize]
+    }
 }
 
 impl Value {
@@ -52,31 +77,46 @@ impl Value {
         Value::Scalar(leaf)
     }
 
-    /// A fat (slice) value: data pointer + length, each a backend leaf.
+    /// A value held in several leaves.
+    pub(crate) fn leaves(leaves: &[ValueId]) -> Self {
+        Value::Leaves(Inline::new(leaves, ValueId::PLACEHOLDER))
+    }
+
+    /// A slice's value: data pointer + length, each a backend leaf.
     pub(crate) fn fat(ptr: ValueId, len: ValueId) -> Self {
         expect_type(ptr, ScalarType::Ptr, "fat value data pointer");
         expect_type(len, ScalarType::I64, "fat value length");
-        Value::Fat { ptr, len }
+        Self::leaves(&[ptr, len])
     }
 
-    /// The backend leaf of a scalar value. Panics on a `Fat` value to report a neutral-IR
-    /// shape violation at the first scalar-only boundary.
+    /// The backend leaf of a scalar value. Panics on a value held in several leaves, to
+    /// report a neutral-IR shape violation at the first scalar-only boundary.
     pub(crate) fn leaf(self) -> ValueId {
         match self {
             Value::Scalar(v) => v,
-            Value::Fat { .. } => panic!("expected a scalar value, found a fat (slice) value"),
+            Value::Leaves(_) => panic!("expected a scalar value, found a value held in leaves"),
         }
     }
 
-    /// The `(data ptr, len)` leaves of a fat (slice) value. Panics on a `Scalar`.
+    /// The `(data ptr, len)` leaves of a slice value.
     pub(crate) fn parts(self) -> (ValueId, ValueId) {
+        match self.all_leaves() {
+            [ptr, len] => (
+                expect_type(*ptr, ScalarType::Ptr, "fat value data pointer"),
+                expect_type(*len, ScalarType::I64, "fat value length"),
+            ),
+            leaves => panic!(
+                "expected a (ptr, len) slice value, found {} leaves",
+                leaves.len()
+            ),
+        }
+    }
+
+    /// Every backend leaf of the value: one for a scalar.
+    pub(crate) fn all_leaves(&self) -> &[ValueId] {
         match self {
-            Value::Fat { ptr, len } => {
-                expect_type(ptr, ScalarType::Ptr, "fat value data pointer");
-                expect_type(len, ScalarType::I64, "fat value length");
-                (ptr, len)
-            }
-            Value::Scalar(_) => panic!("expected a fat (slice) value, found a scalar value"),
+            Value::Scalar(leaf) => std::slice::from_ref(leaf),
+            Value::Leaves(leaves) => leaves.as_slice(),
         }
     }
 }
@@ -130,6 +170,11 @@ pub struct SigSpec {
 // These stay here (not in the `cranelift` module) because they touch the handles' private
 // `.0` field; that privacy is exactly what stops an AST module from fabricating a handle.
 impl ValueId {
+    const PLACEHOLDER: Self = Self {
+        index: u32::MAX,
+        ty: ScalarType::I8,
+    };
+
     pub fn scalar_type(self) -> ScalarType {
         self.ty
     }
@@ -160,6 +205,11 @@ impl BlockHandle {
     }
 }
 impl VarHandle {
+    const PLACEHOLDER: Self = Self {
+        index: u32::MAX,
+        ty: ScalarType::I8,
+    };
+
     pub(crate) fn from_cranelift(v: Variable, ty: ScalarType) -> Self {
         Self {
             index: v.as_u32(),
@@ -272,12 +322,18 @@ impl SigRefId {
 // Compilation Context
 // =============================================================================
 
-/// Backend variables holding one neutral [`Value`]. Keeping the shape in the binding
-/// prevents scalar and fat variables from being split across unrelated maps.
+/// Backend variables holding one neutral [`Value`], one per leaf. Keeping the shape in
+/// the binding prevents scalar and leaf variables from being split across unrelated maps.
 #[derive(Clone, Copy)]
 pub(crate) enum VarValue {
     Scalar(VarHandle),
-    Fat { ptr: VarHandle, len: VarHandle },
+    Leaves(Inline<VarHandle>),
+}
+
+impl VarValue {
+    pub(crate) fn leaves(vars: &[VarHandle]) -> Self {
+        VarValue::Leaves(Inline::new(vars, VarHandle::PLACEHOLDER))
+    }
 }
 
 /// Context provided during code generation.
@@ -888,10 +944,10 @@ impl<'c> CompilationContext<'c> {
 
     /// Resolve the data pointer (`*T`) of a slice operand.
     ///
-    /// A slice's Staged value is a [`Value::Fat`] — the `(data ptr, len)` pair as two SSA
+    /// A slice's Staged value is [`Value::Leaves`] — the `(data ptr, len)` pair as two SSA
     /// leaves. These helpers ([`Self::slice_data_ptr`] / [`Self::slice_len`] /
     /// [`Self::slice_parts`]) are the single place slice ops go through; each just picks a
-    /// half of the fat value, so there is no side-channel and no per-op memory access.
+    /// leaf, so there is no side-channel and no per-op memory access.
     pub(crate) fn slice_data_ptr(&mut self, slice: &impl Staged) -> ValueId {
         slice.codegen(self).parts().0
     }
@@ -908,199 +964,229 @@ impl<'c> CompilationContext<'c> {
 
     /// Add the block parameters required to carry one staged value through a merge block.
     pub(crate) fn append_value_block_params<T: StagedType>(&mut self, block: BlockHandle) {
-        if T::is_fat_pointer() {
-            self.append_block_param(block, ScalarType::Ptr);
-            self.append_block_param(block, ScalarType::I64);
-        } else {
-            self.append_block_param(block, T::scalar_type());
+        for ty in leaf_types(Shape::of::<T>()) {
+            self.append_block_param(block, ty);
         }
     }
 
     /// Jump to `target`, passing every SSA leaf in `value` as a block argument.
     pub(crate) fn jump_value(&mut self, target: BlockHandle, value: Value) {
-        match value {
-            Value::Scalar(leaf) => self.jump(target, &[leaf]),
-            Value::Fat { ptr, len } => self.jump(target, &[ptr, len]),
-        }
+        self.jump(target, value.all_leaves());
     }
 
     /// Reconstruct a staged value from the parameters of a merge block.
     pub(crate) fn block_value<T: StagedType>(&mut self, block: BlockHandle) -> Value {
-        if T::is_fat_pointer() {
-            Value::fat(
-                self.block_param(block, 0, ScalarType::Ptr),
-                self.block_param(block, 1, ScalarType::I64),
-            )
-        } else {
-            Value::scalar(self.block_param(block, 0, T::scalar_type()))
-        }
+        let shape = Shape::of::<T>();
+        let leaves: Vec<ValueId> = leaf_types(shape)
+            .into_iter()
+            .enumerate()
+            .map(|(index, ty)| self.block_param(block, index, ty))
+            .collect();
+        value_of(shape, &leaves)
     }
 
     /// Resolve a variable to its shape-aware neutral [`Value`]. The stored shape is checked
-    /// against `T`, so a missing `StagedType::is_fat_pointer` implementation fails at the
+    /// against `T`, so a type whose [`Shape`] disagrees with its codegen fails at the
     /// variable boundary instead of reaching an unrelated scalar operation.
     pub(crate) fn resolve_var<T: StagedType>(&mut self, id: usize) -> Value {
         let binding = *self
             .variables
             .get(&id)
             .unwrap_or_else(|| panic!("staged variable {id} is not defined"));
-
+        let held_in_leaves = matches!(Shape::of::<T>(), Shape::Leaves(_));
         match binding {
-            VarValue::Scalar(var) if !T::is_fat_pointer() => Value::scalar(self.use_var(var)),
-            VarValue::Fat { ptr, len } if T::is_fat_pointer() => {
-                let ptr = self.use_var(ptr);
-                let len = self.use_var(len);
-                Value::fat(ptr, len)
+            VarValue::Scalar(var) if !held_in_leaves => Value::scalar(self.use_var(var)),
+            VarValue::Leaves(vars) if held_in_leaves => {
+                let leaves: Vec<ValueId> = vars
+                    .as_slice()
+                    .iter()
+                    .map(|&var| self.use_var(var))
+                    .collect();
+                Value::leaves(&leaves)
             }
-            VarValue::Scalar(_) => panic!(
-                "staged variable {id} has scalar storage, but {} declares a fat value",
-                std::any::type_name::<T>()
-            ),
-            VarValue::Fat { .. } => panic!(
-                "staged variable {id} has fat storage, but {} declares a scalar value",
+            _ => panic!(
+                "staged variable {id} does not hold a {} value",
                 std::any::type_name::<T>()
             ),
         }
     }
 
     /// Bind `value` to variable `id`, retaining its neutral shape. `reuse` reuses an
-    /// existing binding for loop-carried assignments. The value shape and `T` must agree.
+    /// existing binding for loop-carried assignments. The value shape and `shape` must agree.
     pub(crate) fn assign_var_layout(
         &mut self,
         id: usize,
         value: Value,
-        is_fat: bool,
-        scalar: ScalarType,
+        shape: Shape,
         name: &'static str,
         reuse: bool,
     ) {
-        self.assign_var_inner(id, value, is_fat, scalar, name, reuse)
+        let existing = reuse.then(|| self.variables.get(&id).copied()).flatten();
+        let types = leaf_types(shape);
+        let leaves = value.all_leaves();
+        assert_eq!(
+            leaves.len(),
+            types.len(),
+            "{name} is held in {} leaves but codegen produced {}",
+            types.len(),
+            leaves.len()
+        );
+        let binding = match (existing, value) {
+            (Some(binding @ VarValue::Scalar(_)), Value::Scalar(_))
+            | (Some(binding @ VarValue::Leaves(_)), Value::Leaves(_)) => binding,
+            (Some(_), _) => panic!("staged variable {id} changed shape"),
+            (None, Value::Scalar(_)) => VarValue::Scalar(self.declare_var(types[0])),
+            (None, Value::Leaves(_)) => {
+                let vars: Vec<VarHandle> = types.iter().map(|&ty| self.declare_var(ty)).collect();
+                VarValue::leaves(&vars)
+            }
+        };
+        let vars = match &binding {
+            VarValue::Scalar(var) => std::slice::from_ref(var).to_vec(),
+            VarValue::Leaves(vars) => vars.as_slice().to_vec(),
+        };
+        for (var, &leaf) in vars.into_iter().zip(leaves) {
+            self.def_var(var, leaf);
+        }
+        self.variables.insert(id, binding);
     }
 
     pub(crate) fn assign_var<T: StagedType>(&mut self, id: usize, value: Value, reuse: bool) {
-        self.assign_var_inner(
+        self.assign_var_layout(
             id,
             value,
-            T::is_fat_pointer(),
-            T::scalar_type(),
+            Shape::of::<T>(),
             std::any::type_name::<T>(),
             reuse,
         )
     }
 
-    fn assign_var_inner(
-        &mut self,
-        id: usize,
-        value: Value,
-        is_fat: bool,
-        scalar: ScalarType,
-        name: &'static str,
-        reuse: bool,
-    ) {
-        let existing = reuse.then(|| self.variables.get(&id).copied()).flatten();
-
-        match value {
-            Value::Scalar(leaf) if !is_fat => {
-                expect_type(leaf, scalar, "staged variable assignment");
-                let var = match existing {
-                    Some(VarValue::Scalar(var)) => var,
-                    Some(VarValue::Fat { .. }) => {
-                        panic!("cannot assign a scalar value to fat staged variable {id}")
-                    }
-                    None => self.declare_var(scalar),
-                };
-                self.def_var(var, leaf);
-                self.variables.insert(id, VarValue::Scalar(var));
+    /// Load a value of `shape` from its canonical in-memory representation at `base`.
+    pub(crate) fn load_shape(&mut self, shape: Shape, base: ValueId) -> Value {
+        expect_type(base, ScalarType::Ptr, "load_value base");
+        match shape {
+            Shape::Unit => Value::scalar(self.get_unit_value()),
+            Shape::Scalar(ty) => Value::scalar(self.load(ty, base, 0)),
+            Shape::Leaves(layout) => {
+                let leaves: Vec<ValueId> = layout
+                    .iter()
+                    .map(|(ty, offset)| self.load(ty, base, offset as i32))
+                    .collect();
+                Value::leaves(&leaves)
             }
-            Value::Fat { ptr, len } if is_fat => {
-                let (ptr_var, len_var) = match existing {
-                    Some(VarValue::Fat { ptr, len }) => (ptr, len),
-                    Some(VarValue::Scalar(_)) => {
-                        panic!("cannot assign a fat value to scalar staged variable {id}")
-                    }
-                    None => (
-                        self.declare_var(ScalarType::Ptr),
-                        self.declare_var(ScalarType::I64),
-                    ),
-                };
-                self.def_var(ptr_var, ptr);
-                self.def_var(len_var, len);
-                self.variables.insert(
-                    id,
-                    VarValue::Fat {
-                        ptr: ptr_var,
-                        len: len_var,
-                    },
-                );
-            }
-            Value::Scalar(_) => panic!(
-                "{} declares a fat value but codegen produced a scalar",
-                name
-            ),
-            Value::Fat { .. } => panic!(
-                "{} declares a scalar value but codegen produced a fat value",
-                name
-            ),
+            Shape::Memory { .. } => Value::scalar(base),
         }
     }
 
-    /// Load a fat (slice) value from an in-memory `{ptr, len}` descriptor at `base`
-    /// (`ptr` at offset 0 as `Ptr`, `len` at offset 8 as `I64`). Used when reinterpreting a
-    /// pointer to such a descriptor (an FFI array field, a param's incoming pair) as a slice —
-    /// the memory→fat boundary, mirror of [`Self::materialize_value`].
+    /// Store a value of `shape` in its canonical in-memory representation at `base`.
+    pub(crate) fn store_shape(&mut self, shape: Shape, base: ValueId, value: Value) {
+        expect_type(base, ScalarType::Ptr, "store_value base");
+        match shape {
+            Shape::Unit => {}
+            Shape::Scalar(ty) => {
+                let value = expect_type(value.leaf(), ty, "stored value");
+                self.store(value, base, 0);
+            }
+            Shape::Leaves(layout) => {
+                let leaves = value.all_leaves().to_vec();
+                assert_eq!(leaves.len(), layout.len(), "stored value: leaf count");
+                for ((ty, offset), leaf) in layout.iter().zip(leaves) {
+                    let leaf = expect_type(leaf, ty, "stored leaf");
+                    self.store(leaf, base, offset as i32);
+                }
+            }
+            Shape::Memory { size, align } => {
+                let value = expect_type(value.leaf(), ScalarType::Ptr, "copy value");
+                self.copy_nonoverlapping(base, value, size, align);
+            }
+        }
+    }
+
+    /// Load a slice's `(ptr, len)` from an in-memory descriptor at `base`.
     pub(crate) fn load_fat(&mut self, base: ValueId) -> Value {
-        expect_type(base, ScalarType::Ptr, "load_fat base");
-        let ptr = self.load(ScalarType::Ptr, base, 0);
-        let len = self.load(ScalarType::I64, base, 8);
-        Value::fat(ptr, len)
+        self.load_shape(Shape::Leaves(crate::types::Leaves::fat()), base)
     }
 
     /// Load a staged value from its canonical in-memory representation.
     pub(crate) fn load_value<T: StagedType>(&mut self, base: ValueId) -> Value {
-        expect_type(base, ScalarType::Ptr, "load_value base");
-        if T::is_fat_pointer() {
-            self.load_fat(base)
-        } else if T::is_copy_struct() {
-            Value::scalar(base)
-        } else if T::size_of() == 0 {
-            Value::scalar(self.get_unit_value())
-        } else {
-            Value::scalar(self.load(T::scalar_type(), base, 0))
-        }
+        self.load_shape(Shape::of::<T>(), base)
     }
 
     /// Store a staged value in its canonical in-memory representation.
     pub(crate) fn store_value<T: StagedType>(&mut self, base: ValueId, value: Value) {
-        expect_type(base, ScalarType::Ptr, "store_value base");
-        if T::is_fat_pointer() {
-            let (ptr, len) = value.parts();
-            self.store(ptr, base, 0);
-            self.store(len, base, 8);
-        } else if T::is_copy_struct() {
-            let value = expect_type(value.leaf(), ScalarType::Ptr, "copy value");
-            self.copy_nonoverlapping(base, value, T::size_of(), T::align_of());
-        } else if T::size_of() != 0 {
-            let value = expect_type(value.leaf(), T::scalar_type(), "stored value");
-            self.store(value, base, 0);
+        self.store_shape(Shape::of::<T>(), base, value)
+    }
+
+    /// Materialize a value of `shape` to a single ABI leaf: a scalar passes through, a
+    /// value held in memory is its pointer, and a value held in leaves is written to a
+    /// fresh stack slot whose pointer is returned — the storage-pointer form used when a
+    /// value crosses a call/extern boundary or needs an address.
+    pub(crate) fn materialize_shape(
+        &mut self,
+        shape: Shape,
+        size: usize,
+        align: usize,
+        value: Value,
+    ) -> ValueId {
+        match (shape, value) {
+            (Shape::Leaves(_), Value::Leaves(_)) => {
+                let slot = self.alloc_stack_slot(size.max(1) as u32, align.trailing_zeros() as u8);
+                let slot_ptr = self.stack_addr(slot, 0);
+                self.store_shape(shape, slot_ptr, value);
+                slot_ptr
+            }
+            (_, value) => value.leaf(),
         }
     }
 
-    /// Materialize a [`Value`] to a single ABI leaf (a storage pointer for aggregates).
-    /// Scalars pass through; a [`Value::Fat`] slice is written to a fresh 16-byte
-    /// `{ptr, len}` stack slot and its pointer returned — the storage-pointer ABI form used
-    /// when a slice crosses a call/extern boundary. Other canonical memory locations use
-    /// [`Self::store_value`] directly.
-    pub(crate) fn materialize_value(&mut self, value: Value) -> ValueId {
-        match value {
-            Value::Scalar(leaf) => leaf,
-            Value::Fat { ptr, len } => {
-                let slot = self.alloc_stack_slot(16, 3);
-                let slot_ptr = self.stack_addr(slot, 0);
-                self.store(ptr, slot_ptr, 0);
-                self.store(len, slot_ptr, 8);
-                slot_ptr
-            }
+    /// A struct `T` from its fields: `(shape, offset, value)` per field, in field order.
+    /// Held in leaves, it is the fields' leaves; held in memory, a stack slot they are
+    /// stored into.
+    pub(crate) fn struct_value<T: StagedType>(
+        &mut self,
+        fields: &[(Shape, usize, Value)],
+    ) -> Value {
+        if let Shape::Leaves(_) = Shape::of::<T>() {
+            let leaves: Vec<ValueId> = fields
+                .iter()
+                .filter(|(shape, _, _)| *shape != Shape::Unit)
+                .flat_map(|(_, _, value)| value.all_leaves().to_vec())
+                .collect();
+            return Value::leaves(&leaves);
         }
+        let slot = self.alloc_stack_slot(
+            T::size_of().max(1) as u32,
+            T::align_of().trailing_zeros() as u8,
+        );
+        let slot_ptr = self.stack_addr(slot, 0);
+        for &(shape, offset, value) in fields {
+            let field_ptr = self.ptr_offset_const(slot_ptr, offset as i64);
+            self.store_shape(shape, field_ptr, value);
+        }
+        Value::scalar(slot_ptr)
+    }
+
+    pub(crate) fn materialize_value<T: StagedType>(&mut self, value: Value) -> ValueId {
+        self.materialize_shape(Shape::of::<T>(), T::size_of(), T::align_of(), value)
+    }
+}
+
+/// The backend types of the leaves a value of `shape` is held in: a pointer for a value
+/// held in memory, an `I8` placeholder for a unit.
+pub(crate) fn leaf_types(shape: Shape) -> Vec<ScalarType> {
+    match shape {
+        Shape::Unit => vec![ScalarType::I8],
+        Shape::Scalar(ty) => vec![ty],
+        Shape::Leaves(layout) => layout.iter().map(|(ty, _)| ty).collect(),
+        Shape::Memory { .. } => vec![ScalarType::Ptr],
+    }
+}
+
+/// A value of `shape` from its leaves, as [`leaf_types`] lists them.
+pub(crate) fn value_of(shape: Shape, leaves: &[ValueId]) -> Value {
+    match shape {
+        Shape::Leaves(_) => Value::leaves(leaves),
+        _ => Value::scalar(leaves[0]),
     }
 }
 
@@ -1558,8 +1644,8 @@ where
     type Out = ();
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Generate the value and bind it to the variable (fat-aware: a slice reassignment
-        // updates its `(ptr, len)` register pair). `reuse` keeps a stable variable across
+        // Generate the value and bind it to the variable (shape-aware: a value held in
+        // leaves updates one variable per leaf). `reuse` keeps a stable variable across
         // repeated assignments (e.g. in a loop).
         let value = self.expr.codegen(ctx);
         ctx.assign_var::<T>(self.var.id, value, true);

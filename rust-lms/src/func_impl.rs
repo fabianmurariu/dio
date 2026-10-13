@@ -6,7 +6,7 @@
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId};
-use crate::types::{ScalarType, StagedType};
+use crate::types::{ScalarType, Shape, StagedType};
 use std::marker::PhantomData;
 
 // =============================================================================
@@ -18,29 +18,28 @@ use std::marker::PhantomData;
 /// This captures the layout needed to marshal a value through canonical storage.
 #[derive(Clone, Debug)]
 pub struct TypeInfo {
-    /// Backend-neutral scalar representation used after loading a scalar from its
-    /// ABI slot.
-    pub repr: ScalarType,
+    /// How the staged value is held.
+    pub shape: Shape,
     /// Exact runtime size in bytes.
     pub size: u32,
     /// Exact runtime alignment in bytes.
     pub alignment: u32,
-    /// True when staged values are represented by a pointer to their storage.
-    pub is_aggregate: bool,
-    /// True if this is a fat pointer (slice reference).
-    pub is_fat_pointer: bool,
 }
 
 impl TypeInfo {
     /// Create TypeInfo from a StagedType
     pub fn from_staged_type<T: StagedType>() -> Self {
         TypeInfo {
-            repr: T::scalar_type(),
+            shape: Shape::of::<T>(),
             size: T::size_of() as u32,
             alignment: T::align_of() as u32,
-            is_aggregate: T::is_copy_struct(),
-            is_fat_pointer: T::is_fat_pointer(),
         }
+    }
+
+    /// Whether the ABI passes this value as a pointer to storage the caller already holds
+    /// or materializes ([`CompilationContext::materialize_value`]), rather than a scalar.
+    pub(crate) fn by_pointer(&self) -> bool {
+        matches!(self.shape, Shape::Leaves(_) | Shape::Memory { .. })
     }
 
     /// Storage-slot dimensions `(size_bytes, align_shift)` for this value's ABI
@@ -84,7 +83,7 @@ pub fn codegen_call(
     let mut call_args: Vec<ValueId> = Vec::with_capacity(arg_values.len() + 1);
 
     for (arg_value, param_info) in arg_values.iter().zip(param_infos.iter()) {
-        if param_info.is_aggregate {
+        if param_info.by_pointer() {
             call_args.push(*arg_value);
         } else {
             let (size, align_shift) = param_info.slot_dims();
@@ -105,22 +104,14 @@ pub fn codegen_call(
     // Generate the call
     ctx.call(func_ref, &call_args);
 
-    if return_info.is_fat_pointer {
-        ctx.load_fat(result_ptr)
-    } else if return_info.is_aggregate {
-        Value::scalar(result_ptr)
-    } else if return_info.size == 0 {
-        Value::scalar(ctx.get_unit_value())
-    } else {
-        Value::scalar(ctx.load(return_info.repr, result_ptr, 0))
-    }
+    ctx.load_shape(return_info.shape, result_ptr)
 }
 
-/// Codegen one call argument to its ABI leaf: a scalar passes through; a fat (slice) value is
-/// materialized to a `{ptr,len}` stack slot and passed by pointer (the storage-pointer ABI).
-pub(crate) fn materialized_arg(ctx: &mut CompilationContext, arg: &impl Staged) -> ValueId {
+/// Codegen one call argument to its ABI leaf: a scalar passes through; a value held in
+/// leaves is materialized to a stack slot and passed by pointer (the storage-pointer ABI).
+pub(crate) fn materialized_arg<S: Staged>(ctx: &mut CompilationContext, arg: &S) -> ValueId {
     let value = arg.codegen(ctx);
-    ctx.materialize_value(value)
+    ctx.materialize_value::<S::Out>(value)
 }
 
 /// Generate code to get a function's address (for returning function pointers)

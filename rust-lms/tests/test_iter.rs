@@ -906,7 +906,7 @@ fn test_map_and_filter_capture_ctx() {
         let f = compiler.fun1("popcount_of_powers", |ctx, arr: Var<SRef<Slice<u64>>>| {
             arr.staged_iter()
                 .filter(|x| is_power_of_two(ctx, x))
-                .map(|ctx, x| popcount(ctx, x))
+                .map(popcount)
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compilation failed");
@@ -926,7 +926,7 @@ fn test_map_capturing_ctx_through_random_access() {
             |ctx, bits: Var<SRef<Slice<u64>>>, weights: Var<SRef<Slice<u64>>>| {
                 let total = ctx.var(0u64);
                 bits.staged_iter()
-                    .map(|ctx, x| popcount(ctx, x))
+                    .map(popcount)
                     .zip(weights)
                     .for_each(ctx, |ctx, ones, weight| {
                         ctx.store(total, total + ones * weight)

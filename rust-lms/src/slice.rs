@@ -17,7 +17,7 @@
 //!
 //! # Canonical Staged representation
 //!
-//! Within the staged graph, a slice's `codegen` value is `Value::Fat { ptr, len }`.
+//! Within the staged graph, a slice's `codegen` value is `Value::Leaves([ptr, len])`.
 //! Both leaves remain in SSA registers through variables, sub-slicing, and slice ops.
 //! The pair is materialized as a descriptor only when it crosses the private function or
 //! extern ABI, and loaded back into a fat value on entry.
@@ -382,8 +382,8 @@ unsafe impl<T: StagedType> StagedType for SRef<Slice<T>> {
         true // Fat pointer is Copy
     }
 
-    fn is_fat_pointer() -> bool {
-        true // Slice references are fat pointers
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -428,8 +428,8 @@ unsafe impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
         true // ABI-classified as a two-register aggregate; not semantically Copy.
     }
 
-    fn is_fat_pointer() -> bool {
-        true // Mutable slice references are fat pointers
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -626,8 +626,8 @@ unsafe impl<T: StagedType> StagedType for BorrowedSlice<'_, T> {
     fn is_copy_struct() -> bool {
         true
     }
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -664,8 +664,8 @@ unsafe impl<T: StagedType> StagedType for BorrowedSliceMut<'_, T> {
     fn is_copy_struct() -> bool {
         true
     }
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 

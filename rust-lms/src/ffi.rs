@@ -29,7 +29,7 @@ use crate::slice::Slice;
 use crate::staged::{
     CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse,
 };
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -210,8 +210,8 @@ unsafe impl<T: StagedType> StagedType for RawSlice<T> {
         true
     }
 
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -252,8 +252,8 @@ unsafe impl<T: StagedType> StagedType for RawSliceMut<T> {
         true
     }
 
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -961,7 +961,7 @@ where
     let arg_value = arg.codegen(ctx);
     // Materialize to the arg's ABI leaf: a scalar passes through; a fat (slice) value becomes
     // a pointer to a `{ptr,len}` stack slot — exactly the storage a slice extern arg expects.
-    let arg_leaf = ctx.materialize_value(arg_value);
+    let arg_leaf = ctx.materialize_value::<AType>(arg_value);
     push_extern_value::<AType>(ctx, args, arg_leaf);
 }
 
@@ -970,7 +970,7 @@ pub(crate) fn push_extern_value<T: StagedType>(
     args: &mut Vec<ValueId>,
     value: ValueId,
 ) {
-    if T::is_copy_struct() {
+    if matches!(Shape::of::<T>(), Shape::Leaves(_) | Shape::Memory { .. }) {
         args.push(value);
     } else {
         let stack_slot = ctx.alloc_stack_slot(
@@ -999,15 +999,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     args.push(output_ptr);
     ctx.call(func_ref, &args);
 
-    if Ret::is_fat_pointer() {
-        ctx.load_fat(output_ptr)
-    } else if Ret::is_copy_struct() {
-        Value::scalar(output_ptr)
-    } else if Ret::size_of() == 0 {
-        Value::scalar(ctx.get_unit_value())
-    } else {
-        Value::scalar(ctx.load(Ret::scalar_type(), output_ptr, 0))
-    }
+    ctx.load_value::<Ret>(output_ptr)
 }
 
 /// Call an external function with 3 arguments. `Out` is `S::Ret`.

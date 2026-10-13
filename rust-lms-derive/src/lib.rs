@@ -206,6 +206,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
     // a constructor fn named after the field (the public call surface,
     // `PointType::x()`), with generic params inferred from the receiver.
     let staged_types: Vec<Type> = named_fields.iter().map(&resolve_staged_ty).collect();
+    let field_idents: Vec<_> = named_fields.iter().map(|field| &field.ident).collect();
 
     // A struct with a lifetime borrows host data: it gets a lifetime-free staged
     // marker instead of a `StagedType` impl of its own (see `derive_borrowed`).
@@ -369,7 +370,7 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
             };
 
             fn scalar_type() -> ::rust_lms::types::ScalarType {
-                // A derived staged struct is a pointer to its stack slot.
+                // A derived struct held in memory is a pointer to its storage (see `leaves`).
                 ::rust_lms::types::ScalarType::Ptr
             }
 
@@ -387,6 +388,17 @@ pub fn derive_staged_type(input: TokenStream) -> TokenStream {
                 true
             }
 
+            fn leaves() -> ::core::option::Option<::rust_lms::types::Leaves> {
+                let mut leaves = ::rust_lms::types::Leaves::empty();
+                #(
+                    if !leaves.append_field::<#staged_types>(
+                        ::core::mem::offset_of!(#struct_name #ty_generics, #field_idents),
+                    ) {
+                        return ::core::option::Option::None;
+                    }
+                )*
+                ::core::option::Option::Some(leaves)
+            }
         }
 
         unsafe impl #trusted_impl_generics ::rust_lms::types::RuntimeParam for #struct_name #ty_generics #trusted_where_clause {
@@ -522,6 +534,7 @@ fn derive_borrowed(
         static_field_types.push(static_ty);
     }
 
+    let field_indices = 0..named_fields.len();
     let field_names: Vec<_> = named_fields
         .iter()
         .map(|field| field.ident.as_ref().unwrap())
@@ -618,6 +631,10 @@ fn derive_borrowed(
                 #(#field_names: #raw_field_types,)*
             }
 
+            pub(super) const OFFSETS: &[usize] = &[
+                #(::core::mem::offset_of!(Raw, #field_names),)*
+            ];
+
             pub(super) const LAYOUT_VALID: () = {
                 #(#layout_checks)*
                 assert!(::core::mem::size_of::<Raw>() == ::core::mem::size_of::<#host_static>());
@@ -639,7 +656,7 @@ fn derive_borrowed(
             const LAYOUT_VALID: () = #raw_module::LAYOUT_VALID;
 
             fn scalar_type() -> ::rust_lms::types::ScalarType {
-                // A derived staged struct is a pointer to its stack slot.
+                // A derived struct held in memory is a pointer to its storage (see `leaves`).
                 ::rust_lms::types::ScalarType::Ptr
             }
 
@@ -655,6 +672,16 @@ fn derive_borrowed(
 
             fn is_copy_struct() -> bool {
                 true
+            }
+
+            fn leaves() -> ::core::option::Option<::rust_lms::types::Leaves> {
+                let mut leaves = ::rust_lms::types::Leaves::empty();
+                #(
+                    if !leaves.append_field::<#staged_types>(#raw_module::OFFSETS[#field_indices]) {
+                        return ::core::option::Option::None;
+                    }
+                )*
+                ::core::option::Option::Some(leaves)
             }
         }
 

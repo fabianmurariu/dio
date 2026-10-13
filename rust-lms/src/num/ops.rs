@@ -795,10 +795,21 @@ where
     type Out = Out;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let cond = self.condition.codegen(ctx);
+        let cond = self.condition.codegen(ctx).leaf();
         let true_val = self.if_true.codegen(ctx);
         let false_val = self.if_false.codegen(ctx);
-        Value::scalar(ctx.select(cond.leaf(), true_val.leaf(), false_val.leaf()))
+        match (true_val, false_val) {
+            (Value::Scalar(a), Value::Scalar(b)) => Value::scalar(ctx.select(cond, a, b)),
+            (a, b) => {
+                let leaves: Vec<_> = a
+                    .all_leaves()
+                    .iter()
+                    .zip(b.all_leaves())
+                    .map(|(&a, &b)| ctx.select(cond, a, b))
+                    .collect();
+                Value::leaves(&leaves)
+            }
+        }
     }
 }
 

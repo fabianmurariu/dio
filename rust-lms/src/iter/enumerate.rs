@@ -44,8 +44,7 @@ where
     /// Visit every `(index, element)` pair.
     ///
     /// Shadows [`StagedIterator::for_each`] with a three-argument consumer, so
-    /// the index and the element arrive as separate vars rather than through a
-    /// pair that would round-trip a stack slot.
+    /// the index and the element arrive as separate vars rather than as a pair.
     pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
         F: FnOnce(&Ctx, Var<u64>, Var<I::Item>),

@@ -77,6 +77,96 @@ impl ScalarType {
     }
 }
 
+/// The most scalar leaves a value is held in, in registers, before it is held in memory.
+pub const MAX_LEAVES: usize = 4;
+
+/// The scalar leaves of a runtime value and their byte offsets, in memory order: one for
+/// a scalar, `(ptr, len)` for a slice, the flattened fields of a small struct.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Leaves {
+    leaves: [(ScalarType, u32); MAX_LEAVES],
+    len: u8,
+}
+
+impl Leaves {
+    pub const fn empty() -> Self {
+        Self {
+            leaves: [(ScalarType::I8, 0); MAX_LEAVES],
+            len: 0,
+        }
+    }
+
+    pub const fn one(ty: ScalarType, offset: u32) -> Self {
+        let mut leaves = Self::empty();
+        leaves.leaves[0] = (ty, offset);
+        leaves.len = 1;
+        leaves
+    }
+
+    /// A slice's `(data ptr, len)`.
+    pub const fn fat() -> Self {
+        let mut leaves = Self::one(ScalarType::Ptr, 0);
+        leaves.leaves[1] = (ScalarType::I64, 8);
+        leaves.len = 2;
+        leaves
+    }
+
+    /// Appends the leaves of a `T` stored at `offset`; false when `T` is held in memory or
+    /// the leaves would exceed [`MAX_LEAVES`].
+    pub fn append_field<T: StagedType>(&mut self, offset: usize) -> bool {
+        let Some(field) = T::leaves() else {
+            return false;
+        };
+        if self.len() + field.len() > MAX_LEAVES {
+            return false;
+        }
+        for (ty, at) in field.iter() {
+            self.leaves[self.len as usize] = (ty, at + offset as u32);
+            self.len += 1;
+        }
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ScalarType, u32)> + '_ {
+        self.leaves[..self.len()].iter().copied()
+    }
+}
+
+/// How a staged value of a type is held during codegen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shape {
+    /// A zero-sized value.
+    Unit,
+    /// One scalar leaf.
+    Scalar(ScalarType),
+    /// Several scalar leaves, or the leaves of a struct: registers, not memory.
+    Leaves(Leaves),
+    /// A pointer to the value's storage.
+    Memory { size: usize, align: usize },
+}
+
+impl Shape {
+    pub fn of<T: StagedType>() -> Self {
+        match T::leaves() {
+            None => Shape::Memory {
+                size: T::size_of(),
+                align: T::align_of(),
+            },
+            Some(leaves) if T::is_copy_struct() || leaves.len() > 1 => Shape::Leaves(leaves),
+            Some(_) if T::size_of() == 0 => Shape::Unit,
+            Some(_) => Shape::Scalar(T::scalar_type()),
+        }
+    }
+}
+
 /// Backend-neutral integer comparison predicate (see [`ScalarType`]).
 ///
 /// The staged type system names this instead of Cranelift's `IntCC`; each backend
@@ -352,17 +442,23 @@ pub unsafe trait StagedType {
         Self::size_of()
     }
 
-    /// Returns true when staged values use an indirect aggregate
-    /// representation for field access and exact byte copies.
+    /// Returns true for a struct: its staged values are its fields' leaves, or a pointer
+    /// to its storage when [`Self::leaves`] is `None`.
     fn is_copy_struct() -> bool {
         false
     }
 
-    /// Returns true if this is a fat pointer (e.g., slice reference).
-    /// Fat pointers are 2 x i64 (ptr, len) that can be stored in separate
-    /// registers instead of a stack slot for better performance.
-    fn is_fat_pointer() -> bool {
-        false
+    /// The scalar leaves a staged value of this type is held in, with their byte offsets
+    /// in the runtime value; `None` for a value held by a pointer to its storage. See
+    /// [`Shape::of`].
+    fn leaves() -> Option<Leaves> {
+        if Self::is_copy_struct() {
+            None
+        } else if Self::size_of() == 0 {
+            Some(Leaves::empty())
+        } else {
+            Some(Leaves::one(Self::scalar_type(), 0))
+        }
     }
 }
 

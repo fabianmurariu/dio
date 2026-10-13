@@ -147,8 +147,8 @@ pub mod prelude {
         field_mut, field_path, load_field_mut, load_field_unchecked, split_fields_mut,
     };
     pub use crate::types::{
-        ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, RuntimeParam, RuntimeResult,
-        ScalarType, StagedType,
+        ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, Leaves, RuntimeParam, RuntimeResult,
+        ScalarType, Shape, StagedType,
     };
     // Re-export derive macro
     #[cfg(feature = "derive")]

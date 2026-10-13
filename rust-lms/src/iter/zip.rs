@@ -6,9 +6,9 @@ use rust_lms_derive::StagedType;
 use crate::func::Ctx;
 use crate::label::Label;
 use crate::num::{add, ge};
-use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
+use crate::staged::{CompilationContext, Staged, Value, Var};
 use crate::r#struct::{Field, LoadField, load_field_unchecked};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, Shape, StagedType};
 
 use super::traits::{Close, Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 
@@ -185,30 +185,7 @@ where
         // SAFETY: the zip length is the minimum of both source lengths.
         let second = unsafe { IndexedSource::get_at(self.other.clone(), self.index) }.codegen(ctx);
 
-        let align_shift = Self::Out::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
-        let slot_ptr = ctx.stack_addr(stack_slot, 0);
-
-        store_value::<<I as IndexedSource>::Item>(
-            ctx,
-            first,
-            slot_ptr,
-            ZipItemType::__field_first::<
-                <I as IndexedSource>::Item,
-                <S as IndexedSource>::Item,
-            >::OFFSET as i32,
-        );
-        store_value::<<S as IndexedSource>::Item>(
-            ctx,
-            second,
-            slot_ptr,
-            ZipItemType::__field_second::<
-                <I as IndexedSource>::Item,
-                <S as IndexedSource>::Item,
-            >::OFFSET as i32,
-        );
-
-        Value::scalar(slot_ptr)
+        pair::<<I as IndexedSource>::Item, <S as IndexedSource>::Item>(ctx, first, second)
     }
 }
 
@@ -239,9 +216,8 @@ impl<A: Clone, B: Clone> Clone for Pair<A, B> {
 
 impl<A: Copy, B: Copy> Copy for Pair<A, B> {}
 
-// SAFETY: writes both fields at their declared offsets into a stack slot sized
-// and aligned for `ZipItem`, and yields that slot's address — the indirect
-// representation `is_copy_struct` declares.
+// SAFETY: yields a `ZipItem` in the shape it declares: both fields' leaves, or a stack
+// slot sized and aligned for it with both fields at their declared offsets.
 unsafe impl<A, B> Staged for Pair<A, B>
 where
     A: Staged,
@@ -255,35 +231,28 @@ where
         let first = self.first.codegen(ctx);
         let second = self.second.codegen(ctx);
 
-        let align_shift = Self::Out::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
-        let slot_ptr = ctx.stack_addr(stack_slot, 0);
-
-        store_value::<A::Out>(
-            ctx,
-            first,
-            slot_ptr,
-            ZipItemType::__field_first::<A::Out, B::Out>::OFFSET as i32,
-        );
-        store_value::<B::Out>(
-            ctx,
-            second,
-            slot_ptr,
-            ZipItemType::__field_second::<A::Out, B::Out>::OFFSET as i32,
-        );
-
-        Value::scalar(slot_ptr)
+        pair::<A::Out, B::Out>(ctx, first, second)
     }
 }
 
-fn store_value<T: StagedType>(
+/// A `ZipItem<A, B>` of two values.
+fn pair<A: CopyType, B: CopyType>(
     ctx: &mut CompilationContext,
-    value: Value,
-    ptr: ValueId,
-    offset: i32,
-) {
-    let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
-    ctx.store_value::<T>(destination, value);
+    first: Value,
+    second: Value,
+) -> Value {
+    ctx.struct_value::<ZipItem<A, B>>(&[
+        (
+            Shape::of::<A>(),
+            ZipItemType::__field_first::<A, B>::OFFSET,
+            first,
+        ),
+        (
+            Shape::of::<B>(),
+            ZipItemType::__field_second::<A, B>::OFFSET,
+            second,
+        ),
+    ])
 }
 
 impl<A, B> StagedIterator for Zip<A, B>
@@ -443,8 +412,8 @@ where
     /// Drive a loop over `(a_elem, b_elem)` pairs.
     ///
     /// Shadows [`StagedIterator::for_each`] with a three-argument consumer: the
-    /// two elements arrive as separate vars, so no `ZipItem` is written to a
-    /// stack slot and read back. Iteration stops at the shorter side.
+    /// two elements arrive as separate vars rather than as a `ZipItem`. Iteration
+    /// stops at the shorter side.
     pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
         F: FnOnce(&Ctx, Var<A::Item>, Var<B::Item>),

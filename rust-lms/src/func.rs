@@ -19,10 +19,8 @@
 
 use crate::cranelift::CraneliftBackend;
 use crate::label::{Again, Label};
-use crate::staged::{
-    CompilationContext, LifetimeErased, Staged, Value, ValueId, Var, VarValue, assign,
-};
-use crate::types::{RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use crate::staged::{CompilationContext, LifetimeErased, Staged, Value, ValueId, Var, assign};
+use crate::types::{RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
 use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
@@ -224,15 +222,14 @@ impl Ctx {
         let id = v.id;
         // Layout comes from the erased twin — identical to `E::Out`'s, and read
         // here so `E::Out` never enters the `'static` closure.
-        let (is_fat, scalar, name) = (
-            E::ErasedOut::is_fat_pointer(),
-            E::ErasedOut::scalar_type(),
+        let (shape, name) = (
+            Shape::of::<E::ErasedOut>(),
             std::any::type_name::<E::ErasedOut>(),
         );
         let expr = expr.erase_lifetime();
         self.push(Box::new(move |ctx| {
             let value = expr.codegen(ctx);
-            ctx.assign_var_layout(id, value, is_fat, scalar, name, true);
+            ctx.assign_var_layout(id, value, shape, name, true);
         }));
         v
     }
@@ -765,68 +762,16 @@ pub(crate) fn emit_function_body(
     for (index, info) in param_infos.iter().enumerate() {
         let var_id = param_var_ids[index];
         let storage_ptr = params[index];
-
-        if info.is_fat_pointer {
-            // A slice arrives as a `{ptr, len}` pair in memory; load it once into a register
-            // pair — that *is* the slice's fat value (read back by `resolve_var`). The data
-            // pointer is `Ptr` (an `llvm.ptr` on MLIR); `len` is `I64`. This memory→fat load
-            // is the one boundary where a slice touches memory on the way in.
-            let ptr_value = ctx.load(ScalarType::Ptr, storage_ptr, 0);
-            let len_value = ctx.load(ScalarType::I64, storage_ptr, 8);
-            let ptr_var = ctx.declare_var(ScalarType::Ptr);
-            let len_var = ctx.declare_var(ScalarType::I64);
-            ctx.def_var(ptr_var, ptr_value);
-            ctx.def_var(len_var, len_value);
-            ctx.variables.insert(
-                var_id,
-                VarValue::Fat {
-                    ptr: ptr_var,
-                    len: len_var,
-                },
-            );
-        } else if info.is_aggregate {
-            // A non-slice aggregate is represented by a pointer to its storage.
-            let param_var = ctx.declare_var(ScalarType::Ptr);
-            ctx.def_var(param_var, storage_ptr);
-            ctx.variables.insert(var_id, VarValue::Scalar(param_var));
-        } else {
-            let param_value = if info.size == 0 {
-                ctx.iconst(ScalarType::I8, 0)
-            } else {
-                ctx.load(info.repr, storage_ptr, 0)
-            };
-            let param_var = ctx.declare_var(info.repr);
-            ctx.def_var(param_var, param_value);
-            ctx.variables.insert(var_id, VarValue::Scalar(param_var));
-        }
+        // A value held in memory stays at its storage; any other is loaded once into its
+        // leaves — the one boundary where an argument touches memory on the way in.
+        let value = ctx.load_shape(info.shape, storage_ptr);
+        ctx.assign_var_layout(var_id, value, info.shape, "parameter", false);
     }
 
     let result = body(ctx);
 
     let output_ptr = params[param_infos.len()];
-    if return_info.is_fat_pointer {
-        // A returned slice is a fat value; write its (ptr, len) into the output `{ptr,len}`.
-        let (ptr, len) = result.parts();
-        ctx.store(ptr, output_ptr, 0);
-        ctx.store(len, output_ptr, 8);
-    } else if return_info.is_aggregate {
-        ctx.copy_nonoverlapping(
-            output_ptr,
-            result.leaf(),
-            return_info.size as usize,
-            return_info.alignment as usize,
-        );
-    } else if return_info.size != 0 {
-        let result = result.leaf();
-        assert_eq!(
-            result.scalar_type(),
-            return_info.repr,
-            "function result: expected {:?}, found {:?}",
-            return_info.repr,
-            result.scalar_type()
-        );
-        ctx.store(result, output_ptr, 0);
-    }
+    ctx.store_shape(return_info.shape, output_ptr, result);
 }
 
 /// The central coordinator for staged computations.
@@ -923,8 +868,8 @@ impl Compiler {
     /// # Struct Pass-by-Value
     ///
     /// If `A` is a `#[repr(C)] Copy` struct, the function will accept the struct
-    /// by value at the Rust level (`fn(Point)`), but internally store it in a
-    /// stack slot for field access.
+    /// by value at the Rust level (`fn(Point)`) and hold it as its fields' leaves, or
+    /// by a pointer to its storage when it has more than [`MAX_LEAVES`](crate::types::MAX_LEAVES).
     pub fn fun1<A, OUT, F, BODY>(&mut self, name: &str, body_fn: F) -> FunRef1<A, OUT>
     where
         A: StagedType,
