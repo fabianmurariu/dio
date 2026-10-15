@@ -248,7 +248,9 @@ fn test_iter_zip_dot_product() {
             |ctx, a: Var<SRef<Slice<f64>>>, b: Var<SRef<Slice<f64>>>| {
                 let acc = ctx.var(0.0f64);
 
-                a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                    let ai = ctx.bind(pair.first());
+                    let bi = ctx.bind(pair.second());
                     ctx.store(acc, acc + ai * bi);
                 });
 
@@ -273,7 +275,9 @@ fn test_iter_zip_stops_at_shorter_secondary() {
             "zip_short_secondary",
             |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
                 let total = ctx.var(0i64);
-                a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                    let ai = ctx.bind(pair.first());
+                    let bi = ctx.bind(pair.second());
                     ctx.store(total, total + ai + bi);
                 });
                 total
@@ -312,7 +316,9 @@ fn test_iter_zip_element_wise_sum() {
             |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
                 let total = ctx.var(0i64);
 
-                a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+                a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                    let ai = ctx.bind(pair.first());
+                    let bi = ctx.bind(pair.second());
                     ctx.store(total, total + ai + bi);
                 });
 
@@ -388,7 +394,9 @@ fn test_iter_zip_is_indexed_source_for_nested_zip() {
                 a.staged_iter()
                     .zip(b)
                     .zip(c)
-                    .for_each(ctx, move |ctx, ab, c_value| {
+                    .for_each(ctx, move |ctx, pair| {
+                        let ab = ctx.bind(pair.first());
+                        let c_value = ctx.bind(pair.second());
                         let a_value = ctx.bind(ab.first());
                         let b_value = ctx.bind(ab.second());
                         ctx.store(total, total + a_value + b_value + c_value);
@@ -674,7 +682,9 @@ fn test_iter_enumerate_weighted_sum() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("weighted", |ctx, a: Var<SRef<Slice<i64>>>| {
             let acc = ctx.var(0i64);
-            a.staged_iter().enumerate().for_each(ctx, move |ctx, i, x| {
+            a.staged_iter().enumerate().for_each(ctx, move |ctx, pair| {
+                let i = ctx.bind(pair.first());
+                let x = ctx.bind(pair.second());
                 ctx.store(acc, acc + x * int_cast::<i64, u64, _>(i));
             });
             acc
@@ -717,7 +727,8 @@ fn test_iter_enumerate_after_filter_renumbers() {
             a.staged_iter()
                 .filter(|x| gt(x, 15i64))
                 .enumerate()
-                .for_each(ctx, move |ctx, i, _x| {
+                .for_each(ctx, move |ctx, pair| {
+                    let i = ctx.bind(pair.first());
                     ctx.store(acc, acc + i);
                 });
             acc
@@ -928,7 +939,9 @@ fn test_map_capturing_ctx_through_random_access() {
                 bits.staged_iter()
                     .map(popcount)
                     .zip(weights)
-                    .for_each(ctx, |ctx, ones, weight| {
+                    .for_each(ctx, |ctx, pair| {
+                        let ones = ctx.bind(pair.first());
+                        let weight = ctx.bind(pair.second());
                         ctx.store(total, total + ones * weight)
                     });
                 total

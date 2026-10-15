@@ -10,7 +10,7 @@ use crate::staged::{CompilationContext, Staged, Value, Var};
 use crate::r#struct::{Field, LoadField, load_field_unchecked};
 use crate::types::{CopyType, Shape, StagedType};
 
-use super::traits::{Close, Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
+use super::traits::{Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 
 /// Element yielded by a zipped iterator.
 ///
@@ -298,36 +298,6 @@ pub struct ZipCursor<A, B> {
     shared: Option<SharedIndex>,
 }
 
-/// One zip step: both elements, and both sides' closes.
-type ZipStep<A, B> = (
-    (Var<<A as Cursor>::Item>, Var<<B as Cursor>::Item>),
-    (<A as Cursor>::Close, <B as Cursor>::Close),
-);
-
-impl<A: Cursor, B: Cursor> ZipCursor<A, B> {
-    /// One step, yielding both elements as separate vars (no pair slot).
-    fn next_parts(self, ctx: &Ctx, done: Label<'_>) -> ZipStep<A, B> {
-        match self.shared {
-            Some(SharedIndex { len, pos }) => {
-                ctx.exit_if(ge(pos, len), done);
-                // SAFETY: `pos < len = min(len_a, len_b)`.
-                let (x, ca) = unsafe { self.a.next_at(ctx, pos) };
-                // SAFETY: as above.
-                let (y, cb) = unsafe { self.b.next_at(ctx, pos) };
-                ctx.store(pos, add(pos, 1u64));
-                ((x, y), (ca, cb))
-            }
-            None => {
-                // `a` first: if `b` is then exhausted, `a`'s element is dropped,
-                // as in `std::iter::Zip`.
-                let (x, ca) = self.a.next(ctx, done);
-                let (y, cb) = self.b.next(ctx, done);
-                ((x, y), (ca, cb))
-            }
-        }
-    }
-}
-
 impl<A, B> Cursor for ZipCursor<A, B>
 where
     A: Cursor,
@@ -339,8 +309,24 @@ where
     type Close = (A::Close, B::Close);
 
     fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
-        let ((x, y), close) = self.next_parts(ctx, done);
-        (ctx.bind(Pair::new(x, y)), close)
+        match self.shared {
+            Some(SharedIndex { len, pos }) => {
+                ctx.exit_if(ge(pos, len), done);
+                // SAFETY: `pos < len = min(len_a, len_b)`.
+                let (x, ca) = unsafe { self.a.next_at(ctx, pos) };
+                // SAFETY: as above.
+                let (y, cb) = unsafe { self.b.next_at(ctx, pos) };
+                ctx.store(pos, add(pos, 1u64));
+                (ctx.bind(Pair::new(x, y)), (ca, cb))
+            }
+            None => {
+                // `a` first: if `b` is then exhausted, `a`'s element is dropped,
+                // as in `std::iter::Zip`.
+                let (x, ca) = self.a.next(ctx, done);
+                let (y, cb) = self.b.next(ctx, done);
+                (ctx.bind(Pair::new(x, y)), (ca, cb))
+            }
+        }
     }
 
     fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
@@ -399,32 +385,5 @@ where
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         ZipGetAt::new(self.iter, self.other, index)
-    }
-}
-
-impl<A, B> Zip<A, B>
-where
-    A: StagedIterator,
-    B: StagedIterator,
-    A::Item: CopyType + 'static,
-    B::Item: CopyType + 'static,
-{
-    /// Drive a loop over `(a_elem, b_elem)` pairs.
-    ///
-    /// Shadows [`StagedIterator::for_each`] with a three-argument consumer: the
-    /// two elements arrive as separate vars rather than as a `ZipItem`. Iteration
-    /// stops at the shorter side.
-    pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
-    where
-        F: FnOnce(&Ctx, Var<A::Item>, Var<B::Item>),
-    {
-        let cursor = StagedIterator::open(self, ctx);
-        let mut close = None;
-        ctx.iterate(|ctx, done| {
-            let ((x, y), c) = cursor.next_parts(ctx, done);
-            close = Some(c);
-            consumer(ctx, x, y);
-        });
-        close.expect("the step is staged exactly once").close(ctx);
     }
 }

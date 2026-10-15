@@ -74,7 +74,9 @@ fn sum_skips_nulls_via_is_valid() {
         col.values()
             .staged_iter()
             .enumerate()
-            .for_each(ctx, move |ctx, i, v| {
+            .for_each(ctx, move |ctx, pair| {
+                let i = ctx.bind(pair.first());
+                let v = ctx.bind(pair.second());
                 // SAFETY: `i` is a position the iterator produced, so it is in
                 // range for this column's validity bitmap.
                 let valid = ctx.bind(unsafe { col.validity().is_valid(i) });

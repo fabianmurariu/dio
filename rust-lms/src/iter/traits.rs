@@ -302,9 +302,7 @@ pub trait StagedIterator: Sized {
 
     /// Pair each element with its zero-based position.
     ///
-    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
-    /// element separately; used through the combinators the item is a
-    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
+    /// The item is a `ZipItem<u64, _>`, read with `.first()`/`.second()`.
     fn enumerate(self) -> super::Enumerate<Self> {
         super::Enumerate::new(self)
     }

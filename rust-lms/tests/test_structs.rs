@@ -188,7 +188,9 @@ fn test_adj_rows_enumerate_degrees() {
             |ctx, graph: Var<FfiAdjListStaged>, out: Var<SRefMut<Slice<u64>>>| {
                 // SAFETY: the host passes a valid CSR.
                 let graph = unsafe { AdjListStaged::new(ctx, graph) };
-                graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+                graph.rows().enumerate().for_each(ctx, |ctx, pair| {
+                    let node = ctx.bind(pair.first());
+                    let row = ctx.bind(pair.second());
                     // SAFETY: `out` has one slot per node.
                     ctx.emit(unsafe { out.set_unchecked(node, row.len()) });
                 });
@@ -217,7 +219,9 @@ fn test_adj_rows_nested_iteration() {
             // SAFETY: the host passes a valid CSR.
             let graph = unsafe { AdjListStaged::new(ctx, graph) };
             let total = ctx.var(0u64);
-            graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+            graph.rows().enumerate().for_each(ctx, |ctx, pair| {
+                let node = ctx.bind(pair.first());
+                let row = ctx.bind(pair.second());
                 let row_sum = row.staged_iter().sum(ctx);
                 ctx.store(total, total + node * row_sum);
             });
@@ -255,7 +259,9 @@ fn test_adj_rows_zip_random_access() {
                 // SAFETY: the host passes a valid CSR.
                 let graph = unsafe { AdjListStaged::new(ctx, graph) };
                 let total = ctx.var(0u64);
-                graph.rows().zip(weights).for_each(ctx, |ctx, row, weight| {
+                graph.rows().zip(weights).for_each(ctx, |ctx, pair| {
+                    let row = ctx.bind(pair.first());
+                    let weight = ctx.bind(pair.second());
                     ctx.store(total, total + row.len() * weight);
                 });
                 total

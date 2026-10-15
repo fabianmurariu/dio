@@ -206,10 +206,6 @@ unsafe impl<T: StagedType> StagedType for RawSlice<T> {
         std::mem::align_of::<FatSlice<()>>()
     }
 
-    fn is_copy_struct() -> bool {
-        true
-    }
-
     fn leaves() -> Option<crate::types::Leaves> {
         Some(crate::types::Leaves::fat())
     }
@@ -246,10 +242,6 @@ unsafe impl<T: StagedType> StagedType for RawSliceMut<T> {
 
     fn align_of() -> usize {
         std::mem::align_of::<FatSliceMut<()>>()
-    }
-
-    fn is_copy_struct() -> bool {
-        true
     }
 
     fn leaves() -> Option<crate::types::Leaves> {

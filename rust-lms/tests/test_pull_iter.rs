@@ -140,7 +140,9 @@ fn zip_slice_with_extern_three_arg_consumer() {
             let acc = ctx.var(0u64);
             // SAFETY: a fresh `DynIter<u64>` handle from the producer.
             let nodes = unsafe { it.iter(call_extern1(nodes, g)) };
-            w.staged_iter().zip(nodes).for_each(ctx, move |ctx, wi, n| {
+            w.staged_iter().zip(nodes).for_each(ctx, move |ctx, pair| {
+                let wi = ctx.bind(pair.first());
+                let n = ctx.bind(pair.second());
                 ctx.store(acc, acc * 100u64 + wi * n);
             });
             acc
@@ -188,7 +190,9 @@ fn zip_filtered_with_indexed() {
             a.staged_iter()
                 .filter(|x| eq(rem(x, 2u64), 0u64))
                 .zip(b)
-                .for_each(ctx, move |ctx, x, y| {
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
                     ctx.store(acc, acc * 100u64 + x * y);
                 });
             acc
@@ -398,7 +402,9 @@ fn skip_and_take_keep_the_shared_counter_in_zip() {
             a.staged_iter()
                 .skip(1u64)
                 .zip(b.staged_iter().take(2u64))
-                .for_each(ctx, move |ctx, x, y| {
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
                     ctx.store(acc, acc * 100u64 + x * y);
                 });
             acc
@@ -497,7 +503,11 @@ fn flat_map_pulled_by_zip() {
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .zip(w)
-                .for_each(ctx, move |ctx, x, y| ctx.store(acc, acc * 100u64 + x * y));
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
+                    ctx.store(acc, acc * 100u64 + x * y);
+                });
             acc
         });
         let compiled = compiler.compile(f).expect("compile");

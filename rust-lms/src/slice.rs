@@ -378,10 +378,6 @@ unsafe impl<T: StagedType> StagedType for SRef<Slice<T>> {
         8
     }
 
-    fn is_copy_struct() -> bool {
-        true // Fat pointer is Copy
-    }
-
     fn leaves() -> Option<crate::types::Leaves> {
         Some(crate::types::Leaves::fat())
     }
@@ -422,10 +418,6 @@ unsafe impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
 
     fn align_of() -> usize {
         8
-    }
-
-    fn is_copy_struct() -> bool {
-        true // ABI-classified as a two-register aggregate; not semantically Copy.
     }
 
     fn leaves() -> Option<crate::types::Leaves> {
@@ -623,9 +615,6 @@ unsafe impl<T: StagedType> StagedType for BorrowedSlice<'_, T> {
     fn align_of() -> usize {
         8
     }
-    fn is_copy_struct() -> bool {
-        true
-    }
     fn leaves() -> Option<crate::types::Leaves> {
         Some(crate::types::Leaves::fat())
     }
@@ -660,9 +649,6 @@ unsafe impl<T: StagedType> StagedType for BorrowedSliceMut<'_, T> {
     }
     fn align_of() -> usize {
         8
-    }
-    fn is_copy_struct() -> bool {
-        true
     }
     fn leaves() -> Option<crate::types::Leaves> {
         Some(crate::types::Leaves::fat())

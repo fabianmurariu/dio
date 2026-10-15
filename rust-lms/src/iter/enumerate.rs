@@ -7,16 +7,11 @@ use crate::types::CopyType;
 
 use crate::label::Label;
 
-use super::traits::{Cursor, StagedIterator, drive};
+use super::traits::{Cursor, StagedIterator};
 use super::zip::{Pair, ZipItem};
 
-/// Yields each element together with its zero-based position.
-///
-/// Like [`Zip`](super::Zip) it has two paths. The inherent
-/// [`for_each`](Self::for_each) hands the index and the element over as separate
-/// vars and materialises no pair at all; the [`StagedIterator`] impl reports
-/// `Item = ZipItem<u64, _>` so `enumerate` still composes with `map`, `filter`
-/// and the terminals.
+/// Yields each element together with its zero-based position, as a
+/// `ZipItem<u64, _>`.
 pub struct Enumerate<I> {
     iter: I,
 }
@@ -34,27 +29,6 @@ impl<I: Copy> Copy for Enumerate<I> {}
 impl<I> Enumerate<I> {
     pub(super) fn new(iter: I) -> Self {
         Enumerate { iter }
-    }
-}
-
-impl<I> Enumerate<I>
-where
-    I: StagedIterator,
-{
-    /// Visit every `(index, element)` pair.
-    ///
-    /// Shadows [`StagedIterator::for_each`] with a three-argument consumer, so
-    /// the index and the element arrive as separate vars rather than as a pair.
-    pub fn for_each<F>(self, ctx: &Ctx, consumer: F)
-    where
-        F: FnOnce(&Ctx, Var<u64>, Var<I::Item>),
-    {
-        let index = ctx.var(0u64);
-        let cursor = self.iter.open(ctx);
-        drive(cursor, ctx, move |ctx, elem| {
-            consumer(ctx, index, elem);
-            ctx.store(index, add(index, 1u64));
-        });
     }
 }
 

@@ -207,26 +207,12 @@ fn zip_iter(backend: JitBackend) -> SlicePairFn {
         "zip_iter",
         |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
             let acc = ctx.var(0i64);
-            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                let ai = ctx.bind(pair.first());
+                let bi = ctx.bind(pair.second());
                 ctx.store(acc, add(acc, mul(ai, bi)));
             });
             acc
-        },
-    );
-    let compiled = compiler.compile(f).expect("compile");
-    Box::new(move |a, b| compiled.as_fn().call(a, b))
-}
-
-/// The zip consumed as `ZipItem`s, as a generic consumer (`map`, `sum`) sees it.
-fn zip_pair(backend: JitBackend) -> SlicePairFn {
-    let mut compiler = Compiler::new().with_backend(backend);
-    let f = compiler.fun2(
-        "zip_pair",
-        |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
-            StagedIterator::map(a.staged_iter().zip(b), |_, pair| {
-                mul(pair.first(), pair.second())
-            })
-            .sum(ctx)
         },
     );
     let compiled = compiler.compile(f).expect("compile");
@@ -345,30 +331,20 @@ fn bench_zip(c: &mut Criterion) {
     group.measurement_time(Duration::from_secs(3));
     group.sample_size(30);
 
-    let built: Vec<(&str, SlicePairFn, SlicePairFn, SlicePairFn)> = backends()
+    let built: Vec<(&str, SlicePairFn, SlicePairFn)> = backends()
         .into_iter()
-        .map(|(b, backend)| (b, zip_manual(backend), zip_iter(backend), zip_pair(backend)))
+        .map(|(b, backend)| (b, zip_manual(backend), zip_iter(backend)))
         .collect();
 
     for &size in SIZES {
         let (a, b) = (data(size, 1), data(size, 2));
         group.throughput(Throughput::Elements(size as u64));
 
-        for (backend, m, it, pair) in &built {
+        for (backend, m, it) in &built {
             assert_eq!(
                 m(&a[..], &b[..]),
                 it(&a[..], &b[..]),
                 "zip_dot/{backend}: results differ"
-            );
-            assert_eq!(
-                m(&a[..], &b[..]),
-                pair(&a[..], &b[..]),
-                "zip_dot/{backend}: pair results differ"
-            );
-            group.bench_with_input(
-                BenchmarkId::new(format!("{backend}/pair"), size),
-                &size,
-                |bch, _| bch.iter(|| black_box(pair(black_box(&a[..]), black_box(&b[..])))),
             );
             group.bench_with_input(
                 BenchmarkId::new(format!("{backend}/manual"), size),
