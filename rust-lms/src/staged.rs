@@ -425,6 +425,8 @@ pub trait Backend {
     fn sextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn uextend(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn ireduce(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    /// The `I128` whose low half is `lo` and high half is `hi`, both `I64`.
+    fn iconcat(&mut self, lo: ValueId, hi: ValueId) -> ValueId;
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
@@ -454,6 +456,8 @@ pub trait Backend {
         else_block: BlockHandle,
         else_args: &[ValueId],
     );
+    /// Jump to `targets[index]`, or to `default` when `index >= targets.len()`.
+    fn br_table(&mut self, index: ValueId, default: BlockHandle, targets: &[BlockHandle]);
     // variables
     fn declare_var(&mut self, ty: ScalarType) -> VarHandle;
     fn def_var(&mut self, var: VarHandle, val: ValueId);
@@ -707,6 +711,14 @@ impl<'c> CompilationContext<'c> {
     }
 
     #[doc(hidden)]
+    pub fn iconcat(&mut self, lo: ValueId, hi: ValueId) -> ValueId {
+        expect_type(lo, ScalarType::I64, "iconcat");
+        expect_type(hi, ScalarType::I64, "iconcat");
+        let result = self.backend.iconcat(lo, hi);
+        expect_type(result, ScalarType::I128, "iconcat")
+    }
+
+    #[doc(hidden)]
     pub fn fcvt_from_sint(&mut self, to: ScalarType, value: ValueId) -> ValueId {
         assert!(
             value.scalar_type().is_integer() && to.is_float(),
@@ -869,6 +881,12 @@ impl<'c> CompilationContext<'c> {
         self.check_block_args("brif else", else_block, else_args);
         self.backend
             .brif(cond, then_block, then_args, else_block, else_args);
+    }
+
+    #[doc(hidden)]
+    pub fn br_table(&mut self, index: ValueId, default: BlockHandle, targets: &[BlockHandle]) {
+        expect_type(index, ScalarType::I32, "br_table");
+        self.backend.br_table(index, default, targets);
     }
 
     #[doc(hidden)]

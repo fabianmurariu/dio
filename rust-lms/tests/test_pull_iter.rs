@@ -640,6 +640,40 @@ fn merge_extern_with_slice_and_stop_early() {
 }
 
 #[test]
+fn kmerge_of_extern_streams_releases_every_part() {
+    // Two extern parts; a downstream `take_while` stops mid-merge, and both handles are
+    // released, as when the merge runs to the end.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("kmerge", move |ctx, g: Var<G>, t1: Var<u64>| {
+            let acc = ctx.var(0u64);
+            let parts = (0..2)
+                .map(|_| {
+                    let handle = ctx.bind(call_extern1(nodes, g));
+                    // SAFETY: a fresh `DynIter<u64>` handle from the producer.
+                    unsafe { it.iter(handle) }
+                })
+                .collect();
+            kmerge_by(parts, |_, x| x)
+                .take_while(move |t| lt(t, t1))
+                .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, 5), 1144);
+        assert_all_dropped(&g, 2);
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, 100), 114488);
+        assert_all_dropped(&g, 2);
+    });
+}
+
+#[test]
 fn three_way_merge() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun3("merge3", |ctx, a: Var<S>, b: Var<S>, c: Var<S>| {

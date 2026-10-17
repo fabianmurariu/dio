@@ -93,7 +93,7 @@ pub mod prelude {
         call_extern0_unchecked, call_extern1, call_extern1_unchecked, call_extern2,
         call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
         call_extern4_unchecked, slice_from_raw_parts, slice_from_raw_parts_mut, stack_alloc,
-        stack_bytes,
+        stack_array, stack_bytes,
     };
     pub use crate::func::{
         Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3, FunType0,
@@ -102,19 +102,20 @@ pub mod prelude {
     pub use crate::iter::{
         Chain, Close, Cursor, DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner,
         ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap,
-        FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, Map, MergeBy,
-        MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns, OpaqueIterItem,
-        OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter, RangeStep,
-        ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, SetBits, Skip,
-        SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem,
+        FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, KMergeBy, Map,
+        MergeBy, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns,
+        OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter,
+        RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, SetBits,
+        Skip, SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem,
         ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
-        from_fn, range, range_step, set_bits,
+        from_fn, kmerge_by, range, range_step, set_bits,
     };
     pub use crate::label::{Again, Label};
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne,
-        Num, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast,
-        int_to_float, le, lt, max, min, mul, ne, rem, select, shl, shr, sub, trailing_zeros,
+        Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast,
+        int_to_float, le, lt, max, min, mul, ne, pack_i128, rem, select, shl, shr, sub,
+        trailing_zeros,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{

@@ -12,8 +12,8 @@
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::{
-    AbiParam, BlockArg, FuncRef, InstBuilder, MemFlagsData, SigRef, Signature, StackSlotData,
-    StackSlotKind, Value, types,
+    AbiParam, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, SigRef,
+    Signature, StackSlotData, StackSlotKind, Value, types,
 };
 use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::FunctionBuilder;
@@ -74,6 +74,10 @@ fn block_args(args: &[ValueId]) -> Vec<BlockArg> {
 impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     // ---- constants ----
     fn iconst(&mut self, ty: ScalarType, imm: i64) -> ValueId {
+        if ty == ScalarType::I128 {
+            let v = self.builder.ins().iconst(types::I64, imm);
+            return ValueId::from_cranelift(self.builder.ins().sextend(types::I128, v), ty);
+        }
         ValueId::from_cranelift(self.builder.ins().iconst(ty.to_cranelift(), imm), ty)
     }
     fn null_ptr(&mut self) -> ValueId {
@@ -245,6 +249,12 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             to,
         )
     }
+    fn iconcat(&mut self, lo: ValueId, hi: ValueId) -> ValueId {
+        ValueId::from_cranelift(
+            self.builder.ins().iconcat(lo.cranelift(), hi.cranelift()),
+            ScalarType::I128,
+        )
+    }
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         ValueId::from_cranelift(
             self.builder
@@ -379,6 +389,16 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             else_block.cranelift(),
             &ea,
         );
+    }
+    fn br_table(&mut self, index: ValueId, default: BlockHandle, targets: &[BlockHandle]) {
+        let pool = &mut self.builder.func.dfg.value_lists;
+        let call = |block: BlockHandle, pool: &mut _| BlockCall::new(block.cranelift(), [], pool);
+        let default = call(default, pool);
+        let table: Vec<_> = targets.iter().map(|&t| call(t, pool)).collect();
+        let table = self
+            .builder
+            .create_jump_table(JumpTableData::new(default, &table));
+        self.builder.ins().br_table(index.cranelift(), table);
     }
     // ---- variables ----
     fn declare_var(&mut self, ty: ScalarType) -> VarHandle {

@@ -29,6 +29,7 @@ mod filter;
 mod filter_map;
 mod flat_map;
 mod from_fn;
+mod kmerge;
 mod map;
 pub mod opaque;
 mod range_iter;
@@ -49,6 +50,7 @@ pub use filter::{Filter, FilterCursor};
 pub use filter_map::{FilterMap, FilterMapCursor};
 pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
+pub use kmerge::{KMergeBy, KMergeCursor, LINEAR_MAX, Plan, kmerge_by};
 pub use map::{Map, MapCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
@@ -97,6 +99,7 @@ into_staged_iter_is_self!(
     FromFn<F, O>,
     Map<I, F, U>,
     IntersectBy<A, B, P>,
+    KMergeBy<I, F>,
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,

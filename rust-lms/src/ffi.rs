@@ -437,6 +437,32 @@ pub fn stack_alloc(size: usize) -> StackAlloc {
     StackAlloc { size }
 }
 
+/// A fresh, **uninitialised** stack slot for `len` values of `T`, aligned for `T`, as a
+/// `SMutPtr<T>` to the first. Allocated once in the frame, like [`StackAlloc`].
+pub struct StackArray<T> {
+    len: usize,
+    _t: PhantomData<fn() -> T>,
+}
+
+unsafe impl<T: StagedType> Staged for StackArray<T> {
+    type Out = SMutPtr<T>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let size = (T::size_of() * self.len).max(1);
+        let align_shift = T::align_of().max(1).trailing_zeros() as u8;
+        let slot = ctx.alloc_stack_slot(size as u32, align_shift);
+        Value::scalar(ctx.stack_addr(slot, 0))
+    }
+}
+
+/// Reserve uninitialised stack room for `len` values of `T`. See [`StackArray`].
+pub fn stack_array<T: StagedType>(len: usize) -> StackArray<T> {
+    StackArray {
+        len,
+        _t: PhantomData,
+    }
+}
+
 // =============================================================================
 // ExternFn trait - Metadata for external functions
 // =============================================================================

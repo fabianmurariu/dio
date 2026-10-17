@@ -88,7 +88,9 @@ where
                     close = Some(c);
                     consumer(ctx, x);
                 });
-                let close = close.expect("the inner step is staged exactly once");
+                let close = close
+                    .clone()
+                    .expect("the inner step is staged exactly once");
                 close.close(ctx);
                 ctx.break_loop();
             });
@@ -151,7 +153,9 @@ where
                     inner_close = Some(c);
                     ctx.goto(got, x);
                 });
-                let close = inner_close.expect("the inner step is staged exactly once");
+                let close = inner_close
+                    .clone()
+                    .expect("the inner step is staged exactly once");
                 close.close(ctx);
                 ctx.store(active, false);
                 ctx.again(again);
@@ -174,17 +178,11 @@ where
 
 /// Releases the current inner iterator if the traversal stopped while one was
 /// open (an early exit); an exhausted inner one was already closed in the step.
+#[derive(Clone)]
 pub struct CloseIfActive<C> {
     active: Var<bool>,
     inner: C,
 }
-
-impl<C: Copy> Clone for CloseIfActive<C> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<C: Copy> Copy for CloseIfActive<C> {}
 
 impl<C: Close> Close for CloseIfActive<C> {
     fn close(self, ctx: &Ctx) {

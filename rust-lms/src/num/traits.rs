@@ -1,8 +1,8 @@
 //! Capability traits for numeric types.
 //!
-//! - [`Num`]: shared arithmetic (`+ - * /`) and comparison (`< > ==`) for any
-//!   integer or floating-point staged type. Both branches of the hierarchy
-//!   refine this.
+//! - [`Ordered`]: comparison (`< > ==`), for every [`Num`] and for `i128`.
+//! - [`Num`]: shared arithmetic (`+ - * /`) for any integer or floating-point
+//!   staged type. Both branches of the hierarchy refine this.
 //! - [`IntNum`]: adds remainder (modulo). Implemented by `i64`, `u64`, `i32`,
 //!   `u32`.
 //! - [`FloatNum`]: marker for floating-point staged types; reserved for future
@@ -29,11 +29,18 @@ mod sealed {
 ///
 /// This trait is sealed because its methods return raw IR values whose type is
 /// trusted by every arithmetic expression.
-pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
+pub trait Num: Ordered {
     fn codegen_add(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_sub(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_mul(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_div(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+}
+
+/// Staged types with comparisons (`< > == != <= >=`): every [`Num`], and `i128`, which
+/// has no division and so is not a `Num`.
+///
+/// Sealed for the same reason as [`Num`].
+pub trait Ordered: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
     fn codegen_lt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_gt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_eq(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
@@ -103,6 +110,8 @@ macro_rules! impl_int_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.sdiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Slt, l.leaf(), r.leaf()))
             }
@@ -152,6 +161,8 @@ macro_rules! impl_int_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.udiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Ult, l.leaf(), r.leaf()))
             }
@@ -196,6 +207,29 @@ impl_int_num!(u64, unsigned);
 impl_int_num!(i32, signed);
 impl_int_num!(u32, unsigned);
 
+impl sealed::Sealed for i128 {}
+impl Bits for i128 {}
+impl Ordered for i128 {
+    fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Slt, l.leaf(), r.leaf()))
+    }
+    fn codegen_gt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sgt, l.leaf(), r.leaf()))
+    }
+    fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
+    }
+    fn codegen_ne(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Ne, l.leaf(), r.leaf()))
+    }
+    fn codegen_le(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sle, l.leaf(), r.leaf()))
+    }
+    fn codegen_ge(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sge, l.leaf(), r.leaf()))
+    }
+}
+
 impl sealed::Sealed for bool {}
 impl Bits for bool {}
 
@@ -219,6 +253,8 @@ macro_rules! impl_float_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.fdiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.fcmp(FloatCmp::Lt, l.leaf(), r.leaf()))
             }

@@ -96,6 +96,14 @@ impl MinMax for i32 {
         i32::MAX
     }
 }
+impl MinMax for i128 {
+    fn min_sentinel() -> Self {
+        i128::MIN
+    }
+    fn max_sentinel() -> Self {
+        i128::MAX
+    }
+}
 impl MinMax for u32 {
     fn min_sentinel() -> Self {
         u32::MIN
@@ -159,8 +167,9 @@ pub trait Cursor: Sized {
 ///
 /// Emitted once after the driving loop, which both exhaustion and an early
 /// `break_loop` reach, so every opened resource is released exactly once on
-/// every exit. `Copy` because it is only stage-0 handles (vars, extern refs).
-pub trait Close: Copy {
+/// every exit. `Clone` because a close may be emitted at more than one exit; it is only
+/// stage-0 handles (vars, extern refs), one per part for a k-way merge.
+pub trait Close: Clone {
     fn close(self, ctx: &Ctx);
 }
 

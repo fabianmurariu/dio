@@ -2306,6 +2306,7 @@ dependencies = [
  "cranelift-native",
  "criterion",
  "either",
+ "itertools 0.14.0",
  "melior",
  "mlir-sys",
  "proptest",

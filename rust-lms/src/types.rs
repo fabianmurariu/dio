@@ -29,6 +29,7 @@ pub enum ScalarType {
     I16,
     I32,
     I64,
+    I128,
     F32,
     F64,
     Ptr,
@@ -36,7 +37,10 @@ pub enum ScalarType {
 
 impl ScalarType {
     pub(crate) fn is_integer(self) -> bool {
-        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128
+        )
     }
 
     pub(crate) fn is_float(self) -> bool {
@@ -50,6 +54,7 @@ impl ScalarType {
             Self::I16 => 16,
             Self::I32 | Self::F32 => 32,
             Self::I64 | Self::F64 | Self::Ptr => 64,
+            Self::I128 => 128,
         }
     }
 
@@ -62,6 +67,7 @@ impl ScalarType {
             ScalarType::I32 => types::I32,
             ScalarType::F32 => types::F32,
             ScalarType::I64 | ScalarType::Ptr => types::I64,
+            ScalarType::I128 => types::I128,
             ScalarType::F64 => types::F64,
         }
     }
@@ -73,6 +79,7 @@ impl ScalarType {
             ScalarType::I16 => 2,
             ScalarType::I32 | ScalarType::F32 => 4,
             ScalarType::I64 | ScalarType::F64 | ScalarType::Ptr => 8,
+            ScalarType::I128 => 16,
         }
     }
 }
@@ -638,6 +645,32 @@ unsafe impl ConstantType for u64 {
 
 unsafe impl CopyType for u64 {}
 
+unsafe impl StagedType for i128 {
+    type RuntimeValue = i128;
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::I128
+    }
+
+    fn size_of() -> usize {
+        std::mem::size_of::<i128>()
+    }
+
+    fn align_of() -> usize {
+        std::mem::align_of::<i128>()
+    }
+}
+
+unsafe impl ConstantType for i128 {
+    fn codegen_constant(value: &i128, ctx: &mut CompilationContext<'_>) -> Value {
+        let lo = ctx.iconst(ScalarType::I64, *value as i64);
+        let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
+        Value::scalar(ctx.iconcat(lo, hi))
+    }
+}
+
+unsafe impl CopyType for i128 {}
+
 unsafe impl StagedType for i32 {
     type RuntimeValue = i32;
 
@@ -782,7 +815,21 @@ unsafe impl ConstantType for () {
 
 unsafe impl CopyType for () {}
 
-impl_by_value_runtime_type!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool, ());
+impl_by_value_runtime_type!(
+    i8,
+    u8,
+    i16,
+    u16,
+    i32,
+    u32,
+    i64,
+    u64,
+    i128,
+    f32,
+    f64,
+    bool,
+    ()
+);
 
 macro_rules! impl_direct_value {
     ($($ty:ty),+ $(,)?) => {
@@ -793,4 +840,4 @@ macro_rules! impl_direct_value {
     };
 }
 
-impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool);
+impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, i128, f32, f64, bool);

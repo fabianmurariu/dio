@@ -603,6 +603,36 @@ impl Ctx {
         }));
     }
 
+    /// Run `arm(j)` for `index == j`, `j` in `0..n`: one indirect jump through a table,
+    /// with each arm staged once. `index` must be below `n`.
+    pub fn switch<F>(&self, index: Var<u32>, n: u32, mut arm: F)
+    where
+        F: FnMut(&Ctx, u32),
+    {
+        let arms: Vec<Vec<CodegenAction>> =
+            (0..n).map(|j| self.child(|ctx| arm(ctx, j)).0).collect();
+
+        self.push(Box::new(move |ctx| {
+            let blocks: Vec<_> = (0..n).map(|_| ctx.create_block()).collect();
+            let merge_block = ctx.create_block();
+
+            let index = index.codegen(ctx);
+            ctx.br_table(index.leaf(), merge_block, &blocks);
+
+            for (block, actions) in blocks.into_iter().zip(arms) {
+                ctx.switch_to_block(block);
+                ctx.seal_block(block);
+                for action in actions {
+                    action(ctx);
+                }
+                ctx.jump(merge_block, &[]);
+            }
+
+            ctx.switch_to_block(merge_block);
+            ctx.seal_block(merge_block);
+        }));
+    }
+
     /// Emit a two-sided conditional: `if cond { then } else { els }`.
     ///
     /// Both branches are side-effecting (they emit into the `Ctx` they receive)

@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::types::StagedType;
 
-use super::traits::{Bits, FloatNum, IntNum, Num};
+use super::traits::{Bits, FloatNum, IntNum, Num, Ordered};
 
 // =============================================================================
 // Arithmetic Operations
@@ -265,6 +265,40 @@ where
     }
 }
 
+/// An `i128` from a high `i64` and a low `u64`: `(hi << 64) | lo`. Its signed order is
+/// the order of `(hi, lo)`, so a two-part key compares as one integer.
+#[derive(Clone, Copy)]
+pub struct PackI128<H, L> {
+    hi: H,
+    lo: L,
+}
+
+unsafe impl<H, L> Staged for PackI128<H, L>
+where
+    H: Staged<Out = i64>,
+    L: Staged<Out = u64>,
+{
+    type Out = i128;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let hi = self.hi.codegen(ctx).leaf();
+        let lo = self.lo.codegen(ctx).leaf();
+        Value::scalar(ctx.iconcat(lo, hi))
+    }
+}
+
+/// Build a staged [`PackI128`].
+pub fn pack_i128<H, L>(hi: H, lo: L) -> PackI128<H::Staged, L::Staged>
+where
+    H: IntoStaged<i64>,
+    L: IntoStaged<u64>,
+{
+    PackI128 {
+        hi: hi.into_staged(),
+        lo: lo.into_staged(),
+    }
+}
+
 /// Integer cast with Rust-like truncation on narrowing and signedness-aware
 /// extension on widening.
 pub struct IntCast<E, TO> {
@@ -359,7 +393,7 @@ unsafe impl<L, R, T> Staged for Lt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -381,7 +415,7 @@ unsafe impl<L, R, T> Staged for Gt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -403,7 +437,7 @@ unsafe impl<L, R, T> Staged for Eq<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -428,7 +462,7 @@ unsafe impl<L, R, T> Staged for Ne<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -450,7 +484,7 @@ unsafe impl<L, R, T> Staged for Le<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -472,7 +506,7 @@ unsafe impl<L, R, T> Staged for Ge<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -691,7 +725,7 @@ where
 /// Build a staged less-than comparison.
 pub fn lt<T, L, R>(left: L, right: R) -> Lt<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -704,7 +738,7 @@ where
 /// Build a staged greater-than comparison.
 pub fn gt<T, L, R>(left: L, right: R) -> Gt<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -717,7 +751,7 @@ where
 /// Build a staged equality comparison.
 pub fn eq<T, L, R>(left: L, right: R) -> Eq<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -733,7 +767,7 @@ where
 /// `!eq(..)` rather than an ordered comparison.
 pub fn ne<T, L, R>(left: L, right: R) -> Ne<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -749,7 +783,7 @@ where
 /// operand is NaN.
 pub fn le<T, L, R>(left: L, right: R) -> Le<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -763,7 +797,7 @@ where
 /// [`le`].
 pub fn ge<T, L, R>(left: L, right: R) -> Ge<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -835,7 +869,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
     L::Staged: Clone,
@@ -857,7 +891,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
     L::Staged: Clone,
