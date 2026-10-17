@@ -1,31 +1,24 @@
 //! k-way merge of sorted streams: [`KMergeBy`].
 //!
 //! The number of parts is known at staging time, so the merge is compiled for it, with
-//! each part's step staged exactly once behind a [`switch`](Ctx::switch) (a jump table)
-//! on the part to refill.
+//! each part's step staged exactly once.
 //!
-//! Up to [`LINEAR_MAX`] parts, each part's head and key are variables, and the smallest
-//! key is found by a pass of `select`s over all of them. Above, by a loser tree in stack
-//! arrays: each internal node holds the key, part and head of the loser of its match, so
-//! refilling part `j` replays the path from leaf `j` to the root, `log2 k` loads,
-//! compare-and-selects and stores. The path is fixed per part, so it is staged inside
-//! part `j`'s refill with constant offsets. Keeping the tree in memory keeps it out of
-//! the registers the loop carries.
+//! Up to [`CHAIN_MAX`] parts, the merge is a chain of compare branches, as a hand-written
+//! two-way merge: part `j` is next when its key is at most every later part's, and its
+//! successor is pulled right there, so the branch that picks a part is the only
+//! data-dependent one. Above, the smallest key is found by a pass of `select`s over all
+//! keys, and the winner's part is refilled behind a [`switch`](Ctx::switch) (a jump
+//! table). Its heads live in a stack array, of which only the winner's is read.
 //!
 //! A part that runs dry gets the key type's maximum as its key, so the compare path has
 //! no liveness flags; the merge ends when the smallest key is that maximum. Keys must
 //! therefore never equal it (`u64::MAX` for a `Vid`, `i128::MAX` for a packed
 //! `EventTime`).
-//!
-//! With runs on, the merge remembers a bound below which the winner's part keeps winning:
-//! the runner-up key of the last pass, or the least loser on the winner's path in the
-//! tree. A refilled head whose key is below it is the next element, so parts that don't
-//! interleave cost one compare per element.
 
 use crate::ffi::stack_array;
 use crate::func::Ctx;
 use crate::label::{Label, dead};
-use crate::num::{Ordered, add, bitand, bitor, eq, lt, min, select};
+use crate::num::{Ordered, add, eq, int_cast, le, lt, min, select};
 use crate::refer::{SMutPtr, load_mut, ptr_offset_mut, store};
 use crate::staged::{Const, Staged, Var};
 use crate::types::{CopyType, StagedType};
@@ -44,47 +37,34 @@ where
     K: Ordered + MinMax + StagedType<RuntimeValue = K>,
 {
     let parts: Vec<_> = parts.into_iter().map(|p| p.staged_iter()).collect();
-    let plan = if parts.len() <= LINEAR_MAX {
-        Plan::Linear
+    let plan = if parts.len() <= CHAIN_MAX {
+        Plan::Chain
     } else {
-        Plan::Tree
+        Plan::Linear
     };
-    KMergeBy {
-        parts,
-        key,
-        runs: true,
-        plan,
-    }
+    KMergeBy { parts, key, plan }
 }
 
-/// The most parts merged by a pass over all keys; more use a loser tree.
-pub const LINEAR_MAX: usize = 8;
+/// The most parts merged by a chain of compare branches; more by a pass over all keys.
+pub const CHAIN_MAX: usize = 4;
 
-/// How the smallest key is found.
+/// How the next part is picked.
 #[doc(hidden)]
 #[derive(Clone, Copy, PartialEq, Eq, Debug)]
 pub enum Plan {
+    Chain,
     Linear,
-    Tree,
 }
 
 /// Built by [`kmerge_by`].
 pub struct KMergeBy<I, F> {
     parts: Vec<I>,
     key: F,
-    runs: bool,
     plan: Plan,
 }
 
 impl<I, F> KMergeBy<I, F> {
-    /// Turn the runner-up shortcut off: every element takes a full pass over the keys.
-    #[doc(hidden)]
-    pub fn without_runs(mut self) -> Self {
-        self.runs = false;
-        self
-    }
-
-    /// Override the choice between a linear pass and a loser tree.
+    /// Override the choice between a chain of branches and a linear pass.
     #[doc(hidden)]
     pub fn with_plan(mut self, plan: Plan) -> Self {
         self.plan = plan;
@@ -106,142 +86,59 @@ where
     fn open(self, ctx: &Ctx) -> Self::Cursor {
         let cursors: Vec<_> = self.parts.into_iter().map(|p| p.open(ctx)).collect();
         let k = cursors.len();
-        let heads = match self.plan {
-            Plan::Linear => Heads::Vars(
-                (0..k)
+        let state = match self.plan {
+            Plan::Chain => State::Chain {
+                heads: (0..k)
                     .map(|_| {
                         let head = ctx.var(dead::<I::Item>());
-                        (head, ctx.var(Const::new(K::max_sentinel())))
+                        (head, ctx.var(Const::new(K::min_sentinel())))
                     })
                     .collect(),
-            ),
-            Plan::Tree => Heads::Tree(Tree {
-                keys: ctx.bind(stack_array::<K>(2 * k)),
-                parts: ctx.bind(stack_array::<u32>(2 * k)),
-                heads: ctx.bind(stack_array::<I::Item>(2 * k)),
-                winner: Entry::declare(ctx),
+                filled: ctx.var(0u32),
+            },
+            Plan::Linear => State::Linear(Linear {
+                heads: ctx.bind(stack_array::<I::Item>(k)),
+                keys: (0..k)
+                    .map(|_| ctx.var(Const::new(K::max_sentinel())))
+                    .collect(),
+                refill: ctx.var(0u32),
+                priming: ctx.var(true),
+                bound: ctx.var(Const::new(K::min_sentinel())),
             }),
         };
         KMergeCursor {
             cursors,
             key: self.key,
-            refill: ctx.var(0u32),
-            priming: ctx.var(true),
-            bound: self.runs.then(|| ctx.var(Const::new(K::min_sentinel()))),
-            heads,
+            state,
         }
     }
 }
 
-/// A contender: a part's head, its key, and the part's index for ties.
-struct Entry<K: StagedType, T: StagedType> {
-    key: Var<K>,
-    part: Var<u32>,
-    head: Var<T>,
+enum State<K: StagedType, T: StagedType> {
+    /// Each part's head and key, and how many parts have been pulled for the first time.
+    Chain {
+        heads: Vec<(Var<T>, Var<K>)>,
+        filled: Var<u32>,
+    },
+    Linear(Linear<K, T>),
 }
 
-impl<K: CopyType, T: CopyType> Clone for Entry<K, T> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<K: CopyType, T: CopyType> Copy for Entry<K, T> {}
-
-impl<K, T> Entry<K, T>
-where
-    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
-    T: CopyType + 'static,
-{
-    fn declare(ctx: &Ctx) -> Self {
-        Entry {
-            key: ctx.var(Const::new(K::max_sentinel())),
-            part: ctx.var(0u32),
-            head: ctx.var(dead::<T>()),
-        }
-    }
-
-    /// Whether `self` comes before `other`: a smaller key, or an equal key from an
-    /// earlier part.
-    fn beats(self, other: Self) -> impl Staged<Out = bool> + 'static {
-        bitor(
-            lt(self.key, other.key),
-            bitand(eq(self.key, other.key), lt(self.part, other.part)),
-        )
-    }
-
-    /// `a` if `c`, else `b`.
-    fn pick(ctx: &Ctx, c: Var<bool>, a: Self, b: Self) -> Self {
-        Entry {
-            key: ctx.bind(select(c, a.key, b.key)),
-            part: ctx.bind(select(c, a.part, b.part)),
-            head: ctx.bind(select(c, a.head, b.head)),
-        }
-    }
-
-    fn store(self, ctx: &Ctx, to: Self) {
-        ctx.store(to.key, self.key);
-        ctx.store(to.part, self.part);
-        ctx.store(to.head, self.head);
-    }
-}
-
-/// A loser tree in heap order, in three stack arrays of `2k` slots: internal node `i` in
-/// `1..k` holds the loser of its match, and leaf `j` (slot `k + j`) a part's first head
-/// until the tree is built. `winner` is the root's winner.
-struct Tree<K: StagedType, T: StagedType> {
-    keys: Var<SMutPtr<K>>,
-    parts: Var<SMutPtr<u32>>,
+/// The parts' heads in a stack array and their keys; the part to refill at the next step
+/// (while `priming`, the part being pulled for the first time); and the key below which
+/// that part keeps winning.
+struct Linear<K: StagedType, T: StagedType> {
     heads: Var<SMutPtr<T>>,
-    winner: Entry<K, T>,
-}
-
-impl<K, T> Tree<K, T>
-where
-    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
-    T: CopyType + 'static,
-{
-    fn load(&self, ctx: &Ctx, slot: usize) -> Entry<K, T> {
-        let i = Const::new(slot as i64);
-        // SAFETY: `slot < 2k`, within the arrays; each slot read was written before (a
-        // leaf while priming, a node when the tree was built).
-        unsafe {
-            Entry {
-                key: ctx.bind(load_mut(ptr_offset_mut(self.keys, i))),
-                part: ctx.bind(load_mut(ptr_offset_mut(self.parts, i))),
-                head: ctx.bind(load_mut(ptr_offset_mut(self.heads, i))),
-            }
-        }
-    }
-
-    fn save(&self, ctx: &Ctx, slot: usize, e: Entry<K, T>) {
-        let i = Const::new(slot as i64);
-        // SAFETY: `slot < 2k`, within the arrays.
-        unsafe {
-            ctx.emit(store(ptr_offset_mut(self.keys, i), e.key));
-            ctx.emit(store(ptr_offset_mut(self.parts, i), e.part));
-            ctx.emit(store(ptr_offset_mut(self.heads, i), e.head));
-        }
-    }
-}
-
-/// Where the parts' heads live: a head and key variable per part ([`Plan::Linear`]), or
-/// a loser tree ([`Plan::Tree`]).
-enum Heads<K: StagedType, T: StagedType> {
-    Vars(Vec<(Var<T>, Var<K>)>),
-    Tree(Tree<K, T>),
+    keys: Vec<Var<K>>,
+    refill: Var<u32>,
+    priming: Var<bool>,
+    bound: Var<K>,
 }
 
 /// The cursor of a [`KMergeBy`].
 pub struct KMergeCursor<C: Cursor, F, K: StagedType> {
     cursors: Vec<C>,
     key: F,
-    /// The part whose head was yielded last, refilled at the next step. While
-    /// `priming`, the part being filled for the first time.
-    refill: Var<u32>,
-    priming: Var<bool>,
-    /// The key below which the last winner's part keeps winning; `None` with runs off.
-    bound: Option<Var<K>>,
-    heads: Heads<K, C::Item>,
+    state: State<K, C::Item>,
 }
 
 impl<C: Close> Close for Vec<C> {
@@ -263,190 +160,243 @@ where
     type Item = C::Item;
     type Close = Vec<C::Close>;
 
-    /// ```text
-    /// got: {
-    ///   again:
-    ///     switch refill {
-    ///       j: pulled: { x = part[j].next() (exhausted → key = MAX); head = x
-    ///                    key = key(x); if key < bound → got(x) }
-    ///          linear: head[j], key[j] = head, key
-    ///          tree: if priming { leaf j = (head, key) } else { replay it from leaf j to
-    ///                the root; if j still wins, bound = least loser on its path, else MIN }
-    ///     }
-    ///     if priming { if refill < k - 1 { refill += 1; → again }; priming = false
-    ///                  tree: build it from the leaves }
-    ///     linear: (w, m, m2) = argmin, min and runner-up of key[..]; bound = m2
-    ///     tree: (w, m) = the root's winner
-    ///     if m == MAX → done
-    ///     refill = w; got(head of w)
-    /// }
-    /// ```
-    /// `bound` starts at the key's minimum, so no head passes it before the first pass.
     fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<C::Item>, Self::Close) {
-        let KMergeCursor {
-            cursors,
-            key,
-            refill,
-            priming,
-            bound,
-            heads,
-        } = self;
-        let k = cursors.len() as u32;
-        if k == 0 {
+        if self.cursors.is_empty() {
             ctx.exit(done);
             return (ctx.bind(dead::<C::Item>()), Vec::new());
         }
-        let mut cursors: Vec<_> = cursors.into_iter().map(Some).collect();
-        let mut closes: Vec<Option<C::Close>> = (0..k).map(|_| None).collect();
-        let sentinel = || Const::new(K::max_sentinel());
-        let part = |ctx: &Ctx, j: u32| ctx.bind(Const::new(j));
+        let parts = self.cursors.into_iter().map(Some).collect();
+        match self.state {
+            State::Chain { heads, filled } => chain(ctx, parts, &self.key, &heads, filled, done),
+            State::Linear(s) => linear(ctx, parts, &self.key, &s, done),
+        }
+    }
+}
 
-        let item = ctx.join(|ctx, got| {
-            ctx.repeat(|ctx, again| {
-                ctx.switch(refill, k, |ctx, j| {
-                    let (head, head_key) = match &heads {
-                        Heads::Vars(vars) => vars[j as usize],
-                        Heads::Tree(_) => (ctx.var(dead::<C::Item>()), ctx.var(sentinel())),
-                    };
-                    let cursor = cursors[j as usize]
-                        .take()
-                        .expect("each part is staged once");
-                    ctx.block(|ctx, pulled| {
-                        ctx.block(|ctx, exhausted| {
-                            let (x, c) = cursor.next(ctx, exhausted);
-                            closes[j as usize] = Some(c);
-                            ctx.store(head, x);
-                            ctx.store(head_key, key(ctx, x));
-                            if let Some(bound) = bound {
-                                ctx.if_then(lt(head_key, bound), |ctx| ctx.goto(got, x));
-                            }
-                            ctx.exit(pulled);
-                        });
-                        ctx.store(head_key, sentinel());
-                    });
-                    if let Heads::Tree(tree) = &heads {
-                        let entry = Entry {
-                            key: head_key,
-                            part: part(ctx, j),
-                            head,
-                        };
-                        let leaf = (k + j) as usize;
-                        ctx.if_then_else(
-                            priming,
-                            |ctx| tree.save(ctx, leaf, entry),
-                            |ctx| replay(ctx, tree, entry, leaf / 2, bound),
-                        );
-                    }
-                });
-                ctx.if_then(priming, |ctx| {
-                    ctx.if_then(lt(refill, k - 1), |ctx| {
-                        ctx.store(refill, add(refill, 1u32));
-                        ctx.again(again);
-                    });
-                    ctx.store(priming, false);
-                    if let Heads::Tree(tree) = &heads {
-                        build(ctx, tree, k as usize).store(ctx, tree.winner);
-                    }
-                });
+/// Pull `part`'s next element `x` and store its key in `head_key`, then run `then(x)`;
+/// when the part is dry, set the key to MAX instead. Returns the part's close.
+fn pull<C, F, KE, K>(
+    ctx: &Ctx,
+    part: C,
+    key: &F,
+    head_key: Var<K>,
+    then: impl FnOnce(&Ctx, Var<C::Item>),
+) -> C::Close
+where
+    C: Cursor,
+    C::Item: CopyType + 'static,
+    F: Fn(&Ctx, Var<C::Item>) -> KE,
+    KE: Staged<Out = K> + 'static,
+    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
+{
+    let mut close = None;
+    ctx.block(|ctx, pulled| {
+        ctx.block(|ctx, exhausted| {
+            let (x, c) = part.next(ctx, exhausted);
+            close = Some(c);
+            ctx.store(head_key, key(ctx, x));
+            then(ctx, x);
+            ctx.exit(pulled);
+        });
+        ctx.store(head_key, Const::new(K::max_sentinel()));
+    });
+    close.expect("each part is staged once")
+}
 
-                let winner = match &heads {
-                    Heads::Tree(tree) => tree.winner,
-                    Heads::Vars(vars) => {
-                        let entries: Vec<_> = (0..k)
-                            .map(|j| {
-                                let (head, key) = vars[j as usize];
-                                Entry {
-                                    key,
-                                    part: part(ctx, j),
-                                    head,
-                                }
-                            })
-                            .collect();
-                        linear(ctx, &entries, bound)
+/// The step of a [`Plan::Chain`]:
+///
+/// ```text
+/// again:
+///   taken: {
+///     arm 0: { arm 1: { … {
+///       if filled < k { if filled == 0 → arm 0; …; → arm k-1 }
+///       if key[0] <= min(key[1..]) → arm 0; …; if key[k-2] <= key[k-1] → arm k-2
+///       → arm k-1
+///     } … }
+///     arm j:  j == 0: if key[0] == MAX → done
+///             x = head[j]; head[j], key[j] = part[j].next() (exhausted → MAX)
+///             taken(x)
+///   }
+///   if filled < k { filled += 1; → again }
+///   x
+/// ```
+/// The first part to pass is the first with the smallest key, so when every key is MAX
+/// it is part 0, which is where the end is checked. Keys start at the minimum, so part
+/// 0 is not taken for ended while priming.
+fn chain<C, F, KE, K>(
+    ctx: &Ctx,
+    mut parts: Vec<Option<C>>,
+    key: &F,
+    heads: &[(Var<C::Item>, Var<K>)],
+    filled: Var<u32>,
+    done: Label<'_>,
+) -> (Var<C::Item>, Vec<C::Close>)
+where
+    C: Cursor,
+    C::Item: CopyType + 'static,
+    F: Fn(&Ctx, Var<C::Item>) -> KE,
+    KE: Staged<Out = K> + 'static,
+    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
+{
+    let k = parts.len();
+    let mut closes = Vec::with_capacity(k);
+    let item = ctx.repeat(|ctx, again| {
+        let x = ctx.join(|ctx, taken| {
+            let mut dispatch = |ctx: &Ctx, to: &To| {
+                ctx.if_then(lt(filled, k as u32), |ctx| {
+                    for j in 0..k - 1 {
+                        to(ctx, j, Some(ctx.bind(eq(filled, j as u32))));
                     }
-                };
-                ctx.exit_if(eq(winner.key, sentinel()), done);
-                ctx.store(refill, winner.part);
-                ctx.goto(got, winner.head);
-            });
+                    to(ctx, k - 1, None);
+                });
+                let mut later = heads[k - 1].1;
+                let mut firsts = Vec::with_capacity(k);
+                for j in (0..k - 1).rev() {
+                    firsts.push(ctx.bind(le(heads[j].1, later)));
+                    if j > 0 {
+                        later = ctx.bind(min(heads[j].1, later));
+                    }
+                }
+                for (j, first) in firsts.into_iter().rev().enumerate() {
+                    to(ctx, j, Some(first));
+                }
+                to(ctx, k - 1, None);
+            };
+            let mut arm = |ctx: &Ctx, j: usize| {
+                let (head, head_key) = heads[j];
+                if j == 0 {
+                    ctx.exit_if(eq(head_key, Const::new(K::max_sentinel())), done);
+                }
+                let x = ctx.bind(head);
+                let part = parts[j].take().expect("each part is staged once");
+                closes.push(pull(ctx, part, key, head_key, |ctx, y| ctx.store(head, y)));
+                ctx.goto(taken, x);
+            };
+            arms(
+                ctx,
+                k - 1,
+                &|_, _, _| unreachable!(),
+                &mut dispatch,
+                &mut arm,
+            );
             dead::<C::Item>()
         });
-        let closes = closes
-            .into_iter()
-            .map(|c| c.expect("each part is staged once"))
-            .collect();
-        (item, closes)
-    }
+        ctx.if_then(lt(filled, k as u32), |ctx| {
+            ctx.store(filled, add(filled, 1u32));
+            ctx.again(again);
+        });
+        x
+    });
+    (item, closes)
 }
 
-/// The first of `entries` (the lowest part on ties); `bound` becomes the runner-up key.
-fn linear<K, T>(ctx: &Ctx, entries: &[Entry<K, T>], bound: Option<Var<K>>) -> Entry<K, T>
-where
-    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
-    T: CopyType + 'static,
-{
-    let mut best = entries[0];
-    let mut runner_up: Var<K> = ctx.bind(Const::new(K::max_sentinel()));
-    for &e in &entries[1..] {
-        let better = ctx.bind(lt(e.key, best.key));
-        if bound.is_some() {
-            runner_up = ctx.bind(select(better, best.key, min(runner_up, e.key)));
-        }
-        best = Entry::pick(ctx, better, e, best);
-    }
-    if let Some(bound) = bound {
-        ctx.store(bound, runner_up);
-    }
-    best
-}
+/// Jump to arm `j`, if the condition holds (always, without one).
+type To<'a> = dyn Fn(&Ctx, usize, Option<Var<bool>>) + 'a;
 
-/// Play the matches of a fresh tree bottom-up from its `k` leaves, saving each loser;
-/// returns the winner.
-fn build<K, T>(ctx: &Ctx, tree: &Tree<K, T>, k: usize) -> Entry<K, T>
-where
-    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
-    T: CopyType + 'static,
-{
-    let mut win: Vec<Option<Entry<K, T>>> = vec![None; k];
-    win.extend((k..2 * k).map(|slot| Some(tree.load(ctx, slot))));
-    for i in (1..k).rev() {
-        let (a, b) = (win[2 * i].expect("child"), win[2 * i + 1].expect("child"));
-        let a_wins = ctx.bind(a.beats(b));
-        win[i] = Some(Entry::pick(ctx, a_wins, a, b));
-        tree.save(ctx, i, Entry::pick(ctx, a_wins, b, a));
-    }
-    win[1].expect("root")
-}
-
-/// Replay `entry` from `node` up to the root: at each node the loser stays and the
-/// winner goes on. If `entry` wins, `bound` becomes the least loser key on its path;
-/// otherwise the winner's path was not all replayed, and `bound` turns the shortcut off.
-fn replay<K, T>(
+/// Arms `0..=j`, each staged once after a block whose exit enters it, nested so that
+/// `dispatch`, staged innermost, can jump to any of them.
+fn arms(
     ctx: &Ctx,
-    tree: &Tree<K, T>,
-    mut entry: Entry<K, T>,
-    mut node: usize,
-    bound: Option<Var<K>>,
-) where
-    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
-    T: CopyType + 'static,
-{
-    let part = entry.part;
-    let mut least: Var<K> = ctx.bind(Const::new(K::max_sentinel()));
-    while node >= 1 {
-        let held = tree.load(ctx, node);
-        let held_wins = ctx.bind(held.beats(entry));
-        let loser = Entry::pick(ctx, held_wins, entry, held);
-        entry = Entry::pick(ctx, held_wins, held, entry);
-        tree.save(ctx, node, loser);
-        if bound.is_some() {
-            least = ctx.bind(min(least, loser.key));
+    j: usize,
+    outer: &To,
+    dispatch: &mut dyn FnMut(&Ctx, &To),
+    arm: &mut dyn FnMut(&Ctx, usize),
+) {
+    ctx.block(|ctx, enter| {
+        let to = |ctx: &Ctx, i: usize, cond: Option<Var<bool>>| match (i == j, cond) {
+            (true, Some(c)) => ctx.exit_if(c, enter),
+            (true, None) => ctx.exit(enter),
+            (false, _) => outer(ctx, i, cond),
+        };
+        if j == 0 {
+            dispatch(ctx, &to);
+        } else {
+            arms(ctx, j - 1, &to, dispatch, arm);
         }
-        node /= 2;
+    });
+    arm(ctx, j);
+}
+
+/// The step of a [`Plan::Linear`]:
+///
+/// ```text
+/// got: {
+///   again:
+///     switch refill {
+///       j: key[j] = key(x = part[j].next()) (exhausted → MAX)
+///          if key[j] < bound → got(x); head[j] = x
+///     }
+///     if priming { if refill < k - 1 { refill += 1; → again }; priming = false }
+///     (w, m, bound) = argmin, min and runner-up of key[..]
+///     if m == MAX → done
+///     refill = w; got(head[w])
+/// }
+/// ```
+/// `bound` starts at the key's minimum, so no head passes it before the first pass. A
+/// part that keeps winning (parts that don't interleave) costs one compare per element.
+fn linear<C, F, KE, K>(
+    ctx: &Ctx,
+    mut parts: Vec<Option<C>>,
+    key: &F,
+    s: &Linear<K, C::Item>,
+    done: Label<'_>,
+) -> (Var<C::Item>, Vec<C::Close>)
+where
+    C: Cursor,
+    C::Item: CopyType + 'static,
+    F: Fn(&Ctx, Var<C::Item>) -> KE,
+    KE: Staged<Out = K> + 'static,
+    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
+{
+    let k = parts.len() as u32;
+    let mut closes = Vec::with_capacity(parts.len());
+    let item = ctx.join(|ctx, got| {
+        ctx.repeat(|ctx, again| {
+            ctx.switch(s.refill, k, |ctx, j| {
+                let part = parts[j as usize].take().expect("each part is staged once");
+                let head_key = s.keys[j as usize];
+                closes.push(pull(ctx, part, key, head_key, |ctx, x| {
+                    ctx.if_then(lt(head_key, s.bound), |ctx| ctx.goto(got, x));
+                    // SAFETY: `j < k`, within the array.
+                    unsafe { ctx.emit(store(ptr_offset_mut(s.heads, Const::new(j as i64)), x)) };
+                }));
+            });
+            ctx.if_then(s.priming, |ctx| {
+                ctx.if_then(lt(s.refill, k - 1), |ctx| {
+                    ctx.store(s.refill, add(s.refill, 1u32));
+                    ctx.again(again);
+                });
+                ctx.store(s.priming, false);
+            });
+            let (least, winner) = argmin(ctx, &s.keys, s.bound);
+            ctx.exit_if(eq(least, Const::new(K::max_sentinel())), done);
+            ctx.store(s.refill, winner);
+            // SAFETY: `winner < k`, a part whose head was stored: its key is not MAX.
+            let head =
+                unsafe { load_mut(ptr_offset_mut(s.heads, int_cast::<i64, u32, _>(winner))) };
+            ctx.goto(got, head);
+        });
+        dead::<C::Item>()
+    });
+    (item, closes)
+}
+
+/// The smallest of `keys` and its part (the lowest on ties); `bound` becomes the
+/// runner-up key.
+fn argmin<K>(ctx: &Ctx, keys: &[Var<K>], bound: Var<K>) -> (Var<K>, Var<u32>)
+where
+    K: Ordered + MinMax + StagedType<RuntimeValue = K>,
+{
+    let mut best = (keys[0], ctx.bind(Const::new(0u32)));
+    let mut runner_up: Var<K> = ctx.bind(Const::new(K::max_sentinel()));
+    for (j, &key) in keys.iter().enumerate().skip(1) {
+        let better = ctx.bind(lt(key, best.0));
+        runner_up = ctx.bind(select(better, best.0, min(runner_up, key)));
+        best = (
+            ctx.bind(select(better, key, best.0)),
+            ctx.bind(select(better, Const::new(j as u32), best.1)),
+        );
     }
-    entry.store(ctx, tree.winner);
-    if let Some(bound) = bound {
-        let kept = eq(entry.part, part);
-        ctx.store(bound, select(kept, least, Const::new(K::min_sentinel())));
-    }
+    ctx.store(bound, runner_up);
+    best
 }

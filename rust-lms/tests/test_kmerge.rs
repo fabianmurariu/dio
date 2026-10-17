@@ -1,6 +1,5 @@
 //! `kmerge_by`: k sorted parts merged into one stable sorted stream, checked against a
-//! host stable sort, by a linear pass and by a loser tree, with and without the
-//! runner-up shortcut.
+//! host stable sort, by a chain of branches and by a linear pass.
 
 use proptest::prelude::*;
 use rust_lms::prelude::*;
@@ -9,7 +8,7 @@ mod common;
 use common::{for_each_backend, with_backends};
 use rust_lms::iter::Plan;
 
-const PLANS: [Plan; 2] = [Plan::Linear, Plan::Tree];
+const PLANS: [Plan; 2] = [Plan::Chain, Plan::Linear];
 
 type S = SRef<Slice<u64>>;
 type Out = SRefMut<Slice<u64>>;
@@ -31,13 +30,7 @@ fn tag(parts: &[Vec<u64>]) -> (Vec<u64>, Vec<u64>, Vec<u64>) {
 
 /// Writes the merge of `k` parts of `values` (bounds in `offsets`) to `out`, up to
 /// `limit` elements, and returns how many it wrote.
-fn compile_merge(
-    mut compiler: Compiler,
-    k: usize,
-    plan: Plan,
-    runs: bool,
-    limit: Option<u64>,
-) -> Kernel {
+fn compile_merge(mut compiler: Compiler, k: usize, plan: Plan, limit: Option<u64>) -> Kernel {
     let f = compiler.fun3(
         "kmerge",
         move |ctx, values: Var<S>, offsets: Var<S>, out: Var<Out>| {
@@ -51,8 +44,7 @@ fn compile_merge(
                     }
                 })
                 .collect();
-            let merge = kmerge_by(parts, |_, x| shr(x, 4u64));
-            let merge = kmerge_with(merge, plan, runs);
+            let merge = kmerge_by(parts, |_, x| shr(x, 4u64)).with_plan(plan);
             let n = ctx.var(0u64);
             let body = move |ctx: &Ctx, x: Var<u64>| {
                 // SAFETY: `out` has room for every element.
@@ -69,11 +61,6 @@ fn compile_merge(
     compiler.compile(f).expect("compile failed")
 }
 
-fn kmerge_with<I, F>(merge: KMergeBy<I, F>, plan: Plan, runs: bool) -> KMergeBy<I, F> {
-    let merge = merge.with_plan(plan);
-    if runs { merge } else { merge.without_runs() }
-}
-
 fn run(kernel: &Kernel, parts: &[Vec<u64>]) -> Vec<u64> {
     let (values, offsets, _) = tag(parts);
     let mut out = vec![0u64; values.len()];
@@ -87,7 +74,7 @@ fn merges_interleaved_parts() {
     with_backends(|make| {
         for plan in PLANS {
             let parts = vec![vec![1, 4, 7], vec![2, 5, 8], vec![3, 6, 9]];
-            let kernel = compile_merge(make(), 3, plan, true, None);
+            let kernel = compile_merge(make(), 3, plan, None);
             assert_eq!(run(&kernel, &parts), tag(&parts).2);
         }
     });
@@ -98,7 +85,7 @@ fn equal_keys_keep_part_order() {
     with_backends(|make| {
         for plan in PLANS {
             let parts = vec![vec![2, 2], vec![1, 2], vec![2, 3], vec![]];
-            let kernel = compile_merge(make(), 4, plan, true, None);
+            let kernel = compile_merge(make(), 4, plan, None);
             let merged = run(&kernel, &parts);
             assert_eq!(merged, tag(&parts).2);
             assert_eq!(
@@ -113,9 +100,9 @@ fn equal_keys_keep_part_order() {
 fn no_parts_and_empty_parts() {
     with_backends(|make| {
         for plan in PLANS {
-            let kernel = compile_merge(make(), 0, plan, true, None);
+            let kernel = compile_merge(make(), 0, plan, None);
             assert_eq!(run(&kernel, &[]), Vec::<u64>::new());
-            let kernel = compile_merge(make(), 3, plan, true, None);
+            let kernel = compile_merge(make(), 3, plan, None);
             assert_eq!(run(&kernel, &[vec![], vec![], vec![]]), Vec::<u64>::new());
             let parts = vec![vec![], vec![5], vec![]];
             assert_eq!(run(&kernel, &parts), tag(&parts).2);
@@ -128,7 +115,7 @@ fn stops_early() {
     with_backends(|make| {
         for plan in PLANS {
             let parts = vec![vec![1, 4, 7], vec![2, 5, 8], vec![3, 6, 9]];
-            let kernel = compile_merge(make(), 3, plan, true, Some(4));
+            let kernel = compile_merge(make(), 3, plan, Some(4));
             assert_eq!(run(&kernel, &parts), tag(&parts).2[..4]);
         }
     });
@@ -195,15 +182,15 @@ fn sorted_parts() -> impl Strategy<Value = Vec<Vec<u64>>> {
 }
 
 fn plan() -> impl Strategy<Value = Plan> {
-    prop_oneof![Just(Plan::Linear), Just(Plan::Tree)]
+    prop_oneof![Just(Plan::Chain), Just(Plan::Linear)]
 }
 
 proptest! {
     #![proptest_config(ProptestConfig::with_cases(128))]
 
     #[test]
-    fn matches_a_stable_sort(parts in sorted_parts(), plan in plan(), runs in any::<bool>()) {
-        let kernel = compile_merge(Compiler::new(), parts.len(), plan, runs, None);
+    fn matches_a_stable_sort(parts in sorted_parts(), plan in plan()) {
+        let kernel = compile_merge(Compiler::new(), parts.len(), plan, None);
         prop_assert_eq!(run(&kernel, &parts), tag(&parts).2);
     }
 
@@ -211,7 +198,6 @@ proptest! {
     fn disjoint_parts(
         lens in prop::collection::vec(0u64..20, 0..12),
         plan in plan(),
-        runs in any::<bool>(),
     ) {
         let mut start = 0;
         let mut parts: Vec<Vec<u64>> = lens
@@ -223,7 +209,7 @@ proptest! {
             })
             .collect();
         parts.reverse();
-        let kernel = compile_merge(Compiler::new(), parts.len(), plan, runs, None);
+        let kernel = compile_merge(Compiler::new(), parts.len(), plan, None);
         prop_assert_eq!(run(&kernel, &parts), tag(&parts).2);
     }
 }

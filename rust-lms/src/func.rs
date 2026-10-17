@@ -1305,6 +1305,12 @@ impl Compiler {
         flag_builder
             .set("use_colocated_libcalls", "true")
             .map_err(|e| CompileError::JitError(e.to_string()))?;
+        // The Spectre guard on a jump table index (`csdb` on aarch64) protects a wasm
+        // sandbox from its guest; a kernel is trusted code, and `switch` is in its hot
+        // loops.
+        flag_builder
+            .set("enable_table_access_spectre_mitigation", "false")
+            .map_err(|e| CompileError::JitError(e.to_string()))?;
         let isa_builder =
             cranelift_native::builder().map_err(|e| CompileError::JitError(e.to_string()))?;
         let isa = isa_builder

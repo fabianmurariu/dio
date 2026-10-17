@@ -50,7 +50,7 @@ pub use filter::{Filter, FilterCursor};
 pub use filter_map::{FilterMap, FilterMapCursor};
 pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
-pub use kmerge::{KMergeBy, KMergeCursor, LINEAR_MAX, Plan, kmerge_by};
+pub use kmerge::{CHAIN_MAX, KMergeBy, KMergeCursor, Plan, kmerge_by};
 pub use map::{Map, MapCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
