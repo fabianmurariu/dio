@@ -125,7 +125,7 @@ fn plain_sum_and_filter() {
             // SAFETY: `graph_iter_nodes` returns a fresh `NodeIter` handle, and
             // `NodesKind` supplies that handle's matching operations.
             unsafe { nodes.iter(handle) }
-                .filter(|x| lt(2u64, x))
+                .filter(|_, x| lt(2u64, x))
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");

@@ -188,7 +188,7 @@ fn zip_filtered_with_indexed() {
         let f = compiler.fun2("evens_by_pos", |ctx, a: Var<S>, b: Var<S>| {
             let acc = ctx.var(0u64);
             a.staged_iter()
-                .filter(|x| eq(rem(x, 2u64), 0u64))
+                .filter(|_, x| eq(rem(x, 2u64), 0u64))
                 .zip(b)
                 .for_each(ctx, move |ctx, pair| {
                     let x = ctx.bind(pair.first());
@@ -799,7 +799,7 @@ fn triangle_count_by_intersecting_adjacency_lists() {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }.for_each(ctx, move |ctx, u| {
                 unsafe { it.iter(call_extern2(nbrs, g, u)) }
-                    .filter(move |v| gt(v, u))
+                    .filter(move |_, v| gt(v, u))
                     .for_each(ctx, move |ctx, v| {
                         let c = unsafe { it.iter(call_extern2(nbrs, g, u)) }
                             .intersect(unsafe { it.iter(call_extern2(nbrs, g, v)) })

@@ -59,7 +59,7 @@ fn test_iter_sum_with_map() {
 fn test_iter_sum_with_filter() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("positive_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            arr.staged_iter().filter(|x| lt(0i64, x)).sum(ctx)
+            arr.staged_iter().filter(|_, x| lt(0i64, x)).sum(ctx)
         });
 
         let compiled = compiler.compile(f).expect("compile failed");
@@ -93,7 +93,7 @@ fn test_iter_count_all() {
 fn test_iter_count_filtered() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("count_gt3", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            arr.staged_iter().filter(|x| lt(3i64, x)).count(ctx)
+            arr.staged_iter().filter(|_, x| lt(3i64, x)).count(ctx)
         });
 
         let compiled = compiler.compile(f).expect("compile failed");
@@ -101,6 +101,115 @@ fn test_iter_count_filtered() {
 
         let data: [i64; 5] = [1, 4, 5, 2, 6];
         assert_eq!(f.call(&data[..]), 3u64); // 4, 5, 6
+    });
+}
+
+#[test]
+fn test_iter_count_flat_map_sums_inner_lengths() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("count_triangle", |ctx, n: Var<u64>| {
+            range(0u64, n)
+                .flat_map(|_, i| range(0u64, i))
+                .count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        for n in [0u64, 1, 2, 5, 10] {
+            assert_eq!(compiled.call(n), n * n.saturating_sub(1) / 2, "n = {n}");
+        }
+    });
+}
+
+#[test]
+fn test_iter_count_chain_and_map() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "count_chain_map",
+            |ctx, arr: Var<SRef<Slice<i64>>>, n: Var<u64>| {
+                arr.staged_iter()
+                    .map(|_, x| x + 1i64)
+                    .chain(range(0u64, n).flat_map(|_, i| range(0u64, i)).map(|_, i| int_cast::<i64, u64, _>(i)))
+                    .count(ctx)
+            },
+        );
+        let compiled = compiler.compile(f).expect("compile failed");
+        let data: [i64; 3] = [7, 8, 9];
+        assert_eq!(compiled.call(&data[..], 4u64), 3 + 6);
+    });
+}
+
+#[test]
+fn test_iter_count_filter_over_flat_map_still_loops() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("count_even_pairs", |ctx, n: Var<u64>| {
+            range(0u64, n)
+                .flat_map(|_, i| range(0u64, i))
+                .filter(|_, j| eq(rem(j, 2u64), 0u64))
+                .count(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let expected = |n: u64| (0..n).flat_map(|i| 0..i).filter(|j| j % 2 == 0).count() as u64;
+        for n in [0u64, 1, 4, 7] {
+            assert_eq!(compiled.call(n), expected(n), "n = {n}");
+        }
+    });
+}
+
+// =============================================================================
+// boxed
+// =============================================================================
+
+#[test]
+fn test_iter_boxed_terminals_reach_the_boxed_iterator() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("boxed_sum_count", |ctx, n: Var<u64>| {
+            let pairs = || range(0u64, n).flat_map(|_, i| range(0u64, i)).boxed();
+            let sum = pairs().sum(ctx);
+            let count = pairs().count(ctx);
+            ctx.bind(sum * 1000u64 + count)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        // n = 4: pairs 0 | 0 1 | 0 1 2 → sum 4, count 6.
+        assert_eq!(compiled.call(4u64), 4 * 1000 + 6);
+    });
+}
+
+#[test]
+fn test_iter_boxed_pulled_by_zip_and_chain() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2(
+            "boxed_zip_chain",
+            |ctx, arr: Var<SRef<Slice<u64>>>, n: Var<u64>| {
+                let odd = arr.staged_iter().filter(|_, x| eq(rem(x, 2u64), 1u64)).boxed();
+                let tail = range(0u64, n).boxed();
+                let acc = ctx.var(0u64);
+                odd.chain(tail)
+                    .zip(range(1u64, 100u64).boxed())
+                    .for_each(ctx, move |ctx, pair| {
+                        let (x, i) = (ctx.bind(pair.first()), ctx.bind(pair.second()));
+                        ctx.store(acc, acc + x * i);
+                    });
+                acc
+            },
+        );
+        let compiled = compiler.compile(f).expect("compile failed");
+        let data: [u64; 5] = [1, 2, 3, 4, 5];
+        // 1*1 + 3*2 + 5*3, then 0*4 + 1*5.
+        assert_eq!(compiled.call(&data[..], 2u64), 1 + 6 + 15 + 5);
+    });
+}
+
+#[test]
+fn test_iter_boxed_early_exit_leaves_the_whole_traversal() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("boxed_any", |ctx, n: Var<u64>, target: Var<u64>| {
+            range(0u64, n)
+                .flat_map(|_, i| range(0u64, i))
+                .boxed()
+                .any(ctx, move |_, j| eq(j, target))
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        assert!(compiled.call(5u64, 3u64));
+        assert!(!compiled.call(5u64, 4u64));
     });
 }
 
@@ -142,7 +251,7 @@ fn test_iter_max_f64() {
 fn test_iter_min_max_filtered() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("min_positive", |ctx, arr: Var<SRef<Slice<i64>>>| {
-            arr.staged_iter().filter(|x| lt(0i64, x)).min(ctx)
+            arr.staged_iter().filter(|_, x| lt(0i64, x)).min(ctx)
         });
 
         let compiled = compiler.compile(f).expect("compile failed");
@@ -579,7 +688,7 @@ fn test_iter_any_after_filter() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("any_even_gt_4", |ctx, arr: Var<SRef<Slice<i64>>>| {
             arr.staged_iter()
-                .filter(|x| eq(x % 2i64, 0i64))
+                .filter(|_, x| eq(x % 2i64, 0i64))
                 .any(ctx, |_, x| gt(x, 4i64))
         });
         let compiled = compiler.compile(f).expect("compile failed");
@@ -725,7 +834,7 @@ fn test_iter_enumerate_after_filter_renumbers() {
         let f = compiler.fun1("after_filter", |ctx, a: Var<SRef<Slice<i64>>>| {
             let acc = ctx.var(0u64);
             a.staged_iter()
-                .filter(|x| gt(x, 15i64))
+                .filter(|_, x| gt(x, 15i64))
                 .enumerate()
                 .for_each(ctx, move |ctx, pair| {
                     let i = ctx.bind(pair.first());
@@ -916,7 +1025,7 @@ fn test_map_and_filter_capture_ctx() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("popcount_of_powers", |ctx, arr: Var<SRef<Slice<u64>>>| {
             arr.staged_iter()
-                .filter(|x| is_power_of_two(ctx, x))
+                .filter(|ctx, x| is_power_of_two(ctx, x))
                 .map(popcount)
                 .sum(ctx)
         });

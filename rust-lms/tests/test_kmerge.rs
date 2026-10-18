@@ -125,7 +125,7 @@ fn stops_early() {
 fn non_indexed_parts() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2("odd_merge", |ctx, a: Var<S>, b: Var<S>| {
-            let odd = |s: Var<S>| s.staged_iter().filter(|x| eq(rem(x, 2u64), 1u64));
+            let odd = |s: Var<S>| s.staged_iter().filter(|_, x| eq(rem(x, 2u64), 1u64));
             let acc = ctx.var(0u64);
             kmerge_by(vec![odd(a), odd(b)], |_, x| x).for_each(ctx, move |ctx, x| {
                 ctx.store(acc, acc * 10u64 + x);

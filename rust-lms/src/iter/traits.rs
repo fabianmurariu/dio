@@ -11,8 +11,8 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
-    Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile, Take,
-    TakeWhile, Zip,
+    BoxedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile,
+    Take, TakeWhile, Zip,
 };
 
 // =============================================================================
@@ -257,7 +257,7 @@ pub trait StagedIterator: Sized {
 
     fn filter<P, Cond>(self, p: P) -> Filter<Self, P>
     where
-        P: Fn(Var<Self::Item>) -> Cond,
+        P: Fn(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool>,
     {
         Filter::new(self, p)
@@ -338,6 +338,18 @@ pub trait StagedIterator: Sized {
         B::Iter: StagedIterator<Item = Self::Item>,
     {
         Chain::new(self, other.staged_iter())
+    }
+
+    /// This iterator with its type erased at stage 0 (see [`BoxedIter`]): for a
+    /// compiler that picks iterators while walking a plan. The emitted code is the
+    /// same.
+    fn boxed<'a>(self) -> BoxedIter<'a, Self::Item>
+    where
+        Self: 'a,
+        Self::Cursor: 'a,
+        Self::Item: 'static,
+    {
+        Box::new(self)
     }
 
     /// Map each element to an iterator and yield the inner elements in order.
@@ -515,11 +527,23 @@ pub trait StagedIterator: Sized {
     }
 
     /// Count elements passing through (including any upstream filter).
+    ///
+    /// A random-access iterator (a slice, a `u64` range, a `map` or an indexed
+    /// `zip` of those) counts as its length, with no loop; random-access cursors
+    /// hold nothing to release. Others loop, unless they override this as Rust
+    /// iterators override `count`: a `chain` sums its sides, a `flat_map` its
+    /// inner counts.
     fn count(self, ctx: &Ctx) -> Var<u64>
     where
         Self::Item: 'static,
     {
-        self.fold(ctx, 0u64, |_, acc, _| acc + 1u64)
+        let mut cursor = self.open(ctx);
+        if let Some(len) = cursor.indexed_len(ctx) {
+            return len;
+        }
+        let count = ctx.var(0u64);
+        drive(cursor, ctx, move |ctx, _| ctx.store(count, count + 1u64));
+        count
     }
 
     /// Branchless count of elements satisfying `pred` — a [`fold_if`](Self::fold_if).

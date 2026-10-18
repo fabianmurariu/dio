@@ -99,6 +99,15 @@ where
                 .close(ctx);
         });
     }
+
+    /// The sum of the inner counts: one loop over the outer elements, and none over
+    /// an inner iterator that knows its length.
+    fn count(self, ctx: &Ctx) -> Var<u64> {
+        let f = self.f;
+        self.outer.fold(ctx, 0u64, move |ctx, acc, o| {
+            acc + f(ctx, o).staged_iter().count(ctx)
+        })
+    }
 }
 
 /// The cursor of a [`FlatMap`] (the pulled lowering).

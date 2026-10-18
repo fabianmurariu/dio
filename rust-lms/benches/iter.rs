@@ -116,7 +116,7 @@ fn filtered_iter(backend: JitBackend) -> SliceFn {
     let f = compiler.fun1("filtered_iter", |ctx, a: Var<SRef<Slice<i64>>>| {
         let acc = ctx.var(0i64);
         a.staged_iter()
-            .filter(|v| gt(v, 0i64))
+            .filter(|_, v| gt(v, 0i64))
             .for_each(ctx, move |ctx, v| {
                 ctx.store(acc, add(acc, v));
             });
@@ -166,7 +166,7 @@ fn chain_iter(backend: JitBackend) -> SliceFn {
     let mut compiler = Compiler::new().with_backend(backend);
     let f = compiler.fun1("chain_iter", |ctx, a: Var<SRef<Slice<i64>>>| {
         a.staged_iter()
-            .filter(|v| gt(v, 0i64))
+            .filter(|_, v| gt(v, 0i64))
             .map(|_, v| mul(v, 2i64))
             .sum(ctx)
     });

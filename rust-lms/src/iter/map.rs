@@ -32,6 +32,7 @@ impl<I, F, U> Map<I, F, U> {
 impl<I, F, U, MapOut> StagedIterator for Map<I, F, U>
 where
     I: StagedIterator,
+    I::Item: 'static,
     F: Fn(&Ctx, Var<I::Item>) -> MapOut,
     MapOut: Staged<Out = U> + 'static,
     U: StagedType + CopyType + 'static,
@@ -45,6 +46,11 @@ where
             map_fn: self.map_fn,
             _phantom: PhantomData,
         }
+    }
+
+    /// One output per input, and `f` only computes the output.
+    fn count(self, ctx: &Ctx) -> Var<u64> {
+        self.inner.count(ctx)
     }
 }
 
@@ -84,6 +90,7 @@ where
 impl<I, F, U, MapOut> IndexedStagedIterator for Map<I, F, U>
 where
     I: IndexedStagedIterator,
+    I::Item: 'static,
     F: Fn(&Ctx, Var<I::Item>) -> MapOut,
     MapOut: Staged<Out = U> + 'static,
     U: StagedType + CopyType + 'static,

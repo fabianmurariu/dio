@@ -245,7 +245,7 @@ impl Nbrs for Csr {
         let (targets, ts) = (self.targets, self.ts);
         // SAFETY: CSR offsets are within `targets` and `ts`.
         range(start, end)
-            .filter(move |j| lt(unsafe { ts.get_unchecked(j) }, WINDOW))
+            .filter(move |_, j| lt(unsafe { ts.get_unchecked(j) }, WINDOW))
             .map(move |_, j| unsafe { targets.get_unchecked(j) })
     }
 }
@@ -269,7 +269,7 @@ impl Nbrs for SliceFfi {
         let t = ctx.bind(call_extern2(self.ts, self.g, n));
         // SAFETY: both slices have the node's degree as length, into the live graph.
         range(0u64, s.len())
-            .filter(move |j| lt(unsafe { t.get_unchecked(j) }, WINDOW))
+            .filter(move |_, j| lt(unsafe { t.get_unchecked(j) }, WINDOW))
             .map(move |_, j| unsafe { s.get_unchecked(j) })
     }
 }

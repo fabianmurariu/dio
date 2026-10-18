@@ -23,6 +23,7 @@
 //!      });
 //! ```
 
+mod boxed;
 mod chain;
 mod enumerate;
 mod filter;
@@ -44,6 +45,7 @@ mod take_while;
 mod traits;
 mod zip;
 
+pub use boxed::{BoxedClose, BoxedCursor, BoxedIter, ErasedClose, ErasedCursor, ErasedIter};
 pub use chain::{Chain, ChainCursor};
 pub use enumerate::{Enumerate, EnumerateCursor};
 pub use filter::{Filter, FilterCursor};

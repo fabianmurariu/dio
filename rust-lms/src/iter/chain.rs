@@ -41,6 +41,12 @@ where
             in_b: ctx.var(false),
         }
     }
+
+    fn count(self, ctx: &Ctx) -> Var<u64> {
+        let a = self.a.count(ctx);
+        let b = self.b.count(ctx);
+        ctx.bind(a + b)
+    }
 }
 
 /// The cursor of a [`Chain`].

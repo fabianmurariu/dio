@@ -24,7 +24,7 @@ impl<I, P, Cond> StagedIterator for Filter<I, P>
 where
     I: StagedIterator,
     I::Item: crate::types::CopyType + 'static,
-    P: Fn(Var<I::Item>) -> Cond,
+    P: Fn(&Ctx, Var<I::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
@@ -48,7 +48,7 @@ impl<C, P, Cond> Cursor for FilterCursor<C, P>
 where
     C: Cursor,
     C::Item: crate::types::CopyType + 'static,
-    P: Fn(Var<C::Item>) -> Cond,
+    P: Fn(&Ctx, Var<C::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = C::Item;
@@ -64,7 +64,8 @@ where
         let (inner, predicate) = (self.inner, self.predicate);
         ctx.repeat(|ctx, again| {
             let (elem, close) = inner.next(ctx, done);
-            ctx.again_unless(predicate(elem), again);
+            let keep = predicate(ctx, elem);
+            ctx.again_unless(keep, again);
             (elem, close)
         })
     }
