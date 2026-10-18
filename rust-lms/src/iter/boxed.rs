@@ -21,8 +21,8 @@ use crate::types::StagedType;
 use super::traits::{Close, Cursor, IntoStagedIterator, StagedIterator};
 
 /// A [`StagedIterator`] of `T` whose concrete type is erased.
-pub type BoxedIter<'a, T> = Box<dyn ErasedIter<'a, T> + 'a>;
-/// The cursor of a [`BoxedIter`].
+pub type BoxedStagedIter<'a, T> = Box<dyn ErasedIter<'a, T> + 'a>;
+/// The cursor of a [`BoxedStagedIter`].
 pub type BoxedCursor<'a, T> = Box<dyn ErasedCursor<'a, T> + 'a>;
 /// The close of a [`BoxedCursor`].
 pub type BoxedClose<'a> = Box<dyn ErasedClose<'a> + 'a>;
@@ -61,7 +61,7 @@ where
     }
 }
 
-impl<'a, T: StagedType + 'static> StagedIterator for BoxedIter<'a, T> {
+impl<'a, T: StagedType + 'static> StagedIterator for BoxedStagedIter<'a, T> {
     type Item = T;
     type Cursor = BoxedCursor<'a, T>;
 
@@ -81,7 +81,7 @@ impl<'a, T: StagedType + 'static> StagedIterator for BoxedIter<'a, T> {
     }
 }
 
-impl<'a, T: StagedType + 'static> IntoStagedIterator for BoxedIter<'a, T> {
+impl<'a, T: StagedType + 'static> IntoStagedIterator for BoxedStagedIter<'a, T> {
     type Iter = Self;
 
     fn staged_iter(self) -> Self {

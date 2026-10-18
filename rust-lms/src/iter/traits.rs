@@ -11,7 +11,7 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
-    BoxedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile,
+    BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile,
     Take, TakeWhile, Zip,
 };
 
@@ -340,10 +340,10 @@ pub trait StagedIterator: Sized {
         Chain::new(self, other.staged_iter())
     }
 
-    /// This iterator with its type erased at stage 0 (see [`BoxedIter`]): for a
+    /// This iterator with its type erased at stage 0 (see [`BoxedStagedIter`]): for a
     /// compiler that picks iterators while walking a plan. The emitted code is the
     /// same.
-    fn boxed<'a>(self) -> BoxedIter<'a, Self::Item>
+    fn boxed<'a>(self) -> BoxedStagedIter<'a, Self::Item>
     where
         Self: 'a,
         Self::Cursor: 'a,
