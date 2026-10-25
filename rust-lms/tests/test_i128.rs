@@ -131,3 +131,19 @@ proptest! {
         prop_assert_eq!(compiled.as_fn().call(a.0, a.1, b.0, b.1), a.cmp(&b) as i64);
     }
 }
+
+#[test]
+fn unpacks_to_its_parts() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("unpacked", |ctx, t: Var<i64>, i: Var<u64>| {
+            let packed = ctx.bind(pack_i128(t, i));
+            let (hi, lo) = (ctx.bind(i128_hi(packed)), ctx.bind(i128_lo(packed)));
+            // Both halves survive: `hi` keeps its sign, `lo` all its bits.
+            ctx.bind(eq(hi, t) & eq(lo, i))
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        for (t, i) in PARTS {
+            assert!(compiled.call(t, i), "({t}, {i})");
+        }
+    });
+}

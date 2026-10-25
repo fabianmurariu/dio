@@ -20,5 +20,5 @@ pub use traits::{Bits, FloatNum, IntNum, Num, Ordered};
 
 pub use ops::{
     add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast, int_to_float, le, lt, max, min,
-    mul, ne, pack_i128, rem, select, shl, shr, sub, trailing_zeros,
+    mul, ne, i128_hi, i128_lo, pack_i128, rem, select, shl, shr, sub, trailing_zeros,
 };

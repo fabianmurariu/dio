@@ -25,6 +25,7 @@
 
 mod boxed;
 mod chain;
+mod empty;
 mod enumerate;
 mod filter;
 mod filter_map;
@@ -47,6 +48,7 @@ mod zip;
 
 pub use boxed::{BoxedClose, BoxedCursor, BoxedStagedIter, ErasedClose, ErasedCursor, ErasedIter};
 pub use chain::{Chain, ChainCursor};
+pub use empty::{Empty, EmptyCursor, empty};
 pub use enumerate::{Enumerate, EnumerateCursor};
 pub use filter::{Filter, FilterCursor};
 pub use filter_map::{FilterMap, FilterMapCursor};
@@ -94,6 +96,7 @@ macro_rules! into_staged_iter_is_self {
 
 into_staged_iter_is_self!(
     Chain<A, B>,
+    Empty<T>,
     Enumerate<I>,
     Filter<I, P>,
     FilterMap<I, F>,

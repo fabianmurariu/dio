@@ -1121,3 +1121,17 @@ fn test_set_bits_count_u64() {
         }
     });
 }
+
+#[test]
+fn test_iter_empty_has_no_elements() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("empty_then", |ctx, n: Var<u64>| {
+            let sum = empty::<u64>().chain(range(0u64, n)).sum(ctx);
+            let count = empty::<u64>().count(ctx);
+            let any = empty::<u64>().any(ctx, |_, x| eq(x, x));
+            ctx.bind(sum + count + select(any, 1000u64, 0u64))
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        assert_eq!(compiled.call(4u64), 6);
+    });
+}

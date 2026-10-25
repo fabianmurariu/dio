@@ -299,6 +299,50 @@ where
     }
 }
 
+/// The halves of an `i128` packed by [`pack_i128`]: the signed high `i64`, or the low
+/// `u64`.
+#[derive(Clone, Copy)]
+pub struct UnpackI128<E, T> {
+    packed: E,
+    _half: PhantomData<T>,
+}
+
+unsafe impl<E: Staged<Out = i128>> Staged for UnpackI128<E, i64> {
+    type Out = i64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let packed = self.packed.codegen(ctx).leaf();
+        let shift = ctx.iconst(crate::types::ScalarType::I128, 64);
+        let hi = ctx.sshr(packed, shift);
+        Value::scalar(ctx.ireduce(crate::types::ScalarType::I64, hi))
+    }
+}
+
+unsafe impl<E: Staged<Out = i128>> Staged for UnpackI128<E, u64> {
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let packed = self.packed.codegen(ctx).leaf();
+        Value::scalar(ctx.ireduce(crate::types::ScalarType::I64, packed))
+    }
+}
+
+/// The high `i64` of an `i128` from [`pack_i128`].
+pub fn i128_hi<E: IntoStaged<i128>>(packed: E) -> UnpackI128<E::Staged, i64> {
+    UnpackI128 {
+        packed: packed.into_staged(),
+        _half: PhantomData,
+    }
+}
+
+/// The low `u64` of an `i128` from [`pack_i128`].
+pub fn i128_lo<E: IntoStaged<i128>>(packed: E) -> UnpackI128<E::Staged, u64> {
+    UnpackI128 {
+        packed: packed.into_staged(),
+        _half: PhantomData,
+    }
+}
+
 /// Integer cast with Rust-like truncation on narrowing and signedness-aware
 /// extension on widening.
 pub struct IntCast<E, TO> {
