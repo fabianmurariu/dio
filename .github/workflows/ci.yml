@@ -52,7 +52,11 @@ jobs:
 
       - name: Install LLVM/MLIR 22 (macOS, Homebrew)
         if: matrix.os == 'macos'
-        run: brew install llvm@22
+        # `llvm-config --system-libs` asks for -lzstd (and -lxml2 etc.), but only LLVM's own
+        # lib dir is passed to the linker; Homebrew's zstd lives in $(brew --prefix)/lib.
+        run: |
+          brew install llvm@22
+          echo "LIBRARY_PATH=$(brew --prefix)/lib${LIBRARY_PATH:+:$LIBRARY_PATH}" >> "$GITHUB_ENV"
 
       - uses: Swatinem/rust-cache@v2
         with:
