@@ -306,7 +306,7 @@ unsafe impl<T: StagedType + 'static> Staged for SVecSliceExprMut<T> {
 
 /// Load `len` from a control block. Shared by the views and [`SVec::len`] so the
 /// field offset lives in exactly one place.
-fn raw_vec_len(ctx: &mut Ctx, ctrl: *mut RawVec) -> Var<u64> {
+fn raw_vec_len(ctx: &Ctx, ctrl: *mut RawVec) -> Var<u64> {
     // SAFETY: every constructor of a view or handle guarantees `ctrl` points at
     // a live control block; `len` is one of its declared staged fields.
     ctx.bind(unsafe { load_field_unchecked(const_mut_ptr::<RawVec>(ctrl), RawVecType::len()) })
@@ -396,7 +396,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// ```compile_fail
     /// # use rust_lms::prelude::*;
     /// # use rust_lms_std::SVec;
-    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, v: Var<i64>) {
+    /// # fn demo(ctx: &Ctx, svec: &mut SVec<i64>, v: Var<i64>) {
     /// let snapshot = ctx.bind_lt(svec.as_slice());
     /// svec.push(ctx, v);                        // error: `svec` is still borrowed
     /// let _n = ctx.bind_lt(snapshot.len());
@@ -410,7 +410,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// ```compile_fail
     /// # use rust_lms::prelude::*;
     /// # use rust_lms_std::SVec;
-    /// # fn demo(ctx: &mut Ctx, svec: &mut SVec<i64>, n: Var<u64>, seen: Var<u64>, i: Var<u64>) {
+    /// # fn demo(ctx: &Ctx, svec: &mut SVec<i64>, n: Var<u64>, seen: Var<u64>, i: Var<u64>) {
     /// let snapshot = ctx.bind_lt(svec.as_slice());
     /// ctx.while_loop(lt(i, n), move |ctx| {
     ///     let l = ctx.bind_lt(snapshot.len());  // read on every iteration ...
@@ -456,7 +456,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     }
 
     /// Current element count.
-    pub fn len(&self, ctx: &mut Ctx) -> Var<u64> {
+    pub fn len(&self, ctx: &Ctx) -> Var<u64> {
         raw_vec_len(ctx, self.ctrl)
     }
 
@@ -465,7 +465,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// # Safety
     ///
     /// At execution, `i` must be less than the vector's initialized length.
-    pub unsafe fn get(&self, ctx: &mut Ctx, i: Var<u64>) -> Var<T> {
+    pub unsafe fn get(&self, ctx: &Ctx, i: Var<u64>) -> Var<T> {
         let idx = ctx.bind(int_cast::<i64, u64, _>(i));
         // SAFETY: callers of this unchecked operation must keep `i < len`;
         // `SVec::new` guarantees the allocation and element layout.
@@ -479,7 +479,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// At execution, `i` must be less than the vector's allocated capacity. If
     /// it is beyond the current length, callers must also maintain the vector's
     /// initialized-length invariant before the vector is read or dropped.
-    pub unsafe fn set(&mut self, ctx: &mut Ctx, i: Var<u64>, v: Var<T>) {
+    pub unsafe fn set(&mut self, ctx: &Ctx, i: Var<u64>, v: Var<T>) {
         let idx = ctx.bind(int_cast::<i64, u64, _>(i));
         // SAFETY: callers of this unchecked operation must keep `i < cap`;
         // `SVec::new` guarantees the allocation and element layout.
@@ -524,7 +524,7 @@ impl<T: StagedType + CopyType + 'static> SVec<T> {
     /// let shared = svec.as_slice();
     /// drop((unique, shared));
     /// ```
-    pub fn push(&mut self, ctx: &mut Ctx, v: Var<T>) {
+    pub fn push(&mut self, ctx: &Ctx, v: Var<T>) {
         let len = self.len(ctx);
         // SAFETY: guaranteed by `SVec::new`; `cap` is a field of the live
         // control block.

@@ -209,7 +209,7 @@ fn any_breaks_and_drops() {
     for_each_backend(|mut compiler| {
         let tracked = ChunkedIterFns::<TrackedK>::register(&mut compiler);
         let f = compiler.fun3("any", move |ctx, g: Var<G>, n: Var<u64>, x: Var<u64>| {
-            tracked.iter2(g, n).any(ctx, move |v| eq(v, x))
+            tracked.iter2(g, n).any(ctx, move |_, v| eq(v, x))
         });
         let compiled = compiler.compile(f).expect("compile");
         let g = boundary_graph();
@@ -286,8 +286,8 @@ fn filter_map_into_output_svec() {
             nodes.iter1(g).for_each(ctx, |ctx, n| {
                 neigh
                     .iter2(g, n)
-                    .filter(|b| eq(bitand(b, 1u64), 1u64))
-                    .map(move |b| add(mul(n, 1000u64), b))
+                    .filter(|_, b| eq(bitand(b, 1u64), 1u64))
+                    .map(move |_, b| add(mul(n, 1000u64), b))
                     .for_each(ctx, |ctx, row| svec.push(ctx, row));
             });
             svec.len(ctx)

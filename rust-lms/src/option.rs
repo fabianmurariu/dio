@@ -730,7 +730,7 @@ where
 /// );
 /// ```
 pub fn match_opt<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -739,7 +739,7 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = COptionType<T>>,
-    SomeFn: FnOnce(&mut Ctx, Var<T>) -> SomeBody,
+    SomeFn: FnOnce(&Ctx, Var<T>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
@@ -823,7 +823,7 @@ where
 
 /// Pattern match on an `Option<&T>`.
 pub fn match_opt_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -832,7 +832,7 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptRefType<T>>,
-    SomeFn: FnOnce(&mut Ctx, Var<SRef<T>>) -> SomeBody,
+    SomeFn: FnOnce(&Ctx, Var<SRef<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {
@@ -906,7 +906,7 @@ where
 
 /// Pattern match on an `Option<&mut T>`.
 pub fn match_opt_mut_ref<T, OUT, OPT, SomeFn, SomeBody, NoneBody>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     opt: OPT,
     some_fn: SomeFn,
     none_body: NoneBody,
@@ -915,7 +915,7 @@ where
     T: StagedType,
     OUT: StagedType,
     OPT: Staged<Out = OptMutRefType<T>>,
-    SomeFn: FnOnce(&mut Ctx, Var<SRefMut<T>>) -> SomeBody,
+    SomeFn: FnOnce(&Ctx, Var<SRefMut<T>>) -> SomeBody,
     SomeBody: Staged<Out = OUT>,
     NoneBody: Staged<Out = OUT>,
 {

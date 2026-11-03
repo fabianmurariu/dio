@@ -39,7 +39,7 @@ where
     type Item = I::Item;
     type Cursor = RevCursor<I>;
 
-    fn open(self, ctx: &mut Ctx) -> RevCursor<I> {
+    fn open(self, ctx: &Ctx) -> RevCursor<I> {
         let len = ctx.bind(self.iter.count());
         let remaining = ctx.var(len);
         RevCursor {
@@ -62,7 +62,7 @@ impl<I: IndexedSource> Cursor for RevCursor<I> {
     type Item = I::Item;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<I::Item>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<I::Item>, ()) {
         let i = self.remaining;
         // Counting down to an exclusive `0` keeps the counter unsigned.
         ctx.exit_unless(gt(i, 0u64), done);
@@ -72,11 +72,11 @@ impl<I: IndexedSource> Cursor for RevCursor<I> {
         (item, ())
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         Some(self.len)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<I::Item>, ()) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<I::Item>, ()) {
         let at = ctx.bind(sub(sub(self.len, 1u64), index));
         // SAFETY: `index < len`, so `len - 1 - index < len`.
         (ctx.bind(unsafe { IndexedSource::get_at(self.src, at) }), ())

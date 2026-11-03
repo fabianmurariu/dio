@@ -39,6 +39,7 @@ pub(super) fn scalar_to_mlir(context: &Context, ty: ScalarType) -> Type<'_> {
         ScalarType::I16 => IntegerType::new(context, 16).into(),
         ScalarType::I32 => IntegerType::new(context, 32).into(),
         ScalarType::I64 => IntegerType::new(context, 64).into(),
+        ScalarType::I128 => IntegerType::new(context, 128).into(),
         ScalarType::F32 => Type::float32(context),
         ScalarType::F64 => Type::float64(context),
         ScalarType::Ptr => llvm::r#type::pointer(context, 0),
@@ -521,6 +522,22 @@ impl<'c> Backend for MlirBackend<'c> {
         let (a, b) = (self.get(a), self.get(b));
         self.emit_value(arith::shrui(a, b, self.location), ty)
     }
+    fn ctz(&mut self, a: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let a = self.get(a);
+        let i1 = IntegerType::new(self.context, 1).into();
+        // Zero is defined (the bit width), like Cranelift's `ctz` and Rust's `trailing_zeros`.
+        let op = OperationBuilder::new("llvm.intr.cttz", self.location)
+            .add_operands(&[a])
+            .add_attributes(&[(
+                Identifier::new(self.context, "is_zero_poison"),
+                IntegerAttribute::new(i1, 0).into(),
+            )])
+            .add_results(&[scalar_to_mlir(self.context, ty)])
+            .build()
+            .expect("valid llvm.intr.cttz");
+        self.emit_value(op, ty)
+    }
 
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
@@ -578,6 +595,13 @@ impl<'c> Backend for MlirBackend<'c> {
         let ty = scalar_to_mlir(self.context, to);
         let v = self.get(v);
         self.emit_value(arith::trunci(v, ty, self.location), to)
+    }
+    fn iconcat(&mut self, lo: ValueId, hi: ValueId) -> ValueId {
+        let lo = self.uextend(ScalarType::I128, lo);
+        let hi = self.uextend(ScalarType::I128, hi);
+        let shift = self.iconst(ScalarType::I128, 64);
+        let hi = self.ishl(hi, shift);
+        self.bor(lo, hi)
     }
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         let ty = scalar_to_mlir(self.context, to);
@@ -754,6 +778,27 @@ impl<'c> Backend for MlirBackend<'c> {
             &else_ops,
             self.location,
         );
+        self.blocks[self.current].append_operation(operation);
+    }
+    fn br_table(&mut self, index: ValueId, default: BlockHandle, targets: &[BlockHandle]) {
+        let flag_type = scalar_to_mlir(self.context, ScalarType::I32);
+        let index = self.get(index);
+        let cases: Vec<i64> = (0..targets.len() as i64).collect();
+        let default = (&self.blocks[default.as_u32() as usize], &[][..]);
+        let destinations: Vec<_> = targets
+            .iter()
+            .map(|t| (&self.blocks[t.as_u32() as usize], &[][..]))
+            .collect();
+        let operation = cf::switch(
+            self.context,
+            &cases,
+            index,
+            flag_type,
+            default,
+            &destinations,
+            self.location,
+        )
+        .expect("valid cf.switch");
         self.blocks[self.current].append_operation(operation);
     }
 

@@ -116,7 +116,7 @@ fn filtered_iter(backend: JitBackend) -> SliceFn {
     let f = compiler.fun1("filtered_iter", |ctx, a: Var<SRef<Slice<i64>>>| {
         let acc = ctx.var(0i64);
         a.staged_iter()
-            .filter(|v| gt(v, 0i64))
+            .filter(|_, v| gt(v, 0i64))
             .for_each(ctx, move |ctx, v| {
                 ctx.store(acc, add(acc, v));
             });
@@ -131,7 +131,7 @@ fn filtered_iter(backend: JitBackend) -> SliceFn {
 fn filtered_branchless(backend: JitBackend) -> SliceFn {
     let mut compiler = Compiler::new().with_backend(backend);
     let f = compiler.fun1("filtered_branchless", |ctx, a: Var<SRef<Slice<i64>>>| {
-        a.staged_iter().sum_if(ctx, |v| gt(v, 0i64))
+        a.staged_iter().sum_if(ctx, |_, v| gt(v, 0i64))
     });
     let compiled = compiler.compile(f).expect("compile");
     Box::new(move |a| compiled.as_fn().call(a))
@@ -166,8 +166,8 @@ fn chain_iter(backend: JitBackend) -> SliceFn {
     let mut compiler = Compiler::new().with_backend(backend);
     let f = compiler.fun1("chain_iter", |ctx, a: Var<SRef<Slice<i64>>>| {
         a.staged_iter()
-            .filter(|v| gt(v, 0i64))
-            .map(|v| mul(v, 2i64))
+            .filter(|_, v| gt(v, 0i64))
+            .map(|_, v| mul(v, 2i64))
             .sum(ctx)
     });
     let compiled = compiler.compile(f).expect("compile");
@@ -207,7 +207,9 @@ fn zip_iter(backend: JitBackend) -> SlicePairFn {
         "zip_iter",
         |ctx, a: Var<SRef<Slice<i64>>>, b: Var<SRef<Slice<i64>>>| {
             let acc = ctx.var(0i64);
-            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                let ai = ctx.bind(pair.first());
+                let bi = ctx.bind(pair.second());
                 ctx.store(acc, add(acc, mul(ai, bi)));
             });
             acc

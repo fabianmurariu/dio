@@ -1,15 +1,18 @@
 //! Capability traits for numeric types.
 //!
-//! - [`Num`]: shared arithmetic (`+ - * /`) and comparison (`< > ==`) for any
-//!   integer or floating-point staged type. Both branches of the hierarchy
-//!   refine this.
+//! - [`Ordered`]: comparison (`< > ==`), for every [`Num`] and for `i128`.
+//! - [`Num`]: shared arithmetic (`+ - * /`) for any integer or floating-point
+//!   staged type. Both branches of the hierarchy refine this.
 //! - [`IntNum`]: adds remainder (modulo). Implemented by `i64`, `u64`, `i32`,
 //!   `u32`.
 //! - [`FloatNum`]: marker for floating-point staged types; reserved for future
 //!   float-only operations (sqrt, abs, ...). Implemented by `f64`.
+//! - [`Bits`]: bitwise `& | ^`. Implemented by every integer type and by `bool`,
+//!   where they are logical and/or/xor (non-short-circuiting).
 //!
 //! `bool` deliberately does not implement `Num` — boolean values use the
-//! control-flow combinators (`if_then`, `if_then_else`) rather than arithmetic.
+//! control-flow combinators (`if_then`, `if_then_else`) and [`Bits`] rather than
+//! arithmetic.
 
 use crate::staged::{CompilationContext, Value};
 use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, StagedType};
@@ -26,11 +29,18 @@ mod sealed {
 ///
 /// This trait is sealed because its methods return raw IR values whose type is
 /// trusted by every arithmetic expression.
-pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
+pub trait Num: Ordered {
     fn codegen_add(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_sub(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_mul(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_div(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
+}
+
+/// Staged types with comparisons (`< > == != <= >=`): every [`Num`], and `i128`, which
+/// has no division and so is not a `Num`.
+///
+/// Sealed for the same reason as [`Num`].
+pub trait Ordered: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
     fn codegen_lt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_gt(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_eq(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
@@ -39,14 +49,39 @@ pub trait Num: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {
     fn codegen_ge(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
 }
 
-/// Integer-typed numbers — additionally support remainder (modulo).
-pub trait IntNum: Num {
+/// Types supporting bitwise `& | ^`: the integers, and `bool` (where they are
+/// logical and/or/xor). A `bool` is an `i8` in `{0, 1}`, a set closed under all
+/// three, so one instruction per op is exact for every implementor — this is a
+/// marker, with no per-type instruction selection.
+///
+/// `bool` gets only the logical ops — no shifts:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// fn shift(a: Var<bool>, b: Var<bool>) { let _ = a << b; }
+/// ```
+///
+/// no arithmetic:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// fn plus(a: Var<bool>, b: Var<bool>) { let _ = a + b; }
+/// ```
+///
+/// and no mixing with integers:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+/// fn mixed(a: Var<bool>, b: Var<i64>) { let _ = a & b; }
+/// ```
+pub trait Bits: StagedType + ConstantType + CopyType + sealed::Sealed + 'static {}
+
+/// Integer-typed numbers — additionally support remainder (modulo), bitwise ops
+/// and shifts.
+pub trait IntNum: Num + Bits {
     const SIGNED: bool;
 
     fn codegen_rem(left: Value, right: Value, ctx: &mut CompilationContext<'_>) -> Value;
-    fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
-    fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
-    fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
     fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value;
 }
@@ -61,6 +96,7 @@ pub trait FloatNum: Num {}
 macro_rules! impl_int_num {
     ($ty:ty, signed) => {
         impl sealed::Sealed for $ty {}
+        impl Bits for $ty {}
         impl Num for $ty {
             fn codegen_add(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.iadd(l.leaf(), r.leaf()))
@@ -74,6 +110,8 @@ macro_rules! impl_int_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.sdiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Slt, l.leaf(), r.leaf()))
             }
@@ -99,15 +137,6 @@ macro_rules! impl_int_num {
             fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.srem(l.leaf(), r.leaf()))
             }
-            fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.band(l.leaf(), r.leaf()))
-            }
-            fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.bor(l.leaf(), r.leaf()))
-            }
-            fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.bxor(l.leaf(), r.leaf()))
-            }
             fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
             }
@@ -118,6 +147,7 @@ macro_rules! impl_int_num {
     };
     ($ty:ty, unsigned) => {
         impl sealed::Sealed for $ty {}
+        impl Bits for $ty {}
         impl Num for $ty {
             fn codegen_add(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.iadd(l.leaf(), r.leaf()))
@@ -131,6 +161,8 @@ macro_rules! impl_int_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.udiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.icmp(IntCmp::Ult, l.leaf(), r.leaf()))
             }
@@ -156,15 +188,6 @@ macro_rules! impl_int_num {
             fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.urem(l.leaf(), r.leaf()))
             }
-            fn codegen_bitand(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.band(l.leaf(), r.leaf()))
-            }
-            fn codegen_bitor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.bor(l.leaf(), r.leaf()))
-            }
-            fn codegen_bitxor(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.bxor(l.leaf(), r.leaf()))
-            }
             fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
             }
@@ -183,6 +206,32 @@ impl_int_num!(i64, signed);
 impl_int_num!(u64, unsigned);
 impl_int_num!(i32, signed);
 impl_int_num!(u32, unsigned);
+
+impl sealed::Sealed for i128 {}
+impl Bits for i128 {}
+impl Ordered for i128 {
+    fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Slt, l.leaf(), r.leaf()))
+    }
+    fn codegen_gt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sgt, l.leaf(), r.leaf()))
+    }
+    fn codegen_eq(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Eq, l.leaf(), r.leaf()))
+    }
+    fn codegen_ne(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Ne, l.leaf(), r.leaf()))
+    }
+    fn codegen_le(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sle, l.leaf(), r.leaf()))
+    }
+    fn codegen_ge(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
+        Value::scalar(ctx.icmp(IntCmp::Sge, l.leaf(), r.leaf()))
+    }
+}
+
+impl sealed::Sealed for bool {}
+impl Bits for bool {}
 
 // =============================================================================
 // Floating point
@@ -204,6 +253,8 @@ macro_rules! impl_float_num {
             fn codegen_div(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.fdiv(l.leaf(), r.leaf()))
             }
+        }
+        impl Ordered for $ty {
             fn codegen_lt(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.fcmp(FloatCmp::Lt, l.leaf(), r.leaf()))
             }

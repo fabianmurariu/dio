@@ -201,7 +201,7 @@ fn view_released_then_grow() {
 /// Each borrowed sub-expression is `bind_lt`-ed at the point it is produced, so
 /// everything downstream is an ordinary borrow-free `Var` and the plain ops
 /// apply. That is what keeps `LifetimeErased` off the arithmetic nodes.
-fn total<S>(ctx: &mut Ctx, s: S) -> Var<i64>
+fn total<S>(ctx: &Ctx, s: S) -> Var<i64>
 where
     S: LifetimeErased,
     S::Out: TrustedSliceType<Elem = i64>,

@@ -29,7 +29,7 @@ use crate::slice::Slice;
 use crate::staged::{
     CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse,
 };
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -206,12 +206,8 @@ unsafe impl<T: StagedType> StagedType for RawSlice<T> {
         std::mem::align_of::<FatSlice<()>>()
     }
 
-    fn is_copy_struct() -> bool {
-        true
-    }
-
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -248,12 +244,8 @@ unsafe impl<T: StagedType> StagedType for RawSliceMut<T> {
         std::mem::align_of::<FatSliceMut<()>>()
     }
 
-    fn is_copy_struct() -> bool {
-        true
-    }
-
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -443,6 +435,32 @@ unsafe impl Staged for StackAlloc {
 /// Reserve `size` bytes of uninitialised, 8-byte-aligned stack scratch. See [`StackAlloc`].
 pub fn stack_alloc(size: usize) -> StackAlloc {
     StackAlloc { size }
+}
+
+/// A fresh, **uninitialised** stack slot for `len` values of `T`, aligned for `T`, as a
+/// `SMutPtr<T>` to the first. Allocated once in the frame, like [`StackAlloc`].
+pub struct StackArray<T> {
+    len: usize,
+    _t: PhantomData<fn() -> T>,
+}
+
+unsafe impl<T: StagedType> Staged for StackArray<T> {
+    type Out = SMutPtr<T>;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let size = (T::size_of() * self.len).max(1);
+        let align_shift = T::align_of().max(1).trailing_zeros() as u8;
+        let slot = ctx.alloc_stack_slot(size as u32, align_shift);
+        Value::scalar(ctx.stack_addr(slot, 0))
+    }
+}
+
+/// Reserve uninitialised stack room for `len` values of `T`. See [`StackArray`].
+pub fn stack_array<T: StagedType>(len: usize) -> StackArray<T> {
+    StackArray {
+        len,
+        _t: PhantomData,
+    }
 }
 
 // =============================================================================
@@ -961,7 +979,7 @@ where
     let arg_value = arg.codegen(ctx);
     // Materialize to the arg's ABI leaf: a scalar passes through; a fat (slice) value becomes
     // a pointer to a `{ptr,len}` stack slot — exactly the storage a slice extern arg expects.
-    let arg_leaf = ctx.materialize_value(arg_value);
+    let arg_leaf = ctx.materialize_value::<AType>(arg_value);
     push_extern_value::<AType>(ctx, args, arg_leaf);
 }
 
@@ -970,7 +988,7 @@ pub(crate) fn push_extern_value<T: StagedType>(
     args: &mut Vec<ValueId>,
     value: ValueId,
 ) {
-    if T::is_copy_struct() {
+    if matches!(Shape::of::<T>(), Shape::Leaves(_) | Shape::Memory { .. }) {
         args.push(value);
     } else {
         let stack_slot = ctx.alloc_stack_slot(
@@ -999,15 +1017,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     args.push(output_ptr);
     ctx.call(func_ref, &args);
 
-    if Ret::is_fat_pointer() {
-        ctx.load_fat(output_ptr)
-    } else if Ret::is_copy_struct() {
-        Value::scalar(output_ptr)
-    } else if Ret::size_of() == 0 {
-        Value::scalar(ctx.get_unit_value())
-    } else {
-        Value::scalar(ctx.load(Ret::scalar_type(), output_ptr, 0))
-    }
+    ctx.load_value::<Ret>(output_ptr)
 }
 
 /// Call an external function with 3 arguments. `Out` is `S::Ret`.

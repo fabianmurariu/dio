@@ -95,7 +95,9 @@ RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms <name> -- --nocapture
   `Compiler` owns definitions; `fun0..8`(`_rec`) define functions; `compile`
   performs ABI lowering and JIT; `Compiled::run()`/`as_fn()` execute.
 - **Authoring style** — imperative `Ctx`: `ctx.var`/`bind`/`store`/`emit`/
-  `if_then`/`if_then_else`/`while_loop`/`break_loop`. (The old declarative
+  `if_then`/`if_then_else`/`while_loop`/`break_loop`. `&Ctx` is a shared handle
+  (`Rc<RefCell<..>>`); statements land in the innermost open scope, so closures
+  may capture and emit through it. (The old declarative
   expression-tree style — `let_var`, tuple sequencing — has been removed.)
 - **Control flow** (`src/control.rs`) — `IfThenElse` (merge block param = phi),
   `IfThen`, `While`, `Not`.

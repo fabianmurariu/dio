@@ -34,3 +34,25 @@ fn stack_alloc_write_read_roundtrip() {
         assert_eq!(compiled.call(7, 35), 42);
     });
 }
+
+#[test]
+fn stack_array_holds_i128_keys() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("pairs", |ctx, a: Var<i64>, b: Var<u64>| {
+            let keys = ctx.bind(stack_array::<i128>(3));
+            let neg = ctx.bind(sub(0i64, a));
+            // SAFETY: three slots, each written before it is read.
+            unsafe {
+                for (slot, key) in [(0i64, pack_i128(a, b)), (2, pack_i128(neg, b))] {
+                    ctx.emit(store(ptr_offset_mut(keys, Const::new(slot)), key));
+                }
+                let first = ctx.bind(load_mut(ptr_offset_mut(keys, Const::new(0i64))));
+                let last = ctx.bind(load_mut(ptr_offset_mut(keys, Const::new(2i64))));
+                select(lt(first, last), 1u64, 0u64)
+            }
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        assert_eq!(compiled.call(-3, 9), 1);
+        assert_eq!(compiled.call(3, 9), 0);
+    });
+}

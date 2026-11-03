@@ -41,7 +41,7 @@ pub struct FromFn<F, O> {
 /// `chain` that would end the whole pipeline instead of this stream.
 pub fn from_fn<F, O>(next: F) -> FromFn<F, O>
 where
-    F: FnOnce(&mut Ctx) -> O,
+    F: FnOnce(&Ctx) -> O,
     O: StagedOpt,
 {
     FromFn {
@@ -52,28 +52,28 @@ where
 
 impl<F, O> StagedIterator for FromFn<F, O>
 where
-    F: FnOnce(&mut Ctx) -> O,
+    F: FnOnce(&Ctx) -> O,
     O: StagedOpt,
     O::Item: 'static,
 {
     type Item = O::Item;
     type Cursor = Self;
 
-    fn open(self, _ctx: &mut Ctx) -> Self {
+    fn open(self, _ctx: &Ctx) -> Self {
         self
     }
 }
 
 impl<F, O> Cursor for FromFn<F, O>
 where
-    F: FnOnce(&mut Ctx) -> O,
+    F: FnOnce(&Ctx) -> O,
     O: StagedOpt,
     O::Item: 'static,
 {
     type Item = O::Item;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<O::Item>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<O::Item>, ()) {
         let next = self.next;
         let item = ctx.join(|ctx, got| {
             next(ctx).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.exit(done));

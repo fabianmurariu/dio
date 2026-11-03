@@ -37,7 +37,7 @@ fn join_mut(state: *mut JoinState) -> impl Staged<Out = SMutPtr<Opaque<JoinState
 /// multimap (the JIT proxy for `hm += (key, rec)`). `key_cv` is the row's key
 /// value; a NULL key is skipped (it never matches).
 fn emit_key_insert(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     state: *mut JoinState,
     rt: crate::runtime::Runtime,
     key_cv: crate::value::ColVal,
@@ -46,7 +46,7 @@ fn emit_key_insert(
 ) {
     let key_i64 = to_i64(ctx, key_cv);
     let key = ctx.bind(int_cast::<u64, i64, _>(key_i64));
-    let insert = move |ctx: &mut Ctx| {
+    let insert = move |ctx: &Ctx| {
         // SAFETY: the build driver retains `state`, generated mutations are
         // sequenced, and the locator values refer to the retained relation.
         ctx.emit(unsafe {
@@ -63,7 +63,7 @@ fn emit_key_insert(
 /// non-null row, read the `Int` key column (typed) and `join_insert` its
 /// `Locator(batch_idx, row)`.
 pub(crate) fn gen_build_index(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     rel_schema: SchemaRef,
     key_col: usize,
     cx: &CodegenCtx,
@@ -104,7 +104,7 @@ pub(crate) fn gen_build_index(
 /// relation is a single batch, so `rb_pos == 0`). Returns the row count `n` (for
 /// finalizing the relation's `RecordBatch`).
 pub(crate) fn gen_build<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     build: &Operator,
     key_expr: &Expr,
@@ -146,7 +146,7 @@ pub(crate) fn gen_build<I: InputsSource>(
 /// Emit the probe. `op` is the `Join`; its left side is already built, so we only
 /// codegen `gen_op(right, …)` with a per-row match loop.
 pub(crate) fn gen_join<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     op: &Operator,
     cx: &CodegenCtx,
@@ -184,7 +184,7 @@ pub(crate) fn gen_join<I: InputsSource>(
 
             // The per-match loop: look up the key's `Locator` run, then for each
             // read `.rb_pos`/`.row`, `gen_read` the located left row, emit `[l | r]`.
-            let probe = move |ctx: &mut Ctx| {
+            let probe = move |ctx: &Ctx| {
                 // SAFETY: the probe driver retains immutable `state` for both
                 // calls; their results describe the same key's locator run.
                 let count = ctx.bind(unsafe {

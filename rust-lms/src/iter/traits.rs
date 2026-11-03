@@ -11,8 +11,8 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
-    Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile, Take,
-    TakeWhile, Zip,
+    BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile,
+    Take, TakeWhile, Zip,
 };
 
 // =============================================================================
@@ -96,6 +96,14 @@ impl MinMax for i32 {
         i32::MAX
     }
 }
+impl MinMax for i128 {
+    fn min_sentinel() -> Self {
+        i128::MIN
+    }
+    fn max_sentinel() -> Self {
+        i128::MAX
+    }
+}
 impl MinMax for u32 {
     fn min_sentinel() -> Self {
         u32::MIN
@@ -129,7 +137,7 @@ pub trait Cursor: Sized {
     type Close: Close;
 
     /// Emit one advance: jump to `done`, or fall through with the item.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close);
 
     /// Stage-0 probe for random access: `Some(len)` when this cursor can also
     /// be driven by an external index through [`next_at`](Self::next_at).
@@ -138,7 +146,7 @@ pub trait Cursor: Sized {
     /// for the length (a range's element count) lands there and is emitted only
     /// when someone asks. The decision itself is ordinary Rust at stage 0, so it
     /// costs nothing at runtime.
-    fn indexed_len(&mut self, ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, ctx: &Ctx) -> Option<Var<u64>> {
         let _ = ctx;
         None
     }
@@ -149,7 +157,7 @@ pub trait Cursor: Sized {
     ///
     /// Only valid when [`indexed_len`](Self::indexed_len) returned `Some(len)`,
     /// and `index < len` at execution.
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
         let _ = (ctx, index);
         unreachable!("next_at on a cursor without random access")
     }
@@ -159,17 +167,18 @@ pub trait Cursor: Sized {
 ///
 /// Emitted once after the driving loop, which both exhaustion and an early
 /// `break_loop` reach, so every opened resource is released exactly once on
-/// every exit. `Copy` because it is only stage-0 handles (vars, extern refs).
-pub trait Close: Copy {
-    fn close(self, ctx: &mut Ctx);
+/// every exit. `Clone` because a close may be emitted at more than one exit; it is only
+/// stage-0 handles (vars, extern refs), one per part for a k-way merge.
+pub trait Close: Clone {
+    fn close(self, ctx: &Ctx);
 }
 
 impl Close for () {
-    fn close(self, _ctx: &mut Ctx) {}
+    fn close(self, _ctx: &Ctx) {}
 }
 
 impl<A: Close, B: Close> Close for (A, B) {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         self.0.close(ctx);
         self.1.close(ctx);
     }
@@ -179,10 +188,10 @@ impl<A: Close, B: Close> Close for (A, B) {
 ///
 /// `done` and a consumer's `break_loop` both leave through `iterate`'s exit, so
 /// the close runs on every path out of the loop.
-pub(crate) fn drive<C, F>(cursor: C, ctx: &mut Ctx, consumer: F)
+pub(crate) fn drive<C, F>(cursor: C, ctx: &Ctx, consumer: F)
 where
     C: Cursor,
-    F: FnOnce(&mut Ctx, Var<C::Item>),
+    F: FnOnce(&Ctx, Var<C::Item>),
 {
     let mut close = None;
     ctx.iterate(|ctx, done| {
@@ -219,15 +228,15 @@ pub trait StagedIterator: Sized {
 
     /// Emit the setup — bind handles, call producers, declare state vars — and
     /// return the cursor. Runs once, before the loop that drives it.
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor;
+    fn open(self, ctx: &Ctx) -> Self::Cursor;
 
     /// Drive a loop over all elements.
     ///
     /// `consumer` is called once at staging time; it emits the per-element
     /// body via the `Ctx` it receives. No `Clone` constraint required.
-    fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
+    fn for_each<F>(self, ctx: &Ctx, consumer: F)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
+        F: FnOnce(&Ctx, Var<Self::Item>),
     {
         let cursor = self.open(ctx);
         drive(cursor, ctx, consumer);
@@ -240,7 +249,7 @@ pub trait StagedIterator: Sized {
     fn map<U, F, MapOut>(self, f: F) -> Map<Self, F, U>
     where
         U: StagedType,
-        F: Fn(Var<Self::Item>) -> MapOut,
+        F: Fn(&Ctx, Var<Self::Item>) -> MapOut,
         MapOut: Staged<Out = U>,
     {
         Map::new(self, f)
@@ -248,7 +257,7 @@ pub trait StagedIterator: Sized {
 
     fn filter<P, Cond>(self, p: P) -> Filter<Self, P>
     where
-        P: Fn(Var<Self::Item>) -> Cond,
+        P: Fn(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool>,
     {
         Filter::new(self, p)
@@ -264,7 +273,7 @@ pub trait StagedIterator: Sized {
     where
         St: StagedType + crate::types::CopyType + 'static,
         Init: crate::staged::IntoStaged<St>,
-        F: Fn(&mut Ctx, Var<St>, Var<Self::Item>) + 'static,
+        F: Fn(&Ctx, Var<St>, Var<Self::Item>),
     {
         Scan::new(self, init, f)
     }
@@ -302,9 +311,7 @@ pub trait StagedIterator: Sized {
 
     /// Pair each element with its zero-based position.
     ///
-    /// `it.enumerate().for_each(ctx, |ctx, i, x| ..)` receives the index and the
-    /// element separately; used through the combinators the item is a
-    /// `ZipItem<u64, _>`, read with `.first()`/`.second()`.
+    /// The item is a `ZipItem<u64, _>`, read with `.first()`/`.second()`.
     fn enumerate(self) -> super::Enumerate<Self> {
         super::Enumerate::new(self)
     }
@@ -333,14 +340,29 @@ pub trait StagedIterator: Sized {
         Chain::new(self, other.staged_iter())
     }
 
+    /// This iterator with its type erased at stage 0 (see [`BoxedStagedIter`]): for a
+    /// compiler that picks iterators while walking a plan. The emitted code is the
+    /// same.
+    fn boxed<'a>(self) -> BoxedStagedIter<'a, Self::Item>
+    where
+        Self: 'a,
+        Self::Cursor: 'a,
+        Self::Item: 'static,
+    {
+        Box::new(self)
+    }
+
     /// Map each element to an iterator and yield the inner elements in order.
     ///
     /// Consumed directly (a terminal, `for_each`) it is two nested loops; pulled
     /// (inside `zip`/`chain`/`merge_by`/`take`…) it is a state machine over one
     /// loop. Either way an early exit releases the open inner iterator.
+    ///
+    /// `f` gets the `Ctx` it is staged in, so building the inner iterator can bind
+    /// values (load a row's bounds, say) once per outer element.
     fn flat_map<J, F>(self, f: F) -> FlatMap<Self, F>
     where
-        F: Fn(Var<Self::Item>) -> J,
+        F: Fn(&Ctx, Var<Self::Item>) -> J,
         J: IntoStagedIterator,
     {
         FlatMap::new(self, f)
@@ -428,29 +450,31 @@ pub trait StagedIterator: Sized {
     // Terminal operations
     // =========================================================================
 
-    /// Fold every element into an accumulator: `acc = f(acc, elem)`, starting
-    /// from `init`. Returns the accumulator.
+    /// Fold every element into an accumulator: `acc = f(ctx, acc, elem)`,
+    /// starting from `init`. Returns the accumulator.
     ///
-    /// `f` is called once at staging time and builds the update expression; the
-    /// accumulator lives in a register across the loop.
+    /// `f` is called once at staging time. It may emit statements into the
+    /// loop body through `ctx` (loops, binds, branches) before returning the
+    /// update expression; the accumulator lives in a register across the loop.
     ///
     /// ```ignore
-    /// let total = slice.staged_iter().fold(ctx, 0i64, |acc, x| acc + x);
+    /// let total = slice.staged_iter().fold(ctx, 0i64, |_, acc, x| acc + x);
     /// ```
     ///
-    /// Several accumulators at once, or updates with side effects, are a
-    /// [`for_each`](Self::for_each) over vars declared before the loop.
-    fn fold<A, Init, F, E>(self, ctx: &mut Ctx, init: Init, f: F) -> Var<A>
+    /// Several accumulators at once are a [`for_each`](Self::for_each) over
+    /// vars declared before the loop.
+    fn fold<A, Init, F, E>(self, ctx: &Ctx, init: Init, f: F) -> Var<A>
     where
         A: StagedType + CopyType + 'static,
         Init: IntoStaged<A>,
         Init::Staged: 'static,
-        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
         let acc = ctx.var(init);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.store(acc, f(acc, elem));
+            let next = f(ctx, acc, elem);
+            ctx.store(acc, next);
         });
         acc
     }
@@ -462,28 +486,35 @@ pub trait StagedIterator: Sized {
     /// has no data-dependent branch, so it stays vectorizable/unrollable (and
     /// `count_if` becomes a single conditional increment, e.g. `csinc`).
     ///
+    /// `pred` and `f` may both emit statements through `ctx`; `pred` is staged
+    /// first. Only the accumulator update is branchless: any loops or branches
+    /// they emit themselves stay in the body.
+    ///
     /// **`f` is evaluated for every element**, whether `pred` holds or not, so
     /// it must be cheap and total — no division `pred` is guarding against a
     /// zero, no load `pred` is guarding against being out of range. For those,
     /// use `filter(..).fold(..)`, which branches.
-    fn fold_if<A, Init, P, Cond, F, E>(self, ctx: &mut Ctx, init: Init, pred: P, f: F) -> Var<A>
+    fn fold_if<A, Init, P, Cond, F, E>(self, ctx: &Ctx, init: Init, pred: P, f: F) -> Var<A>
     where
         A: DirectValue + 'static,
         Init: IntoStaged<A>,
         Init::Staged: 'static,
         Self::Item: CopyType + 'static,
-        P: FnOnce(Var<Self::Item>) -> Cond,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
-        F: FnOnce(Var<A>, Var<Self::Item>) -> E,
+        F: FnOnce(&Ctx, Var<A>, Var<Self::Item>) -> E,
         E: Staged<Out = A> + 'static,
     {
-        self.fold(ctx, init, move |acc, elem| {
-            select(pred(elem), f(acc, elem), acc)
+        self.fold(ctx, init, move |ctx, acc, elem| {
+            let keep = pred(ctx, elem);
+            let keep = ctx.bind(keep);
+            let next = f(ctx, acc, elem);
+            select(keep, next, acc)
         })
     }
 
     /// Sum all elements, starting from zero.
-    fn sum(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn sum(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: Default,
@@ -491,42 +522,54 @@ pub trait StagedIterator: Sized {
         self.fold(
             ctx,
             Const::<Self::Item>::new(Default::default()),
-            |acc, x| acc + x,
+            |_, acc, x| acc + x,
         )
     }
 
     /// Count elements passing through (including any upstream filter).
-    fn count(self, ctx: &mut Ctx) -> Var<u64>
+    ///
+    /// A random-access iterator (a slice, a `u64` range, a `map` or an indexed
+    /// `zip` of those) counts as its length, with no loop; random-access cursors
+    /// hold nothing to release. Others loop, unless they override this as Rust
+    /// iterators override `count`: a `chain` sums its sides, a `flat_map` its
+    /// inner counts.
+    fn count(self, ctx: &Ctx) -> Var<u64>
     where
         Self::Item: 'static,
     {
-        self.fold(ctx, 0u64, |acc, _| acc + 1u64)
+        let mut cursor = self.open(ctx);
+        if let Some(len) = cursor.indexed_len(ctx) {
+            return len;
+        }
+        let count = ctx.var(0u64);
+        drive(cursor, ctx, move |ctx, _| ctx.store(count, count + 1u64));
+        count
     }
 
     /// Branchless count of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
-    fn count_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    fn count_if<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<u64>
     where
         Self::Item: CopyType + 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
-        self.fold_if(ctx, 0u64, pred, |acc, _| acc + 1u64)
+        self.fold_if(ctx, 0u64, pred, |_, acc, _| acc + 1u64)
     }
 
     /// Branchless sum of elements satisfying `pred` — a [`fold_if`](Self::fold_if).
-    fn sum_if<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<Self::Item>
+    fn sum_if<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<Self::Item>
     where
         Self::Item: Num + DirectValue,
         <Self::Item as StagedType>::RuntimeValue: Default,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let zero = Const::<Self::Item>::new(Default::default());
-        self.fold_if(ctx, zero, pred, |acc, x| acc + x)
+        self.fold_if(ctx, zero, pred, |_, acc, x| acc + x)
     }
 
     /// Find the minimum element. Starts at the type's maximum sentinel.
-    fn min(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn min(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
@@ -534,19 +577,19 @@ pub trait StagedIterator: Sized {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::max_sentinel();
         // Branchless: an unconditional store of a cmov keeps the body
         // vectorizable/unrollable.
-        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |_, acc, x| {
             select(lt(x, acc), x, acc)
         })
     }
 
     /// Find the maximum element. Starts at the type's minimum sentinel.
-    fn max(self, ctx: &mut Ctx) -> Var<Self::Item>
+    fn max(self, ctx: &Ctx) -> Var<Self::Item>
     where
         Self::Item: Num,
         <Self::Item as StagedType>::RuntimeValue: MinMax,
     {
         let sentinel = <Self::Item as StagedType>::RuntimeValue::min_sentinel();
-        self.fold(ctx, Const::<Self::Item>::new(sentinel), |acc, x| {
+        self.fold(ctx, Const::<Self::Item>::new(sentinel), |_, acc, x| {
             select(gt(x, acc), x, acc)
         })
     }
@@ -558,20 +601,23 @@ pub trait StagedIterator: Sized {
     // the answer is known. Because combinators (`map`/`filter`/…) introduce
     // only `if_then`s — never loops — the `break_loop` always targets the
     // source's single iteration loop, so these compose freely after `filter`,
-    // `map`, etc. (Eager terminals like `sum`/`fold` emit no break and keep
-    // their optimal loop body.)
+    // `map`, etc. A predicate may run loops of its own: they are closed by the
+    // time it returns, so the break still leaves the iteration. (Eager
+    // terminals like `sum`/`fold` emit no break and keep their optimal loop
+    // body.)
     // =========================================================================
 
     /// `true` as soon as any element satisfies `pred` (short-circuits).
-    fn any<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    fn any<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(pred(elem), move |ctx| {
+            let hit = pred(ctx, elem);
+            ctx.if_then(hit, move |ctx| {
                 ctx.store(found, true);
                 ctx.break_loop();
             });
@@ -581,15 +627,16 @@ pub trait StagedIterator: Sized {
 
     /// `true` only if every element satisfies `pred` (short-circuits on the
     /// first failure).
-    fn all<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<bool>
+    fn all<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<bool>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         let result = ctx.var(true);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(not(pred(elem)), move |ctx| {
+            let holds = pred(ctx, elem);
+            ctx.if_then(not(holds), move |ctx| {
                 ctx.store(result, false);
                 ctx.break_loop();
             });
@@ -600,17 +647,18 @@ pub trait StagedIterator: Sized {
     /// Index (in this iterator's sequence, i.e. after any `filter`) of the
     /// first element satisfying `pred`, or the total element count if none
     /// match (short-circuits).
-    fn position<P, Cond>(self, ctx: &mut Ctx, pred: P) -> Var<u64>
+    fn position<P, Cond>(self, ctx: &Ctx, pred: P) -> Var<u64>
     where
         Self::Item: 'static,
-        P: Fn(Var<Self::Item>) -> Cond + 'static,
+        P: FnOnce(&Ctx, Var<Self::Item>) -> Cond,
         Cond: Staged<Out = bool> + 'static,
     {
         // `idx` counts elements seen; on a match we break *before* incrementing,
         // so it holds the match position. With no match it ends at the count.
         let idx = ctx.var(0u64);
         self.for_each(ctx, move |ctx, elem| {
-            ctx.if_then(pred(elem), move |ctx| {
+            let hit = pred(ctx, elem);
+            ctx.if_then(hit, move |ctx| {
                 ctx.break_loop();
             });
             ctx.store(idx, add(idx, 1u64));
@@ -621,10 +669,11 @@ pub trait StagedIterator: Sized {
     /// First `Some` produced by `f`, short-circuiting. Returns `(value, found)`:
     /// when `found` is `false` the iterator was exhausted and `value` holds the
     /// default — check `found` before using `value`. No `Option` is
-    /// materialized; `f` is typically `|x| cond.then_some(mapped)`.
-    fn find_map<F, O>(self, ctx: &mut Ctx, f: F) -> (Var<O::Item>, Var<bool>)
+    /// materialized; `f` is typically `|_, x| cond.then_some(mapped)`, and may
+    /// emit statements through its `ctx` first.
+    fn find_map<F, O>(self, ctx: &Ctx, f: F) -> (Var<O::Item>, Var<bool>)
     where
-        F: Fn(Var<Self::Item>) -> O + 'static,
+        F: FnOnce(&Ctx, Var<Self::Item>) -> O,
         O: StagedOpt + 'static,
         O::Item: ConstantType + CopyType + 'static,
         <O::Item as StagedType>::RuntimeValue: Default,
@@ -632,7 +681,7 @@ pub trait StagedIterator: Sized {
         let result = ctx.var(Const::<O::Item>::new(Default::default()));
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
-            f(elem).eliminate(
+            f(ctx, elem).eliminate(
                 ctx,
                 move |ctx, v| {
                     ctx.store(result, v);

@@ -6,11 +6,11 @@ use rust_lms_derive::StagedType;
 use crate::func::Ctx;
 use crate::label::Label;
 use crate::num::{add, ge};
-use crate::staged::{CompilationContext, Staged, Value, ValueId, Var};
+use crate::staged::{CompilationContext, Staged, Value, Var};
 use crate::r#struct::{Field, LoadField, load_field_unchecked};
-use crate::types::{CopyType, StagedType};
+use crate::types::{CopyType, Shape, StagedType};
 
-use super::traits::{Close, Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
+use super::traits::{Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 
 /// Element yielded by a zipped iterator.
 ///
@@ -185,30 +185,7 @@ where
         // SAFETY: the zip length is the minimum of both source lengths.
         let second = unsafe { IndexedSource::get_at(self.other.clone(), self.index) }.codegen(ctx);
 
-        let align_shift = Self::Out::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
-        let slot_ptr = ctx.stack_addr(stack_slot, 0);
-
-        store_value::<<I as IndexedSource>::Item>(
-            ctx,
-            first,
-            slot_ptr,
-            ZipItemType::__field_first::<
-                <I as IndexedSource>::Item,
-                <S as IndexedSource>::Item,
-            >::OFFSET as i32,
-        );
-        store_value::<<S as IndexedSource>::Item>(
-            ctx,
-            second,
-            slot_ptr,
-            ZipItemType::__field_second::<
-                <I as IndexedSource>::Item,
-                <S as IndexedSource>::Item,
-            >::OFFSET as i32,
-        );
-
-        Value::scalar(slot_ptr)
+        pair::<<I as IndexedSource>::Item, <S as IndexedSource>::Item>(ctx, first, second)
     }
 }
 
@@ -239,9 +216,8 @@ impl<A: Clone, B: Clone> Clone for Pair<A, B> {
 
 impl<A: Copy, B: Copy> Copy for Pair<A, B> {}
 
-// SAFETY: writes both fields at their declared offsets into a stack slot sized
-// and aligned for `ZipItem`, and yields that slot's address — the indirect
-// representation `is_copy_struct` declares.
+// SAFETY: yields a `ZipItem` in the shape it declares: both fields' leaves, or a stack
+// slot sized and aligned for it with both fields at their declared offsets.
 unsafe impl<A, B> Staged for Pair<A, B>
 where
     A: Staged,
@@ -255,35 +231,28 @@ where
         let first = self.first.codegen(ctx);
         let second = self.second.codegen(ctx);
 
-        let align_shift = Self::Out::align_of().trailing_zeros() as u8;
-        let stack_slot = ctx.alloc_stack_slot(Self::Out::size_of() as u32, align_shift);
-        let slot_ptr = ctx.stack_addr(stack_slot, 0);
-
-        store_value::<A::Out>(
-            ctx,
-            first,
-            slot_ptr,
-            ZipItemType::__field_first::<A::Out, B::Out>::OFFSET as i32,
-        );
-        store_value::<B::Out>(
-            ctx,
-            second,
-            slot_ptr,
-            ZipItemType::__field_second::<A::Out, B::Out>::OFFSET as i32,
-        );
-
-        Value::scalar(slot_ptr)
+        pair::<A::Out, B::Out>(ctx, first, second)
     }
 }
 
-fn store_value<T: StagedType>(
+/// A `ZipItem<A, B>` of two values.
+fn pair<A: CopyType, B: CopyType>(
     ctx: &mut CompilationContext,
-    value: Value,
-    ptr: ValueId,
-    offset: i32,
-) {
-    let destination = ctx.ptr_offset_const(ptr, i64::from(offset));
-    ctx.store_value::<T>(destination, value);
+    first: Value,
+    second: Value,
+) -> Value {
+    ctx.struct_value::<ZipItem<A, B>>(&[
+        (
+            Shape::of::<A>(),
+            ZipItemType::__field_first::<A, B>::OFFSET,
+            first,
+        ),
+        (
+            Shape::of::<B>(),
+            ZipItemType::__field_second::<A, B>::OFFSET,
+            second,
+        ),
+    ])
 }
 
 impl<A, B> StagedIterator for Zip<A, B>
@@ -300,7 +269,7 @@ where
     /// access, one shared counter against the hoisted `min` of the lengths —
     /// the loop a hand-written zip over two slices would be. Otherwise each
     /// side pulls its own element.
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let mut a = self.iter.open(ctx);
         let mut b = self.other.open(ctx);
         let shared = match (a.indexed_len(ctx), b.indexed_len(ctx)) {
@@ -329,36 +298,6 @@ pub struct ZipCursor<A, B> {
     shared: Option<SharedIndex>,
 }
 
-/// One zip step: both elements, and both sides' closes.
-type ZipStep<A, B> = (
-    (Var<<A as Cursor>::Item>, Var<<B as Cursor>::Item>),
-    (<A as Cursor>::Close, <B as Cursor>::Close),
-);
-
-impl<A: Cursor, B: Cursor> ZipCursor<A, B> {
-    /// One step, yielding both elements as separate vars (no pair slot).
-    fn next_parts(self, ctx: &mut Ctx, done: Label<'_>) -> ZipStep<A, B> {
-        match self.shared {
-            Some(SharedIndex { len, pos }) => {
-                ctx.exit_if(ge(pos, len), done);
-                // SAFETY: `pos < len = min(len_a, len_b)`.
-                let (x, ca) = unsafe { self.a.next_at(ctx, pos) };
-                // SAFETY: as above.
-                let (y, cb) = unsafe { self.b.next_at(ctx, pos) };
-                ctx.store(pos, add(pos, 1u64));
-                ((x, y), (ca, cb))
-            }
-            None => {
-                // `a` first: if `b` is then exhausted, `a`'s element is dropped,
-                // as in `std::iter::Zip`.
-                let (x, ca) = self.a.next(ctx, done);
-                let (y, cb) = self.b.next(ctx, done);
-                ((x, y), (ca, cb))
-            }
-        }
-    }
-}
-
 impl<A, B> Cursor for ZipCursor<A, B>
 where
     A: Cursor,
@@ -369,16 +308,32 @@ where
     type Item = ZipItem<A::Item, B::Item>;
     type Close = (A::Close, B::Close);
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
-        let ((x, y), close) = self.next_parts(ctx, done);
-        (ctx.bind(Pair::new(x, y)), close)
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
+        match self.shared {
+            Some(SharedIndex { len, pos }) => {
+                ctx.exit_if(ge(pos, len), done);
+                // SAFETY: `pos < len = min(len_a, len_b)`.
+                let (x, ca) = unsafe { self.a.next_at(ctx, pos) };
+                // SAFETY: as above.
+                let (y, cb) = unsafe { self.b.next_at(ctx, pos) };
+                ctx.store(pos, add(pos, 1u64));
+                (ctx.bind(Pair::new(x, y)), (ca, cb))
+            }
+            None => {
+                // `a` first: if `b` is then exhausted, `a`'s element is dropped,
+                // as in `std::iter::Zip`.
+                let (x, ca) = self.a.next(ctx, done);
+                let (y, cb) = self.b.next(ctx, done);
+                (ctx.bind(Pair::new(x, y)), (ca, cb))
+            }
+        }
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         self.shared.map(|s| s.len)
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<Self::Item>, Self::Close) {
         // SAFETY: `index < len = min(len_a, len_b)`, forwarded from the caller.
         let (x, ca) = unsafe { self.a.next_at(ctx, index) };
         // SAFETY: as above.
@@ -430,32 +385,5 @@ where
 
     unsafe fn get_at(self, index: Var<u64>) -> Self::GetExpr {
         ZipGetAt::new(self.iter, self.other, index)
-    }
-}
-
-impl<A, B> Zip<A, B>
-where
-    A: StagedIterator,
-    B: StagedIterator,
-    A::Item: CopyType + 'static,
-    B::Item: CopyType + 'static,
-{
-    /// Drive a loop over `(a_elem, b_elem)` pairs.
-    ///
-    /// Shadows [`StagedIterator::for_each`] with a three-argument consumer: the
-    /// two elements arrive as separate vars, so no `ZipItem` is written to a
-    /// stack slot and read back. Iteration stops at the shorter side.
-    pub fn for_each<F>(self, ctx: &mut Ctx, consumer: F)
-    where
-        F: FnOnce(&mut Ctx, Var<A::Item>, Var<B::Item>),
-    {
-        let cursor = StagedIterator::open(self, ctx);
-        let mut close = None;
-        ctx.iterate(|ctx, done| {
-            let ((x, y), c) = cursor.next_parts(ctx, done);
-            close = Some(c);
-            consumer(ctx, x, y);
-        });
-        close.expect("the step is staged exactly once").close(ctx);
     }
 }

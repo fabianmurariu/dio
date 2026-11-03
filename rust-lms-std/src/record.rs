@@ -94,7 +94,7 @@ impl RecordLayout {
     /// At execution, `base.add(index * self.stride())` must identify a live,
     /// initialized record allocated with this layout and remain writable for
     /// every use of the returned handle.
-    pub unsafe fn record<B>(&self, ctx: &mut Ctx, base: B, index: Var<u64>) -> DynamicRecord
+    pub unsafe fn record<B>(&self, ctx: &Ctx, base: B, index: Var<u64>) -> DynamicRecord
     where
         B: Staged<Out = SMutPtr<u8>> + 'static,
     {
@@ -172,7 +172,7 @@ impl DynamicRecord {
     /// Load field `field` (its type is inferred from the token).
     pub fn get<T: StagedType + CopyType + 'static>(
         &self,
-        ctx: &mut Ctx,
+        ctx: &Ctx,
         field: FieldId<T>,
     ) -> Var<T> {
         self.check(field.layout, field.index);
@@ -184,7 +184,7 @@ impl DynamicRecord {
     /// Store `v` into field `field`.
     pub fn set<T: StagedType + CopyType + 'static>(
         &self,
-        ctx: &mut Ctx,
+        ctx: &Ctx,
         field: FieldId<T>,
         v: Var<T>,
     ) {

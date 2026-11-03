@@ -29,6 +29,7 @@ pub enum ScalarType {
     I16,
     I32,
     I64,
+    I128,
     F32,
     F64,
     Ptr,
@@ -36,7 +37,10 @@ pub enum ScalarType {
 
 impl ScalarType {
     pub(crate) fn is_integer(self) -> bool {
-        matches!(self, Self::I8 | Self::I16 | Self::I32 | Self::I64)
+        matches!(
+            self,
+            Self::I8 | Self::I16 | Self::I32 | Self::I64 | Self::I128
+        )
     }
 
     pub(crate) fn is_float(self) -> bool {
@@ -50,6 +54,7 @@ impl ScalarType {
             Self::I16 => 16,
             Self::I32 | Self::F32 => 32,
             Self::I64 | Self::F64 | Self::Ptr => 64,
+            Self::I128 => 128,
         }
     }
 
@@ -62,6 +67,7 @@ impl ScalarType {
             ScalarType::I32 => types::I32,
             ScalarType::F32 => types::F32,
             ScalarType::I64 | ScalarType::Ptr => types::I64,
+            ScalarType::I128 => types::I128,
             ScalarType::F64 => types::F64,
         }
     }
@@ -73,6 +79,97 @@ impl ScalarType {
             ScalarType::I16 => 2,
             ScalarType::I32 | ScalarType::F32 => 4,
             ScalarType::I64 | ScalarType::F64 | ScalarType::Ptr => 8,
+            ScalarType::I128 => 16,
+        }
+    }
+}
+
+/// The most scalar leaves a value is held in, in registers, before it is held in memory.
+pub const MAX_LEAVES: usize = 4;
+
+/// The scalar leaves of a runtime value and their byte offsets, in memory order: one for
+/// a scalar, `(ptr, len)` for a slice, the flattened fields of a small struct.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub struct Leaves {
+    leaves: [(ScalarType, u32); MAX_LEAVES],
+    len: u8,
+}
+
+impl Leaves {
+    pub const fn empty() -> Self {
+        Self {
+            leaves: [(ScalarType::I8, 0); MAX_LEAVES],
+            len: 0,
+        }
+    }
+
+    pub const fn one(ty: ScalarType, offset: u32) -> Self {
+        let mut leaves = Self::empty();
+        leaves.leaves[0] = (ty, offset);
+        leaves.len = 1;
+        leaves
+    }
+
+    /// A slice's `(data ptr, len)`.
+    pub const fn fat() -> Self {
+        let mut leaves = Self::one(ScalarType::Ptr, 0);
+        leaves.leaves[1] = (ScalarType::I64, 8);
+        leaves.len = 2;
+        leaves
+    }
+
+    /// Appends the leaves of a `T` stored at `offset`; false when `T` is held in memory or
+    /// the leaves would exceed [`MAX_LEAVES`].
+    pub fn append_field<T: StagedType>(&mut self, offset: usize) -> bool {
+        let Some(field) = T::leaves() else {
+            return false;
+        };
+        if self.len() + field.len() > MAX_LEAVES {
+            return false;
+        }
+        for (ty, at) in field.iter() {
+            self.leaves[self.len as usize] = (ty, at + offset as u32);
+            self.len += 1;
+        }
+        true
+    }
+
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    pub fn iter(&self) -> impl Iterator<Item = (ScalarType, u32)> + '_ {
+        self.leaves[..self.len()].iter().copied()
+    }
+}
+
+/// How a staged value of a type is held during codegen.
+#[derive(Clone, Copy, PartialEq, Eq, Debug)]
+pub enum Shape {
+    /// A zero-sized value.
+    Unit,
+    /// One scalar leaf.
+    Scalar(ScalarType),
+    /// Several scalar leaves, or the leaves of a struct: registers, not memory.
+    Leaves(Leaves),
+    /// A pointer to the value's storage.
+    Memory { size: usize, align: usize },
+}
+
+impl Shape {
+    pub fn of<T: StagedType>() -> Self {
+        match T::leaves() {
+            None => Shape::Memory {
+                size: T::size_of(),
+                align: T::align_of(),
+            },
+            Some(leaves) if T::is_copy_struct() || leaves.len() > 1 => Shape::Leaves(leaves),
+            Some(_) if T::size_of() == 0 => Shape::Unit,
+            Some(_) => Shape::Scalar(T::scalar_type()),
         }
     }
 }
@@ -352,17 +449,23 @@ pub unsafe trait StagedType {
         Self::size_of()
     }
 
-    /// Returns true when staged values use an indirect aggregate
-    /// representation for field access and exact byte copies.
+    /// Returns true for a struct: its staged values are its fields' leaves, or a pointer
+    /// to its storage when [`Self::leaves`] is `None`.
     fn is_copy_struct() -> bool {
         false
     }
 
-    /// Returns true if this is a fat pointer (e.g., slice reference).
-    /// Fat pointers are 2 x i64 (ptr, len) that can be stored in separate
-    /// registers instead of a stack slot for better performance.
-    fn is_fat_pointer() -> bool {
-        false
+    /// The scalar leaves a staged value of this type is held in, with their byte offsets
+    /// in the runtime value; `None` for a value held by a pointer to its storage. See
+    /// [`Shape::of`].
+    fn leaves() -> Option<Leaves> {
+        if Self::is_copy_struct() {
+            None
+        } else if Self::size_of() == 0 {
+            Some(Leaves::empty())
+        } else {
+            Some(Leaves::one(Self::scalar_type(), 0))
+        }
     }
 }
 
@@ -542,6 +645,32 @@ unsafe impl ConstantType for u64 {
 
 unsafe impl CopyType for u64 {}
 
+unsafe impl StagedType for i128 {
+    type RuntimeValue = i128;
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::I128
+    }
+
+    fn size_of() -> usize {
+        std::mem::size_of::<i128>()
+    }
+
+    fn align_of() -> usize {
+        std::mem::align_of::<i128>()
+    }
+}
+
+unsafe impl ConstantType for i128 {
+    fn codegen_constant(value: &i128, ctx: &mut CompilationContext<'_>) -> Value {
+        let lo = ctx.iconst(ScalarType::I64, *value as i64);
+        let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
+        Value::scalar(ctx.iconcat(lo, hi))
+    }
+}
+
+unsafe impl CopyType for i128 {}
+
 unsafe impl StagedType for i32 {
     type RuntimeValue = i32;
 
@@ -686,7 +815,21 @@ unsafe impl ConstantType for () {
 
 unsafe impl CopyType for () {}
 
-impl_by_value_runtime_type!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool, ());
+impl_by_value_runtime_type!(
+    i8,
+    u8,
+    i16,
+    u16,
+    i32,
+    u32,
+    i64,
+    u64,
+    i128,
+    f32,
+    f64,
+    bool,
+    ()
+);
 
 macro_rules! impl_direct_value {
     ($($ty:ty),+ $(,)?) => {
@@ -697,4 +840,4 @@ macro_rules! impl_direct_value {
     };
 }
 
-impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, f32, f64, bool);
+impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, i128, f32, f64, bool);

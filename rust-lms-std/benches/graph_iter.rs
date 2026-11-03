@@ -209,9 +209,9 @@ unsafe impl ReusedOpaqueIterKind for ReusedWindow {
 /// A neighbour-access strategy. `ctx` is the body the iterator will run in, so a
 /// strategy can bind per-node values (CSR bounds, a returned slice) once.
 trait Nbrs {
-    fn nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_;
+    fn nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_;
     /// Neighbours over edges with `ts < WINDOW`.
-    fn window_nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_;
+    fn window_nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_;
 }
 
 type U64s = Var<SRef<Slice<u64>>>;
@@ -224,7 +224,7 @@ struct Csr {
 }
 
 impl Csr {
-    fn bounds(&self, ctx: &mut Ctx, n: Var<u64>) -> (Var<u64>, Var<u64>) {
+    fn bounds(&self, ctx: &Ctx, n: Var<u64>) -> (Var<u64>, Var<u64>) {
         // SAFETY: `n < NODES` and `offsets` has `NODES + 1` entries.
         let start = ctx.bind(unsafe { self.offsets.get_unchecked(n) });
         let end = ctx.bind(unsafe { self.offsets.get_unchecked(add(n, 1u64)) });
@@ -233,20 +233,20 @@ impl Csr {
 }
 
 impl Nbrs for Csr {
-    fn nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         let (start, end) = self.bounds(ctx, n);
         let targets = self.targets;
         // SAFETY: CSR offsets are within `targets`.
-        range(start, end).map(move |j| unsafe { targets.get_unchecked(j) })
+        range(start, end).map(move |_, j| unsafe { targets.get_unchecked(j) })
     }
 
-    fn window_nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn window_nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         let (start, end) = self.bounds(ctx, n);
         let (targets, ts) = (self.targets, self.ts);
         // SAFETY: CSR offsets are within `targets` and `ts`.
         range(start, end)
-            .filter(move |j| lt(unsafe { ts.get_unchecked(j) }, WINDOW))
-            .map(move |j| unsafe { targets.get_unchecked(j) })
+            .filter(move |_, j| lt(unsafe { ts.get_unchecked(j) }, WINDOW))
+            .map(move |_, j| unsafe { targets.get_unchecked(j) })
     }
 }
 
@@ -258,19 +258,19 @@ struct SliceFfi {
 }
 
 impl Nbrs for SliceFfi {
-    fn nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         let s = ctx.bind(call_extern2(self.nbrs, self.g, n));
         // SAFETY: `j < s.len()`, and the slice points into the live graph.
-        range(0u64, s.len()).map(move |j| unsafe { s.get_unchecked(j) })
+        range(0u64, s.len()).map(move |_, j| unsafe { s.get_unchecked(j) })
     }
 
-    fn window_nbrs(&self, ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn window_nbrs(&self, ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         let s = ctx.bind(call_extern2(self.nbrs, self.g, n));
         let t = ctx.bind(call_extern2(self.ts, self.g, n));
         // SAFETY: both slices have the node's degree as length, into the live graph.
         range(0u64, s.len())
-            .filter(move |j| lt(unsafe { t.get_unchecked(j) }, WINDOW))
-            .map(move |j| unsafe { s.get_unchecked(j) })
+            .filter(move |_, j| lt(unsafe { t.get_unchecked(j) }, WINDOW))
+            .map(move |_, j| unsafe { s.get_unchecked(j) })
     }
 }
 
@@ -282,11 +282,11 @@ struct Chunked {
 }
 
 impl Nbrs for Chunked {
-    fn nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn nbrs(&self, _ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         self.nbrs.iter2(self.g, n)
     }
 
-    fn window_nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn window_nbrs(&self, _ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         self.window.iter2(self.g, n)
     }
 }
@@ -299,11 +299,11 @@ struct Unbuffered {
 }
 
 impl Nbrs for Unbuffered {
-    fn nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn nbrs(&self, _ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         self.nbrs.iter2(self.g, n)
     }
 
-    fn window_nbrs(&self, _ctx: &mut Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
+    fn window_nbrs(&self, _ctx: &Ctx, n: Var<u64>) -> impl StagedIterator<Item = u64> + '_ {
         self.window.iter2(self.g, n)
     }
 }
@@ -332,7 +332,7 @@ impl Workload {
         }
     }
 
-    fn stage<S: Nbrs>(self, ctx: &mut Ctx, s: &S) -> Var<u64> {
+    fn stage<S: Nbrs>(self, ctx: &Ctx, s: &S) -> Var<u64> {
         let acc = ctx.var(0u64);
         let nodes = NODES as u64;
         match self {
@@ -341,11 +341,11 @@ impl Workload {
                     .for_each(ctx, move |ctx, d| ctx.store(acc, add(acc, d)));
             }),
             Workload::DstGtSrc => range(0u64, nodes).for_each(ctx, |ctx, n| {
-                let c = s.nbrs(ctx, n).count_if(ctx, move |d| gt(d, n));
+                let c = s.nbrs(ctx, n).count_if(ctx, move |_, d| gt(d, n));
                 ctx.store(acc, add(acc, c));
             }),
             Workload::AnyMod16 => range(0u64, nodes).for_each(ctx, |ctx, n| {
-                let hit = s.nbrs(ctx, n).any(ctx, |d| eq(bitand(d, 15u64), 0u64));
+                let hit = s.nbrs(ctx, n).any(ctx, |_, d| eq(bitand(d, 15u64), 0u64));
                 ctx.store(acc, add(acc, select(hit, 1u64, 0u64)));
             }),
             Workload::Window => range(0u64, nodes).for_each(ctx, |ctx, n| {
@@ -354,7 +354,7 @@ impl Workload {
             }),
             Workload::TwoHop => range(0u64, TWO_HOP_SOURCES).for_each(ctx, |ctx, n| {
                 s.nbrs(ctx, n).for_each(ctx, |ctx, m| {
-                    let c = s.nbrs(ctx, m).count_if(ctx, move |w| gt(w, n));
+                    let c = s.nbrs(ctx, m).count_if(ctx, move |_, w| gt(w, n));
                     ctx.store(acc, add(acc, c));
                 });
             }),

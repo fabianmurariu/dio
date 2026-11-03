@@ -36,7 +36,7 @@ type InnerCursor<J> = <Inner<J> as StagedIterator>::Cursor;
 impl<I, F, J> StagedIterator for FlatMap<I, F>
 where
     I: StagedIterator,
-    F: Fn(Var<I::Item>) -> J,
+    F: Fn(&Ctx, Var<I::Item>) -> J,
     J: IntoStagedIterator,
     Inner<J>: StagedIterator,
     <Inner<J> as StagedIterator>::Item: 'static,
@@ -44,7 +44,7 @@ where
     type Item = <Inner<J> as StagedIterator>::Item;
     type Cursor = FlatMapCursor<I::Cursor, F, J>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let active = ctx.var(false);
         FlatMapCursor {
             outer: self.outer.open(ctx),
@@ -74,13 +74,13 @@ where
     ///   close(cursor)                        ; normal end of this inner list
     /// }
     /// ```
-    fn for_each<G>(self, ctx: &mut Ctx, consumer: G)
+    fn for_each<G>(self, ctx: &Ctx, consumer: G)
     where
-        G: FnOnce(&mut Ctx, Var<Self::Item>),
+        G: FnOnce(&Ctx, Var<Self::Item>),
     {
         let f = self.f;
         self.outer.for_each(ctx, move |ctx, o| {
-            let cursor = f(o).staged_iter().open(ctx);
+            let cursor = f(ctx, o).staged_iter().open(ctx);
             let mut close = None;
             ctx.block(|ctx, exhausted| {
                 ctx.iterate(|ctx, _| {
@@ -88,7 +88,9 @@ where
                     close = Some(c);
                     consumer(ctx, x);
                 });
-                let close = close.expect("the inner step is staged exactly once");
+                let close = close
+                    .clone()
+                    .expect("the inner step is staged exactly once");
                 close.close(ctx);
                 ctx.break_loop();
             });
@@ -96,6 +98,15 @@ where
                 .expect("the inner step is staged exactly once")
                 .close(ctx);
         });
+    }
+
+    /// The sum of the inner counts: one loop over the outer elements, and none over
+    /// an inner iterator that knows its length.
+    fn count(self, ctx: &Ctx) -> Var<u64> {
+        let f = self.f;
+        self.outer.fold(ctx, 0u64, move |ctx, acc, o| {
+            acc + f(ctx, o).staged_iter().count(ctx)
+        })
     }
 }
 
@@ -111,7 +122,7 @@ pub struct FlatMapCursor<C, F, J> {
 impl<C, F, J> Cursor for FlatMapCursor<C, F, J>
 where
     C: Cursor,
-    F: Fn(Var<C::Item>) -> J,
+    F: Fn(&Ctx, Var<C::Item>) -> J,
     J: IntoStagedIterator,
     Inner<J>: StagedIterator,
     <Inner<J> as StagedIterator>::Item: 'static,
@@ -133,7 +144,7 @@ where
     /// ```
     /// Each step — outer, inner, and the inner open — is staged once; the inner
     /// cursor's state is defined in the `!active` branch and loop-carried after.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<Self::Item>, Self::Close) {
         let (outer, f, active) = (self.outer, self.f, self.active);
         let (mut outer_close, mut inner_close) = (None, None);
         let item = ctx.join(|ctx, got| {
@@ -142,7 +153,7 @@ where
                 ctx.if_then(not(active), |ctx| {
                     let (o, c) = outer.next(ctx, done);
                     outer_close = Some(c);
-                    inner = Some(f(o).staged_iter().open(ctx));
+                    inner = Some(f(ctx, o).staged_iter().open(ctx));
                     ctx.store(active, true);
                 });
                 let inner = inner.expect("the inner open is staged exactly once");
@@ -151,7 +162,9 @@ where
                     inner_close = Some(c);
                     ctx.goto(got, x);
                 });
-                let close = inner_close.expect("the inner step is staged exactly once");
+                let close = inner_close
+                    .clone()
+                    .expect("the inner step is staged exactly once");
                 close.close(ctx);
                 ctx.store(active, false);
                 ctx.again(again);
@@ -174,20 +187,14 @@ where
 
 /// Releases the current inner iterator if the traversal stopped while one was
 /// open (an early exit); an exhausted inner one was already closed in the step.
+#[derive(Clone)]
 pub struct CloseIfActive<C> {
     active: Var<bool>,
     inner: C,
 }
 
-impl<C: Copy> Clone for CloseIfActive<C> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-impl<C: Copy> Copy for CloseIfActive<C> {}
-
 impl<C: Close> Close for CloseIfActive<C> {
-    fn close(self, ctx: &mut Ctx) {
+    fn close(self, ctx: &Ctx) {
         let inner = self.inner;
         ctx.if_then(self.active, move |ctx| inner.close(ctx));
     }

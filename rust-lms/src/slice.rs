@@ -17,7 +17,7 @@
 //!
 //! # Canonical Staged representation
 //!
-//! Within the staged graph, a slice's `codegen` value is `Value::Fat { ptr, len }`.
+//! Within the staged graph, a slice's `codegen` value is `Value::Leaves([ptr, len])`.
 //! Both leaves remain in SSA registers through variables, sub-slicing, and slice ops.
 //! The pair is materialized as a descriptor only when it crosses the private function or
 //! extern ABI, and loaded back into a fat value on entry.
@@ -378,12 +378,8 @@ unsafe impl<T: StagedType> StagedType for SRef<Slice<T>> {
         8
     }
 
-    fn is_copy_struct() -> bool {
-        true // Fat pointer is Copy
-    }
-
-    fn is_fat_pointer() -> bool {
-        true // Slice references are fat pointers
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -424,12 +420,8 @@ unsafe impl<T: StagedType> StagedType for SRefMut<Slice<T>> {
         8
     }
 
-    fn is_copy_struct() -> bool {
-        true // ABI-classified as a two-register aggregate; not semantically Copy.
-    }
-
-    fn is_fat_pointer() -> bool {
-        true // Mutable slice references are fat pointers
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -623,11 +615,8 @@ unsafe impl<T: StagedType> StagedType for BorrowedSlice<'_, T> {
     fn align_of() -> usize {
         8
     }
-    fn is_copy_struct() -> bool {
-        true
-    }
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -661,11 +650,8 @@ unsafe impl<T: StagedType> StagedType for BorrowedSliceMut<'_, T> {
     fn align_of() -> usize {
         8
     }
-    fn is_copy_struct() -> bool {
-        true
-    }
-    fn is_fat_pointer() -> bool {
-        true
+    fn leaves() -> Option<crate::types::Leaves> {
+        Some(crate::types::Leaves::fat())
     }
 }
 
@@ -1425,10 +1411,10 @@ where
 {
     type Item = S::Out;
 
-    fn eliminate<F, N>(self, ctx: &mut Ctx, on_some: F, on_none: N)
+    fn eliminate<F, N>(self, ctx: &Ctx, on_some: F, on_none: N)
     where
-        F: FnOnce(&mut Ctx, Var<Self::Item>),
-        N: FnOnce(&mut Ctx),
+        F: FnOnce(&Ctx, Var<Self::Item>),
+        N: FnOnce(&Ctx),
     {
         let mut slice = ctx.bind(self.slice);
         let start = ctx.bind(self.start);
@@ -1498,6 +1484,37 @@ where
             slice: self,
             index: index.into_staged(),
         }
+    }
+
+    /// The index of the first element for which `pred` is false, like
+    /// [`<[T]>::partition_point`](slice::partition_point).
+    ///
+    /// The slice must be partitioned: `pred` holds for a prefix and fails for
+    /// the rest. Otherwise the result is some index in `0..=len`, unspecified.
+    /// The search is branchless, so `pred` is staged once.
+    fn partition_point<P, C>(self, ctx: &Ctx, pred: P) -> Var<u64>
+    where
+        Self: 'static,
+        Self::Out: CopyType + 'static,
+        ElemOf<Self>: CopyType + 'static,
+        P: FnOnce(&Ctx, Var<ElemOf<Self>>) -> C,
+        C: Staged<Out = bool> + 'static,
+    {
+        let slice = ctx.bind(self);
+        let first = ctx.var(0u64);
+        let len = ctx.var(slice.len());
+        ctx.while_loop(crate::num::gt(len, 0u64), |ctx| {
+            let half = ctx.bind(crate::num::shr(len, 1u64));
+            let mid = ctx.bind(first + half);
+            // SAFETY: `first + len <= slice.len()` holds on entry and every step
+            // keeps it, so `mid = first + len / 2 < slice.len()`.
+            let elem = ctx.bind(unsafe { slice.get_unchecked(mid) });
+            let before = pred(ctx, elem);
+            let before = ctx.bind(before);
+            ctx.store(first, crate::num::select(before, mid + 1u64, first));
+            ctx.store(len, crate::num::select(before, len - half - 1u64, half));
+        });
+        first
     }
 }
 
@@ -1588,7 +1605,7 @@ where
     /// a staged iterator yields values and has nowhere to put them back. Binds
     /// the slice once and reborrows per element, so a unique — and therefore
     /// non-`Clone` — origin works.
-    fn map_in_place<F, E>(self, ctx: &mut Ctx, f: F)
+    fn map_in_place<F, E>(self, ctx: &Ctx, f: F)
     where
         Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
         VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
@@ -1615,7 +1632,7 @@ where
     /// Emits only the store — routing this through
     /// [`map_in_place`](Self::map_in_place) would emit a per-element load whose
     /// result is never used, and the frontend does not remove it.
-    fn fill<V>(self, ctx: &mut Ctx, value: V)
+    fn fill<V>(self, ctx: &Ctx, value: V)
     where
         Self: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,
         VarUse<<Self as Staged>::Out>: crate::staged::LifetimeErased<Out = <Self as Staged>::Out>,

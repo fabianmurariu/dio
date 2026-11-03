@@ -111,7 +111,7 @@ fn zip_extern_with_slice() {
             // SAFETY: a fresh `DynIter<u64>` handle from the producer.
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .zip(w)
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -140,7 +140,9 @@ fn zip_slice_with_extern_three_arg_consumer() {
             let acc = ctx.var(0u64);
             // SAFETY: a fresh `DynIter<u64>` handle from the producer.
             let nodes = unsafe { it.iter(call_extern1(nodes, g)) };
-            w.staged_iter().zip(nodes).for_each(ctx, move |ctx, wi, n| {
+            w.staged_iter().zip(nodes).for_each(ctx, move |ctx, pair| {
+                let wi = ctx.bind(pair.first());
+                let n = ctx.bind(pair.second());
                 ctx.store(acc, acc * 100u64 + wi * n);
             });
             acc
@@ -168,7 +170,7 @@ fn zip_extern_with_extern() {
                 )
             };
             // Count pairs where the two streams agree.
-            a.zip(b).count_if(ctx, |p| eq(p.first(), p.second()))
+            a.zip(b).count_if(ctx, |_, p| eq(p.first(), p.second()))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -186,9 +188,11 @@ fn zip_filtered_with_indexed() {
         let f = compiler.fun2("evens_by_pos", |ctx, a: Var<S>, b: Var<S>| {
             let acc = ctx.var(0u64);
             a.staged_iter()
-                .filter(|x| eq(rem(x, 2u64), 0u64))
+                .filter(|_, x| eq(rem(x, 2u64), 0u64))
                 .zip(b)
-                .for_each(ctx, move |ctx, x, y| {
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
                     ctx.store(acc, acc * 100u64 + x * y);
                 });
             acc
@@ -206,7 +210,7 @@ fn zip_of_i64_range_and_slice_is_indexed() {
         let f = compiler.fun1("signed", |ctx, s: Var<SRef<Slice<i64>>>| {
             range(-2i64, 10i64)
                 .zip(s)
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -224,9 +228,9 @@ fn zip_of_mapped_slices() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2("mapped", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
-                .map(|x| x + 1u64)
-                .zip(b.staged_iter().map(|y| y * 2u64))
-                .map(|p| p.first() * p.second())
+                .map(|_, x| x + 1u64)
+                .zip(b.staged_iter().map(|_, y| y * 2u64))
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -269,7 +273,7 @@ fn chain_extern_then_slice() {
             unsafe { it.iter(call_extern1(nodes, g)) }
                 .chain(disk)
                 .enumerate()
-                .map(|p| p.first() * p.second())
+                .map(|_, p| p.first() * p.second())
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -329,7 +333,7 @@ fn early_exit_in_first_half_drops_both_handles() {
                     it.iter(call_extern1(other, g)),
                 )
             };
-            a.chain(b).any(ctx, move |x| gt(x, t))
+            a.chain(b).any(ctx, move |_, x| gt(x, t))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -398,7 +402,9 @@ fn skip_and_take_keep_the_shared_counter_in_zip() {
             a.staged_iter()
                 .skip(1u64)
                 .zip(b.staged_iter().take(2u64))
-                .for_each(ctx, move |ctx, x, y| {
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
                     ctx.store(acc, acc * 100u64 + x * y);
                 });
             acc
@@ -440,7 +446,7 @@ fn flat_map_consumed_as_nested_loops() {
         let f = compiler.fun1("nbr_sum", move |ctx, g: Var<G>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -462,8 +468,8 @@ fn flat_map_early_exit_leaves_the_whole_traversal() {
         let f = compiler.fun2("find", move |ctx, g: Var<G>, t: Var<u64>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
-                .position(ctx, move |x| eq(x, t))
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .position(ctx, move |_, x| eq(x, t))
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -495,9 +501,13 @@ fn flat_map_pulled_by_zip() {
             let acc = ctx.var(0u64);
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
                 .zip(w)
-                .for_each(ctx, move |ctx, x, y| ctx.store(acc, acc * 100u64 + x * y));
+                .for_each(ctx, move |ctx, pair| {
+                    let x = ctx.bind(pair.first());
+                    let y = ctx.bind(pair.second());
+                    ctx.store(acc, acc * 100u64 + x * y);
+                });
             acc
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -522,7 +532,7 @@ fn flat_map_pulled_by_chain_and_take() {
         let f = compiler.fun2("tri_then", |ctx, n: Var<u64>, tail: Var<S>| {
             let acc = ctx.var(0u64);
             range(0u64, n)
-                .flat_map(|i| range(0u64, i))
+                .flat_map(|_, i| range(0u64, i))
                 .chain(tail)
                 .take(7u64)
                 .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x + 1u64));
@@ -541,7 +551,7 @@ fn flat_map_pulled_by_chain_and_take() {
 fn flat_map_counts_triangles_of_ranges() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("tri", |ctx, n: Var<u64>| {
-            range(0u64, n).flat_map(|i| range(0u64, i)).count(ctx)
+            range(0u64, n).flat_map(|_, i| range(0u64, i)).count(ctx)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -581,8 +591,8 @@ fn merge_by_is_stable() {
         let f = compiler.fun2("stable", |ctx, a: Var<S>, b: Var<S>| {
             let acc = ctx.var(0u64);
             a.staged_iter()
-                .map(|x| x * 10u64 + 1u64)
-                .merge_by(b.staged_iter().map(|x| x * 10u64 + 2u64), |x, y| {
+                .map(|_, x| x * 10u64 + 1u64)
+                .merge_by(b.staged_iter().map(|_, x| x * 10u64 + 2u64), |x, y| {
                     le(div(x, 10u64), div(y, 10u64))
                 })
                 .for_each(ctx, move |ctx, x| {
@@ -630,6 +640,40 @@ fn merge_extern_with_slice_and_stop_early() {
 }
 
 #[test]
+fn kmerge_of_extern_streams_releases_every_part() {
+    // Two extern parts; a downstream `take_while` stops mid-merge, and both handles are
+    // released, as when the merge runs to the end.
+    for_each_backend(|mut compiler| {
+        let nodes = compiler.extern_fn::<PullGraphNodesExtern>();
+        let it = compiler.opaque_iter_fns::<DynIter<u64>>();
+        let f = compiler.fun2("kmerge", move |ctx, g: Var<G>, t1: Var<u64>| {
+            let acc = ctx.var(0u64);
+            let parts = (0..2)
+                .map(|_| {
+                    let handle = ctx.bind(call_extern1(nodes, g));
+                    // SAFETY: a fresh `DynIter<u64>` handle from the producer.
+                    unsafe { it.iter(handle) }
+                })
+                .collect();
+            kmerge_by(parts, |_, x| x)
+                .take_while(move |t| lt(t, t1))
+                .for_each(ctx, move |ctx, x| ctx.store(acc, acc * 10u64 + x));
+            acc
+        });
+        let compiled = compiler.compile(f).expect("compile");
+        let f = compiled.as_fn();
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, 5), 1144);
+        assert_all_dropped(&g, 2);
+
+        let g = graph(&[1, 4, 8], &[]);
+        assert_eq!(f.call(&g, 100), 114488);
+        assert_all_dropped(&g, 2);
+    });
+}
+
+#[test]
 fn three_way_merge() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun3("merge3", |ctx, a: Var<S>, b: Var<S>, c: Var<S>| {
@@ -660,10 +704,10 @@ fn three_level_flat_map_early_exit() {
         let f = compiler.fun2("two_hop_find", move |ctx, g: Var<G>, t: Var<u64>| {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             let (pos, found) = unsafe { it.iter(call_extern1(nodes, g)) }
-                .flat_map(move |n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
-                .flat_map(move |m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
+                .flat_map(move |_, n| unsafe { it.iter(call_extern2(nbrs, g, n)) })
+                .flat_map(move |_, m| unsafe { it.iter(call_extern2(nbrs, g, m)) })
                 .enumerate()
-                .find_map(ctx, move |p| eq(p.second(), t).then_some(p.first()));
+                .find_map(ctx, move |_, p| eq(p.second(), t).then_some(p.first()));
             select(found, pos, 99u64)
         });
         let compiled = compiler.compile(f).expect("compile");
@@ -692,7 +736,7 @@ fn intersect_two_sorted_slices() {
         let f = compiler.fun2("common", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
                 .intersect(b)
-                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+                .fold(ctx, 0u64, |_, acc, x| acc * 10u64 + x)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -714,7 +758,7 @@ fn intersect_by_a_descending_order() {
         let f = compiler.fun2("common_desc", |ctx, a: Var<S>, b: Var<S>| {
             a.staged_iter()
                 .intersect_by(b, gt)
-                .fold(ctx, 0u64, |acc, x| acc * 10u64 + x)
+                .fold(ctx, 0u64, |_, acc, x| acc * 10u64 + x)
         });
         let compiled = compiler.compile(f).expect("compile");
         let f = compiled.as_fn();
@@ -755,11 +799,11 @@ fn triangle_count_by_intersecting_adjacency_lists() {
             // SAFETY: fresh `DynIter<u64>` handles from the producers.
             unsafe { it.iter(call_extern1(nodes, g)) }.for_each(ctx, move |ctx, u| {
                 unsafe { it.iter(call_extern2(nbrs, g, u)) }
-                    .filter(move |v| gt(v, u))
+                    .filter(move |_, v| gt(v, u))
                     .for_each(ctx, move |ctx, v| {
                         let c = unsafe { it.iter(call_extern2(nbrs, g, u)) }
                             .intersect(unsafe { it.iter(call_extern2(nbrs, g, v)) })
-                            .count_if(ctx, move |w| gt(w, v));
+                            .count_if(ctx, move |_, w| gt(w, v));
                         ctx.store(acc, acc + c);
                     });
             });

@@ -31,7 +31,7 @@ fn test_borrowed_struct_of_slices() {
         let sum_deg = compiler.fun1("sum_degrees", |ctx, g: Var<FfiAdjListStaged>| {
             let offsets = g.get(FfiAdjListType::offsets());
             let n = g.get(FfiAdjListType::num_nodes());
-            range(0, n).fold(ctx, 0, |acc, i| {
+            range(0, n).fold(ctx, 0, |_, acc, i| {
                 let deg = unsafe { offsets.get_unchecked(i + 1) - offsets.get_unchecked(i) };
                 acc + deg
             })
@@ -88,7 +88,7 @@ impl AdjListStaged {
     /// At execution the graph must be a valid CSR: `offsets` holds at least
     /// `num_nodes + 1` non-decreasing entries, and `offsets[num_nodes] <=
     /// neighbours.len()`. Rows are read without bounds checks.
-    unsafe fn new(ctx: &mut Ctx, graph: Var<FfiAdjListStaged>) -> Self {
+    unsafe fn new(ctx: &Ctx, graph: Var<FfiAdjListStaged>) -> Self {
         AdjListStaged {
             offsets: ctx.bind(graph.get(FfiAdjListType::offsets())),
             neighbours: ctx.bind(graph.get(FfiAdjListType::neighbours())),
@@ -105,7 +105,7 @@ impl AdjListStaged {
     /// # Safety
     ///
     /// `node < num_nodes` at execution.
-    unsafe fn row(self, ctx: &mut Ctx, node: Var<u64>) -> Var<SRef<Slice<u64>>> {
+    unsafe fn row(self, ctx: &Ctx, node: Var<u64>) -> Var<SRef<Slice<u64>>> {
         // SAFETY: `node < num_nodes` (caller) and the CSR invariant of `new`
         // make both offsets readable and `start <= end <= neighbours.len()`.
         unsafe {
@@ -131,7 +131,7 @@ impl StagedIterator for AdjRows {
     type Item = SRef<Slice<u64>>;
     type Cursor = AdjRowsCursor;
 
-    fn open(self, ctx: &mut Ctx) -> AdjRowsCursor {
+    fn open(self, ctx: &Ctx) -> AdjRowsCursor {
         AdjRowsCursor {
             graph: self.graph,
             pos: ctx.var(0u64),
@@ -156,7 +156,7 @@ impl Cursor for AdjRowsCursor {
     type Item = SRef<Slice<u64>>;
     type Close = ();
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<SRef<Slice<u64>>>, ()) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<SRef<Slice<u64>>>, ()) {
         let pos = self.pos;
         ctx.exit_if(ge(pos, self.graph.num_nodes()), done);
         // SAFETY: the exit above proves `pos < num_nodes`.
@@ -165,11 +165,11 @@ impl Cursor for AdjRowsCursor {
         (row, ())
     }
 
-    fn indexed_len(&mut self, _ctx: &mut Ctx) -> Option<Var<u64>> {
+    fn indexed_len(&mut self, _ctx: &Ctx) -> Option<Var<u64>> {
         Some(self.graph.num_nodes())
     }
 
-    unsafe fn next_at(self, ctx: &mut Ctx, index: Var<u64>) -> (Var<SRef<Slice<u64>>>, ()) {
+    unsafe fn next_at(self, ctx: &Ctx, index: Var<u64>) -> (Var<SRef<Slice<u64>>>, ()) {
         // SAFETY: forwarded from the caller (`index < num_nodes`).
         (unsafe { self.graph.row(ctx, index) }, ())
     }
@@ -188,7 +188,9 @@ fn test_adj_rows_enumerate_degrees() {
             |ctx, graph: Var<FfiAdjListStaged>, out: Var<SRefMut<Slice<u64>>>| {
                 // SAFETY: the host passes a valid CSR.
                 let graph = unsafe { AdjListStaged::new(ctx, graph) };
-                graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+                graph.rows().enumerate().for_each(ctx, |ctx, pair| {
+                    let node = ctx.bind(pair.first());
+                    let row = ctx.bind(pair.second());
                     // SAFETY: `out` has one slot per node.
                     ctx.emit(unsafe { out.set_unchecked(node, row.len()) });
                 });
@@ -217,7 +219,9 @@ fn test_adj_rows_nested_iteration() {
             // SAFETY: the host passes a valid CSR.
             let graph = unsafe { AdjListStaged::new(ctx, graph) };
             let total = ctx.var(0u64);
-            graph.rows().enumerate().for_each(ctx, |ctx, node, row| {
+            graph.rows().enumerate().for_each(ctx, |ctx, pair| {
+                let node = ctx.bind(pair.first());
+                let row = ctx.bind(pair.second());
                 let row_sum = row.staged_iter().sum(ctx);
                 ctx.store(total, total + node * row_sum);
             });
@@ -255,7 +259,9 @@ fn test_adj_rows_zip_random_access() {
                 // SAFETY: the host passes a valid CSR.
                 let graph = unsafe { AdjListStaged::new(ctx, graph) };
                 let total = ctx.var(0u64);
-                graph.rows().zip(weights).for_each(ctx, |ctx, row, weight| {
+                graph.rows().zip(weights).for_each(ctx, |ctx, pair| {
+                    let row = ctx.bind(pair.first());
+                    let weight = ctx.bind(pair.second());
                     ctx.store(total, total + row.len() * weight);
                 });
                 total
@@ -787,5 +793,118 @@ fn test_return_mixed_struct() {
 
         let result = f.call(42, 3.15);
         assert_eq!(result, 42);
+    });
+}
+
+// =============================================================================
+// Structs held in leaves (up to `MAX_LEAVES` scalars) and in memory (more)
+// =============================================================================
+
+#[test]
+fn test_struct_shapes() {
+    assert_eq!(
+        Shape::of::<Point>(),
+        Shape::Leaves({
+            let mut leaves = Leaves::empty();
+            assert!(leaves.append_field::<i64>(0));
+            assert!(leaves.append_field::<f64>(8));
+            leaves
+        })
+    );
+    assert!(matches!(Shape::of::<Outer>(), Shape::Leaves(leaves) if leaves.len() == 2));
+    assert!(matches!(
+        Shape::of::<Wide>(),
+        Shape::Memory { size: 40, align: 8 }
+    ));
+}
+
+/// A struct read from a slice into a variable is a copy: overwriting the element
+/// afterwards does not change it.
+#[test]
+fn test_struct_read_from_slice_is_a_copy() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1(
+            "copy_then_overwrite",
+            |ctx, mut points: Var<SRefMut<Slice<Point>>>| {
+                // SAFETY: called with two points.
+                let first = ctx.bind(unsafe { points.reborrow().get_unchecked(0u64) });
+                let second = ctx.bind(unsafe { points.reborrow().get_unchecked(1u64) });
+                ctx.emit(unsafe { points.set_unchecked(0u64, second) });
+                first.get(PointType::x())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let mut points = [Point { x: 1, y: 1.5 }, Point { x: 2, y: 2.5 }];
+        assert_eq!(compiled.as_fn().call(&mut points[..]), 1);
+        assert_eq!(points[0].x, 2);
+        assert_eq!(points[0].y, 2.5);
+    });
+}
+
+#[test]
+fn test_struct_select() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun3(
+            "pick",
+            |ctx, left: Var<bool>, a: Var<Point>, b: Var<Point>| {
+                let picked = ctx.bind(select(left, a, b));
+                picked.get(PointType::x())
+            },
+        );
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let (a, b) = (Point { x: 3, y: 0.0 }, Point { x: 4, y: 0.0 });
+        assert_eq!(compiled.call(true, a, b), 3);
+        assert_eq!(compiled.call(false, a, b), 4);
+    });
+}
+
+#[test]
+fn test_struct_returned_by_value() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("larger", |ctx, a: Var<Point>, b: Var<Point>| {
+            let a_x = ctx.bind(a.get(PointType::x()));
+            let b_x = ctx.bind(b.get(PointType::x()));
+            select(gt(a_x, b_x), a, b)
+        });
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let larger = compiled.call(Point { x: 9, y: 1.25 }, Point { x: 5, y: 7.5 });
+        assert_eq!((larger.x, larger.y), (9, 1.25));
+    });
+}
+
+#[derive(StagedType, Copy, Clone)]
+#[repr(C)]
+pub struct Wide {
+    #[staged(i64)]
+    a: i64,
+    #[staged(i64)]
+    b: i64,
+    #[staged(i64)]
+    c: i64,
+    #[staged(i64)]
+    d: i64,
+    #[staged(i64)]
+    e: i64,
+}
+
+#[test]
+fn test_wide_struct_held_in_memory() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("sum_wide", |_ctx, wide: Var<Wide>| {
+            wide.get(WideType::a())
+                + wide.get(WideType::b())
+                + wide.get(WideType::c())
+                + wide.get(WideType::d())
+                + wide.get(WideType::e())
+        });
+        let compiled = compiler.compile(f).expect("compilation failed");
+        let wide = Wide {
+            a: 1,
+            b: 2,
+            c: 3,
+            d: 4,
+            e: 5,
+        };
+        assert_eq!(compiled.as_fn().call(wide), 15);
     });
 }

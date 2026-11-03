@@ -257,3 +257,55 @@ fn nested_iterate_scopes_are_independent() {
         assert_eq!(f.call(4), 10);
     });
 }
+
+// =============================================================================
+// switch: a jump table over staged arms
+// =============================================================================
+
+#[test]
+fn switch_runs_the_arm_of_the_index() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun2("switch", |ctx, i: Var<u32>, x: Var<i64>| {
+            let out = ctx.var(-1i64);
+            ctx.switch(i, 4, |ctx, j| match j {
+                0 => ctx.store(out, x),
+                1 => ctx.store(out, x * 10i64),
+                2 => {}
+                _ => ctx.store(out, x + j as i64),
+            });
+            out
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let switch = compiled.as_fn();
+        assert_eq!(switch.call(0, 7), 7);
+        assert_eq!(switch.call(1, 7), 70);
+        assert_eq!(switch.call(2, 7), -1);
+        assert_eq!(switch.call(3, 7), 10);
+    });
+}
+
+#[test]
+fn switch_arms_jump_to_enclosing_labels() {
+    // Count down through the arms: each arm either leaves the loop or picks the next one.
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("countdown", |ctx, start: Var<u32>| {
+            let i = ctx.var(start);
+            let visits = ctx.var(0u64);
+            ctx.iterate(|ctx, done| {
+                ctx.store(visits, visits + 1u64);
+                ctx.switch(i, 3, |ctx, j| {
+                    if j == 0 {
+                        ctx.exit(done);
+                    } else {
+                        ctx.store(i, Const::new(j - 1));
+                    }
+                });
+            });
+            visits
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        let countdown = compiled.as_fn();
+        assert_eq!(countdown.call(0), 1);
+        assert_eq!(countdown.call(2), 3);
+    });
+}

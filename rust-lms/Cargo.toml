@@ -32,6 +32,7 @@ criterion = { workspace = true }
 rand = { workspace = true }
 either = {workspace = true}
 proptest = { workspace = true }
+itertools = "0.14"
 
 [[bench]]
 name = "backends"
@@ -39,4 +40,8 @@ harness = false
 
 [[bench]]
 name = "iter"
+harness = false
+
+[[bench]]
+name = "kmerge"
 harness = false

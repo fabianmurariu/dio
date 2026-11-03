@@ -39,12 +39,12 @@ where
     St: StagedType + CopyType + 'static,
     Init: IntoStaged<St>,
     Init::Staged: 'static,
-    F: Fn(&mut Ctx, Var<St>, Var<I::Item>) + 'static,
+    F: Fn(&Ctx, Var<St>, Var<I::Item>),
 {
     type Item = St;
     type Cursor = ScanCursor<I::Cursor, St, F>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         // Allocate the state once, before the loop; update it each step.
         let state = ctx.var(self.init);
         ScanCursor {
@@ -66,12 +66,12 @@ impl<C, St, F> Cursor for ScanCursor<C, St, F>
 where
     C: Cursor,
     St: StagedType + CopyType + 'static,
-    F: Fn(&mut Ctx, Var<St>, Var<C::Item>) + 'static,
+    F: Fn(&Ctx, Var<St>, Var<C::Item>),
 {
     type Item = St;
     type Close = C::Close;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<St>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<St>, C::Close) {
         let (elem, close) = self.inner.next(ctx, done);
         (self.f)(ctx, self.state, elem);
         (self.state, close)

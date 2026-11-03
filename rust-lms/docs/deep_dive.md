@@ -126,7 +126,7 @@ naturally:
 | `U64Type` (`= u64`) | `u64`  | `I64`     | unsigned; `Num` + `IntNum` |
 | `I32Type` / `U32Type` | `i32`/`u32` | `I32` | `Num` + `IntNum` |
 | `F64Type` (`= f64`) | `f64`  | `F64`     | `Num` + `FloatNum` |
-| `BoolType` (`= bool`) | `bool` | `I8`    | **not** `Num`; control flow only |
+| `BoolType` (`= bool`) | `bool` | `I8`    | **not** `Num`; `Bits` (`& \| ^ !`) + control flow |
 | `UnitType` (`= ()`) | `()`     | `I8`(0)   | result of side effects |
 
 Because `i64`/`u64`/`f64`/`bool`/`()` are the markers themselves, a literal like
@@ -144,9 +144,12 @@ Because `i64`/`u64`/`f64`/`bool`/`()` are the markers themselves, a literal like
   float-only ops. Signed vs unsigned vs float pick `sdiv`/`udiv`/`fdiv`,
   `SignedLessThan`/`UnsignedLessThan`/`FloatCC::LessThan`, etc. — this is the one
   place where signedness lives.
+- **`Bits`** — marker for `& | ^` (`band`/`bor`/`bxor`): every integer type and
+  `bool`, where they are logical and/or/xor. `IntNum: Num + Bits`. `!` on any
+  `bool`-producing carrier is `control::Not`.
 
 > **Invariant:** `bool` is deliberately not `Num`. Booleans flow through
-> `if_then`, `select`, `not`, comparisons — never arithmetic.
+> `if_then`, `select`, `& | ^ !`, comparisons — never arithmetic.
 
 ---
 
@@ -229,6 +232,18 @@ let gcd = compiler.fun2_rec("gcd", |f, _ctx, a: Var<i64>, b: Var<i64>| {
 
 `funN_rec` passes the function's own `FunRefN` in as the first closure argument so
 the body can call itself.
+
+The builder is passed as `&Ctx`, a handle to shared state (`Rc<RefCell<..>>`).
+Statements go into the innermost scope open at the moment of the call: a loop
+body, a branch, a block. Combinators that run a closure per element (`map`,
+`flat_map`, `fold`, …) pass it the `Ctx` to emit through:
+
+```rust
+arr.staged_iter().map(|ctx, x| popcount(ctx, x)).sum(ctx) // popcount emits a loop
+```
+
+`map` runs its closure inside the consumer's loop body, so the loop lands there.
+A `Ctx` kept past the end of its function body panics if used.
 
 ### Calling and compiling
 
@@ -413,7 +428,7 @@ consumer closure runs **once at staging time** to build the loop body.
 ```rust
 let total = slice.staged_iter()
     .filter(move |x| gt(x, 0.0f64))
-    .map(move |x| x * x)
+    .map(move |_, x| x * x)
     .sum(ctx);                    // -> Var<f64>
 ```
 
@@ -508,7 +523,7 @@ let mut compiler = Compiler::new();
 let f = compiler.fun1("sum_pos_sq", |ctx, arr: Var<SRef<Slice<f64>>>| {
     arr.staged_iter()
        .filter(move |x| gt(x, 0.0f64))
-       .map(move |x| x * x)
+       .map(move |_, x| x * x)
        .sum(ctx)                       // Var<f64>
 });
 

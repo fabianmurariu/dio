@@ -99,7 +99,7 @@ fn p99_31_is_prime() {
         let f = compiler.fun1("p31_isprime", |ctx, n: Var<i64>| {
             let no_divisor = range(2i64, n)
                 .take_while(move |d| lt(d * d, n + 1i64))
-                .all(ctx, move |d| not(eq(n % d, 0i64)));
+                .all(ctx, move |_, d| not(eq(n % d, 0i64)));
             select(gt(n, 1i64), no_divisor, false)
         });
 

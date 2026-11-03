@@ -40,7 +40,7 @@ where
     C::Item: CopyType + 'static,
 {
     /// Declare the lookahead state (before the driving loop).
-    fn declare(ctx: &mut Ctx, cursor: C) -> Self {
+    fn declare(ctx: &Ctx, cursor: C) -> Self {
         Lookahead {
             cursor,
             // Never read before the first pull writes it (`need` starts true).
@@ -52,7 +52,7 @@ where
     /// If the head was consumed, pull the next one; jump to `exhausted` when
     /// there is none. Stages the input's step (once). Returns the head, the
     /// flag that marks it consumed, and the input's close.
-    fn refill(self, ctx: &mut Ctx, exhausted: Label<'_>) -> (Var<C::Item>, Var<bool>, C::Close) {
+    fn refill(self, ctx: &Ctx, exhausted: Label<'_>) -> (Var<C::Item>, Var<bool>, C::Close) {
         let Lookahead { cursor, head, need } = self;
         let mut close = None;
         ctx.if_then(need, |ctx| {
@@ -102,7 +102,7 @@ where
     type Item = A::Item;
     type Cursor = MergeCursor<A::Cursor, B::Cursor, P>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let a = self.a.open(ctx);
         let b = self.b.open(ctx);
         MergeCursor {
@@ -129,7 +129,7 @@ pub struct MergeCursor<A: Cursor, B: Cursor, P> {
 /// Refill one side of a merge; exhaustion marks it dead instead of ending the
 /// stream (the other side may still have elements).
 fn refill_or_die<C>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     side: Lookahead<C>,
     live: Var<bool>,
 ) -> (Var<C::Item>, Var<bool>, C::Close)
@@ -173,7 +173,7 @@ where
     ///   b.need = true; b.head
     /// }
     /// ```
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
         let (live_a, live_b) = (self.live_a, self.live_b);
         let (ha, need_a, close_a) = refill_or_die(ctx, self.a, live_a);
         let (hb, need_b, close_b) = refill_or_die(ctx, self.b, live_b);
@@ -233,7 +233,7 @@ where
     type Item = A::Item;
     type Cursor = IntersectCursor<A::Cursor, B::Cursor, P>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         let a = self.a.open(ctx);
         let b = self.b.open(ctx);
         IntersectCursor {
@@ -273,7 +273,7 @@ where
     /// The bookkeeping is branchless — only the retry branches. Exhaustion of
     /// either side ends the stream, so unlike a merge there is no "live" state:
     /// both refills jump straight to `done`.
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<A::Item>, Self::Close) {
         let (a, b, lt) = (self.a, self.b, self.lt);
         ctx.repeat(|ctx, again| {
             let (ha, need_a, close_a) = a.refill(ctx, done);

@@ -36,7 +36,7 @@ fn euler_01_multiples_of_3_or_5() {
         // Branchless predicated sum over [1, n): keep i when divisible by 3 or 5.
         // `select(a, true, b)` is a logical OR of the two divisibility tests.
         let f = compiler.fun1("e01", |ctx, n: Var<i64>| {
-            range(1i64, n).sum_if(ctx, |i| {
+            range(1i64, n).sum_if(ctx, |_, i| {
                 select(eq(i % 3i64, 0i64), true, eq(i % 5i64, 0i64))
             })
         });
@@ -189,7 +189,7 @@ fn euler_06_sum_square_difference() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("e06", |ctx, n: Var<i64>| {
             let sum = range(1i64, n + 1i64).sum(ctx);
-            let sq_sum = range(1i64, n + 1i64).map(|i| i * i).sum(ctx);
+            let sq_sum = range(1i64, n + 1i64).map(|_, i| i * i).sum(ctx);
             sum * sum - sq_sum
         });
 
@@ -539,7 +539,7 @@ fn euler_28_spiral_diagonals() {
         // Center (1) plus the four corners of each ring k = 3, 5, ..., size.
         let f = compiler.fun1("e28", |ctx, size: Var<i64>| {
             let rings = range_step(3i64, size + 1i64, 2i64)
-                .map(|k| k * k * 4i64 - (k - 1i64) * 6i64)
+                .map(|_, k| k * k * 4i64 - (k - 1i64) * 6i64)
                 .sum(ctx);
             rings + 1i64
         });

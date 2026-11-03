@@ -23,17 +23,21 @@
 //!      });
 //! ```
 
+mod boxed;
 mod chain;
+mod empty;
 mod enumerate;
 mod filter;
 mod filter_map;
 mod flat_map;
 mod from_fn;
+mod kmerge;
 mod map;
 pub mod opaque;
 mod range_iter;
 mod rev;
 mod scan;
+mod set_bits;
 mod skip_while;
 mod slice_iter;
 mod sorted;
@@ -42,12 +46,15 @@ mod take_while;
 mod traits;
 mod zip;
 
+pub use boxed::{BoxedClose, BoxedCursor, BoxedStagedIter, ErasedClose, ErasedCursor, ErasedIter};
 pub use chain::{Chain, ChainCursor};
+pub use empty::{Empty, EmptyCursor, empty};
 pub use enumerate::{Enumerate, EnumerateCursor};
 pub use filter::{Filter, FilterCursor};
 pub use filter_map::{FilterMap, FilterMapCursor};
 pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
+pub use kmerge::{CHAIN_MAX, KMergeBy, KMergeCursor, Plan, kmerge_by};
 pub use map::{Map, MapCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
@@ -58,6 +65,7 @@ pub use opaque::{
 pub use range_iter::{RangeCursor, RangeIter, RangeLen, RangeStep, range, range_step};
 pub use rev::{Rev, RevCursor};
 pub use scan::{Scan, ScanCursor};
+pub use set_bits::{SetBits, SetBitsCursor, set_bits};
 pub use skip_while::{SkipWhile, SkipWhileCursor};
 pub use slice_iter::{SliceCursor, SliceIter};
 pub use sorted::{IntersectBy, IntersectCursor, Lookahead, MergeBy, MergeCursor};
@@ -88,6 +96,7 @@ macro_rules! into_staged_iter_is_self {
 
 into_staged_iter_is_self!(
     Chain<A, B>,
+    Empty<T>,
     Enumerate<I>,
     Filter<I, P>,
     FilterMap<I, F>,
@@ -95,9 +104,11 @@ into_staged_iter_is_self!(
     FromFn<F, O>,
     Map<I, F, U>,
     IntersectBy<A, B, P>,
+    KMergeBy<I, F>,
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,
+    SetBits<T, W>,
     Skip<I, N>,
     SkipWhile<I, P>,
     Take<I, N>,

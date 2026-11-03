@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::types::StagedType;
 
-use super::traits::{FloatNum, IntNum, Num};
+use super::traits::{Bits, FloatNum, IntNum, Num, Ordered};
 
 // =============================================================================
 // Arithmetic Operations
@@ -122,10 +122,10 @@ where
 }
 
 // =============================================================================
-// Integer Bit Operations
+// Bit Operations — integers, and `bool` (logical and/or/xor)
 // =============================================================================
 
-/// Bitwise AND operation.
+/// Bitwise AND operation; logical AND on `bool`.
 #[derive(Clone)]
 pub struct BitAnd<L, R> {
     left: L,
@@ -136,18 +136,18 @@ unsafe impl<L, R, T> Staged for BitAnd<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitand(lv, rv, ctx)
+        Value::scalar(ctx.band(lv.leaf(), rv.leaf()))
     }
 }
 
-/// Bitwise OR operation.
+/// Bitwise OR operation; logical OR on `bool`.
 #[derive(Clone)]
 pub struct BitOr<L, R> {
     left: L,
@@ -158,18 +158,18 @@ unsafe impl<L, R, T> Staged for BitOr<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitor(lv, rv, ctx)
+        Value::scalar(ctx.bor(lv.leaf(), rv.leaf()))
     }
 }
 
-/// Bitwise XOR operation.
+/// Bitwise XOR operation; logical XOR (`!=`) on `bool`.
 #[derive(Clone)]
 pub struct BitXor<L, R> {
     left: L,
@@ -180,14 +180,14 @@ unsafe impl<L, R, T> Staged for BitXor<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Bits,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
-        T::codegen_bitxor(lv, rv, ctx)
+        Value::scalar(ctx.bxor(lv.leaf(), rv.leaf()))
     }
 }
 
@@ -232,6 +232,114 @@ where
         let lv = self.left.codegen(ctx);
         let rv = self.right.codegen(ctx);
         T::codegen_shr(lv, rv, ctx)
+    }
+}
+
+/// Count of trailing zero bits, like Rust's `trailing_zeros`: the bit width for zero.
+#[derive(Clone, Copy)]
+pub struct TrailingZeros<E> {
+    expr: E,
+}
+
+unsafe impl<E, T> Staged for TrailingZeros<E>
+where
+    E: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let value = self.expr.codegen(ctx);
+        Value::scalar(ctx.ctz(value.leaf()))
+    }
+}
+
+/// Build a staged count of trailing zero bits. See [`TrailingZeros`].
+pub fn trailing_zeros<T, E>(expr: E) -> TrailingZeros<E::Staged>
+where
+    T: IntNum,
+    E: IntoStaged<T>,
+{
+    TrailingZeros {
+        expr: expr.into_staged(),
+    }
+}
+
+/// An `i128` from a high `i64` and a low `u64`: `(hi << 64) | lo`. Its signed order is
+/// the order of `(hi, lo)`, so a two-part key compares as one integer.
+#[derive(Clone, Copy)]
+pub struct PackI128<H, L> {
+    hi: H,
+    lo: L,
+}
+
+unsafe impl<H, L> Staged for PackI128<H, L>
+where
+    H: Staged<Out = i64>,
+    L: Staged<Out = u64>,
+{
+    type Out = i128;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let hi = self.hi.codegen(ctx).leaf();
+        let lo = self.lo.codegen(ctx).leaf();
+        Value::scalar(ctx.iconcat(lo, hi))
+    }
+}
+
+/// Build a staged [`PackI128`].
+pub fn pack_i128<H, L>(hi: H, lo: L) -> PackI128<H::Staged, L::Staged>
+where
+    H: IntoStaged<i64>,
+    L: IntoStaged<u64>,
+{
+    PackI128 {
+        hi: hi.into_staged(),
+        lo: lo.into_staged(),
+    }
+}
+
+/// The halves of an `i128` packed by [`pack_i128`]: the signed high `i64`, or the low
+/// `u64`.
+#[derive(Clone, Copy)]
+pub struct UnpackI128<E, T> {
+    packed: E,
+    _half: PhantomData<T>,
+}
+
+unsafe impl<E: Staged<Out = i128>> Staged for UnpackI128<E, i64> {
+    type Out = i64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let packed = self.packed.codegen(ctx).leaf();
+        let shift = ctx.iconst(crate::types::ScalarType::I128, 64);
+        let hi = ctx.sshr(packed, shift);
+        Value::scalar(ctx.ireduce(crate::types::ScalarType::I64, hi))
+    }
+}
+
+unsafe impl<E: Staged<Out = i128>> Staged for UnpackI128<E, u64> {
+    type Out = u64;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let packed = self.packed.codegen(ctx).leaf();
+        Value::scalar(ctx.ireduce(crate::types::ScalarType::I64, packed))
+    }
+}
+
+/// The high `i64` of an `i128` from [`pack_i128`].
+pub fn i128_hi<E: IntoStaged<i128>>(packed: E) -> UnpackI128<E::Staged, i64> {
+    UnpackI128 {
+        packed: packed.into_staged(),
+        _half: PhantomData,
+    }
+}
+
+/// The low `u64` of an `i128` from [`pack_i128`].
+pub fn i128_lo<E: IntoStaged<i128>>(packed: E) -> UnpackI128<E::Staged, u64> {
+    UnpackI128 {
+        packed: packed.into_staged(),
+        _half: PhantomData,
     }
 }
 
@@ -329,7 +437,7 @@ unsafe impl<L, R, T> Staged for Lt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -351,7 +459,7 @@ unsafe impl<L, R, T> Staged for Gt<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -373,7 +481,7 @@ unsafe impl<L, R, T> Staged for Eq<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -398,7 +506,7 @@ unsafe impl<L, R, T> Staged for Ne<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -420,7 +528,7 @@ unsafe impl<L, R, T> Staged for Le<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -442,7 +550,7 @@ unsafe impl<L, R, T> Staged for Ge<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: Num,
+    T: Ordered,
 {
     type Out = bool;
 
@@ -522,10 +630,10 @@ where
     }
 }
 
-/// Build a staged bitwise AND.
+/// Build a staged bitwise AND (logical AND on `bool`).
 pub fn bitand<T, L, R>(left: L, right: R) -> BitAnd<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -535,10 +643,10 @@ where
     }
 }
 
-/// Build a staged bitwise OR.
+/// Build a staged bitwise OR (logical OR on `bool`).
 pub fn bitor<T, L, R>(left: L, right: R) -> BitOr<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -548,10 +656,10 @@ where
     }
 }
 
-/// Build a staged bitwise XOR.
+/// Build a staged bitwise XOR (logical XOR on `bool`).
 pub fn bitxor<T, L, R>(left: L, right: R) -> BitXor<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Bits,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -661,7 +769,7 @@ where
 /// Build a staged less-than comparison.
 pub fn lt<T, L, R>(left: L, right: R) -> Lt<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -674,7 +782,7 @@ where
 /// Build a staged greater-than comparison.
 pub fn gt<T, L, R>(left: L, right: R) -> Gt<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -687,7 +795,7 @@ where
 /// Build a staged equality comparison.
 pub fn eq<T, L, R>(left: L, right: R) -> Eq<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -703,7 +811,7 @@ where
 /// `!eq(..)` rather than an ordered comparison.
 pub fn ne<T, L, R>(left: L, right: R) -> Ne<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -719,7 +827,7 @@ where
 /// operand is NaN.
 pub fn le<T, L, R>(left: L, right: R) -> Le<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -733,7 +841,7 @@ where
 /// [`le`].
 pub fn ge<T, L, R>(left: L, right: R) -> Ge<L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -765,10 +873,21 @@ where
     type Out = Out;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let cond = self.condition.codegen(ctx);
+        let cond = self.condition.codegen(ctx).leaf();
         let true_val = self.if_true.codegen(ctx);
         let false_val = self.if_false.codegen(ctx);
-        Value::scalar(ctx.select(cond.leaf(), true_val.leaf(), false_val.leaf()))
+        match (true_val, false_val) {
+            (Value::Scalar(a), Value::Scalar(b)) => Value::scalar(ctx.select(cond, a, b)),
+            (a, b) => {
+                let leaves: Vec<_> = a
+                    .all_leaves()
+                    .iter()
+                    .zip(b.all_leaves())
+                    .map(|(&a, &b)| ctx.select(cond, a, b))
+                    .collect();
+                Value::leaves(&leaves)
+            }
+        }
     }
 }
 
@@ -794,7 +913,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn min<T, L, R>(left: L, right: R) -> Select<Lt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
     L::Staged: Clone,
@@ -816,7 +935,7 @@ where
 #[allow(clippy::type_complexity)]
 pub fn max<T, L, R>(left: L, right: R) -> Select<Gt<L::Staged, R::Staged>, L::Staged, R::Staged>
 where
-    T: Num,
+    T: Ordered,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
     L::Staged: Clone,
@@ -918,14 +1037,16 @@ macro_rules! impl_rem_op_for {
     };
 }
 
-/// Impls `core::ops::{BitAnd, BitOr, BitXor, Shl, Shr}` for the given staged
-/// carrier. Operands must have the same staged integer type.
+/// Impls `core::ops::{BitAnd, BitOr, BitXor, Shl, Shr, Not}` for the given
+/// staged carrier. Operands must have the same staged type: `& | ^` need
+/// [`Bits`] (integers or `bool`), shifts need an integer, and `!` is logical
+/// negation of a `bool`.
 macro_rules! impl_bit_ops_for {
     ([$($gen:tt)*] $self:ty) => {
         impl<$($gen)*, __Out, __R> ::core::ops::BitAnd<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -938,7 +1059,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::BitOr<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -951,7 +1072,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::BitXor<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Bits + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -984,6 +1105,16 @@ macro_rules! impl_bit_ops_for {
             type Output = Shr<Self, __R::Staged>;
             fn shr(self, rhs: __R) -> Self::Output {
                 shr::<__Out, _, _>(self, rhs)
+            }
+        }
+
+        impl<$($gen)*> ::core::ops::Not for $self
+        where
+            $self: Staged<Out = bool> + 'static,
+        {
+            type Output = crate::control::Not<Self>;
+            fn not(self) -> Self::Output {
+                crate::control::not(self)
             }
         }
     };
@@ -1038,6 +1169,10 @@ impl_num_ops_for!([L, R] Shr<L, R>);
 impl_rem_op_for!([L, R] Shr<L, R>);
 impl_bit_ops_for!([L, R] Shr<L, R>);
 
+impl_num_ops_for!([E] TrailingZeros<E>);
+impl_rem_op_for!([E] TrailingZeros<E>);
+impl_bit_ops_for!([E] TrailingZeros<E>);
+
 impl_num_ops_for!([E, TO] IntCast<E, TO>);
 impl_rem_op_for!([E, TO] IntCast<E, TO>);
 impl_bit_ops_for!([E, TO] IntCast<E, TO>);
@@ -1046,6 +1181,15 @@ impl_bit_ops_for!([E, TO] IntCast<E, TO>);
 impl_num_ops_for!([C, T, F] Select<C, T, F>);
 impl_rem_op_for!([C, T, F] Select<C, T, F>);
 impl_bit_ops_for!([C, T, F] Select<C, T, F>);
+
+// Boolean-producing carriers: comparisons and `!` compose with `& | ^ !`.
+impl_bit_ops_for!([L, R] Lt<L, R>);
+impl_bit_ops_for!([L, R] Gt<L, R>);
+impl_bit_ops_for!([L, R] Eq<L, R>);
+impl_bit_ops_for!([L, R] Ne<L, R>);
+impl_bit_ops_for!([L, R] Le<L, R>);
+impl_bit_ops_for!([L, R] Ge<L, R>);
+impl_bit_ops_for!([C] crate::control::Not<C>);
 
 // Slice access carriers (length, element reads). The carriers are now unified
 // across immutable and mutable slices, so one impl each covers both.

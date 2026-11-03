@@ -108,7 +108,9 @@ fn build_sum_above_median(backend: JitBackend) -> SumAboveMedian {
             let acc = ctx.var(0i64);
             // `zip` stops at the shorter side; the caller passes `len(b) >= len(a)`,
             // so this is the same trip count the manual `i < n` loop had.
-            a.staged_iter().zip(b).for_each(ctx, move |ctx, ai, bi| {
+            a.staged_iter().zip(b).for_each(ctx, move |ctx, pair| {
+                let ai = ctx.bind(pair.first());
+                let bi = ctx.bind(pair.second());
                 // "one of the two values exceeds the median" == max(ai, bi) > m.
                 ctx.if_then(gt(max(ai, bi), m), move |ctx| {
                     ctx.store(acc, add(acc, add(ai, bi)));

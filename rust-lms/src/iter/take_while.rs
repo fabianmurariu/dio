@@ -25,13 +25,13 @@ impl<I, P, Cond> StagedIterator for TakeWhile<I, P>
 where
     I: StagedIterator,
     I::Item: CopyType + 'static,
-    P: Fn(Var<I::Item>) -> Cond + 'static,
+    P: Fn(Var<I::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = I::Item;
     type Cursor = TakeWhileCursor<I::Cursor, P>;
 
-    fn open(self, ctx: &mut Ctx) -> Self::Cursor {
+    fn open(self, ctx: &Ctx) -> Self::Cursor {
         TakeWhileCursor {
             inner: self.inner.open(ctx),
             pred: self.pred,
@@ -52,13 +52,13 @@ impl<C, P, Cond> Cursor for TakeWhileCursor<C, P>
 where
     C: Cursor,
     C::Item: CopyType + 'static,
-    P: Fn(Var<C::Item>) -> Cond + 'static,
+    P: Fn(Var<C::Item>) -> Cond,
     Cond: Staged<Out = bool> + 'static,
 {
     type Item = C::Item;
     type Close = C::Close;
 
-    fn next(self, ctx: &mut Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
+    fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<C::Item>, C::Close) {
         let (elem, close) = self.inner.next(ctx, done);
         ctx.exit_unless((self.pred)(elem), done);
         (elem, close)

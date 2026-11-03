@@ -31,7 +31,7 @@ fn group_mut(state: *mut GroupState) -> impl Staged<Out = SMutPtr<Opaque<GroupSt
 /// filter above it run in the same kernel (see [`CodegenCtx::group`]). `avg` divides at
 /// emit; nullability rides in the emitted `ColVal` (so `write_col` handles nulls).
 pub(crate) fn gen_grouped<I: InputsSource>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     inputs: I,
     op: &Operator,
     cx: &CodegenCtx,
@@ -169,7 +169,7 @@ pub(crate) fn gen_grouped<I: InputsSource>(
 /// handling) via [`finish_upsert`]. The key computation runs unconditionally but is
 /// harmless on a null row (unused; `str_ptr` reads a null row safely).
 fn fold_single_key(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     key_fields: KeyFields,
     key_valid: Option<FieldId<i64>>,
     key_cv: ColVal,
@@ -216,7 +216,7 @@ fn fold_single_key(
 
 /// Emit the single key `ColVal` for one group's record.
 fn emit_single_key(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     key_fields: KeyFields,
     key_valid: Option<FieldId<i64>>,
     rec: DynamicRecord,
@@ -255,7 +255,7 @@ fn emit_single_key(
 /// computation has already run in the caller (harmless on a null row); only the extern
 /// call is guarded by the branch.
 fn finish_upsert<C>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     valid_call: C,
     key_valid: Option<FieldId<i64>>,
     key_cv: ColVal,
@@ -412,7 +412,7 @@ fn packed_key(group_exprs: &[Expr], cols: &[(DataType, bool)]) -> PackedKey {
 /// null bitmap) then find-or-insert via `group_upsert_str` (which copies the packed
 /// bytes into the pool on a miss). Returns the group's record pointer.
 fn pack_and_upsert(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     packed: &PackedKey,
     row: &Row,
     schema: &SchemaRef,
@@ -473,7 +473,7 @@ fn pack_and_upsert(
 /// Unpack a group's pooled packed key into its output key `ColVal`s (nulls from the
 /// bitmap).
 fn unpack_composite(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     packed: &PackedKey,
     packed_ptr: Var<SMutPtr<u8>>,
 ) -> Vec<ColVal> {
@@ -513,7 +513,7 @@ enum Pushable {
 /// the host scratch (`group_key_*`) and intern the assembled flat key
 /// (`group_upsert_composite`). Returns the group's record pointer.
 fn build_bytes_key(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     bk: &BytesKey,
     row: &Row,
     schema: &SchemaRef,
@@ -586,7 +586,7 @@ fn build_bytes_key(
 /// Load a value of type `T` at byte offset `off` in `base` (a runtime offset, since a
 /// string column's length shifts everything after it).
 unsafe fn load_at_unchecked<T: StagedType + CopyType + 'static>(
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     base: Var<SMutPtr<u8>>,
     off: Var<i64>,
 ) -> Var<T> {
@@ -595,7 +595,7 @@ unsafe fn load_at_unchecked<T: StagedType + CopyType + 'static>(
 }
 
 /// A `*const u8` at byte offset `off` in `base`.
-unsafe fn ptr_at_unchecked(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
+unsafe fn ptr_at_unchecked(ctx: &Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
     // SAFETY: required by this helper's caller.
     ctx.bind(ptr_as_const(unsafe { ptr_offset_mut(base, off) }))
 }
@@ -603,7 +603,7 @@ unsafe fn ptr_at_unchecked(ctx: &mut Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>)
 /// Unpack a variable-length composite key (the pooled flat bytes: `[bitmap | col0 |
 /// …]`, each fixed column 8 bytes, each string `[len | content]`) into its output key
 /// `ColVal`s, walking a running byte offset.
-fn unpack_bytes(ctx: &mut Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec<ColVal> {
+fn unpack_bytes(ctx: &Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec<ColVal> {
     let off0 = ctx.var(0i64);
     // SAFETY: the group state created this flat key using `bk`'s format and
     // retains the complete allocation while groups are emitted.
@@ -916,7 +916,7 @@ struct ResolvedAgg {
 /// (`true` with no argument or a non-null argument).
 fn agg_arg_value(
     arg: &Option<Expr>,
-    ctx: &mut Ctx,
+    ctx: &Ctx,
     row: &Row,
     schema: &SchemaRef,
     cx: &CodegenCtx,
@@ -940,7 +940,7 @@ impl ResolvedAgg {
     /// `avg`, the divisor).
     fn fold(
         &self,
-        ctx: &mut Ctx,
+        ctx: &Ctx,
         rec: DynamicRecord,
         row: &Row,
         schema: &SchemaRef,
@@ -991,7 +991,7 @@ impl ResolvedAgg {
     /// Manifest this aggregate's final `ColVal` from the group's record `rec`:
     /// `count` is never null; `sum`/`min`/`max` are null when the count is 0; `avg`
     /// divides `sum/count` (null when count 0).
-    fn finalize(&self, ctx: &mut Ctx, rec: DynamicRecord) -> ColVal {
+    fn finalize(&self, ctx: &Ctx, rec: DynamicRecord) -> ColVal {
         match (self.kind, self.value) {
             (AggKind::Count, AggValueField::I64(f)) => {
                 ColVal::I64(rec.get(ctx, f), Nullness::NonNull)
@@ -1015,14 +1015,14 @@ impl ResolvedAgg {
     }
 
     /// Whether group `rec` saw any non-null input (its non-null count > 0).
-    fn seen(&self, ctx: &mut Ctx, rec: DynamicRecord) -> Var<bool> {
+    fn seen(&self, ctx: &Ctx, rec: DynamicRecord) -> Var<bool> {
         let count = rec.get(ctx, self.count.expect("nullable agg has a count"));
         ctx.bind(gt(count, 0i64))
     }
 }
 
 /// `rec.count += 1` (the non-null count field for a nullable aggregate).
-fn bump_count(ctx: &mut Ctx, count: Option<FieldId<i64>>, rec: DynamicRecord) {
+fn bump_count(ctx: &Ctx, count: Option<FieldId<i64>>, rec: DynamicRecord) {
     let f = count.expect("nullable aggregate has a count field");
     let cur = rec.get(ctx, f);
     let next = ctx.bind(add(cur, 1i64));
@@ -1031,7 +1031,7 @@ fn bump_count(ctx: &mut Ctx, count: Option<FieldId<i64>>, rec: DynamicRecord) {
 
 /// Fold one `i64` input into a `sum`/`min`/`max` accumulator (`add`/`min`/`max`).
 /// The arms return distinct staged types, so each binds to a `Var` before returning.
-fn combine_i64(ctx: &mut Ctx, kind: AggKind, cur: Var<i64>, v: Var<i64>) -> Var<i64> {
+fn combine_i64(ctx: &Ctx, kind: AggKind, cur: Var<i64>, v: Var<i64>) -> Var<i64> {
     match kind {
         AggKind::Sum => ctx.bind(add(cur, v)),
         AggKind::Min => ctx.bind(min(cur, v)),
@@ -1041,7 +1041,7 @@ fn combine_i64(ctx: &mut Ctx, kind: AggKind, cur: Var<i64>, v: Var<i64>) -> Var<
 }
 
 /// `f64` twin of [`combine_i64`] — for `sum`/`min`/`max` over a `Float64` column.
-fn combine_f64(ctx: &mut Ctx, kind: AggKind, cur: Var<f64>, v: Var<f64>) -> Var<f64> {
+fn combine_f64(ctx: &Ctx, kind: AggKind, cur: Var<f64>, v: Var<f64>) -> Var<f64> {
     match kind {
         AggKind::Sum => ctx.bind(add(cur, v)),
         AggKind::Min => ctx.bind(min(cur, v)),
