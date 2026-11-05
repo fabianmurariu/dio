@@ -47,6 +47,25 @@ where
             _elem: PhantomData,
         }
     }
+
+    /// A view of column `index` as Arrow `Boolean` values.
+    ///
+    /// # Safety
+    ///
+    /// `index` must be in bounds and its descriptor must come from a `BooleanArray`
+    /// for every batch supplied to generated code.
+    unsafe fn boolean(
+        self,
+        index: usize,
+    ) -> BooleanArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone>
+    where
+        Self: Clone,
+    {
+        BooleanArrayView {
+            // SAFETY: forwarded from `ArrayBatchOps::boolean`'s caller.
+            array: unsafe { self.get_ptr_unchecked(index as u64) },
+        }
+    }
 }
 
 impl<B> ArrayBatchOps for B
@@ -70,6 +89,81 @@ pub trait FfiArrayOps<'r>: Staged<Out = SRef<FfiArray>> + Sized + Clone {
         PrimitiveArrayView {
             array: ref_as_ptr(self),
             _elem: PhantomData,
+        }
+    }
+
+    /// Interpret this erased descriptor as Arrow `Boolean` values.
+    ///
+    /// # Safety
+    ///
+    /// The descriptor must come from a `BooleanArray`.
+    unsafe fn into_boolean(self) -> BooleanArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone> {
+        BooleanArrayView {
+            array: ref_as_ptr(self),
+        }
+    }
+}
+
+// =============================================================================
+// BooleanArrayView: bit-packed values
+// =============================================================================
+
+/// Staged view of an Arrow `Boolean` array. Its descriptor's `values` addresses the
+/// bit-packed values from their first bit, LSB first like the validity bitmap, with
+/// one element per row: the buffer's length is the row count, not its byte count.
+pub struct BooleanArrayView<P> {
+    pub(crate) array: P,
+}
+
+impl<P: Clone> Clone for BooleanArrayView<P> {
+    fn clone(&self) -> Self {
+        Self {
+            array: self.array.clone(),
+        }
+    }
+}
+
+impl<P: Copy> Copy for BooleanArrayView<P> {}
+
+impl<P: ArraySource + 'static> BooleanArrayView<P> {
+    /// The value bytes, indexed by byte; its `len` is the row count.
+    fn bytes(&self) -> impl Staged<Out = SRef<Slice<u8>>> + Clone + use<P> {
+        // SAFETY: the view's constructor established that the descriptor addresses a
+        // live bitmap of at least `len` bits for the whole kernel run; the read is
+        // shared.
+        unsafe {
+            field_addr(self.array.clone(), FfiArrayType::values())
+                .into_raw_slice::<u8>()
+                .assume_shared()
+        }
+    }
+
+    /// The row count.
+    pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P> {
+        self.bytes().len()
+    }
+
+    /// Read row `index`'s value without checking the length.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `index` must be less than this array's length.
+    pub unsafe fn value_unchecked<I>(&self, index: I) -> impl Staged<Out = bool> + Clone + use<P, I>
+    where
+        I: IntoStaged<u64>,
+        I::Staged: Clone,
+    {
+        let bit = index.into_staged();
+        let byte_index = shr::<u64, _, _>(bit.clone(), 3u64);
+        let mask = shl::<u64, _, _>(Const::<u64>::new(1), bitand::<u64, _, _>(bit, 7u64));
+        // SAFETY: `index < len` bits, so its byte is inside the bitmap.
+        let byte = int_cast::<u64, u8, _>(unsafe { self.bytes().get_unchecked(byte_index) });
+        not(eq(bitand::<u64, _, _>(byte, mask), 0u64))
+    }
+
+    pub fn validity(&self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P>> {
+        ValidityView {
+            validity: field_addr(self.array.clone(), FfiArrayType::validity()),
         }
     }
 }

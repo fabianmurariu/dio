@@ -11,8 +11,8 @@ use std::marker::PhantomData;
 
 use arrow::array::types::ArrowPrimitiveType;
 use arrow::array::{
-    Array, ArrayRef, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array, Int64Array,
-    PrimitiveArray, StringViewArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
+    Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
+    Int64Array, PrimitiveArray, StringViewArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
 use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
@@ -126,6 +126,16 @@ pub struct FfiArray {
 }
 
 impl FfiArray {
+    /// No rows: what a consumer stands in where a column is missing, so a row lookup
+    /// finds no value instead of branching on presence. Its buffers are null.
+    pub const fn empty() -> Self {
+        Self {
+            values: FfiBuffer::empty(),
+            validity: FfiValidity::all_valid(0),
+            array: std::ptr::null(),
+        }
+    }
+
     pub fn len(&self) -> usize {
         self.values.len
     }
@@ -227,6 +237,12 @@ pub enum FfiError {
         bit_len: usize,
         byte_len: usize,
     },
+    /// A `Boolean` array whose values start mid-byte, as a slice at a bit offset that is
+    /// not a multiple of 8: its descriptor addresses whole bytes.
+    UnalignedBooleanValues {
+        index: usize,
+        bit_offset: usize,
+    },
 }
 
 impl fmt::Display for FfiError {
@@ -250,6 +266,10 @@ impl fmt::Display for FfiError {
                 f,
                 "validity bitmap has {byte_len} bytes, too short for {bit_len} bits"
             ),
+            Self::UnalignedBooleanValues { index, bit_offset } => write!(
+                f,
+                "boolean array {index} starts at bit {bit_offset}, not on a byte"
+            ),
         }
     }
 }
@@ -263,6 +283,26 @@ fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiAr
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
         array: std::ptr::null(),
     }
+}
+
+/// Build an erased descriptor from an Arrow `BooleanArray`: `values` addresses the
+/// bit-packed values from the array's first bit, its length the row count (see
+/// `BooleanArrayView`). Fails if the values start mid-byte.
+fn ffi_from_boolean(index: usize, array: &BooleanArray) -> Result<FfiArray, FfiError> {
+    let values = array.values();
+    let bit_offset = values.offset();
+    if !bit_offset.is_multiple_of(8) {
+        return Err(FfiError::UnalignedBooleanValues { index, bit_offset });
+    }
+    let bytes = &values.inner().as_slice()[bit_offset / 8..];
+    Ok(FfiArray {
+        values: FfiBuffer {
+            ptr: bytes.as_ptr(),
+            len: array.len(),
+        },
+        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        array: std::ptr::null(),
+    })
 }
 
 /// Build an erased descriptor from an Arrow `StringViewArray`.
@@ -383,6 +423,16 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError>
         DataType::UInt64 => downcast_primitive!(UInt64Array),
         DataType::Float32 => downcast_primitive!(Float32Array),
         DataType::Float64 => downcast_primitive!(Float64Array),
+        DataType::Boolean => {
+            let boolean = array
+                .as_any()
+                .downcast_ref::<BooleanArray>()
+                .ok_or_else(|| FfiError::Downcast {
+                    index,
+                    data_type: array.data_type().clone(),
+                })?;
+            ffi_from_boolean(index, boolean)
+        }
         DataType::Utf8View => {
             let view = array
                 .as_any()

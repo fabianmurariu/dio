@@ -7,7 +7,7 @@
 //! `OutCols`). Read descriptors and owner-backed writable validity descriptors
 //! are separate types.
 //!
-//! Scope: primitive arrays only. Validity is a first-class staged view.
+//! Scope: primitive and `Boolean` arrays (and `Utf8View` views). Validity is a first-class staged view.
 
 // `#[derive(StagedType)]` generates field-token modules with lowercase field
 // names, which trips the case lints.
@@ -18,8 +18,8 @@ pub mod ffi;
 pub mod ffi_mut;
 
 pub use array::{
-    ArrayBatchOps, ArraySource, FfiArrayOps, PrimitiveArrayView, ValidityIsValid, ValidityLen,
-    ValidityNullCount, ValiditySource, ValidityView,
+    ArrayBatchOps, ArraySource, BooleanArrayView, FfiArrayOps, PrimitiveArrayView, ValidityIsValid,
+    ValidityLen, ValidityNullCount, ValiditySource, ValidityView,
 };
 pub use ffi::{
     FfiArray, FfiBuffer, FfiError, FfiValidity, FfiValidityMut, PreparedFfiBatch,
