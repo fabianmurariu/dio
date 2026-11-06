@@ -108,9 +108,7 @@ fn test_iter_count_filtered() {
 fn test_iter_count_flat_map_sums_inner_lengths() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun1("count_triangle", |ctx, n: Var<u64>| {
-            range(0u64, n)
-                .flat_map(|_, i| range(0u64, i))
-                .count(ctx)
+            range(0u64, n).flat_map(|_, i| range(0u64, i)).count(ctx)
         });
         let compiled = compiler.compile(f).expect("compile failed");
         for n in [0u64, 1, 2, 5, 10] {
@@ -127,7 +125,11 @@ fn test_iter_count_chain_and_map() {
             |ctx, arr: Var<SRef<Slice<i64>>>, n: Var<u64>| {
                 arr.staged_iter()
                     .map(|_, x| x + 1i64)
-                    .chain(range(0u64, n).flat_map(|_, i| range(0u64, i)).map(|_, i| int_cast::<i64, u64, _>(i)))
+                    .chain(
+                        range(0u64, n)
+                            .flat_map(|_, i| range(0u64, i))
+                            .map(|_, i| int_cast::<i64, u64, _>(i)),
+                    )
                     .count(ctx)
             },
         );
@@ -179,7 +181,10 @@ fn test_iter_boxed_pulled_by_zip_and_chain() {
         let f = compiler.fun2(
             "boxed_zip_chain",
             |ctx, arr: Var<SRef<Slice<u64>>>, n: Var<u64>| {
-                let odd = arr.staged_iter().filter(|_, x| eq(rem(x, 2u64), 1u64)).boxed();
+                let odd = arr
+                    .staged_iter()
+                    .filter(|_, x| eq(rem(x, 2u64), 1u64))
+                    .boxed();
                 let tail = range(0u64, n).boxed();
                 let acc = ctx.var(0u64);
                 odd.chain(tail)
@@ -589,7 +594,7 @@ fn test_iter_filter_map() {
         // keep evens, map to x*10, sum: [1,2,3,4] -> 2,4 -> 20,40 -> 60
         let f = compiler.fun1("fm_sum", |ctx, arr: Var<SRef<Slice<i64>>>| {
             arr.staged_iter()
-                .filter_map(|x| eq(x % 2i64, 0i64).then_some(x * 10i64))
+                .filter_map(|_, x| eq(x % 2i64, 0i64).then_some(x * 10i64))
                 .sum(ctx)
         });
         let compiled = compiler.compile(f).expect("compile failed");

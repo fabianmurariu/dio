@@ -11,8 +11,8 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
-    BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip, SkipWhile,
-    Take, TakeWhile, Zip,
+    BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip,
+    SkipWhile, Take, TakeWhile, Zip,
 };
 
 // =============================================================================
@@ -281,9 +281,11 @@ pub trait StagedIterator: Sized {
     /// Map-and-filter fused: `f` returns a [`StagedOpt`] (typically via
     /// `cond.then_some(value)`); `Some` payloads are kept, `None` dropped. No
     /// `Option` is materialized — one branch per element, value in a register.
+    /// `f` may emit statements through its `ctx` (a search, a loop) before
+    /// returning the option, as `map` and `filter` may.
     fn filter_map<F, O>(self, f: F) -> FilterMap<Self, F>
     where
-        F: Fn(Var<Self::Item>) -> O,
+        F: Fn(&Ctx, Var<Self::Item>) -> O,
         O: StagedOpt,
     {
         FilterMap::new(self, f)

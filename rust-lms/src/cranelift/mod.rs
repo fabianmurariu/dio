@@ -273,7 +273,9 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     }
     fn fpromote(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         ValueId::from_cranelift(
-            self.builder.ins().fpromote(to.to_cranelift(), v.cranelift()),
+            self.builder
+                .ins()
+                .fpromote(to.to_cranelift(), v.cranelift()),
             to,
         )
     }

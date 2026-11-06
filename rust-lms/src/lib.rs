@@ -107,15 +107,15 @@ pub mod prelude {
         OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter,
         RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, SetBits,
         Skip, SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem,
-        ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter,
-        empty, from_fn, kmerge_by, range, range_step, set_bits,
+        ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, empty,
+        from_fn, kmerge_by, range, range_step, set_bits,
     };
     pub use crate::label::{Again, Label};
     pub use crate::num::{
         BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge, IntCast, IntNum,
         IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq,
-        float_promote, ge, gt, int_cast, int_to_float, le, lt, max, min, mul, ne, i128_hi, i128_lo, pack_i128, rem, select, shl, shr, sub,
-        trailing_zeros,
+        float_promote, ge, gt, i128_hi, i128_lo, int_cast, int_to_float, le, lt, max, min, mul, ne,
+        pack_i128, rem, select, shl, shr, sub, trailing_zeros,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{

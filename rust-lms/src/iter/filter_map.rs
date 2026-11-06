@@ -7,7 +7,7 @@ use crate::staged_opt::StagedOpt;
 
 use super::traits::{Cursor, StagedIterator};
 
-/// Iterator adapter applying `f: Item -> impl StagedOpt`, keeping the `Some`
+/// Iterator adapter applying `f: (&Ctx, Item) -> impl StagedOpt`, keeping the `Some`
 /// payloads. No `Option` is materialized: each element emits one branch and the
 /// kept value stays in a register (see [`crate::staged_opt`]).
 pub struct FilterMap<I, F> {
@@ -24,7 +24,7 @@ impl<I, F> FilterMap<I, F> {
 impl<I, F, O> StagedIterator for FilterMap<I, F>
 where
     I: StagedIterator,
-    F: Fn(Var<I::Item>) -> O,
+    F: Fn(&Ctx, Var<I::Item>) -> O,
     O: StagedOpt + 'static,
     O::Item: 'static,
 {
@@ -48,7 +48,7 @@ pub struct FilterMapCursor<C, F> {
 impl<C, F, O> Cursor for FilterMapCursor<C, F>
 where
     C: Cursor,
-    F: Fn(Var<C::Item>) -> O,
+    F: Fn(&Ctx, Var<C::Item>) -> O,
     O: StagedOpt + 'static,
     O::Item: 'static,
 {
@@ -68,7 +68,7 @@ where
             ctx.repeat(|ctx, again| {
                 let (elem, c) = inner.next(ctx, done);
                 close = Some(c);
-                f(elem).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.again(again));
+                f(ctx, elem).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.again(again));
             });
             dead::<O::Item>()
         });
