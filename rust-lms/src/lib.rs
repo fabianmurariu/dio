@@ -112,9 +112,9 @@ pub mod prelude {
     };
     pub use crate::label::{Again, Label};
     pub use crate::num::{
-        BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, Ge, IntCast, IntNum, IntToFloat, Le, Ne,
-        Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq, ge, gt, int_cast,
-        int_to_float, le, lt, max, min, mul, ne, i128_hi, i128_lo, pack_i128, rem, select, shl, shr, sub,
+        BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge, IntCast, IntNum,
+        IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq,
+        float_promote, ge, gt, int_cast, int_to_float, le, lt, max, min, mul, ne, i128_hi, i128_lo, pack_i128, rem, select, shl, shr, sub,
         trailing_zeros,
     };
     pub use crate::opaque::Opaque;

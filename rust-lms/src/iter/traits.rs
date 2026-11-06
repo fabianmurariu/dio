@@ -2,7 +2,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::num::{Le, Lt, Num, add, gt, le, lt, select};
+use crate::num::{Le, Lt, Num, Ordered, add, ge, gt, le, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
 use crate::types::{ConstantType, CopyType, DirectValue, StagedType};
@@ -693,6 +693,78 @@ pub trait StagedIterator: Sized {
         });
         (result, found)
     }
+
+    /// The element whose `key` is greatest, and whether there was one. Of several with
+    /// that key, the **last**, as `Iterator::max_by_key`. When `found` is `false`, the
+    /// element is the default: check `found` before using it.
+    ///
+    /// The best element and its key live in variables beside a found flag, so no key
+    /// value is reserved to mean "none". `key` is staged once and may emit statements
+    /// through its `ctx`.
+    ///
+    /// ```ignore
+    /// // The latest (time, value) update across runs.
+    /// let (latest, any) = runs.max_by_key(ctx, |_, update| update.first());
+    /// ```
+    fn max_by_key<F, KE, K>(self, ctx: &Ctx, key: F) -> (Var<Self::Item>, Var<bool>)
+    where
+        Self::Item: ConstantType + CopyType + 'static,
+        <Self::Item as StagedType>::RuntimeValue: Default,
+        F: FnOnce(&Ctx, Var<Self::Item>) -> KE,
+        KE: Staged<Out = K> + 'static,
+        K: Ordered + ConstantType + CopyType + 'static,
+        K::RuntimeValue: Default,
+    {
+        best_by_key(self, ctx, key, true)
+    }
+
+    /// The element whose `key` is least, and whether there was one. Of several with that
+    /// key, the **first**, as `Iterator::min_by_key`. As [`max_by_key`](Self::max_by_key)
+    /// otherwise.
+    fn min_by_key<F, KE, K>(self, ctx: &Ctx, key: F) -> (Var<Self::Item>, Var<bool>)
+    where
+        Self::Item: ConstantType + CopyType + 'static,
+        <Self::Item as StagedType>::RuntimeValue: Default,
+        F: FnOnce(&Ctx, Var<Self::Item>) -> KE,
+        KE: Staged<Out = K> + 'static,
+        K: Ordered + ConstantType + CopyType + 'static,
+        K::RuntimeValue: Default,
+    {
+        best_by_key(self, ctx, key, false)
+    }
+}
+
+/// [`StagedIterator::max_by_key`] (`max`) or [`StagedIterator::min_by_key`]: an element
+/// replaces the best when it is the first, or its key is at least (`max`, so later ties
+/// win) or below (`min`, so earlier ties win) the best's.
+fn best_by_key<I, F, KE, K>(iter: I, ctx: &Ctx, key: F, max: bool) -> (Var<I::Item>, Var<bool>)
+where
+    I: StagedIterator,
+    I::Item: ConstantType + CopyType + 'static,
+    <I::Item as StagedType>::RuntimeValue: Default,
+    F: FnOnce(&Ctx, Var<I::Item>) -> KE,
+    KE: Staged<Out = K> + 'static,
+    K: Ordered + ConstantType + CopyType + 'static,
+    K::RuntimeValue: Default,
+{
+    let best = ctx.var(Const::<I::Item>::new(Default::default()));
+    let best_key = ctx.var(Const::<K>::new(Default::default()));
+    let found = ctx.var(false);
+    iter.for_each(ctx, move |ctx, elem| {
+        let k = ctx.bind(key(ctx, elem));
+        let beats = if max {
+            ctx.bind(ge(k, best_key))
+        } else {
+            ctx.bind(lt(k, best_key))
+        };
+        let better = ctx.bind(select(found, beats, true));
+        ctx.if_then(better, move |ctx| {
+            ctx.store(best, elem);
+            ctx.store(best_key, k);
+            ctx.store(found, true);
+        });
+    });
+    (best, found)
 }
 
 // =============================================================================

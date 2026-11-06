@@ -613,6 +613,11 @@ impl<'c> Backend for MlirBackend<'c> {
         let v = self.get(v);
         self.emit_value(arith::uitofp(v, ty, self.location), to)
     }
+    fn fpromote(&mut self, to: ScalarType, v: ValueId) -> ValueId {
+        let ty = scalar_to_mlir(self.context, to);
+        let v = self.get(v);
+        self.emit_value(arith::extf(v, ty, self.location), to)
+    }
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId {
         // Same-width reinterpret between non-pointer scalars (e.g. f64↔i64), the Cranelift
         // `bitcast` contract.

@@ -753,6 +753,51 @@ where
     }
 }
 
+/// Widen a float to a wider float type (`f32 -> f64`), exactly.
+pub struct FloatPromote<E, TO> {
+    expr: E,
+    _to: PhantomData<TO>,
+}
+
+impl<E: Clone, TO> Clone for FloatPromote<E, TO> {
+    fn clone(&self) -> Self {
+        Self {
+            expr: self.expr.clone(),
+            _to: PhantomData,
+        }
+    }
+}
+
+impl<E: Copy, TO> Copy for FloatPromote<E, TO> {}
+
+unsafe impl<E, FROM, TO> Staged for FloatPromote<E, TO>
+where
+    E: Staged<Out = FROM>,
+    FROM: FloatNum,
+    TO: FloatNum,
+{
+    type Out = TO;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let value = self.expr.codegen(ctx);
+        Value::scalar(ctx.fpromote(TO::scalar_type(), value.leaf()))
+    }
+}
+
+/// Build a staged float widening (`float_promote::<f64, f32, _>(x)`). Panics at staging
+/// time unless `TO` is wider than `FROM`.
+pub fn float_promote<TO, FROM, E>(expr: E) -> FloatPromote<E::Staged, TO>
+where
+    TO: FloatNum,
+    FROM: FloatNum,
+    E: IntoStaged<FROM>,
+{
+    FloatPromote {
+        expr: expr.into_staged(),
+        _to: PhantomData,
+    }
+}
+
 /// Build a staged integer-to-float conversion (e.g. `int_to_float::<f64, i64, _>(x)`).
 pub fn int_to_float<TO, FROM, E>(expr: E) -> IntToFloat<E::Staged, TO>
 where

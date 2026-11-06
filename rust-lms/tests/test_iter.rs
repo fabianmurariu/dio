@@ -1135,3 +1135,96 @@ fn test_iter_empty_has_no_elements() {
         assert_eq!(compiled.call(4u64), 6);
     });
 }
+
+// =============================================================================
+// max_by_key / min_by_key / find_map over pairs
+// =============================================================================
+
+/// The index of the best key, or `u64::MAX` when there is none.
+fn best_index(max: bool) -> impl Fn(&[i64]) -> u64 {
+    let mut compiler = Compiler::new();
+    let f = compiler.fun1("best_index", move |ctx, keys: Var<SRef<Slice<i64>>>| {
+        let indexed = keys.staged_iter().enumerate();
+        let key = |_: &Ctx, pair: Var<ZipItem<u64, i64>>| pair.second();
+        let (best, found) = if max {
+            indexed.max_by_key(ctx, key)
+        } else {
+            indexed.min_by_key(ctx, key)
+        };
+        select(found, best.first(), u64::MAX)
+    });
+    let compiled = compiler.compile(f).expect("compile failed");
+    move |keys| compiled.as_fn().call(keys)
+}
+
+#[test]
+fn test_iter_max_by_key_keeps_the_last_of_equal_keys() {
+    let max = best_index(true);
+    assert_eq!(max(&[3, 7, 1, 7, 2]), 3);
+    assert_eq!(max(&[5]), 0);
+    // No key is reserved: negative keys beat the zero a variable starts from.
+    assert_eq!(max(&[-5, -2, -9]), 1);
+    assert_eq!(max(&[]), u64::MAX);
+}
+
+#[test]
+fn test_iter_min_by_key_keeps_the_first_of_equal_keys() {
+    let min = best_index(false);
+    assert_eq!(min(&[3, 1, 4, 1]), 1);
+    assert_eq!(min(&[2, 9, 7]), 0);
+    // A positive minimum still wins over the zero a variable starts from.
+    assert_eq!(min(&[5, 8, 6]), 0);
+    assert_eq!(min(&[]), u64::MAX);
+}
+
+#[test]
+fn test_iter_by_key_compiles_on_every_backend() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("last_max", |ctx, keys: Var<SRef<Slice<u64>>>| {
+            let (best, found) = keys
+                .staged_iter()
+                .enumerate()
+                .max_by_key(ctx, |_, pair| pair.second());
+            select(found, best.first(), u64::MAX)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        assert_eq!(compiled.call(&[4u64, 9, 9, 1][..]), 2);
+    });
+}
+
+#[test]
+fn test_iter_find_map_yields_a_pair() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("first_big", |ctx, keys: Var<SRef<Slice<i64>>>| {
+            let (pair, found) = keys
+                .staged_iter()
+                .enumerate()
+                .find_map(ctx, |_, pair| gt(pair.second(), 5i64).then_some(pair));
+            select(found, pair.first(), u64::MAX)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        assert_eq!(compiled.call(&[1i64, 6, 9][..]), 1);
+        assert_eq!(compiled.call(&[1i64, 2][..]), u64::MAX);
+    });
+}
+
+// =============================================================================
+// float_promote
+// =============================================================================
+
+#[test]
+fn test_float_promote_is_exact() {
+    for_each_backend(|mut compiler| {
+        let f = compiler.fun1("sum_as_f64", |ctx, arr: Var<SRef<Slice<f32>>>| {
+            arr.staged_iter()
+                .map(|_, x| float_promote::<f64, f32, _>(x))
+                .sum(ctx)
+        });
+        let compiled = compiler.compile(f).expect("compile failed");
+        // In f32, 2^24 + 1 + 1 rounds back to 2^24; widened first, nothing is lost.
+        let data: [f32; 3] = [16_777_216.0, 1.0, 1.0];
+        assert_eq!(compiled.call(&data[..]), 16_777_218.0);
+        let data: [f32; 2] = [0.1, -2.5];
+        assert_eq!(compiled.call(&data[..]), 0.1f32 as f64 - 2.5);
+    });
+}

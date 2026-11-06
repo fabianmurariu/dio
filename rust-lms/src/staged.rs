@@ -429,6 +429,8 @@ pub trait Backend {
     fn iconcat(&mut self, lo: ValueId, hi: ValueId) -> ValueId;
     fn fcvt_from_sint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn fcvt_from_uint(&mut self, to: ScalarType, v: ValueId) -> ValueId;
+    /// A float widened to the wider float type `to` (`f32 -> f64`), exactly.
+    fn fpromote(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     // memory
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId;
@@ -727,6 +729,17 @@ impl<'c> CompilationContext<'c> {
         );
         let result = self.backend.fcvt_from_sint(to, value);
         expect_type(result, to, "fcvt_from_sint")
+    }
+
+    #[doc(hidden)]
+    pub fn fpromote(&mut self, to: ScalarType, value: ValueId) -> ValueId {
+        let from = value.scalar_type();
+        assert!(
+            from.is_float() && to.is_float() && from.bit_width() < to.bit_width(),
+            "fpromote: expected a float -> a wider float, found {from:?} -> {to:?}"
+        );
+        let result = self.backend.fpromote(to, value);
+        expect_type(result, to, "fpromote")
     }
 
     #[doc(hidden)]
