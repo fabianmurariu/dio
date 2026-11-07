@@ -19,7 +19,9 @@
 
 use crate::cranelift::CraneliftBackend;
 use crate::label::{Again, Label};
-use crate::staged::{CompilationContext, LifetimeErased, Staged, Value, ValueId, Var, assign};
+use crate::staged::{
+    CompilationContext, LifetimeErased, LoadKind, Staged, Value, ValueId, Var, assign,
+};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
@@ -380,6 +382,31 @@ impl Ctx {
     /// [`exit`](Self::exit)`(out)` anywhere inside `body` — however deeply
     /// nested — continues after the block. Not a loop scope: `break_loop`
     /// passes through it.
+    /// Stages `body` with every load it emits marked [`LoadKind::Invariant`]: removable
+    /// when unused, merged when repeated, and movable, out of loops and above branches.
+    /// For reads of descriptors a kernel resolves (a table row at a clamped index, a
+    /// field of one), so the ones nothing uses cost nothing and the ones a loop repeats
+    /// are hoisted out of it.
+    ///
+    /// # Safety
+    ///
+    /// Every load `body` stages, through any pointer and in any nested block, reads
+    /// memory that nothing writes while the function runs, and that is readable
+    /// wherever the load's operands are available: not only where `body` puts it, but
+    /// also before any branch or loop test that guards it. Element reads behind a bounds
+    /// check, and anything that reads the stack, stay outside.
+    pub unsafe fn invariant<T>(&self, body: impl FnOnce(&Ctx) -> T) -> T {
+        let (actions, out) = self.child(body);
+        self.push(Box::new(move |ctx| {
+            let outer = std::mem::replace(&mut ctx.load_kind, LoadKind::Invariant);
+            for action in actions {
+                action(ctx);
+            }
+            ctx.load_kind = outer;
+        }));
+        out
+    }
+
     pub fn block<F>(&self, body: F)
     where
         F: for<'s> FnOnce(&Ctx, Label<'s>),
@@ -1440,6 +1467,7 @@ impl Compiler {
                             block_params: HashMap::new(),
                             loop_exit_stack: Vec::new(),
                             labels: HashMap::new(),
+                            load_kind: LoadKind::Plain,
                         };
                         emit_function_body(
                             &mut ctx,
@@ -1507,6 +1535,7 @@ impl Compiler {
                         block_params: HashMap::new(),
                         loop_exit_stack: Vec::new(),
                         labels: HashMap::new(),
+                        load_kind: LoadKind::Plain,
                     };
                     emit_function_body(
                         &mut ctx,

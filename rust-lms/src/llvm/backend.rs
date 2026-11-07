@@ -23,7 +23,7 @@ use melior::ir::{Block, Identifier, Location, Module, Region, RegionLike, Type, 
 use mlir_sys::MlirValue;
 
 use crate::staged::{
-    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    Backend, BlockHandle, FuncRefId, LoadKind, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
     expect_arguments,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
@@ -627,7 +627,8 @@ impl<'c> Backend for MlirBackend<'c> {
     }
 
     // ---- memory ----
-    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+    // `LoadKind::Invariant` is a Cranelift optimisation hint; LLVM loads stay plain.
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32, _kind: LoadKind) -> ValueId {
         let ptr = self.offset_ptr_const(ptr, offset);
         let mlir_ty = scalar_to_mlir(self.context, ty);
         let ptr = self.get(ptr);

@@ -366,6 +366,22 @@ pub struct CompilationContext<'c> {
     /// `iterate`, keyed by label id. An entry lives exactly as long as its scope
     /// is being emitted; the stage-0 lifetime brand guarantees no jump outlives it.
     pub(crate) labels: HashMap<usize, BlockHandle>,
+    /// How the loads emitted now may be optimised: [`LoadKind::Invariant`] inside
+    /// [`Ctx::invariant`](crate::func::Ctx::invariant).
+    pub(crate) load_kind: LoadKind,
+}
+
+/// How a load may be optimised.
+#[derive(Clone, Copy, Debug, Default, PartialEq, Eq)]
+pub enum LoadKind {
+    /// Ordered against stores and calls, and kept even when unused.
+    #[default]
+    Plain,
+    /// Of memory that nothing writes while the function runs, and that is readable
+    /// wherever the load's operands are available: it may be removed when unused,
+    /// merged with an identical load, and moved, out of loops or past the branch that
+    /// guards it (Cranelift: `readonly`, `can_move`).
+    Invariant,
 }
 
 /// The IR-emission backend: the single interface a code generator implements.
@@ -433,7 +449,7 @@ pub trait Backend {
     fn fpromote(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     // memory
-    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId;
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32, kind: LoadKind) -> ValueId;
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
     fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId;
     /// Allocate an explicit stack slot of `size` bytes with alignment `1 << align_shift`.
@@ -772,7 +788,7 @@ impl<'c> CompilationContext<'c> {
     #[doc(hidden)]
     pub fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
         expect_type(ptr, ScalarType::Ptr, "load pointer");
-        let result = self.backend.load(ty, ptr, offset);
+        let result = self.backend.load(ty, ptr, offset, self.load_kind);
         expect_type(result, ty, "load")
     }
 
