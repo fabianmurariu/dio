@@ -414,8 +414,12 @@ storage-pointer signature, not the original typed Rust signature.
 RUST_LMS_DEBUG_IR=1 cargo test -p rust-lms test_while_loop_factorial -- --nocapture
 ```
 
-prints each function's Cranelift IR (including `__main__`) before it is compiled —
-the first thing to reach for when codegen looks wrong.
+prints each function's Cranelift IR (including `__main__`) as rust-lms built it, before
+Cranelift optimises it — the first thing to reach for when codegen looks wrong.
+`RUST_LMS_DEBUG_IR_OPT=1` prints the same functions after optimisation: what actually
+runs, and whether Cranelift removed what we expected it to. Set both to compare. (On the
+LLVM backend they print the MLIR before and after lowering to the LLVM dialect; LLVM's own
+optimised IR is not exposed by the execution engine.)
 
 ---
 

@@ -129,6 +129,11 @@ pub fn jit_return_i64_const(value: i64) -> i64 {
     pass_manager
         .run(&mut module)
         .expect("lower to the LLVM dialect");
+    // The LLVM dialect, before LLVM's own passes: `ExecutionEngine` optimises it
+    // internally and does not hand back the optimised IR.
+    if std::env::var_os(crate::func::DEBUG_IR_OPT).is_some() {
+        eprintln!("=== MLIR after lowering ===\n{}", module.as_operation());
+    }
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification after lowering"
@@ -159,7 +164,7 @@ fn jit_lookup(
     name: &str,
     symbols: &[(&str, *const u8)],
 ) -> (ExecutionEngine, *mut ()) {
-    if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
+    if std::env::var_os(crate::func::DEBUG_IR).is_some() {
         eprintln!("=== MLIR before lowering ===\n{}", module.as_operation());
     }
     assert!(
@@ -184,6 +189,11 @@ fn jit_lookup(
     pass_manager
         .run(&mut module)
         .expect("lower to the LLVM dialect");
+    // The LLVM dialect, before LLVM's own passes: `ExecutionEngine` optimises it
+    // internally and does not hand back the optimised IR.
+    if std::env::var_os(crate::func::DEBUG_IR_OPT).is_some() {
+        eprintln!("=== MLIR after lowering ===\n{}", module.as_operation());
+    }
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification after lowering"

@@ -1283,11 +1283,13 @@ impl Compiler {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
+            sizes: Vec::new(),
             _signature: PhantomData,
         })
     }
 
     fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
+        let mut sizes = Vec::new();
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -1453,16 +1455,13 @@ impl Compiler {
                     builder.finalize(module.isa().frontend_config());
                 }
 
-                // Debug output for Cranelift IR
-                if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
-                    eprintln!("=== Function: {} ===", func_def.name);
-                    eprintln!("{}", func_ctx.func);
-                    eprintln!();
-                }
-
+                debug_ir(DEBUG_IR, &func_def.name, &func_ctx.func);
                 module
                     .define_function(func_id, &mut func_ctx)
                     .map_err(|e| CompileError::ModuleError(e.to_string()))?;
+                // `define_function` optimises `func_ctx.func` in place.
+                debug_ir(DEBUG_IR_OPT, &func_def.name, &func_ctx.func);
+                sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
                 module.clear_context(&mut func_ctx);
             }
         }
@@ -1523,16 +1522,12 @@ impl Compiler {
                 builder.finalize(module.isa().frontend_config());
             }
 
-            // Debug output for main function IR
-            if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
-                eprintln!("=== Function: __main__ ===");
-                eprintln!("{}", func_ctx.func);
-                eprintln!();
-            }
-
+            debug_ir(DEBUG_IR, "__main__", &func_ctx.func);
             module
                 .define_function(main_func_id, &mut func_ctx)
                 .map_err(|e| CompileError::ModuleError(e.to_string()))?;
+            debug_ir(DEBUG_IR_OPT, "__main__", &func_ctx.func);
+            sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
             module.clear_context(&mut func_ctx);
         }
 
@@ -1552,6 +1547,7 @@ impl Compiler {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
+            sizes,
             _signature: PhantomData,
         })
     }
@@ -1591,6 +1587,8 @@ impl std::error::Error for CompileError {}
 pub struct Compiled<T: StagedType> {
     executable: Arc<FrozenExecutable>,
     main: unsafe extern "C" fn(*mut u8),
+    /// Each function's optimised size; see [`Compiled::sizes`].
+    sizes: Vec<(String, usize)>,
     _signature: PhantomData<T>,
 }
 
@@ -1643,6 +1641,12 @@ impl Drop for FrozenExecutable {
 }
 
 impl<T: StagedType> Compiled<T> {
+    /// Each function's name and its number of instructions after optimisation: a
+    /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
+    pub fn sizes(&self) -> &[(String, usize)] {
+        &self.sizes
+    }
+
     /// Execute the compiled code and return the result.
     pub fn run(&self) -> T::RuntimeValue {
         let mut output = MaybeUninit::<T::RuntimeValue>::uninit();
@@ -1900,3 +1904,28 @@ impl_compiled_fn!(5, FunType5, [A: a, B: b, C: c, D: d, E: e]);
 impl_compiled_fn!(6, FunType6, [A: a, B: b, C: c, D: d, E: e, F: f]);
 impl_compiled_fn!(7, FunType7, [A: a, B: b, C: c, D: d, E: e, F: f, G: g]);
 impl_compiled_fn!(8, FunType8, [A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h]);
+
+/// Prints each function's Cranelift IR as rust-lms built it, before optimisation.
+pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
+/// Prints each function's Cranelift IR after optimisation: what runs.
+pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
+
+/// Prints `func` to stderr when the environment variable `var` is set.
+fn debug_ir(var: &str, name: &str, func: &cranelift_codegen::ir::Function) {
+    if std::env::var_os(var).is_some() {
+        let stage = if var == DEBUG_IR_OPT {
+            "optimised"
+        } else {
+            "before optimisation"
+        };
+        eprintln!("=== Function: {name} ({stage}) ===\n{func}\n");
+    }
+}
+
+/// The number of instructions in `func`.
+fn num_insts(func: &cranelift_codegen::ir::Function) -> usize {
+    func.layout
+        .blocks()
+        .map(|block| func.layout.block_insts(block).count())
+        .sum()
+}
