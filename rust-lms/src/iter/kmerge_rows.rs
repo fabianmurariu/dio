@@ -4,27 +4,30 @@
 //! [`kmerge_by`](super::kmerge_by) fixes its parts at staging time, so its code grows
 //! with them. Here the parts are rows, each a slice of keys sorted ascending and a
 //! slice of values of the same length, pushed while the merge opens by a staged loop
-//! of the caller's. Their cursors live in stack arrays of a capacity fixed at
-//! compile time and are ordered as a binary heap on their head keys, so the code is
-//! the same whatever the number of rows, and each element costs O(log P).
+//! of the caller's. The code is the same whatever the number of rows, and each
+//! element costs O(log P).
 //!
-//! A row's cursor is its head key, pointers to its head key and value, and how many
-//! elements it has left. Rows that are empty when pushed are never stored.
+//! A row's cursor is its head key, pointers to the ends of its keys and values, and
+//! how many elements it has left: a [`Row`]. The row with the smallest head, `top`, is held in
+//! variables; the others are records in one stack array of a capacity fixed at
+//! compile time, ordered as a binary heap on their head keys. Each element comes
+//! from `top`, which then advances, and the heap is touched only when its smallest
+//! head drops below `top`'s or `top` runs dry. So a row that runs ahead, and a merge
+//! of one row, never sift. Sifts move a hole, each row written once. With two rows
+//! `top` and the root are ordered by selects instead, as their heads interleave
+//! unpredictably more often than not.
 //!
-//! While at most two rows are live (from the start, or once the others have run
-//! dry), their cursors move to variables, [`Head`]s, and each element is a
-//! two-way step instead of a pop and a sift through the stack arrays.
-//! A merge of one or two rows, the common case of a node over few layers, never
-//! touches the heap after it opens.
+//! Rows that are empty when pushed are never stored.
 
 use std::marker::PhantomData;
 
-use crate::control::not;
 use crate::ffi::stack_array;
 use crate::func::Ctx;
 use crate::label::{Label, dead};
-use crate::num::{Ordered, add, eq, ge, int_cast, le, lt, shl, shr, sub};
-use crate::refer::{SMutPtr, SPtr, SRef, load, load_mut, ptr_offset, ptr_offset_mut, store};
+use crate::num::{Ordered, add, eq, ge, int_cast, le, lt, select, shl, shr, sub};
+use crate::refer::{
+    SMutPtr, SPtr, SRef, load, load_mut, ptr_cast_mut, ptr_offset, ptr_offset_mut, store,
+};
 use crate::slice::{Slice, SliceOps};
 use crate::staged::{Const, Staged, Var};
 use crate::types::{CopyType, StagedType};
@@ -61,71 +64,72 @@ pub struct KMergeRows<K, V, F> {
     _kv: PhantomData<fn() -> (K, V)>,
 }
 
-/// The cursors of a [`kmerge_rows`]: parallel stack arrays, a binary heap on `keys`
-/// over their first `len` entries; or, once `small`, the `len <= 2` cursors in `a`
-/// and `b`, `a` the smaller head.
+/// The cursors of a [`kmerge_rows`]: `top`, the smallest head, and a binary heap of
+/// the others over the first `len` records. `top.left == 0` once every row is dry.
 pub struct Heap<K: StagedType, V: StagedType> {
-    keys: Array<K>,
-    key_ptrs: Array<SPtr<K>>,
-    value_ptrs: Array<SPtr<V>>,
-    left: Array<u64>,
+    records: Records<K, V>,
     len: Var<u64>,
-    small: Var<bool>,
-    a: Head<K, V>,
-    b: Head<K, V>,
+    top: Row<K, V>,
 }
 
-/// A row's cursor held in variables.
-struct Head<K: StagedType, V: StagedType> {
+/// A row's cursor: its head key, the ends of its keys and values, and how many
+/// elements it has left, the head `left` elements before the ends. As variables
+/// (`top`), or as values bound from them or from a record. Advancing is a
+/// decrement; the ends never change.
+struct Row<K: StagedType, V: StagedType> {
     key: Var<K>,
-    key_ptr: Var<SPtr<K>>,
-    value_ptr: Var<SPtr<V>>,
+    key_end: Var<SPtr<K>>,
+    value_end: Var<SPtr<V>>,
     left: Var<u64>,
 }
 
-/// A [`Head`]'s fields, copied.
-struct Snapshot<K: StagedType, V: StagedType> {
-    key: Var<K>,
-    key_ptr: Var<SPtr<K>>,
-    value_ptr: Var<SPtr<V>>,
-    left: Var<u64>,
-}
-
-impl<K, V> Head<K, V>
+impl<K, V> Row<K, V>
 where
     K: Ordered + StagedType + CopyType + 'static,
     V: StagedType + CopyType + 'static,
 {
-    fn new(ctx: &Ctx) -> Self {
+    fn vars(ctx: &Ctx) -> Self {
         Self {
             key: ctx.var(dead::<K>()),
-            key_ptr: ctx.var(dead::<SPtr<K>>()),
-            value_ptr: ctx.var(dead::<SPtr<V>>()),
-            left: ctx.var(dead::<u64>()),
+            key_end: ctx.var(dead::<SPtr<K>>()),
+            value_end: ctx.var(dead::<SPtr<V>>()),
+            left: ctx.var(0u64),
         }
     }
 
-    /// Copy the stack arrays' entry `i` here.
-    fn load(&self, ctx: &Ctx, heap: &Heap<K, V>, i: Var<u64>) {
-        ctx.store(self.key, heap.keys.get(ctx, i));
-        ctx.store(self.key_ptr, heap.key_ptrs.get(ctx, i));
-        ctx.store(self.value_ptr, heap.value_ptrs.get(ctx, i));
-        ctx.store(self.left, heap.left.get(ctx, i));
+    /// The head's address in the row ending at `end`: `left` elements before it.
+    fn head<T: StagedType + 'static>(
+        &self,
+        end: Var<SPtr<T>>,
+    ) -> impl Staged<Out = SPtr<T>> + 'static {
+        let back = sub(Const::new(0i64), int_cast::<i64, u64, _>(self.left));
+        // SAFETY: `left` is at most the row's length.
+        unsafe { ptr_offset(end, back) }
     }
 
-    fn snapshot(&self, ctx: &Ctx) -> Snapshot<K, V> {
-        Snapshot {
+    fn bind(&self, ctx: &Ctx) -> Self {
+        Self {
             key: ctx.bind(self.key),
-            key_ptr: ctx.bind(self.key_ptr),
-            value_ptr: ctx.bind(self.value_ptr),
+            key_end: ctx.bind(self.key_end),
+            value_end: ctx.bind(self.value_end),
             left: ctx.bind(self.left),
         }
     }
 
-    fn assign(&self, ctx: &Ctx, from: &Snapshot<K, V>) {
+    /// `if_true` if `cond`, else `if_false`, field by field.
+    fn select(ctx: &Ctx, cond: Var<bool>, if_true: &Self, if_false: &Self) -> Self {
+        Self {
+            key: ctx.bind(select(cond, if_true.key, if_false.key)),
+            key_end: ctx.bind(select(cond, if_true.key_end, if_false.key_end)),
+            value_end: ctx.bind(select(cond, if_true.value_end, if_false.value_end)),
+            left: ctx.bind(select(cond, if_true.left, if_false.left)),
+        }
+    }
+
+    fn assign(&self, ctx: &Ctx, from: &Self) {
         ctx.store(self.key, from.key);
-        ctx.store(self.key_ptr, from.key_ptr);
-        ctx.store(self.value_ptr, from.value_ptr);
+        ctx.store(self.key_end, from.key_end);
+        ctx.store(self.value_end, from.value_end);
         ctx.store(self.left, from.left);
     }
 }
@@ -140,143 +144,113 @@ where
     pub fn push(&self, ctx: &Ctx, keys: Var<SRef<Slice<K>>>, values: Var<SRef<Slice<V>>>) {
         let n = ctx.bind(keys.len());
         ctx.if_then(lt(0u64, n), |ctx| {
-            let at = ctx.bind(self.len);
             let key_ptr = ctx.bind(keys.into_ptr());
-            // SAFETY: the row is non-empty, so its first key is in it.
-            self.keys.set(ctx, at, unsafe { load(key_ptr) });
-            self.key_ptrs.set(ctx, at, key_ptr);
-            self.value_ptrs.set(ctx, at, values.into_ptr());
-            self.left.set(ctx, at, n);
-            ctx.store(self.len, add(self.len, 1u64));
-            self.sift_up(ctx, at);
+            let len = int_cast::<i64, u64, _>(n);
+            // SAFETY: the ends are one past the last element of each slice.
+            let row = Row {
+                // SAFETY: the row is non-empty, so its first key is in it.
+                key: ctx.bind(unsafe { load(key_ptr) }),
+                key_end: ctx.bind(unsafe { ptr_offset(key_ptr, len) }),
+                value_end: ctx.bind(unsafe { ptr_offset(values.into_ptr(), len) }),
+                left: n,
+            };
+            self.sift_up(ctx, &row);
         });
     }
 
-    /// Move entry `i` up while its key is below its parent's.
-    fn sift_up(&self, ctx: &Ctx, i: Var<u64>) {
-        let i = ctx.var(i);
+    /// Store `row` at the end of the heap and restore it: parents above `row`'s key
+    /// move down into the hole until `row` fits.
+    fn sift_up(&self, ctx: &Ctx, row: &Row<K, V>) {
+        let i = ctx.var(self.len);
+        ctx.store(self.len, add(self.len, 1u64));
         ctx.while_loop(lt(0u64, i), |ctx| {
             let parent = ctx.bind(shr(sub(i, 1u64), 1u64));
-            let (key, parent_key) = (self.keys.get(ctx, i), self.keys.get(ctx, parent));
-            ctx.if_then(le(parent_key, key), |ctx| ctx.break_loop());
-            self.swap(ctx, i, parent);
+            ctx.if_then(le(self.records.key(ctx, parent), row.key), |ctx| {
+                ctx.break_loop()
+            });
+            self.records.copy(ctx, parent, i);
             ctx.store(i, parent);
         });
+        self.records.set(ctx, i, row);
     }
 
-    /// Move entry 0 down while a child's key is below its own.
-    fn sift_down(&self, ctx: &Ctx) {
+    /// Store `row` at the root of the heap and restore it: the smaller child moves up
+    /// into the hole while its key is below `row`'s.
+    fn sift_down(&self, ctx: &Ctx, row: &Row<K, V>) {
         let i = ctx.var(0u64);
         ctx.while_loop(true, |ctx| {
             let left = ctx.bind(add(shl(i, 1u64), 1u64));
             ctx.if_then(ge(left, self.len), |ctx| ctx.break_loop());
             let right = ctx.bind(add(left, 1u64));
             let child = ctx.var(left);
+            let child_key = ctx.var(self.records.key(ctx, left));
             ctx.if_then(lt(right, self.len), |ctx| {
-                let (left_key, right_key) = (self.keys.get(ctx, left), self.keys.get(ctx, right));
-                ctx.if_then(lt(right_key, left_key), |ctx| ctx.store(child, right));
+                let right_key = self.records.key(ctx, right);
+                ctx.if_then(lt(right_key, child_key), |ctx| {
+                    ctx.store(child, right);
+                    ctx.store(child_key, right_key);
+                });
             });
-            let (key, child_key) = (self.keys.get(ctx, i), self.keys.get(ctx, child));
-            ctx.if_then(le(key, child_key), |ctx| ctx.break_loop());
-            self.swap(ctx, i, child);
+            ctx.if_then(le(row.key, child_key), |ctx| ctx.break_loop());
+            self.records.copy(ctx, child, i);
             ctx.store(i, child);
         });
+        self.records.set(ctx, i, row);
     }
 
-    fn swap(&self, ctx: &Ctx, i: Var<u64>, j: Var<u64>) {
-        self.keys.swap(ctx, i, j);
-        self.key_ptrs.swap(ctx, i, j);
-        self.value_ptrs.swap(ctx, i, j);
-        self.left.swap(ctx, i, j);
-    }
-
-    /// With `len <= 2`, move the live cursors from the arrays to `a` and `b`, in
-    /// order, and merge from those on.
-    fn enter_small(&self, ctx: &Ctx) {
-        ctx.store(self.small, true);
-        self.a.load(ctx, self, ctx.var(0u64));
-        ctx.if_then(eq(self.len, 2u64), |ctx| {
-            self.b.load(ctx, self, ctx.var(1u64));
-            self.order(ctx);
-        });
-    }
-
-    /// Swap `a` and `b` if `b`'s head is smaller. Only with `len == 2`. A branch, not
-    /// selects: a select makes each element wait on the last one's load, while the
-    /// branch is predicted whenever one row runs ahead of the other.
-    fn order(&self, ctx: &Ctx) {
-        ctx.if_then(lt(self.b.key, self.a.key), |ctx| {
-            let (a, b) = (self.a.snapshot(ctx), self.b.snapshot(ctx));
-            self.a.assign(ctx, &b);
-            self.b.assign(ctx, &a);
-        });
-    }
-
-    /// `a`'s head into `key` and `value`, then `a` advanced, or replaced by `b`
-    /// when dry.
-    fn next_small(&self, ctx: &Ctx, key: Var<K>, value: Var<V>) {
-        let a = &self.a;
-        ctx.store(key, a.key);
-        // SAFETY: `a`'s row has an element left, at these pointers.
-        ctx.store(value, unsafe { load(a.value_ptr) });
-        let left = ctx.bind(sub(a.left, 1u64));
+    /// `top` replaced by the heap's smallest row, the heap's last row sifted into the
+    /// root's place; or marked dry if the heap is empty.
+    fn pop(&self, ctx: &Ctx) {
         ctx.if_then_else(
-            eq(left, 0u64),
+            eq(self.len, 0u64),
+            |ctx| ctx.store(self.top.left, 0u64),
             |ctx| {
+                let zero = ctx.var(0u64);
+                self.top.assign(ctx, &self.records.get(ctx, zero));
                 ctx.store(self.len, sub(self.len, 1u64));
-                a.assign(ctx, &self.b.snapshot(ctx));
-            },
-            |ctx| {
-                // SAFETY: the row has `left > 0` elements after these.
-                let (key_ptr, value_ptr) = unsafe {
-                    (
-                        ctx.bind(ptr_offset(a.key_ptr, Const::new(1i64))),
-                        ctx.bind(ptr_offset(a.value_ptr, Const::new(1i64))),
-                    )
-                };
-                ctx.store(a.key, unsafe { load(key_ptr) });
-                ctx.store(a.key_ptr, key_ptr);
-                ctx.store(a.value_ptr, value_ptr);
-                ctx.store(a.left, left);
-                ctx.if_then(eq(self.len, 2u64), |ctx| self.order(ctx));
+                // With `len` now 0 the last row is the root, stored back unread.
+                self.sift_down(ctx, &self.records.get(ctx, self.len));
             },
         );
     }
 
-    /// The smallest head off the heap into `key` and `value`, its row advanced (or
-    /// dropped when dry) and the heap restored; or, once two rows or fewer are left,
-    /// moved to `a` and `b`.
-    fn next_heap(&self, ctx: &Ctx, key: Var<K>, value: Var<V>) {
-        let zero = ctx.var(0u64);
-        let key_ptr = self.key_ptrs.get(ctx, zero);
-        let value_ptr = self.value_ptrs.get(ctx, zero);
-        ctx.store(key, self.keys.get(ctx, zero));
-        // SAFETY: entry 0's row has an element left, at these pointers.
-        ctx.store(value, unsafe { load(value_ptr) });
-        let left = ctx.bind(sub(self.left.get(ctx, zero), 1u64));
+    /// `top` advanced past its head, then swapped with the heap's root if the root's
+    /// head is below it; or, when dry, replaced by the root.
+    fn advance(&self, ctx: &Ctx) {
+        let top = &self.top;
+        let left = ctx.bind(sub(top.left, 1u64));
         ctx.if_then_else(
             eq(left, 0u64),
+            |ctx| self.pop(ctx),
             |ctx| {
-                let last = ctx.bind(sub(self.len, 1u64));
-                ctx.store(self.len, last);
-                self.move_entry(ctx, last, zero);
-                ctx.if_then(le(self.len, 2u64), |ctx| self.enter_small(ctx));
-            },
-            |ctx| {
-                // SAFETY: the row has `left > 0` elements after these.
-                let (key_ptr, value_ptr) = unsafe {
-                    (
-                        ctx.bind(ptr_offset(key_ptr, Const::new(1i64))),
-                        ctx.bind(ptr_offset(value_ptr, Const::new(1i64))),
-                    )
-                };
-                self.keys.set(ctx, zero, unsafe { load(key_ptr) });
-                self.key_ptrs.set(ctx, zero, key_ptr);
-                self.value_ptrs.set(ctx, zero, value_ptr);
-                self.left.set(ctx, zero, left);
+                ctx.store(top.left, left);
+                // SAFETY: the row has `left > 0` elements after its head.
+                ctx.store(top.key, unsafe { load(top.head(top.key_end)) });
+                let zero = ctx.var(0u64);
+                ctx.if_then_else(
+                    eq(self.len, 1u64),
+                    |ctx| {
+                        // Two rows, `top` and the root: ordered by selects, as their
+                        // heads interleave unpredictably more often than not.
+                        let (row, root) = (top.bind(ctx), self.records.get(ctx, zero));
+                        let swap = ctx.bind(lt(root.key, row.key));
+                        top.assign(ctx, &Row::select(ctx, swap, &root, &row));
+                        self.records
+                            .set(ctx, zero, &Row::select(ctx, swap, &row, &root));
+                    },
+                    |ctx| {
+                        // A branch: predicted whenever a row runs ahead.
+                        ctx.if_then(lt(0u64, self.len), |ctx| {
+                            ctx.if_then(lt(self.records.key(ctx, zero), top.key), |ctx| {
+                                let old = top.bind(ctx);
+                                top.assign(ctx, &self.records.get(ctx, zero));
+                                self.sift_down(ctx, &old);
+                            });
+                        });
+                    },
+                );
             },
         );
-        ctx.if_then(not(self.small), |ctx| self.sift_down(ctx));
     }
 }
 
@@ -291,17 +265,12 @@ where
 
     fn open(self, ctx: &Ctx) -> Heap<K, V> {
         let heap = Heap {
-            keys: Array::new(ctx, self.capacity),
-            key_ptrs: Array::new(ctx, self.capacity),
-            value_ptrs: Array::new(ctx, self.capacity),
-            left: Array::new(ctx, self.capacity),
+            records: Records::new(ctx, self.capacity),
             len: ctx.var(0u64),
-            small: ctx.var(false),
-            a: Head::new(ctx),
-            b: Head::new(ctx),
+            top: Row::vars(ctx),
         };
         (self.fill)(ctx, &heap);
-        ctx.if_then(le(heap.len, 2u64), |ctx| heap.enter_small(ctx));
+        heap.pop(ctx);
         heap
     }
 }
@@ -315,61 +284,86 @@ where
     type Close = ();
 
     fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<ZipItem<K, V>>, ()) {
-        ctx.exit_if(eq(self.len, 0u64), done);
-        let (key, value) = (ctx.var(dead::<K>()), ctx.var(dead::<V>()));
-        ctx.if_then_else(
-            self.small,
-            |ctx| self.next_small(ctx, key, value),
-            |ctx| self.next_heap(ctx, key, value),
-        );
+        ctx.exit_if(eq(self.top.left, 0u64), done);
+        let key = ctx.bind(self.top.key);
+        // SAFETY: `top`'s row has an element left, at these pointers.
+        let value = ctx.bind(unsafe { load(self.top.head(self.top.value_end)) });
+        self.advance(ctx);
         (ctx.bind(Pair::new(key, value)), ())
     }
 }
 
-impl<K, V> Heap<K, V>
+/// The heap's rows: a stack array of `capacity` records of four words, a [`Row`]'s
+/// fields. Indices are the heap's, always below the capacity.
+struct Records<K: StagedType, V: StagedType> {
+    base: Var<SMutPtr<u64>>,
+    _kv: PhantomData<fn() -> (K, V)>,
+}
+
+// `left` between the two ends: no two neighbouring words share a type, so LLVM's SLP
+// vectoriser does not pair the ends into a vector register, which then costs a
+// move back to an integer register for each element read.
+const KEY: u64 = 0;
+const KEY_END: u64 = 1;
+const LEFT: u64 = 2;
+const VALUE_END: u64 = 3;
+
+impl<K, V> Records<K, V>
 where
     K: Ordered + StagedType + CopyType + 'static,
     V: StagedType + CopyType + 'static,
 {
-    fn move_entry(&self, ctx: &Ctx, from: Var<u64>, to: Var<u64>) {
-        self.keys.set(ctx, to, self.keys.get(ctx, from));
-        self.key_ptrs.set(ctx, to, self.key_ptrs.get(ctx, from));
-        self.value_ptrs.set(ctx, to, self.value_ptrs.get(ctx, from));
-        self.left.set(ctx, to, self.left.get(ctx, from));
-    }
-}
-
-/// A stack array of `capacity` values of `T`, indexed by staged `u64`s. Indices are
-/// the heap's, always below its length, which is at most the capacity.
-struct Array<T: StagedType> {
-    base: Var<SMutPtr<T>>,
-}
-
-impl<T: StagedType + CopyType + 'static> Array<T> {
     fn new(ctx: &Ctx, capacity: usize) -> Self {
+        assert!(
+            K::size_of() <= 8 && K::align_of() <= 8,
+            "kmerge_rows: a key must fit a word"
+        );
         Self {
-            base: ctx.bind(stack_array::<T>(capacity)),
+            base: ctx.bind(stack_array::<u64>(4 * capacity)),
+            _kv: PhantomData,
         }
     }
 
-    fn at(&self, i: Var<u64>) -> impl Staged<Out = SMutPtr<T>> + 'static {
-        // SAFETY: `i` is below the capacity (see the type).
-        unsafe { ptr_offset_mut(self.base, int_cast::<i64, u64, _>(i)) }
+    /// Field `field` of record `i`, as a pointer to `T`.
+    fn field<T: StagedType + 'static>(
+        &self,
+        i: Var<u64>,
+        field: u64,
+    ) -> impl Staged<Out = SMutPtr<T>> + 'static {
+        let word = int_cast::<i64, u64, _>(add(shl(i, 2u64), field));
+        // SAFETY: `i` is below the capacity (see the type); every field fits a word,
+        // whose alignment is 8.
+        ptr_cast_mut::<T, u64, _>(unsafe { ptr_offset_mut(self.base, word) })
     }
 
-    fn get(&self, ctx: &Ctx, i: Var<u64>) -> Var<T> {
-        // SAFETY: entries below the heap's length were stored.
-        ctx.bind(unsafe { load_mut(self.at(i)) })
+    fn key(&self, ctx: &Ctx, i: Var<u64>) -> Var<K> {
+        // SAFETY: records below the heap's length were stored.
+        ctx.bind(unsafe { load_mut(self.field::<K>(i, KEY)) })
     }
 
-    fn set(&self, ctx: &Ctx, i: Var<u64>, value: impl Staged<Out = T> + 'static) {
+    fn get(&self, ctx: &Ctx, i: Var<u64>) -> Row<K, V> {
+        // SAFETY: records below the heap's length were stored.
+        unsafe {
+            Row {
+                key: self.key(ctx, i),
+                key_end: ctx.bind(load_mut(self.field::<SPtr<K>>(i, KEY_END))),
+                value_end: ctx.bind(load_mut(self.field::<SPtr<V>>(i, VALUE_END))),
+                left: ctx.bind(load_mut(self.field::<u64>(i, LEFT))),
+            }
+        }
+    }
+
+    fn set(&self, ctx: &Ctx, i: Var<u64>, row: &Row<K, V>) {
         // SAFETY: `i` is within the array.
-        ctx.emit(unsafe { store(self.at(i), value) });
+        unsafe {
+            ctx.emit(store(self.field::<K>(i, KEY), row.key));
+            ctx.emit(store(self.field::<SPtr<K>>(i, KEY_END), row.key_end));
+            ctx.emit(store(self.field::<SPtr<V>>(i, VALUE_END), row.value_end));
+            ctx.emit(store(self.field::<u64>(i, LEFT), row.left));
+        }
     }
 
-    fn swap(&self, ctx: &Ctx, i: Var<u64>, j: Var<u64>) {
-        let (a, b) = (self.get(ctx, i), self.get(ctx, j));
-        self.set(ctx, i, b);
-        self.set(ctx, j, a);
+    fn copy(&self, ctx: &Ctx, from: Var<u64>, to: Var<u64>) {
+        self.set(ctx, to, &self.get(ctx, from));
     }
 }
