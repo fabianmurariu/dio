@@ -11,6 +11,7 @@ use crate::label::Label;
 use crate::staged::IntoStaged;
 
 use super::{
+    dedup::DedupByKey,
     BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip,
     SkipWhile, Take, TakeWhile, Zip,
 };
@@ -368,6 +369,17 @@ pub trait StagedIterator: Sized {
         J: IntoStagedIterator,
     {
         FlatMap::new(self, f)
+    }
+
+    /// Drop each element whose `key` equals the previous element's: on a stream
+    /// sorted by `key`, every key comes once (`Itertools::dedup_by_key`).
+    fn dedup_by_key<F, KE, K>(self, key: F) -> DedupByKey<Self, F>
+    where
+        F: Fn(&Ctx, Var<Self::Item>) -> KE,
+        KE: Staged<Out = K> + 'static,
+        K: Ordered + StagedType + CopyType + 'static,
+    {
+        DedupByKey::new(self, key)
     }
 
     /// Stable merge of two streams sorted by `le` (`le(x, y)`: `x` may come

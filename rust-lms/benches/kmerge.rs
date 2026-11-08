@@ -6,6 +6,9 @@
 //! - `nested`: a balanced tree of two-way `merge_by`s, the baseline.
 //! - `chain`, `linear`: `kmerge_by` with each plan (a chain of compare branches, a pass
 //!   over all keys).
+//! - `heap`: `kmerge_rows`, the parts pushed by a staged loop over the offsets into a
+//!   binary heap in stack arrays: the same code for any number of parts (u64 keys
+//!   only, since it merges slices of keys).
 //! - `host_itertools`: the same merge in Rust, for reference.
 //!
 //! `kmerge_nodes_*`: the shape a query compiles to, `for n in nodes: for x in
@@ -13,6 +16,10 @@
 //! small parts. `ffi_itertools` gets each node's merged iterator from itertools (`merge` for
 //! two runs, `kmerge` above) through an extern call, and pulls and folds it in the kernel.
 //! Events are `EventTime`-shaped structs `{t, i}`, merged by the `i128` packing of `(t, i)`.
+//!
+//! `kmerge_nodes_wide_u64`: the same per-node shape with 16 to 64 runs per node, mostly
+//! empty or of one element, as a node's rows over many layers' runs are: where
+//! `linear` pays O(k) per element and code for every part, and `heap` O(log k).
 //!
 //! Layouts: `random` (each element in a random part), `disjoint` (each part a contiguous
 //! range of keys), `clustered` (runs of 8 to 64 consecutive keys, each in a random part).
@@ -27,7 +34,7 @@ use std::hint::black_box;
 use std::time::Duration;
 
 use rust_lms::func::JitBackend;
-use rust_lms::iter::{CHAIN_MAX, Plan};
+use rust_lms::iter::{CHAIN_MAX, Plan, kmerge_rows};
 use rust_lms::prelude::*;
 
 const N: usize = 1 << 20;
@@ -246,6 +253,27 @@ fn nested_into<J, P, C>(
     }
 }
 
+/// The parts of `values` bounded by `offsets` (`k + 1` of them), merged by
+/// `kmerge_rows` with a heap of `k` entries: one staged push, in a loop over the parts.
+fn heap_merge(
+    values: Var<S>,
+    offsets: Var<S>,
+    k: usize,
+) -> impl StagedIterator<Item = ZipItem<u64, u64>> {
+    // SAFETY: the host passes `k + 1` ascending offsets within `values`, whose parts
+    // are sorted, so there are at most `k` rows.
+    unsafe {
+        kmerge_rows(k, move |ctx, heap| {
+            range(0u64, k as u64).for_each(ctx, |ctx, j| {
+                let start = ctx.bind(offsets.get_unchecked(j));
+                let end = ctx.bind(offsets.get_unchecked(j + 1u64));
+                let part = ctx.bind(values.subslice_unchecked(start, end));
+                heap.push(ctx, part, part);
+            })
+        })
+    }
+}
+
 /// `merge` with the plan of a variant named `chain` or `linear`.
 fn configure<I, F>(merge: KMergeBy<I, F>, variant: &str) -> KMergeBy<I, F> {
     merge.with_plan(match variant {
@@ -265,6 +293,7 @@ fn u64_kernel(backend: JitBackend, variant: &str, k: usize) -> U64Fn {
         let parts = part_slices(ctx, values, offsets, k);
         match variant.as_str() {
             "nested" => nested(ctx, parts, le, |_, x| x),
+            "heap" => fold(ctx, heap_merge(values, offsets, k), |ctx, x| ctx.bind(x.first())),
             v => fold(ctx, configure(kmerge_by(parts, |_, x| x), v), |_, x| x),
         }
     });
@@ -329,6 +358,7 @@ fn host_itertools<K: Copy + Ord>(parts: &[&[K]], value: impl Fn(usize, K) -> u64
 // =============================================================================
 
 const VARIANTS: &[&str] = &["nested", "chain", "linear"];
+const U64_VARIANTS: &[&str] = &["nested", "chain", "linear", "heap"];
 
 fn group<'a>(
     c: &'a mut Criterion,
@@ -353,7 +383,7 @@ fn bench_u64(c: &mut Criterion) {
                 b.iter(|| host_itertools(black_box(&slices), |_, x| x))
             });
             for (backend_name, backend) in backends() {
-                for &variant in VARIANTS {
+                for &variant in U64_VARIANTS {
                     if variant == "chain" && k > CHAIN_MAX {
                         continue;
                     }
@@ -427,6 +457,10 @@ const NODE_KS: &[usize] = &[2, 3, 4, 8];
 const DEGREES: &[usize] = &[4, 32];
 const NODE_LAYOUTS: &[&str] = &["random", "disjoint"];
 const NODE_VARIANTS: &[&str] = &["ffi_itertools", "nested", "chain", "linear"];
+const NODE_U64_VARIANTS: &[&str] = &["ffi_itertools", "nested", "chain", "linear", "heap"];
+const WIDE_KS: &[usize] = &[16, 32, 64];
+const WIDE_DEGREES: &[usize] = &[8, 64];
+const WIDE_VARIANTS: &[&str] = &["ffi_itertools", "linear", "heap"];
 
 /// `N` elements over nodes of degree uniform in `0..=2 * degree`, each node's elements
 /// split over `k` runs: node `n`'s run `j` is `values[offsets[n * k + j]..offsets[n * k + j + 1]]`.
@@ -554,6 +588,9 @@ fn nodes_u64_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<u64
                             fold_into(ctx, acc, merged, |_, x| x)
                         }
                         "nested" => nested_into(ctx, acc, parts, le, |_, x| x),
+                        "heap" => fold_into(ctx, acc, heap_merge(values, offsets, k), |ctx, x| {
+                            ctx.bind(x.first())
+                        }),
                         v => {
                             fold_into(ctx, acc, configure(kmerge_by(parts, |_, x| x), v), |_, x| x)
                         }
@@ -618,24 +655,28 @@ fn nodes_events_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<
     })
 }
 
+#[allow(clippy::too_many_arguments)]
 fn bench_nodes_of<K: Copy + Ord>(
     c: &mut Criterion,
     name: &str,
+    ks: &[usize],
+    degrees: &[usize],
+    variants: &[&str],
     key: impl Fn(usize) -> K + Copy,
     value: impl Fn(K) -> u64 + Copy,
     kernel: impl Fn(JitBackend, &str, usize) -> NodesFn<K>,
 ) {
     for &layout in NODE_LAYOUTS {
-        for &degree in DEGREES {
+        for &degree in degrees {
             let mut group = group(c, &format!("{name}/{layout}/d{degree}"));
-            for &k in NODE_KS {
+            for &k in ks {
                 let nodes = Nodes::new(layout, k, degree, key);
                 let expected = host_nodes(&nodes, k, value);
                 group.bench_with_input(BenchmarkId::new("host_itertools", k), &k, |b, _| {
                     b.iter(|| host_nodes(black_box(&nodes), k, value))
                 });
                 for (backend_name, backend) in backends() {
-                    for &variant in NODE_VARIANTS {
+                    for &variant in variants {
                         if variant == "nested" && !matches!(k, 2 | 3 | 4 | 8) {
                             continue;
                         }
@@ -662,6 +703,19 @@ fn bench_nodes(c: &mut Criterion) {
     bench_nodes_of(
         c,
         "kmerge_nodes_u64",
+        NODE_KS,
+        DEGREES,
+        NODE_U64_VARIANTS,
+        |i| (i / 2 * 3) as u64,
+        |x| x,
+        nodes_u64_kernel,
+    );
+    bench_nodes_of(
+        c,
+        "kmerge_nodes_wide_u64",
+        WIDE_KS,
+        WIDE_DEGREES,
+        WIDE_VARIANTS,
         |i| (i / 2 * 3) as u64,
         |x| x,
         nodes_u64_kernel,
@@ -669,6 +723,9 @@ fn bench_nodes(c: &mut Criterion) {
     bench_nodes_of(
         c,
         "kmerge_nodes_events",
+        NODE_KS,
+        DEGREES,
+        NODE_VARIANTS,
         |i| Ev {
             t: (i / 4) as i64 - (N as i64) / 8,
             i: i as u64,
