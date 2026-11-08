@@ -13,8 +13,7 @@
 //!
 //! `kmerge_nodes_*`: the shape a query compiles to, `for n in nodes: for x in
 //! merge(runs of n)`, so each merge is opened, primed and closed in a tight loop over
-//! small parts. `ffi_itertools` gets each node's merged iterator from itertools (`merge` for
-//! two runs, `kmerge` above) through an extern call, and pulls and folds it in the kernel.
+//! small parts.
 //! Events are `EventTime`-shaped structs `{t, i}`, merged by the `i128` packing of `(t, i)`.
 //!
 //! `kmerge_nodes_wide_u64`: the same per-node shape with 16 to 64 runs per node, mostly
@@ -293,7 +292,9 @@ fn u64_kernel(backend: JitBackend, variant: &str, k: usize) -> U64Fn {
         let parts = part_slices(ctx, values, offsets, k);
         match variant.as_str() {
             "nested" => nested(ctx, parts, le, |_, x| x),
-            "heap" => fold(ctx, heap_merge(values, offsets, k), |ctx, x| ctx.bind(x.first())),
+            "heap" => fold(ctx, heap_merge(values, offsets, k), |ctx, x| {
+                ctx.bind(x.first())
+            }),
             v => fold(ctx, configure(kmerge_by(parts, |_, x| x), v), |_, x| x),
         }
     });
@@ -456,11 +457,11 @@ pub struct Ev {
 const NODE_KS: &[usize] = &[2, 3, 4, 8];
 const DEGREES: &[usize] = &[4, 32];
 const NODE_LAYOUTS: &[&str] = &["random", "disjoint"];
-const NODE_VARIANTS: &[&str] = &["ffi_itertools", "nested", "chain", "linear"];
-const NODE_U64_VARIANTS: &[&str] = &["ffi_itertools", "nested", "chain", "linear", "heap"];
+const NODE_VARIANTS: &[&str] = &["nested", "chain", "linear"];
+const NODE_U64_VARIANTS: &[&str] = &["nested", "chain", "linear", "heap"];
 const WIDE_KS: &[usize] = &[16, 32, 64];
 const WIDE_DEGREES: &[usize] = &[8, 64];
-const WIDE_VARIANTS: &[&str] = &["ffi_itertools", "linear", "heap"];
+const WIDE_VARIANTS: &[&str] = &["linear", "heap"];
 
 /// `N` elements over nodes of degree uniform in `0..=2 * degree`, each node's elements
 /// split over `k` runs: node `n`'s run `j` is `values[offsets[n * k + j]..offsets[n * k + j + 1]]`.
@@ -521,23 +522,6 @@ fn host_nodes<K: Copy + Ord>(nodes: &Nodes<K>, k: usize, value: impl Fn(K) -> u6
     })
 }
 
-/// [`itertools_node`] as a handle, which the kernel drives as a `DynIter`.
-#[allow(improper_ctypes_definitions)]
-#[rust_lms_derive::extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn itertools_node_u64(values: &[u64], offsets: &[u64]) -> *mut () {
-    // SAFETY: the kernel hands the handle to `DynIter<u64>`, which drops it once.
-    unsafe { box_dyn_iter(itertools_node(values, offsets)).into_raw() }
-}
-
-#[allow(improper_ctypes_definitions)]
-#[rust_lms_derive::extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn itertools_node_events(values: &[Ev], offsets: &[u64]) -> *mut () {
-    // SAFETY: the kernel hands the handle to `DynIter<Ev>`, which drops it once.
-    unsafe { box_dyn_iter(itertools_node(values, offsets)).into_raw() }
-}
-
 /// `for n in nodes: for x in merge(runs of n): acc = acc * 31 + value(x)`.
 fn node_loop<E: CopyType + 'static>(
     ctx: &Ctx,
@@ -565,8 +549,6 @@ type NodesFn<K> = Box<dyn Fn(&Nodes<K>) -> u64>;
 
 fn nodes_u64_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<u64> {
     let mut compiler = Compiler::new().with_backend(backend);
-    let itertools = compiler.extern_fn::<ItertoolsNodeU64Extern>();
-    let merged = compiler.opaque_iter_fns::<DynIter<u64>>();
     let variant = variant.to_string();
     let f = compiler.fun3(
         "nodes_u64",
@@ -577,24 +559,12 @@ fn nodes_u64_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<u64
                 offsets,
                 nodes,
                 k,
-                |ctx, acc, parts, offsets| {
-                    match variant.as_str() {
-                        "ffi_itertools" => {
-                            // SAFETY: both slices are valid for the call, which returns
-                            // a fresh `DynIter` handle.
-                            let merged = unsafe {
-                                merged.iter(call_extern2_unchecked(itertools, values, offsets))
-                            };
-                            fold_into(ctx, acc, merged, |_, x| x)
-                        }
-                        "nested" => nested_into(ctx, acc, parts, le, |_, x| x),
-                        "heap" => fold_into(ctx, acc, heap_merge(values, offsets, k), |ctx, x| {
-                            ctx.bind(x.first())
-                        }),
-                        v => {
-                            fold_into(ctx, acc, configure(kmerge_by(parts, |_, x| x), v), |_, x| x)
-                        }
-                    }
+                |ctx, acc, parts, offsets| match variant.as_str() {
+                    "nested" => nested_into(ctx, acc, parts, le, |_, x| x),
+                    "heap" => fold_into(ctx, acc, heap_merge(values, offsets, k), |ctx, x| {
+                        ctx.bind(x.first())
+                    }),
+                    v => fold_into(ctx, acc, configure(kmerge_by(parts, |_, x| x), v), |_, x| x),
                 },
             )
         },
@@ -609,42 +579,23 @@ fn nodes_u64_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<u64
 
 fn nodes_events_kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn<Ev> {
     let mut compiler = Compiler::new().with_backend(backend);
-    let itertools = compiler.extern_fn::<ItertoolsNodeEventsExtern>();
-    let merged = compiler.opaque_iter_fns::<DynIter<Ev>>();
     let variant = variant.to_string();
     let f = compiler.fun3(
         "nodes_events",
         move |ctx, values: Var<SRef<Slice<Ev>>>, offsets: Var<S>, nodes: Var<u64>| {
-            node_loop(
-                ctx,
-                values,
-                offsets,
-                nodes,
-                k,
-                |ctx, acc, parts, offsets| {
-                    let key = |e: Var<Ev>| pack_i128(e.get(EvType::t()), e.get(EvType::i()));
-                    let value = |ctx: &Ctx, e: Var<Ev>| ctx.bind(e.get(EvType::i()));
-                    match variant.as_str() {
-                        "ffi_itertools" => {
-                            // SAFETY: both slices are valid for the call, which returns
-                            // a fresh `DynIter` handle.
-                            let merged = unsafe {
-                                merged.iter(call_extern2_unchecked(itertools, values, offsets))
-                            };
-                            fold_into(ctx, acc, merged, value)
-                        }
-                        "nested" => {
-                            nested_into(ctx, acc, parts, move |x, y| le(key(x), key(y)), value)
-                        }
-                        v => fold_into(
-                            ctx,
-                            acc,
-                            configure(kmerge_by(parts, move |_, e| key(e)), v),
-                            value,
-                        ),
-                    }
-                },
-            )
+            node_loop(ctx, values, offsets, nodes, k, |ctx, acc, parts, _| {
+                let key = |e: Var<Ev>| pack_i128(e.get(EvType::t()), e.get(EvType::i()));
+                let value = |ctx: &Ctx, e: Var<Ev>| ctx.bind(e.get(EvType::i()));
+                match variant.as_str() {
+                    "nested" => nested_into(ctx, acc, parts, move |x, y| le(key(x), key(y)), value),
+                    v => fold_into(
+                        ctx,
+                        acc,
+                        configure(kmerge_by(parts, move |_, e| key(e)), v),
+                        value,
+                    ),
+                }
+            })
         },
     );
     let compiled = compiler.compile(f).expect("compile");

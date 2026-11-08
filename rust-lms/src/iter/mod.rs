@@ -100,6 +100,7 @@ macro_rules! into_staged_iter_is_self {
 
 into_staged_iter_is_self!(
     Chain<A, B>,
+    DedupByKey<I, F>,
     Empty<T>,
     Enumerate<I>,
     Filter<I, P>,
@@ -109,6 +110,7 @@ into_staged_iter_is_self!(
     Map<I, F, U>,
     IntersectBy<A, B, P>,
     KMergeBy<I, F>,
+    KMergeRows<K, V, F>,
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,
