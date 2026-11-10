@@ -784,8 +784,9 @@ where
     }
 }
 
-/// Build a staged float widening (`float_promote::<f64, f32, _>(x)`). Panics at staging
-/// time unless `TO` is wider than `FROM`.
+/// Build a staged float widening (`float_promote::<f64, f32, _>(x)`). Compiling the
+/// function panics unless `TO` is wider than `FROM`; the types are parameters so a
+/// caller generic over the target float can widen to it.
 pub fn float_promote<TO, FROM, E>(expr: E) -> FloatPromote<E::Staged, TO>
 where
     TO: FloatNum,

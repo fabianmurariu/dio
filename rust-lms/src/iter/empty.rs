@@ -3,7 +3,7 @@
 use std::marker::PhantomData;
 
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::staged::Var;
 use crate::types::StagedType;
 
@@ -40,6 +40,6 @@ impl<T: StagedType + 'static> Cursor for EmptyCursor<T> {
 
     fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<T>, ()) {
         ctx.exit(done);
-        (ctx.bind(dead::<T>()), ())
+        (ctx.bind(zeroed::<T>()), ())
     }
 }

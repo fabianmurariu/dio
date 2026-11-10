@@ -129,11 +129,6 @@ pub fn jit_return_i64_const(value: i64) -> i64 {
     pass_manager
         .run(&mut module)
         .expect("lower to the LLVM dialect");
-    // The LLVM dialect, before LLVM's own passes: `ExecutionEngine` optimises it
-    // internally and does not hand back the optimised IR.
-    if std::env::var_os(crate::func::DEBUG_IR_OPT).is_some() {
-        eprintln!("=== MLIR after lowering ===\n{}", module.as_operation());
-    }
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification after lowering"

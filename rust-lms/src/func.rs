@@ -377,11 +377,6 @@ impl Ctx {
         }));
     }
 
-    /// A forward label with no value: `'out: { body }`.
-    ///
-    /// [`exit`](Self::exit)`(out)` anywhere inside `body` — however deeply
-    /// nested — continues after the block. Not a loop scope: `break_loop`
-    /// passes through it.
     /// Stages `body` with every load it emits marked [`LoadKind::Invariant`]: removable
     /// when unused, merged when repeated, and movable, out of loops and above branches.
     /// For reads of descriptors a kernel resolves (a table row at a clamped index, a
@@ -394,7 +389,8 @@ impl Ctx {
     /// memory that nothing writes while the function runs, and that is readable
     /// wherever the load's operands are available: not only where `body` puts it, but
     /// also before any branch or loop test that guards it. Element reads behind a bounds
-    /// check, and anything that reads the stack, stay outside.
+    /// check, and anything that reads the stack, stay outside. Calls may be staged
+    /// inside: their results are read back with plain loads.
     pub unsafe fn invariant<T>(&self, body: impl FnOnce(&Ctx) -> T) -> T {
         let (actions, out) = self.child(body);
         self.push(Box::new(move |ctx| {
@@ -407,6 +403,11 @@ impl Ctx {
         out
     }
 
+    /// A forward label with no value: `'out: { body }`.
+    ///
+    /// [`exit`](Self::exit)`(out)` anywhere inside `body` — however deeply
+    /// nested — continues after the block. Not a loop scope: `break_loop`
+    /// passes through it.
     pub fn block<F>(&self, body: F)
     where
         F: for<'s> FnOnce(&Ctx, Label<'s>),
@@ -1483,12 +1484,12 @@ impl Compiler {
                     builder.finalize(module.isa().frontend_config());
                 }
 
-                debug_ir(DEBUG_IR, &func_def.name, &func_ctx.func);
+                debug_ir(DEBUG_IR, "before optimisation", &func_def.name, &func_ctx.func);
                 module
                     .define_function(func_id, &mut func_ctx)
                     .map_err(|e| CompileError::ModuleError(e.to_string()))?;
                 // `define_function` optimises `func_ctx.func` in place.
-                debug_ir(DEBUG_IR_OPT, &func_def.name, &func_ctx.func);
+                debug_ir(DEBUG_IR_OPT, "optimised", &func_def.name, &func_ctx.func);
                 sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
                 module.clear_context(&mut func_ctx);
             }
@@ -1551,11 +1552,11 @@ impl Compiler {
                 builder.finalize(module.isa().frontend_config());
             }
 
-            debug_ir(DEBUG_IR, "__main__", &func_ctx.func);
+            debug_ir(DEBUG_IR, "before optimisation", "__main__", &func_ctx.func);
             module
                 .define_function(main_func_id, &mut func_ctx)
                 .map_err(|e| CompileError::ModuleError(e.to_string()))?;
-            debug_ir(DEBUG_IR_OPT, "__main__", &func_ctx.func);
+            debug_ir(DEBUG_IR_OPT, "optimised", "__main__", &func_ctx.func);
             sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
             module.clear_context(&mut func_ctx);
         }
@@ -1936,17 +1937,15 @@ impl_compiled_fn!(8, FunType8, [A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h])
 
 /// Prints each function's Cranelift IR as rust-lms built it, before optimisation.
 pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
-/// Prints each function's Cranelift IR after optimisation: what runs.
+/// Prints each function's IR as late as the backend shows it: Cranelift's after
+/// optimisation (what runs); LLVM's as the MLIR LLVM dialect, before LLVM's own passes
+/// (its execution engine does not hand back the optimised IR).
 pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
 
-/// Prints `func` to stderr when the environment variable `var` is set.
-fn debug_ir(var: &str, name: &str, func: &cranelift_codegen::ir::Function) {
+/// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is
+/// set.
+fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_codegen::ir::Function) {
     if std::env::var_os(var).is_some() {
-        let stage = if var == DEBUG_IR_OPT {
-            "optimised"
-        } else {
-            "before optimisation"
-        };
         eprintln!("=== Function: {name} ({stage}) ===\n{func}\n");
     }
 }

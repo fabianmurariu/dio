@@ -104,7 +104,7 @@ pub fn codegen_call(
     // Generate the call
     ctx.call(func_ref, &call_args);
 
-    ctx.load_shape(return_info.shape, result_ptr)
+    ctx.load_result(return_info.shape, result_ptr)
 }
 
 /// Codegen one call argument to its ABI leaf: a scalar passes through; a value held in

@@ -1108,6 +1108,16 @@ impl<'c> CompilationContext<'c> {
         )
     }
 
+    /// Load a call's result of `shape` from the slot the callee wrote it to: always a
+    /// plain load, even inside [`Ctx::invariant`](crate::func::Ctx::invariant), since the
+    /// call writes the slot and the load must stay after it.
+    pub(crate) fn load_result(&mut self, shape: Shape, base: ValueId) -> Value {
+        let outer = std::mem::replace(&mut self.load_kind, LoadKind::Plain);
+        let result = self.load_shape(shape, base);
+        self.load_kind = outer;
+        result
+    }
+
     /// Load a value of `shape` from its canonical in-memory representation at `base`.
     pub(crate) fn load_shape(&mut self, shape: Shape, base: ValueId) -> Value {
         expect_type(base, ScalarType::Ptr, "load_value base");

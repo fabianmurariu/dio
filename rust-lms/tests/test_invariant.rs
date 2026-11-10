@@ -51,8 +51,7 @@ fn invariant_reads_are_merged_and_unused_ones_removed() {
     );
 }
 
-/// The sum of `arr[0]` over `0..n`, the read inside the loop; and the size of the loop
-/// body, as the number of loads left inside it.
+/// The sum of `arr[0]` over `0..n`, the read inside the loop.
 fn hoisted(invariant: bool) -> i64 {
     let mut compiler = Compiler::new().with_backend(JitBackend::Cranelift);
     let f = compiler.fun2(
@@ -78,4 +77,29 @@ fn hoisted(invariant: bool) -> i64 {
 fn invariant_reads_in_loops_compute_the_same() {
     assert_eq!(hoisted(false), 12);
     assert_eq!(hoisted(true), 12);
+}
+
+#[rust_lms_derive::extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn ext_invariant_add(x: i64, y: i64) -> i64 {
+    x + y
+}
+
+/// `acc = add(acc, i)` over `0..n`, the extern call staged inside an `invariant` scope.
+/// The scope covers reads of memory nothing writes; the call's result comes back
+/// through a stack slot it writes each time, which must stay a plain load.
+#[test]
+fn calls_inside_invariant_scopes_read_their_own_results() {
+    let mut compiler = Compiler::new().with_backend(JitBackend::Cranelift);
+    let add = compiler.extern_fn::<ExtInvariantAddExtern>();
+    let f = compiler.fun1("calls", move |ctx, n: Var<u64>| {
+        range(0u64, n).fold(ctx, 0i64, move |ctx, acc, i| {
+            let i = ctx.bind(int_cast::<i64, u64, _>(i));
+            // SAFETY: nothing in the scope reads memory the kernel writes; the call's
+            // own result slot is rust-lms's.
+            unsafe { ctx.invariant(|ctx| ctx.bind(call_extern2(add, acc, i))) }
+        })
+    });
+    let compiled = compiler.compile(f).expect("compilation failed");
+    assert_eq!(compiled.as_fn().call(10u64), 45);
 }

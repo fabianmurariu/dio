@@ -10,7 +10,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::staged::Var;
 
 use super::traits::{Close, Cursor, IntoStagedIterator, StagedIterator};
@@ -169,7 +169,7 @@ where
                 ctx.store(active, false);
                 ctx.again(again);
             });
-            dead::<Self::Item>()
+            zeroed::<Self::Item>()
         });
         let staged_once = "each step is staged exactly once";
         (

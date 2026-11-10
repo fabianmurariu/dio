@@ -23,7 +23,7 @@ use std::marker::PhantomData;
 
 use crate::ffi::stack_array;
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::num::{Ordered, add, eq, ge, int_cast, le, lt, select, shl, shr, sub};
 use crate::refer::{
     SMutPtr, SPtr, SRef, load, load_mut, ptr_cast_mut, ptr_offset, ptr_offset_mut, store,
@@ -85,14 +85,14 @@ struct Row<K: StagedType, V: StagedType> {
 
 impl<K, V> Row<K, V>
 where
-    K: Ordered + StagedType + CopyType + 'static,
-    V: StagedType + CopyType + 'static,
+    K: Ordered,
+    V: CopyType + 'static,
 {
     fn vars(ctx: &Ctx) -> Self {
         Self {
-            key: ctx.var(dead::<K>()),
-            key_end: ctx.var(dead::<SPtr<K>>()),
-            value_end: ctx.var(dead::<SPtr<V>>()),
+            key: ctx.var(zeroed::<K>()),
+            key_end: ctx.var(zeroed::<SPtr<K>>()),
+            value_end: ctx.var(zeroed::<SPtr<V>>()),
             left: ctx.var(0u64),
         }
     }
@@ -136,8 +136,8 @@ where
 
 impl<K, V> Heap<K, V>
 where
-    K: Ordered + StagedType + CopyType + 'static,
-    V: StagedType + CopyType + 'static,
+    K: Ordered,
+    V: CopyType + 'static,
 {
     /// Add a row: `keys` sorted ascending, and as many `values`. An empty row is
     /// skipped.
@@ -146,10 +146,10 @@ where
         ctx.if_then(lt(0u64, n), |ctx| {
             let key_ptr = ctx.bind(keys.into_ptr());
             let len = int_cast::<i64, u64, _>(n);
-            // SAFETY: the ends are one past the last element of each slice.
             let row = Row {
                 // SAFETY: the row is non-empty, so its first key is in it.
                 key: ctx.bind(unsafe { load(key_ptr) }),
+                // SAFETY: one past the last element of each slice.
                 key_end: ctx.bind(unsafe { ptr_offset(key_ptr, len) }),
                 value_end: ctx.bind(unsafe { ptr_offset(values.into_ptr(), len) }),
                 left: n,
@@ -208,7 +208,7 @@ where
                 let zero = ctx.var(0u64);
                 self.top.assign(ctx, &self.records.get(ctx, zero));
                 ctx.store(self.len, sub(self.len, 1u64));
-                // With `len` now 0 the last row is the root, stored back unread.
+                // With `len` now 0 the last row is the root: sifting it stores it back.
                 self.sift_down(ctx, &self.records.get(ctx, self.len));
             },
         );
@@ -256,8 +256,8 @@ where
 
 impl<K, V, F> StagedIterator for KMergeRows<K, V, F>
 where
-    K: Ordered + StagedType + CopyType + 'static,
-    V: StagedType + CopyType + 'static,
+    K: Ordered,
+    V: CopyType + 'static,
     F: FnOnce(&Ctx, &Heap<K, V>),
 {
     type Item = ZipItem<K, V>;
@@ -277,8 +277,8 @@ where
 
 impl<K, V> Cursor for Heap<K, V>
 where
-    K: Ordered + StagedType + CopyType + 'static,
-    V: StagedType + CopyType + 'static,
+    K: Ordered,
+    V: CopyType + 'static,
 {
     type Item = ZipItem<K, V>;
     type Close = ();
@@ -310,8 +310,8 @@ const VALUE_END: u64 = 3;
 
 impl<K, V> Records<K, V>
 where
-    K: Ordered + StagedType + CopyType + 'static,
-    V: StagedType + CopyType + 'static,
+    K: Ordered,
+    V: CopyType + 'static,
 {
     fn new(ctx: &Ctx, capacity: usize) -> Self {
         assert!(

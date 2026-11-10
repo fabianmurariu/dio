@@ -1,7 +1,7 @@
 //! FilterMap combinator — map-and-filter fused via a staging-time optional.
 
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::staged::Var;
 use crate::staged_opt::StagedOpt;
 
@@ -70,7 +70,7 @@ where
                 close = Some(c);
                 f(ctx, elem).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.again(again));
             });
-            dead::<O::Item>()
+            zeroed::<O::Item>()
         });
         (value, close.expect("the inner step is staged exactly once"))
     }

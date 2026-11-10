@@ -176,7 +176,8 @@ const WIDE_VARIANTS: &[&str] = &["linear", "heap"];
 
 /// `N` keys over nodes of degree uniform in `0..=2 * degree`, each node's keys split
 /// over `k` runs: node `n`'s run `j` is `values[offsets[n * k + j]..offsets[n * k + j + 1]]`.
-/// Keys are `i / 2 * 3` for the `i`th key overall: gaps and ties.
+/// Keys are `i / 2 * 3`, `i` the node's first position in `values` plus the element's
+/// index within the node: ascending within a node, with gaps and ties.
 struct Nodes {
     values: Vec<u64>,
     offsets: Vec<u64>,
@@ -243,17 +244,19 @@ fn kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn {
             range(0u64, nodes).for_each(ctx, |ctx, n| {
                 let base = ctx.bind(n * k as u64);
                 // SAFETY: the host passes `nodes * k + 1` ascending offsets within `values`.
-                let (offsets, runs) = unsafe {
+                let offsets = unsafe {
                     let end = ctx.bind(base + (k as u64 + 1));
-                    let offsets = ctx.bind(offsets.subslice_unchecked(base, end));
-                    (offsets, part_slices(ctx, values, offsets, k))
+                    ctx.bind(offsets.subslice_unchecked(base, end))
                 };
+                // The heap pushes its runs from a staged loop; the others take them as
+                // slices staged once each.
+                let runs = || part_slices(ctx, values, offsets, k);
                 match variant.as_str() {
-                    "nested" => nested_into(ctx, acc, runs),
                     "heap" => fold_into(ctx, acc, heap_merge(values, offsets, k), |ctx, x| {
                         ctx.bind(x.first())
                     }),
-                    v => fold_into(ctx, acc, configure(kmerge_by(runs, |_, x| x), v), |_, x| x),
+                    "nested" => nested_into(ctx, acc, runs()),
+                    v => fold_into(ctx, acc, configure(kmerge_by(runs(), |_, x| x), v), |_, x| x),
                 }
             });
             acc

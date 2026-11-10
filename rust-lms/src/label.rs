@@ -95,19 +95,20 @@ impl Again<'_> {
 }
 
 // =============================================================================
-// Dead: the fall-through value of a join whose every path already jumped
+// Zeroed: a value of any staged type, all zeros
 // =============================================================================
 
 use crate::staged::{CompilationContext, Staged, Value, ValueId, leaf_types, value_of};
 use crate::types::{ScalarType, Shape, StagedType};
 
-/// A placeholder `T` for code that is never reached — the fall-through of a
-/// [`join`](crate::func::Ctx::join) body whose every path ends in a jump.
-/// Emitted into a dead block, so its (zero) value is never observed.
-pub(crate) struct Dead<T>(PhantomData<fn() -> T>);
+/// A `T` of all zeros (null pointers, `0.0` floats): the start of a variable nothing
+/// reads before it is set, or the fall-through of a [`join`](crate::func::Ctx::join)
+/// body whose every path ends in a jump. Any staged type has one, so it needs no
+/// constant of `T`.
+pub struct Zeroed<T>(PhantomData<fn() -> T>);
 
-pub(crate) fn dead<T>() -> Dead<T> {
-    Dead(PhantomData)
+pub fn zeroed<T>() -> Zeroed<T> {
+    Zeroed(PhantomData)
 }
 
 fn zero_leaf(ctx: &mut CompilationContext, ty: ScalarType) -> ValueId {
@@ -119,9 +120,9 @@ fn zero_leaf(ctx: &mut CompilationContext, ty: ScalarType) -> ValueId {
     }
 }
 
-// SAFETY: the value is only ever produced in unreachable code; it has `T`'s
-// leaf layout (fat → ptr + len, otherwise `T::scalar_type`).
-unsafe impl<T: StagedType> Staged for Dead<T> {
+// SAFETY: the value has `T`'s leaf layout (fat → ptr + len, otherwise
+// `T::scalar_type`), every leaf zero.
+unsafe impl<T: StagedType> Staged for Zeroed<T> {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {

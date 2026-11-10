@@ -5,9 +5,9 @@ use crate::func::Ctx;
 use crate::num::{Le, Lt, Num, Ordered, add, ge, gt, le, lt, select};
 use crate::staged::{Const, Staged, Var};
 use crate::staged_opt::StagedOpt;
-use crate::types::{ConstantType, CopyType, DirectValue, StagedType};
+use crate::types::{CopyType, DirectValue, StagedType};
 
-use crate::label::Label;
+use crate::label::{Label, zeroed};
 use crate::staged::IntoStaged;
 
 use super::{
@@ -377,7 +377,7 @@ pub trait StagedIterator: Sized {
     where
         F: Fn(&Ctx, Var<Self::Item>) -> KE,
         KE: Staged<Out = K> + 'static,
-        K: Ordered + StagedType + CopyType + 'static,
+        K: Ordered,
     {
         DedupByKey::new(self, key)
     }
@@ -689,10 +689,9 @@ pub trait StagedIterator: Sized {
     where
         F: FnOnce(&Ctx, Var<Self::Item>) -> O,
         O: StagedOpt + 'static,
-        O::Item: ConstantType + CopyType + 'static,
-        <O::Item as StagedType>::RuntimeValue: Default,
+        O::Item: CopyType + 'static,
     {
-        let result = ctx.var(Const::<O::Item>::new(Default::default()));
+        let result = ctx.var(zeroed::<O::Item>());
         let found = ctx.var(false);
         self.for_each(ctx, move |ctx, elem| {
             f(ctx, elem).eliminate(
@@ -722,12 +721,10 @@ pub trait StagedIterator: Sized {
     /// ```
     fn max_by_key<F, KE, K>(self, ctx: &Ctx, key: F) -> (Var<Self::Item>, Var<bool>)
     where
-        Self::Item: ConstantType + CopyType + 'static,
-        <Self::Item as StagedType>::RuntimeValue: Default,
+        Self::Item: CopyType + 'static,
         F: FnOnce(&Ctx, Var<Self::Item>) -> KE,
         KE: Staged<Out = K> + 'static,
-        K: Ordered + ConstantType + CopyType + 'static,
-        K::RuntimeValue: Default,
+        K: Ordered,
     {
         best_by_key(self, ctx, key, true)
     }
@@ -737,12 +734,10 @@ pub trait StagedIterator: Sized {
     /// otherwise.
     fn min_by_key<F, KE, K>(self, ctx: &Ctx, key: F) -> (Var<Self::Item>, Var<bool>)
     where
-        Self::Item: ConstantType + CopyType + 'static,
-        <Self::Item as StagedType>::RuntimeValue: Default,
+        Self::Item: CopyType + 'static,
         F: FnOnce(&Ctx, Var<Self::Item>) -> KE,
         KE: Staged<Out = K> + 'static,
-        K: Ordered + ConstantType + CopyType + 'static,
-        K::RuntimeValue: Default,
+        K: Ordered,
     {
         best_by_key(self, ctx, key, false)
     }
@@ -754,15 +749,13 @@ pub trait StagedIterator: Sized {
 fn best_by_key<I, F, KE, K>(iter: I, ctx: &Ctx, key: F, max: bool) -> (Var<I::Item>, Var<bool>)
 where
     I: StagedIterator,
-    I::Item: ConstantType + CopyType + 'static,
-    <I::Item as StagedType>::RuntimeValue: Default,
+    I::Item: CopyType + 'static,
     F: FnOnce(&Ctx, Var<I::Item>) -> KE,
     KE: Staged<Out = K> + 'static,
-    K: Ordered + ConstantType + CopyType + 'static,
-    K::RuntimeValue: Default,
+    K: Ordered,
 {
-    let best = ctx.var(Const::<I::Item>::new(Default::default()));
-    let best_key = ctx.var(Const::<K>::new(Default::default()));
+    let best = ctx.var(zeroed::<I::Item>());
+    let best_key = ctx.var(zeroed::<K>());
     let found = ctx.var(false);
     iter.for_each(ctx, move |ctx, elem| {
         let k = ctx.bind(key(ctx, elem));

@@ -1,7 +1,7 @@
 //! Drop repeats of a sorted stream: [`DedupByKey`].
 
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::num::{Ordered, eq};
 use crate::staged::{Staged, Var};
 use crate::types::{CopyType, StagedType};
@@ -28,7 +28,7 @@ where
     I::Item: CopyType + 'static,
     F: Fn(&Ctx, Var<I::Item>) -> KE,
     KE: Staged<Out = K> + 'static,
-    K: Ordered + StagedType + CopyType + 'static,
+    K: Ordered,
 {
     type Item = I::Item;
     type Cursor = DedupCursor<I::Cursor, F, K>;
@@ -37,7 +37,7 @@ where
         DedupCursor {
             inner: self.inner.open(ctx),
             key: self.key,
-            last: ctx.var(dead::<K>()),
+            last: ctx.var(zeroed::<K>()),
             seen: ctx.var(false),
         }
     }
@@ -57,7 +57,7 @@ where
     C::Item: CopyType + 'static,
     F: Fn(&Ctx, Var<C::Item>) -> KE,
     KE: Staged<Out = K> + 'static,
-    K: Ordered + StagedType + CopyType + 'static,
+    K: Ordered,
 {
     type Item = C::Item;
     type Close = C::Close;
