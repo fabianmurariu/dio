@@ -57,7 +57,7 @@ use melior::{Context, ExecutionEngine};
 use std::collections::HashMap;
 
 use crate::func::{CompileError, Ctx, ExternFnDef, FunDef, TypeInfo};
-use crate::staged::{Backend, CompilationContext, Staged, Value, ValueId, Var};
+use crate::staged::{Backend, CompilationContext, LoadKind, Staged, Value, ValueId, Var};
 use crate::types::ScalarType;
 
 /// The optimization level passed to `ExecutionEngine`. Must be ≥ 2 so LLVM's own
@@ -159,7 +159,7 @@ fn jit_lookup(
     name: &str,
     symbols: &[(&str, *const u8)],
 ) -> (ExecutionEngine, *mut ()) {
-    if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
+    if std::env::var_os(crate::func::DEBUG_IR).is_some() {
         eprintln!("=== MLIR before lowering ===\n{}", module.as_operation());
     }
     assert!(
@@ -184,6 +184,11 @@ fn jit_lookup(
     pass_manager
         .run(&mut module)
         .expect("lower to the LLVM dialect");
+    // The LLVM dialect, before LLVM's own passes: `ExecutionEngine` optimises it
+    // internally and does not hand back the optimised IR.
+    if std::env::var_os(crate::func::DEBUG_IR_OPT).is_some() {
+        eprintln!("=== MLIR after lowering ===\n{}", module.as_operation());
+    }
     assert!(
         module.as_operation().verify(),
         "MLIR module failed verification after lowering"
@@ -293,6 +298,7 @@ where
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
             labels: HashMap::new(),
+            load_kind: LoadKind::Plain,
         };
         body(&mut ctx)
     };
@@ -322,6 +328,7 @@ fn run_kernel_over_mlir(emit_body: impl FnOnce(&mut CompilationContext) -> Value
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
             labels: HashMap::new(),
+            load_kind: LoadKind::Plain,
         };
         emit_body(&mut ctx)
     };
@@ -456,6 +463,7 @@ fn build_function<'c>(
             block_params: HashMap::new(),
             loop_exit_stack: Vec::new(),
             labels: HashMap::new(),
+            load_kind: LoadKind::Plain,
         };
         crate::func::emit_function_body(
             &mut ctx,
@@ -523,7 +531,7 @@ mod tests {
             let base = b.stack_addr(slot, 0);
             b.store(x, base, 0);
             b.store(incremented, base, 8);
-            b.load(ScalarType::I64, base, 8)
+            b.load(ScalarType::I64, base, 8, LoadKind::Plain)
         };
         for x in [-1i64, 0, 41, 99] {
             assert_eq!(jit_run_i64_unary(f, x), x + 1);
@@ -555,7 +563,7 @@ mod tests {
             b.store(zero, src_ptr, 0);
             b.store(x, src_ptr, 8);
             b.copy_nonoverlapping(dst_ptr, src_ptr, 16, 8);
-            b.load(ScalarType::I64, dst_ptr, 8)
+            b.load(ScalarType::I64, dst_ptr, 8, LoadKind::Plain)
         };
         for x in [-3i64, 0, 7, 12345] {
             assert_eq!(jit_run_i64_unary(f, x), x);

@@ -8,7 +8,7 @@ use crate::label::Label;
 use crate::num::{add, ge};
 use crate::staged::{CompilationContext, Staged, Value, Var};
 use crate::r#struct::{Field, LoadField, load_field_unchecked};
-use crate::types::{ConstantType, CopyType, Shape, StagedType};
+use crate::types::{CopyType, Shape, StagedType};
 
 use super::traits::{Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 
@@ -49,35 +49,6 @@ where
     A::RuntimeValue: Copy,
     B::RuntimeValue: Copy,
 {
-}
-
-// SAFETY: built by `pair`, as every other `ZipItem` value, from both fields'
-// constants.
-unsafe impl<A, B> ConstantType for ZipItem<A, B>
-where
-    A: ConstantType + CopyType,
-    B: ConstantType + CopyType,
-{
-    fn codegen_constant(value: &Self, ctx: &mut CompilationContext<'_>) -> Value {
-        let first = A::codegen_constant(&value.first, ctx);
-        let second = B::codegen_constant(&value.second, ctx);
-        pair::<A, B>(ctx, first, second)
-    }
-}
-
-impl<A, B> Default for ZipItem<A, B>
-where
-    A: StagedType,
-    B: StagedType,
-    A::RuntimeValue: Default,
-    B::RuntimeValue: Default,
-{
-    fn default() -> Self {
-        Self {
-            first: Default::default(),
-            second: Default::default(),
-        }
-    }
 }
 
 /// Convenience field access for staged zipped items.

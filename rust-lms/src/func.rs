@@ -19,7 +19,9 @@
 
 use crate::cranelift::CraneliftBackend;
 use crate::label::{Again, Label};
-use crate::staged::{CompilationContext, LifetimeErased, Staged, Value, ValueId, Var, assign};
+use crate::staged::{
+    CompilationContext, LifetimeErased, LoadKind, Staged, Value, ValueId, Var, assign,
+};
 use crate::types::{RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 use cranelift_codegen::ir::{AbiParam, InstBuilder, types};
 use cranelift_codegen::settings::{self, Configurable};
@@ -373,6 +375,32 @@ impl Ctx {
         self.push(Box::new(move |ctx| {
             emit_loop::<crate::staged::Const<bool>>(ctx, None, Some(id), body_actions);
         }));
+    }
+
+    /// Stages `body` with every load it emits marked [`LoadKind::Invariant`]: removable
+    /// when unused, merged when repeated, and movable, out of loops and above branches.
+    /// For reads of descriptors a kernel resolves (a table row at a clamped index, a
+    /// field of one), so the ones nothing uses cost nothing and the ones a loop repeats
+    /// are hoisted out of it.
+    ///
+    /// # Safety
+    ///
+    /// Every load `body` stages, through any pointer and in any nested block, reads
+    /// memory that nothing writes while the function runs, and that is readable
+    /// wherever the load's operands are available: not only where `body` puts it, but
+    /// also before any branch or loop test that guards it. Element reads behind a bounds
+    /// check, and anything that reads the stack, stay outside. Calls may be staged
+    /// inside: their results are read back with plain loads.
+    pub unsafe fn invariant<T>(&self, body: impl FnOnce(&Ctx) -> T) -> T {
+        let (actions, out) = self.child(body);
+        self.push(Box::new(move |ctx| {
+            let outer = std::mem::replace(&mut ctx.load_kind, LoadKind::Invariant);
+            for action in actions {
+                action(ctx);
+            }
+            ctx.load_kind = outer;
+        }));
+        out
     }
 
     /// A forward label with no value: `'out: { body }`.
@@ -1283,11 +1311,13 @@ impl Compiler {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
+            sizes: Vec::new(),
             _signature: PhantomData,
         })
     }
 
     fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
+        let mut sizes = Vec::new();
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -1438,6 +1468,7 @@ impl Compiler {
                             block_params: HashMap::new(),
                             loop_exit_stack: Vec::new(),
                             labels: HashMap::new(),
+                            load_kind: LoadKind::Plain,
                         };
                         emit_function_body(
                             &mut ctx,
@@ -1453,16 +1484,13 @@ impl Compiler {
                     builder.finalize(module.isa().frontend_config());
                 }
 
-                // Debug output for Cranelift IR
-                if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
-                    eprintln!("=== Function: {} ===", func_def.name);
-                    eprintln!("{}", func_ctx.func);
-                    eprintln!();
-                }
-
+                debug_ir(DEBUG_IR, "before optimisation", &func_def.name, &func_ctx.func);
                 module
                     .define_function(func_id, &mut func_ctx)
                     .map_err(|e| CompileError::ModuleError(e.to_string()))?;
+                // `define_function` optimises `func_ctx.func` in place.
+                debug_ir(DEBUG_IR_OPT, "optimised", &func_def.name, &func_ctx.func);
+                sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
                 module.clear_context(&mut func_ctx);
             }
         }
@@ -1508,6 +1536,7 @@ impl Compiler {
                         block_params: HashMap::new(),
                         loop_exit_stack: Vec::new(),
                         labels: HashMap::new(),
+                        load_kind: LoadKind::Plain,
                     };
                     emit_function_body(
                         &mut ctx,
@@ -1523,16 +1552,12 @@ impl Compiler {
                 builder.finalize(module.isa().frontend_config());
             }
 
-            // Debug output for main function IR
-            if std::env::var("RUST_LMS_DEBUG_IR").is_ok() {
-                eprintln!("=== Function: __main__ ===");
-                eprintln!("{}", func_ctx.func);
-                eprintln!();
-            }
-
+            debug_ir(DEBUG_IR, "before optimisation", "__main__", &func_ctx.func);
             module
                 .define_function(main_func_id, &mut func_ctx)
                 .map_err(|e| CompileError::ModuleError(e.to_string()))?;
+            debug_ir(DEBUG_IR_OPT, "optimised", "__main__", &func_ctx.func);
+            sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
             module.clear_context(&mut func_ctx);
         }
 
@@ -1552,6 +1577,7 @@ impl Compiler {
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
             },
+            sizes,
             _signature: PhantomData,
         })
     }
@@ -1591,6 +1617,8 @@ impl std::error::Error for CompileError {}
 pub struct Compiled<T: StagedType> {
     executable: Arc<FrozenExecutable>,
     main: unsafe extern "C" fn(*mut u8),
+    /// Each function's optimised size; see [`Compiled::sizes`].
+    sizes: Vec<(String, usize)>,
     _signature: PhantomData<T>,
 }
 
@@ -1643,6 +1671,12 @@ impl Drop for FrozenExecutable {
 }
 
 impl<T: StagedType> Compiled<T> {
+    /// Each function's name and its number of instructions after optimisation: a
+    /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
+    pub fn sizes(&self) -> &[(String, usize)] {
+        &self.sizes
+    }
+
     /// Execute the compiled code and return the result.
     pub fn run(&self) -> T::RuntimeValue {
         let mut output = MaybeUninit::<T::RuntimeValue>::uninit();
@@ -1900,3 +1934,26 @@ impl_compiled_fn!(5, FunType5, [A: a, B: b, C: c, D: d, E: e]);
 impl_compiled_fn!(6, FunType6, [A: a, B: b, C: c, D: d, E: e, F: f]);
 impl_compiled_fn!(7, FunType7, [A: a, B: b, C: c, D: d, E: e, F: f, G: g]);
 impl_compiled_fn!(8, FunType8, [A: a, B: b, C: c, D: d, E: e, F: f, G: g, H: h]);
+
+/// Prints each function's Cranelift IR as rust-lms built it, before optimisation.
+pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
+/// Prints each function's IR as late as the backend shows it: Cranelift's after
+/// optimisation (what runs); LLVM's as the MLIR LLVM dialect, before LLVM's own passes
+/// (its execution engine does not hand back the optimised IR).
+pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
+
+/// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is
+/// set.
+fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_codegen::ir::Function) {
+    if std::env::var_os(var).is_some() {
+        eprintln!("=== Function: {name} ({stage}) ===\n{func}\n");
+    }
+}
+
+/// The number of instructions in `func`.
+fn num_insts(func: &cranelift_codegen::ir::Function) -> usize {
+    func.layout
+        .blocks()
+        .map(|block| func.layout.block_insts(block).count())
+        .sum()
+}

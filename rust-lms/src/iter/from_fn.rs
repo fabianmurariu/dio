@@ -6,7 +6,7 @@ use crate::func::Ctx;
 use crate::staged::Var;
 use crate::staged_opt::StagedOpt;
 
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 
 use super::traits::{Cursor, StagedIterator};
 
@@ -77,7 +77,7 @@ where
         let next = self.next;
         let item = ctx.join(|ctx, got| {
             next(ctx).eliminate(ctx, |ctx, v| ctx.goto(got, v), |ctx| ctx.exit(done));
-            dead::<O::Item>()
+            zeroed::<O::Item>()
         });
         (item, ())
     }

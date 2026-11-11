@@ -1017,7 +1017,7 @@ pub(crate) fn emit_extern_call<Ret: StagedType>(
     args.push(output_ptr);
     ctx.call(func_ref, &args);
 
-    ctx.load_value::<Ret>(output_ptr)
+    ctx.load_result(Shape::of::<Ret>(), output_ptr)
 }
 
 /// Call an external function with 3 arguments. `Out` is `S::Ret`.

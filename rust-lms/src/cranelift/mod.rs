@@ -21,7 +21,7 @@ use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 
 use crate::staged::{
-    Backend, BlockHandle, FuncRefId, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
+    Backend, BlockHandle, FuncRefId, LoadKind, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
     expect_arguments,
 };
 use crate::types::{FloatCmp, IntCmp, ScalarType};
@@ -294,14 +294,17 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         )
     }
     // ---- memory ----
-    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+    fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32, kind: LoadKind) -> ValueId {
+        // `readonly + notrap + can_move` is what makes a load pure for the e-graph
+        // (`is_pure_for_egraph`): removable, mergeable and movable.
+        let flags = match kind {
+            LoadKind::Plain => MemFlagsData::trusted(),
+            LoadKind::Invariant => MemFlagsData::trusted().with_readonly().with_can_move(),
+        };
         ValueId::from_cranelift(
-            self.builder.ins().load(
-                ty.to_cranelift(),
-                MemFlagsData::trusted(),
-                ptr.cranelift(),
-                offset,
-            ),
+            self.builder
+                .ins()
+                .load(ty.to_cranelift(), flags, ptr.cranelift(), offset),
             ty,
         )
     }

@@ -31,7 +31,9 @@ mod filter;
 mod filter_map;
 mod flat_map;
 mod from_fn;
+mod dedup;
 mod kmerge;
+mod kmerge_rows;
 mod map;
 pub mod opaque;
 mod range_iter;
@@ -48,6 +50,7 @@ mod zip;
 
 pub use boxed::{BoxedClose, BoxedCursor, BoxedStagedIter, ErasedClose, ErasedCursor, ErasedIter};
 pub use chain::{Chain, ChainCursor};
+pub use dedup::{DedupByKey, DedupCursor};
 pub use empty::{Empty, EmptyCursor, empty};
 pub use enumerate::{Enumerate, EnumerateCursor};
 pub use filter::{Filter, FilterCursor};
@@ -55,6 +58,7 @@ pub use filter_map::{FilterMap, FilterMapCursor};
 pub use flat_map::{CloseIfActive, FlatMap, FlatMapCursor};
 pub use from_fn::{FromFn, from_fn};
 pub use kmerge::{CHAIN_MAX, KMergeBy, KMergeCursor, Plan, kmerge_by};
+pub use kmerge_rows::{Heap, KMergeRows, kmerge_rows};
 pub use map::{Map, MapCursor};
 pub use opaque::{
     DynExactIter, DynIter, ExactOpaqueIterOwner, ExactSizeOpaqueIter, ExactSizeOpaqueIterFns,
@@ -96,6 +100,7 @@ macro_rules! into_staged_iter_is_self {
 
 into_staged_iter_is_self!(
     Chain<A, B>,
+    DedupByKey<I, F>,
     Empty<T>,
     Enumerate<I>,
     Filter<I, P>,
@@ -105,6 +110,7 @@ into_staged_iter_is_self!(
     Map<I, F, U>,
     IntersectBy<A, B, P>,
     KMergeBy<I, F>,
+    KMergeRows<K, V, F>,
     MergeBy<A, B, P>,
     Rev<I>,
     Scan<I, St, Init, F>,

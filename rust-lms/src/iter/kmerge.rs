@@ -17,7 +17,7 @@
 
 use crate::ffi::stack_array;
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::num::{Ordered, add, eq, int_cast, le, lt, min, select};
 use crate::refer::{SMutPtr, load_mut, ptr_offset_mut, store};
 use crate::staged::{Const, Staged, Var};
@@ -90,7 +90,7 @@ where
             Plan::Chain => State::Chain {
                 heads: (0..k)
                     .map(|_| {
-                        let head = ctx.var(dead::<I::Item>());
+                        let head = ctx.var(zeroed::<I::Item>());
                         (head, ctx.var(Const::new(K::min_sentinel())))
                     })
                     .collect(),
@@ -163,7 +163,7 @@ where
     fn next(self, ctx: &Ctx, done: Label<'_>) -> (Var<C::Item>, Self::Close) {
         if self.cursors.is_empty() {
             ctx.exit(done);
-            return (ctx.bind(dead::<C::Item>()), Vec::new());
+            return (ctx.bind(zeroed::<C::Item>()), Vec::new());
         }
         let parts = self.cursors.into_iter().map(Some).collect();
         match self.state {
@@ -279,7 +279,7 @@ where
                 &mut dispatch,
                 &mut arm,
             );
-            dead::<C::Item>()
+            zeroed::<C::Item>()
         });
         ctx.if_then(lt(filled, k as u32), |ctx| {
             ctx.store(filled, add(filled, 1u32));
@@ -376,7 +376,7 @@ where
                 unsafe { load_mut(ptr_offset_mut(s.heads, int_cast::<i64, u32, _>(winner))) };
             ctx.goto(got, head);
         });
-        dead::<C::Item>()
+        zeroed::<C::Item>()
     });
     (item, closes)
 }

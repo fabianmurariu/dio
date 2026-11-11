@@ -13,7 +13,7 @@
 
 use crate::control::not;
 use crate::func::Ctx;
-use crate::label::{Label, dead};
+use crate::label::{Label, zeroed};
 use crate::num::select;
 use crate::staged::{Staged, Var};
 use crate::types::CopyType;
@@ -44,7 +44,7 @@ where
         Lookahead {
             cursor,
             // Never read before the first pull writes it (`need` starts true).
-            head: ctx.var(dead::<C::Item>()),
+            head: ctx.var(zeroed::<C::Item>()),
             need: ctx.var(true),
         }
     }
