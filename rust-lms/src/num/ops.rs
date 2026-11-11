@@ -5,7 +5,7 @@ use std::marker::PhantomData;
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::types::StagedType;
 
-use super::traits::{Bits, FloatNum, IntNum, Num, Ordered};
+use super::traits::{Bits, FloatNum, Int, IntNum, Num, Ordered};
 
 // =============================================================================
 // Arithmetic Operations
@@ -202,7 +202,7 @@ unsafe impl<L, R, T> Staged for Shl<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Int,
 {
     type Out = T;
 
@@ -224,7 +224,7 @@ unsafe impl<L, R, T> Staged for Shr<L, R>
 where
     L: Staged<Out = T>,
     R: Staged<Out = T>,
-    T: IntNum,
+    T: Int,
 {
     type Out = T;
 
@@ -235,34 +235,70 @@ where
     }
 }
 
-/// Count of trailing zero bits, like Rust's `trailing_zeros`: the bit width for zero.
-#[derive(Clone, Copy)]
-pub struct TrailingZeros<E> {
-    expr: E,
+/// The unary bit operations of [`BitOp`], each as Rust's integer method of that name.
+#[derive(Clone, Copy, Debug, PartialEq, Eq)]
+pub enum BitOpKind {
+    /// Trailing zero bits; the bit width for zero.
+    TrailingZeros,
+    /// Leading zero bits; the bit width for zero.
+    LeadingZeros,
+    /// One bits.
+    CountOnes,
+    /// The bytes in reverse order; the value itself for an 8-bit integer.
+    SwapBytes,
 }
 
-unsafe impl<E, T> Staged for TrailingZeros<E>
+/// A unary bit operation on an integer of any width, its result of the same type.
+#[derive(Clone, Copy)]
+pub struct BitOp<E> {
+    expr: E,
+    kind: BitOpKind,
+}
+
+unsafe impl<E, T> Staged for BitOp<E>
 where
     E: Staged<Out = T>,
-    T: IntNum,
+    T: Int,
 {
     type Out = T;
 
     fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        let value = self.expr.codegen(ctx);
-        Value::scalar(ctx.ctz(value.leaf()))
+        let value = self.expr.codegen(ctx).leaf();
+        Value::scalar(match self.kind {
+            BitOpKind::TrailingZeros => ctx.ctz(value),
+            BitOpKind::LeadingZeros => ctx.clz(value),
+            BitOpKind::CountOnes => ctx.popcnt(value),
+            BitOpKind::SwapBytes if T::size_of() == 1 => value,
+            BitOpKind::SwapBytes => ctx.bswap(value),
+        })
     }
 }
 
-/// Build a staged count of trailing zero bits. See [`TrailingZeros`].
-pub fn trailing_zeros<T, E>(expr: E) -> TrailingZeros<E::Staged>
-where
-    T: IntNum,
-    E: IntoStaged<T>,
-{
-    TrailingZeros {
+fn bit_op<T: Int, E: IntoStaged<T>>(expr: E, kind: BitOpKind) -> BitOp<E::Staged> {
+    BitOp {
         expr: expr.into_staged(),
+        kind,
     }
+}
+
+/// Count of trailing zero bits, as `trailing_zeros`: the bit width for zero.
+pub fn trailing_zeros<T: Int, E: IntoStaged<T>>(expr: E) -> BitOp<E::Staged> {
+    bit_op(expr, BitOpKind::TrailingZeros)
+}
+
+/// Count of leading zero bits, as `leading_zeros`: the bit width for zero.
+pub fn leading_zeros<T: Int, E: IntoStaged<T>>(expr: E) -> BitOp<E::Staged> {
+    bit_op(expr, BitOpKind::LeadingZeros)
+}
+
+/// Count of one bits, as `count_ones`.
+pub fn count_ones<T: Int, E: IntoStaged<T>>(expr: E) -> BitOp<E::Staged> {
+    bit_op(expr, BitOpKind::CountOnes)
+}
+
+/// The bytes in reverse order, as `swap_bytes`: a little-endian load read big-endian.
+pub fn swap_bytes<T: Int, E: IntoStaged<T>>(expr: E) -> BitOp<E::Staged> {
+    bit_op(expr, BitOpKind::SwapBytes)
 }
 
 /// An `i128` from a high `i64` and a low `u64`: `(hi << 64) | lo`. Its signed order is
@@ -343,8 +379,8 @@ pub fn i128_lo<E: IntoStaged<i128>>(packed: E) -> UnpackI128<E::Staged, u64> {
     }
 }
 
-/// Integer cast with Rust-like truncation on narrowing and signedness-aware
-/// extension on widening.
+/// Integer cast between any two widths, `i128`/`u128` included, with Rust-like
+/// truncation on narrowing and signedness-aware extension on widening.
 pub struct IntCast<E, TO> {
     expr: E,
     _to: PhantomData<TO>,
@@ -364,8 +400,8 @@ impl<E: Copy, TO> Copy for IntCast<E, TO> {}
 unsafe impl<E, FROM, TO> Staged for IntCast<E, TO>
 where
     E: Staged<Out = FROM>,
-    FROM: IntNum,
-    TO: IntNum,
+    FROM: Int,
+    TO: Int,
 {
     type Out = TO;
 
@@ -672,7 +708,7 @@ where
 /// Build a staged left shift.
 pub fn shl<T, L, R>(left: L, right: R) -> Shl<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Int,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -685,7 +721,7 @@ where
 /// Build a staged right shift.
 pub fn shr<T, L, R>(left: L, right: R) -> Shr<L::Staged, R::Staged>
 where
-    T: IntNum,
+    T: Int,
     L: IntoStaged<T>,
     R: IntoStaged<T>,
 {
@@ -698,8 +734,8 @@ where
 /// Build a staged integer cast.
 pub fn int_cast<TO, FROM, E>(expr: E) -> IntCast<E::Staged, TO>
 where
-    TO: IntNum,
-    FROM: IntNum,
+    TO: Int,
+    FROM: Int,
     E: IntoStaged<FROM>,
 {
     IntCast {
@@ -1131,7 +1167,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::Shl<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Int + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -1144,7 +1180,7 @@ macro_rules! impl_bit_ops_for {
         impl<$($gen)*, __Out, __R> ::core::ops::Shr<__R> for $self
         where
             $self: Staged<Out = __Out> + 'static,
-            __Out: IntNum + 'static,
+            __Out: Int + 'static,
             __R: IntoStaged<__Out>,
             __R::Staged: 'static,
         {
@@ -1215,9 +1251,9 @@ impl_num_ops_for!([L, R] Shr<L, R>);
 impl_rem_op_for!([L, R] Shr<L, R>);
 impl_bit_ops_for!([L, R] Shr<L, R>);
 
-impl_num_ops_for!([E] TrailingZeros<E>);
-impl_rem_op_for!([E] TrailingZeros<E>);
-impl_bit_ops_for!([E] TrailingZeros<E>);
+impl_num_ops_for!([E] BitOp<E>);
+impl_rem_op_for!([E] BitOp<E>);
+impl_bit_ops_for!([E] BitOp<E>);
 
 impl_num_ops_for!([E, TO] IntCast<E, TO>);
 impl_rem_op_for!([E, TO] IntCast<E, TO>);

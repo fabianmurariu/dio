@@ -6,11 +6,11 @@ use std::collections::HashMap;
 use std::rc::Rc;
 use std::sync::Arc;
 
+use crate::arena::ByteArena;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{DataFusionError, Result};
 use rust_lms::opaque::Opaque;
-use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
 use datafusion_expr::Expr;
@@ -257,7 +257,7 @@ fn build_join_materialized(
     let rt = Runtime::register(&mut compiler);
 
     // Intern the build subtree's string literals (kept alive until after the run).
-    let mut pool = BytesPool::new();
+    let mut pool = ByteArena::new();
     let mut lit_strs = Vec::new();
     collect_str_literals(build, &mut lit_strs);
     let mut lits: HashMap<String, *const u8> = HashMap::new();
@@ -330,7 +330,7 @@ fn run_kernel(
     // Intern every string literal into a pool that outlives the run; codegen bakes
     // each literal's stable pointer as a constant. The pool must stay alive until
     // after `as_fn` (the baked pointers reference its bytes).
-    let mut pool = BytesPool::new();
+    let mut pool = ByteArena::new();
     let mut lit_strs = Vec::new();
     collect_str_literals(op, &mut lit_strs);
     let mut lits: HashMap<String, *const u8> = HashMap::new();

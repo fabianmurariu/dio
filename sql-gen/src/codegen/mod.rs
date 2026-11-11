@@ -55,7 +55,7 @@ use numeric::{coerce_f64, coerce_i32, tag, to_i64};
 use strings::resolve;
 
 /// Codegen context threaded through the walk: the runtime extern handles plus the
-/// build-time-interned string literals (value → stable `BytesPool` pointer). The
+/// build-time-interned string literals (value → stable `ByteArena` pointer). The
 /// `Rc` is because the push-model `yld` closures are `'static` and can't borrow;
 /// codegen is single-threaded, so `Rc` (not `Arc`) is the honest sharing type.
 #[derive(Clone)]
@@ -98,7 +98,7 @@ pub struct JoinHandle {
 }
 
 /// Collect the string-literal values in `op`'s expressions, so `exec_jit` can
-/// intern each into the `BytesPool` before codegen (see [`CodegenCtx::lits`]).
+/// intern each into the `ByteArena` before codegen (see [`CodegenCtx::lits`]).
 pub fn collect_str_literals<'a>(op: &'a Operator, out: &mut Vec<&'a str>) {
     fn expr_lits<'b>(e: &'b Expr, out: &mut Vec<&'b str>) {
         match e {

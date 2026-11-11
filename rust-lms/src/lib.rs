@@ -52,6 +52,7 @@
 // derive is used *inside* this crate (e.g. iter::zip::ZipItem), not just downstream.
 extern crate self as rust_lms;
 
+pub mod byte_view;
 pub mod control;
 /// Cranelift backend: the default code generator (`impl Backend`), behind `func::compile`.
 pub(crate) mod cranelift;
@@ -84,6 +85,10 @@ pub mod _internal {
 
 /// Commonly used types and traits
 pub mod prelude {
+    pub use crate::byte_view::{
+        Bin, Binary, ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, MakeByteView, RawByteView,
+        Str, Utf8, Utf8LenExtern, make_view, utf8_len, view_len,
+    };
     pub use crate::control::{
         IfThen, IfThenElse, Not, While, if_then, if_then_else, not, while_loop,
     };
@@ -112,10 +117,11 @@ pub mod prelude {
     };
     pub use crate::label::{Again, Label};
     pub use crate::num::{
-        BitAnd, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge, IntCast, IntNum,
-        IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor, bitxor, div, eq,
-        float_promote, ge, gt, i128_hi, i128_lo, int_cast, int_to_float, le, lt, max, min, mul, ne,
-        pack_i128, rem, select, shl, shr, sub, trailing_zeros,
+        BitAnd, BitOp, BitOpKind, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge, Int,
+        IntCast, IntNum, IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor,
+        bitxor, count_ones, div, eq, float_promote, ge, gt, i128_hi, i128_lo, int_cast,
+        int_to_float, le, leading_zeros, lt, max, min, mul, ne, pack_i128, rem, select, shl, shr,
+        sub, swap_bytes, trailing_zeros,
     };
     pub use crate::opaque::Opaque;
     pub use crate::option::{
@@ -123,13 +129,13 @@ pub mod prelude {
         is_mut_ref_some, is_none, is_ref_none, is_ref_some, is_some, match_opt, match_opt_mut_ref,
         match_opt_ref, opt_mut_ref_none, opt_mut_ref_some, opt_ref_none, opt_ref_some, unwrap_or,
     };
-    pub use crate::pool::{BytesPool, PoolAppendExtern, pool_append};
+    pub use crate::pool::BytesPool;
     pub use crate::refer::{
         ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
-        PtrIsNull, PtrOffset, PtrOffsetMut, SMutPtr, SPtr, SRef, SRefMut, Store, StoreRef,
-        array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
+        PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
+        StoreRef, array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
         ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
-        ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
+        read_unaligned, ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
     };
     pub use crate::slice::{
         AsMutSlice, AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceRepr,

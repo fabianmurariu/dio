@@ -8,13 +8,13 @@
 //! JIT-written output arrays (sized to the row count, so indices never overflow).
 //!
 //! Hosting the state in Rust is deliberate: it's the same pattern as the string
-//! `BytesPool`, and it's what lets these kernels later become partial aggregates
+//! `ByteArena`, and it's what lets these kernels later become partial aggregates
 //! whose `[keys | accumulators]` state is merged across parallel workers.
 
+use crate::arena::ByteArena;
 use ahash::RandomState;
 use datafusion_common::{DataFusionError, Result};
 use hashbrown::HashTable;
-use rust_lms::pool::BytesPool;
 use rust_lms::prelude::*;
 
 use crate::status::RuntimeStatus;
@@ -176,7 +176,7 @@ pub trait GroupKey: Copy {
     fn matches(&self, other: &Self) -> bool;
     /// Produce the **stored** form of this probe key, copying any variable data into
     /// `pool` so it stays valid for the table's lifetime. Identity for scalar keys.
-    fn store(&self, pool: &mut BytesPool) -> Self;
+    fn store(&self, pool: &mut ByteArena) -> Self;
 }
 
 impl GroupKey for u64 {
@@ -186,7 +186,7 @@ impl GroupKey for u64 {
     fn matches(&self, other: &Self) -> bool {
         self == other
     }
-    fn store(&self, _pool: &mut BytesPool) -> Self {
+    fn store(&self, _pool: &mut ByteArena) -> Self {
         *self
     }
 }
@@ -216,7 +216,7 @@ impl GroupKey for StrKey {
     fn matches(&self, other: &Self) -> bool {
         self.bytes() == other.bytes()
     }
-    fn store(&self, pool: &mut BytesPool) -> Self {
+    fn store(&self, pool: &mut ByteArena) -> Self {
         // Copy the key bytes into the pool — the stored key must outlive the input.
         StrKey {
             ptr: pool.append(self.bytes()),
@@ -241,7 +241,7 @@ struct Entry<K> {
 pub struct GroupTable<K> {
     table: HashTable<Entry<K>>,
     state: RandomState,
-    pool: BytesPool,
+    pool: ByteArena,
 }
 
 impl<K: GroupKey> GroupTable<K> {
@@ -251,7 +251,7 @@ impl<K: GroupKey> GroupTable<K> {
             // Fixed seed → deterministic group order for a given input (tests, and
             // reproducible output); grouping correctness doesn't depend on the seed.
             state: RandomState::with_seed(0),
-            pool: BytesPool::new(),
+            pool: ByteArena::new(),
         }
     }
 

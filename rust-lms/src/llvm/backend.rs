@@ -538,6 +538,42 @@ impl<'c> Backend for MlirBackend<'c> {
             .expect("valid llvm.intr.cttz");
         self.emit_value(op, ty)
     }
+    fn clz(&mut self, a: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let a = self.get(a);
+        let i1 = IntegerType::new(self.context, 1).into();
+        // Zero is defined (the bit width), like Cranelift's `clz` and Rust's `leading_zeros`.
+        let op = OperationBuilder::new("llvm.intr.ctlz", self.location)
+            .add_operands(&[a])
+            .add_attributes(&[(
+                Identifier::new(self.context, "is_zero_poison"),
+                IntegerAttribute::new(i1, 0).into(),
+            )])
+            .add_results(&[scalar_to_mlir(self.context, ty)])
+            .build()
+            .expect("valid llvm.intr.ctlz");
+        self.emit_value(op, ty)
+    }
+    fn popcnt(&mut self, a: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let a = self.get(a);
+        let op = OperationBuilder::new("llvm.intr.ctpop", self.location)
+            .add_operands(&[a])
+            .add_results(&[scalar_to_mlir(self.context, ty)])
+            .build()
+            .expect("valid llvm.intr.ctpop");
+        self.emit_value(op, ty)
+    }
+    fn bswap(&mut self, a: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let a = self.get(a);
+        let op = OperationBuilder::new("llvm.intr.bswap", self.location)
+            .add_operands(&[a])
+            .add_results(&[scalar_to_mlir(self.context, ty)])
+            .build()
+            .expect("valid llvm.intr.bswap");
+        self.emit_value(op, ty)
+    }
 
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
@@ -639,6 +675,28 @@ impl<'c> Backend for MlirBackend<'c> {
                 mlir_ty,
                 self.location,
                 LoadStoreOptions::new(),
+            ),
+            ty,
+        )
+    }
+    fn load_unaligned(
+        &mut self,
+        ty: ScalarType,
+        ptr: ValueId,
+        offset: i32,
+        _kind: LoadKind,
+    ) -> ValueId {
+        let ptr = self.offset_ptr_const(ptr, offset);
+        let mlir_ty = scalar_to_mlir(self.context, ty);
+        let ptr = self.get(ptr);
+        let i64_ty = IntegerType::new(self.context, 64).into();
+        self.emit_value(
+            llvm::load(
+                self.context,
+                ptr,
+                mlir_ty,
+                self.location,
+                LoadStoreOptions::new().align(Some(IntegerAttribute::new(i64_ty, 1))),
             ),
             ty,
         )

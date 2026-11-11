@@ -11,9 +11,8 @@ use crate::label::{Label, zeroed};
 use crate::staged::IntoStaged;
 
 use super::{
-    dedup::DedupByKey,
     BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip,
-    SkipWhile, Take, TakeWhile, Zip,
+    SkipWhile, Take, TakeWhile, Zip, dedup::DedupByKey,
 };
 
 // =============================================================================
@@ -103,6 +102,15 @@ impl MinMax for i128 {
     }
     fn max_sentinel() -> Self {
         i128::MAX
+    }
+}
+
+impl MinMax for u128 {
+    fn min_sentinel() -> Self {
+        u128::MIN
+    }
+    fn max_sentinel() -> Self {
+        u128::MAX
     }
 }
 impl MinMax for u32 {

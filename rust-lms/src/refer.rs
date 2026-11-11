@@ -10,7 +10,8 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::staged::{CompilationContext, Staged, Value, Var, VarUse};
+use crate::num::Int;
+use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var, VarUse};
 use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
 
@@ -252,6 +253,53 @@ where
     T: StagedType,
 {
     LoadPtr { ptr }
+}
+
+/// Read an integer at any byte address, as `ptr::read_unaligned`.
+pub struct ReadUnaligned<P, T> {
+    ptr: P,
+    _t: PhantomData<fn() -> T>,
+}
+
+impl<P: Clone, T> Clone for ReadUnaligned<P, T> {
+    fn clone(&self) -> Self {
+        Self {
+            ptr: self.ptr.clone(),
+            _t: PhantomData,
+        }
+    }
+}
+
+impl<P: Copy, T> Copy for ReadUnaligned<P, T> {}
+
+unsafe impl<P, T> Staged for ReadUnaligned<P, T>
+where
+    P: Staged<Out = SPtr<u8>>,
+    T: Int,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let ptr = self.ptr.codegen(ctx);
+        Value::scalar(ctx.load_unaligned(T::scalar_type(), ptr.leaf(), 0))
+    }
+}
+
+/// Read a `T` from the bytes at `ptr`, which need not be aligned for `T`: a word of a
+/// byte string, read at any offset.
+///
+/// # Safety
+///
+/// At execution, `ptr` must be readable for `size_of::<T>()` bytes.
+pub unsafe fn read_unaligned<T, P>(ptr: P) -> ReadUnaligned<P::Staged, T>
+where
+    T: Int,
+    P: IntoStaged<SPtr<u8>>,
+{
+    ReadUnaligned {
+        ptr: ptr.into_staged(),
+        _t: PhantomData,
+    }
 }
 
 /// Load from mutable reference/pointer

@@ -12,6 +12,7 @@
 //! `Scan`/`Filter`/`Project` + scalar (no-GROUP-BY) aggregates, primitive
 //! columns.
 
+pub mod arena;
 pub mod catalog;
 pub mod codegen;
 pub mod group;

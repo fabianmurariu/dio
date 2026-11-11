@@ -152,7 +152,7 @@ fn literal_view_halves(s: &str) -> (u64, u64) {
     (lo, hi)
 }
 /// A string literal as resolved [`StrVal::Bytes`]: `ptr` is the literal's stable
-/// address in the `BytesPool` (interned once at build time — see [`CodegenCtx::lits`]),
+/// address in the `ByteArena` (interned once at build time — see [`CodegenCtx::lits`]),
 /// and `view` carries the view halves (for *any* length) so `str_eq`'s length +
 /// prefix fast-reject and inline compare apply.
 pub(crate) fn gen_str_literal(ctx: &Ctx, s: &str, cx: &CodegenCtx) -> ColVal {

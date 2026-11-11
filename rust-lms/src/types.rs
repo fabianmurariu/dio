@@ -671,6 +671,32 @@ unsafe impl ConstantType for i128 {
 
 unsafe impl CopyType for i128 {}
 
+unsafe impl StagedType for u128 {
+    type RuntimeValue = u128;
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::I128
+    }
+
+    fn size_of() -> usize {
+        std::mem::size_of::<u128>()
+    }
+
+    fn align_of() -> usize {
+        std::mem::align_of::<u128>()
+    }
+}
+
+unsafe impl ConstantType for u128 {
+    fn codegen_constant(value: &u128, ctx: &mut CompilationContext<'_>) -> Value {
+        let lo = ctx.iconst(ScalarType::I64, *value as i64);
+        let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
+        Value::scalar(ctx.iconcat(lo, hi))
+    }
+}
+
+unsafe impl CopyType for u128 {}
+
 unsafe impl StagedType for i32 {
     type RuntimeValue = i32;
 
@@ -825,6 +851,7 @@ impl_by_value_runtime_type!(
     i64,
     u64,
     i128,
+    u128,
     f32,
     f64,
     bool,
@@ -840,4 +867,6 @@ macro_rules! impl_direct_value {
     };
 }
 
-impl_direct_value!(i8, u8, i16, u16, i32, u32, i64, u64, i128, f32, f64, bool);
+impl_direct_value!(
+    i8, u8, i16, u16, i32, u32, i64, u64, i128, u128, f32, f64, bool
+);
