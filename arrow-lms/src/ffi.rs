@@ -42,7 +42,7 @@ const _: () = {
 unsafe impl<T: StagedType> SliceRepr<T> for FfiBuffer {}
 
 impl FfiBuffer {
-    const fn empty() -> Self {
+    pub(crate) const fn empty() -> Self {
         Self {
             ptr: std::ptr::null(),
             len: 0,
@@ -56,7 +56,12 @@ impl FfiBuffer {
         }
     }
 
-    fn from_typed_slice<T>(slice: &[T]) -> Self {
+    /// Its element count.
+    pub(crate) fn len(&self) -> usize {
+        self.len
+    }
+
+    pub(crate) fn from_typed_slice<T>(slice: &[T]) -> Self {
         Self {
             ptr: slice.as_ptr().cast::<u8>(),
             len: slice.len(),
@@ -77,7 +82,7 @@ pub struct FfiValidity {
     #[staged(u64)]
     bit_len: u64,
     #[staged(u64)]
-    null_count: u64,
+    pub(crate) null_count: u64,
 }
 
 impl FfiValidity {
@@ -90,7 +95,7 @@ impl FfiValidity {
         }
     }
 
-    fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
+    pub(crate) fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
         match nulls {
             Some(nulls) if nulls.null_count() != 0 => Self {
                 bytes: FfiBuffer::from_bytes(nulls.inner().values()),
