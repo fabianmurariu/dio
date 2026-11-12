@@ -7,7 +7,6 @@
 //! columns/exprs carry **no** validity `Var` at all (zero overhead), nullable
 //! ones carry an `is_valid` bit that propagates through expression evaluation.
 
-use arrow::array::StringViewArray;
 use rust_lms::prelude::*;
 
 /// Static-nullability tag. `NonNull` emits no validity IR; `Nullable` carries a
@@ -19,41 +18,15 @@ pub enum Nullness {
 }
 
 /// A staged column value: static physical-type tag + `Var` value + nullness.
-/// `Str` is a `Utf8View` string (see [`StrVal`]).
+/// `Str` is a `Utf8View` string: an Arrow view and the table it indexes, whether it was
+/// read from a batch, baked in as a literal or emitted as a group key.
 #[derive(Clone, Copy)]
 pub enum ColVal {
     I32(Var<i32>, Nullness),
     I64(Var<i64>, Nullness),
     F64(Var<f64>, Nullness),
     Bool(Var<bool>, Nullness),
-    Str(StrVal, Nullness),
-}
-
-/// A staged `Utf8View` string, in one of two containers — but every container
-/// resolves to a generic `&[u8]` byte reference (`codegen::resolve`), so the
-/// runtime is a flat library over bytes.
-///
-/// - `Column`: a `Utf8View` column row. Carries the 16-byte view as two `u64`
-///   halves (`lo` = `[len:u32][…]`, `hi` = the rest) for register-op
-///   `octet_length` and the inline-literal `=` fast path, plus the originating
-///   array pointer + row so its bytes can be resolved (`arr.value(row)`).
-/// - `Bytes`: already-materialized bytes at `(ptr, len)` — a build-time-interned
-///   literal or a kernel-produced string. `view` holds the inline view halves iff
-///   the bytes are a known `≤12`-byte value (enables the staged `=` fast path);
-///   `None` for long literals and produced strings.
-#[derive(Clone, Copy)]
-pub enum StrVal {
-    Column {
-        lo: Var<u64>,
-        hi: Var<u64>,
-        array: Var<SPtr<Opaque<StringViewArray>>>,
-        row: Var<u64>,
-    },
-    Bytes {
-        ptr: Var<SPtr<u8>>,
-        len: Var<u64>,
-        view: Option<(u64, u64)>,
-    },
+    Str(Var<Str>, Nullness),
 }
 
 impl ColVal {

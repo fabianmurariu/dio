@@ -71,6 +71,13 @@ fn pool_of(values: &[&[u8]], filler: usize) -> (BytesPool, Vec<u128>) {
     (pool, views)
 }
 
+/// `view`, one of `pool`'s, as a kernel argument. Every pool in these tests outlives the
+/// kernels that read its values, and none grows while one runs.
+fn value(pool: &BytesPool, view: u128) -> RawByteView {
+    // SAFETY: as above.
+    unsafe { pool.value(view) }
+}
+
 fn strings() -> Vec<&'static [u8]> {
     STRINGS.iter().map(|s| s.as_bytes()).collect()
 }
@@ -104,7 +111,7 @@ fn each_pair<K, R, V>(
         let fun = compiled.as_fn();
         for (a, &va) in values.iter().zip(&left_views) {
             for (b, &vb) in values.iter().zip(&right_views) {
-                let got = fun.call(left.value(va), right.value(vb));
+                let got = fun.call(value(&left, va), value(&right, vb));
                 assert_eq!(got, host(a, b), "{:?} vs {:?}", show(a), show(b));
             }
         }
@@ -198,33 +205,31 @@ fn lengths_count_bytes_and_characters() {
         let fun = compiled.as_fn();
         for (s, &view) in STRINGS.iter().zip(&views) {
             let want = ((s.chars().count() as u64) << 32) | s.len() as u64;
-            assert_eq!(fun.call(pool.value(view)), want, "{s:?}");
+            assert_eq!(fun.call(value(&pool, view)), want, "{s:?}");
         }
     });
 }
 
-/// A pool's value baked in as a constant (a plan's literal) meets a parameter.
+/// A literal baked in as a constant meets a parameter, and literals added while staging
+/// do not move the ones added before.
 #[test]
 fn a_literal_compares_with_a_value() {
-    let mut literals = BytesPool::new();
-    // Append first: the table may move while the pool grows, so take its address after.
-    let short = literals.append(b"short");
-    let long = literals.append(b"a literal longer than twelve");
-    let (short, long) = (literals.value(short), literals.value(long));
     let (pool, views) = pool_of(&strings(), 0);
-    for literal in [short, long] {
+    for text in [&b"short"[..], b"a literal longer than twelve"] {
         for_each_backend(|mut compiler| {
-            let fun = compiler.fun1("vs_literal", move |ctx, s: Var<Str>| {
-                let literal = ctx.bind(Const::<Str>::new(literal));
+            let mut literals = ByteLiterals::new();
+            let fun = compiler.fun1("vs_literal", |ctx, s: Var<Str>| {
+                // SAFETY: `literals` outlives the compiled kernel's calls below.
+                let literal = ctx.bind(unsafe { literals.constant::<Utf8>(text) });
+                // Another long literal, added after: `literal` must not move.
+                let _ = unsafe { literals.constant::<Utf8>(b"another long literal, never read") };
                 s.compare(ctx, literal)
             });
             let compiled = compiler.compile(fun).expect("compile");
             let fun = compiled.as_fn();
-            // SAFETY: the literal pool is alive and unchanged.
-            let text = unsafe { literal.bytes() };
             for (s, &view) in strings().iter().zip(&views) {
                 assert_eq!(
-                    fun.call(pool.value(view)),
+                    fun.call(value(&pool, view)),
                     sign(s.cmp(&text)),
                     "{:?}",
                     show(s)
@@ -282,7 +287,7 @@ fn row_at(
 #[test]
 fn a_view_is_an_iterator_item() {
     let (pool, views) = pool_of(&strings(), 0);
-    let values: Vec<RawByteView> = views.iter().map(|&v| pool.value(v)).collect();
+    let values: Vec<RawByteView> = views.iter().map(|&v| value(&pool, v)).collect();
     for_each_backend(|mut compiler| {
         let fun = compiler.fun1("greatest", |ctx, xs: Var<SRef<Slice<Str>>>| {
             // SAFETY: the column is not empty.

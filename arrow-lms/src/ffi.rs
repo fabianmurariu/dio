@@ -19,6 +19,9 @@ use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
+use crate::batch::FfiBatch;
+use crate::byte_view::ByteViewDescriptors;
+
 /// Erased read-only `(ptr, len)` buffer used inside prepared Arrow descriptors.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
@@ -112,13 +115,9 @@ impl FfiValidity {
     }
 }
 
-/// Erased Arrow array descriptor: values + validity, plus an opaque pointer back
-/// to the originating arrow array.
-///
-/// `array` is a type-erased pointer to the concrete arrow array (e.g. a
-/// `*const StringViewArray`); it is `null` for fixed-width columns and is passed
-/// to extern runtime functions that need the array's own API (e.g. `&str`
-/// access, `substring`). It borrows the source, which must outlive the call.
+/// Erased Arrow array descriptor: values and validity. A `Utf8View` column's values are
+/// its views, one `u128` per row; its strings are read through the batch's
+/// [`FfiByteViewArray`](crate::FfiByteViewArray) for the column (see [`FfiBatch`]).
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiArray {
@@ -126,8 +125,6 @@ pub struct FfiArray {
     values: FfiBuffer,
     #[staged(FfiValidity)]
     validity: FfiValidity,
-    #[staged(SPtr<u8>)]
-    array: *const u8,
 }
 
 impl FfiArray {
@@ -137,7 +134,6 @@ impl FfiArray {
         Self {
             values: FfiBuffer::empty(),
             validity: FfiValidity::all_valid(0),
-            array: std::ptr::null(),
         }
     }
 
@@ -158,12 +154,87 @@ impl FfiArray {
     }
 }
 
-/// Host-owned read descriptors borrowing an Arrow source. The `'data` borrow
-/// keeps the source alive; [`arrays`](Self::arrays) hands the kernel `&[FfiArray]`.
+/// One batch's descriptors and what [`FfiBatch`] points to: no lifetime, so its owner
+/// keeps the arrays alive (a borrow, or the batch itself).
+#[derive(Debug)]
+struct Descriptors {
+    arrays: Box<[FfiArray]>,
+    #[expect(dead_code, reason = "owns what `batch.strings` points to")]
+    strings: ByteViewDescriptors<Utf8>,
+    batch: FfiBatch,
+}
+
+impl Descriptors {
+    /// Describe `arrays`, one batch's columns, all of one length.
+    fn new<'a>(arrays: impl IntoIterator<Item = &'a dyn Array>) -> Result<Self, FfiError> {
+        let arrays: Vec<&dyn Array> = arrays.into_iter().collect();
+        let num_rows = arrays.first().map_or(0, |array| array.len());
+        let ffi = arrays
+            .iter()
+            .enumerate()
+            .map(|(index, array)| {
+                if array.len() != num_rows {
+                    return Err(FfiError::MismatchedLength {
+                        index,
+                        expected: num_rows,
+                        actual: array.len(),
+                    });
+                }
+                ffi_from_array(index, *array)
+            })
+            .collect::<Result<Box<[FfiArray]>, _>>()?;
+        let strings = ByteViewDescriptors::new(
+            arrays
+                .iter()
+                .map(|array| array.as_any().downcast_ref::<StringViewArray>()),
+        );
+        let batch = FfiBatch {
+            num_rows: num_rows as u64,
+            arrays: FfiBuffer::from_typed_slice(&ffi),
+            strings: FfiBuffer::from_typed_slice(strings.arrays()),
+        };
+        Ok(Self {
+            arrays: ffi,
+            strings,
+            batch,
+        })
+    }
+}
+
+/// Host-owned read descriptors borrowing an Arrow source. The `'data` borrow keeps the
+/// source alive; [`batch`](Self::batch) is what a kernel reads, and
+/// [`arrays`](Self::arrays) the columns alone, as `&[FfiArray]`.
 #[derive(Debug)]
 pub struct PreparedFfiBatch<'data> {
-    arrays: Vec<FfiArray>,
+    descriptors: Descriptors,
     _borrow: PhantomData<&'data [u8]>,
+}
+
+/// A `RecordBatch` with its descriptors: what [`PreparedFfiBatch`] is for a batch that
+/// is kept, not borrowed. Holding the batch keeps its buffers alive.
+#[derive(Debug)]
+pub struct FfiRecordBatch {
+    descriptors: Descriptors,
+    record_batch: RecordBatch,
+}
+
+impl FfiRecordBatch {
+    pub fn new(record_batch: RecordBatch) -> Result<Self, FfiError> {
+        let descriptors = Descriptors::new(record_batch.columns().iter().map(|a| a.as_ref()))?;
+        Ok(Self {
+            descriptors,
+            record_batch,
+        })
+    }
+
+    /// What a kernel reads; it points into `self`, wherever `self` moves.
+    pub fn batch(&self) -> &FfiBatch {
+        &self.descriptors.batch
+    }
+
+    pub fn record_batch(&self) -> &RecordBatch {
+        &self.record_batch
+    }
 }
 
 /// Mutable `(ptr, len)` buffer used only by owner-backed writable descriptors.
@@ -216,9 +287,14 @@ impl PreparedFfiValidityMut<'_> {
 }
 
 impl<'data> PreparedFfiBatch<'data> {
-    /// The read batch handed to the kernel: `SRef<Slice<FfiArray>>` at runtime.
+    /// The columns' descriptors: `SRef<Slice<FfiArray>>` at runtime.
     pub fn arrays(&self) -> &[FfiArray] {
-        &self.arrays
+        &self.descriptors.arrays
+    }
+
+    /// The batch: `SRef<FfiBatch>` at runtime.
+    pub fn batch(&self) -> &FfiBatch {
+        &self.descriptors.batch
     }
 }
 
@@ -286,7 +362,6 @@ fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiAr
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.values()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
-        array: std::ptr::null(),
     }
 }
 
@@ -306,22 +381,15 @@ fn ffi_from_boolean(index: usize, array: &BooleanArray) -> Result<FfiArray, FfiE
             len: array.len(),
         },
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
-        array: std::ptr::null(),
     })
 }
 
-/// Build an erased descriptor from an Arrow `StringViewArray`.
-///
-/// `values` holds the **views** buffer (one `u128` per row: `[len:u32][…]`).
-/// Staged code reads a view as two `u64` halves; `octet_length` needs only the
-/// low 32 bits of the first. The data buffers are not referenced here — that
-/// comes with actual byte access (which will `gc` to a single buffer first).
+/// Build an erased descriptor from an Arrow `StringViewArray`: its views, one `u128` per
+/// row, and validity. The strings themselves are read through [`FfiByteViewArray`](crate::FfiByteViewArray).
 fn ffi_from_string_view(array: &StringViewArray) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.views().as_ref()),
         validity: FfiValidity::from_nulls(array.nulls(), array.len()),
-        // Opaque pointer to the array itself, for extern `&str`/transform calls.
-        array: (array as *const StringViewArray).cast::<u8>(),
     }
 }
 
@@ -376,28 +444,8 @@ pub fn prepare_arrays<'a, I>(arrays: I) -> Result<PreparedFfiBatch<'a>, FfiError
 where
     I: IntoIterator<Item = &'a dyn Array>,
 {
-    let mut row_count = None;
-    let arrays = arrays
-        .into_iter()
-        .enumerate()
-        .map(|(index, array)| {
-            match row_count {
-                Some(expected) if expected != array.len() => {
-                    return Err(FfiError::MismatchedLength {
-                        index,
-                        expected,
-                        actual: array.len(),
-                    });
-                }
-                None => row_count = Some(array.len()),
-                _ => {}
-            }
-            ffi_from_array(index, array)
-        })
-        .collect::<Result<Vec<_>, _>>()?;
-
     Ok(PreparedFfiBatch {
-        arrays,
+        descriptors: Descriptors::new(arrays)?,
         _borrow: PhantomData,
     })
 }

@@ -52,19 +52,11 @@ struct RawByteViewArray {
 /// One Arrow byte-view array of kind `K`, as a kernel reads it. Built only by
 /// [`ByteViewDescriptors`] (or [`empty`](Self::empty)), so its kind is the array's.
 #[repr(transparent)]
-#[derive(Debug)]
+#[derive(Clone, Copy, Debug)]
 pub struct FfiByteViewArray<K: ByteKind> {
     raw: RawByteViewArray,
     _kind: PhantomData<fn() -> K>,
 }
-
-impl<K: ByteKind> Clone for FfiByteViewArray<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K: ByteKind> Copy for FfiByteViewArray<K> {}
 
 impl<K: ByteKind> FfiByteViewArray<K> {
     /// No rows: what a consumer stands in where a column is missing, so a row lookup
@@ -218,21 +210,20 @@ impl<K: ByteKind, A> FfiByteViewArrayOps<K> for A where
 }
 
 /// A staged Arrow byte-view array of kind `K`: its length, validity and rows.
+#[derive(Clone, Copy)]
 pub struct ByteViewArrayView<P, K> {
     array: P,
     _kind: PhantomData<fn() -> K>,
 }
 
-impl<P: Clone, K> Clone for ByteViewArrayView<P, K> {
-    fn clone(&self) -> Self {
+impl<P, K> ByteViewArrayView<P, K> {
+    pub(crate) fn new(array: P) -> Self {
         Self {
-            array: self.array.clone(),
+            array,
             _kind: PhantomData,
         }
     }
 }
-
-impl<P: Copy, K> Copy for ByteViewArrayView<P, K> {}
 
 impl<P, K> ByteViewArrayView<P, K>
 where

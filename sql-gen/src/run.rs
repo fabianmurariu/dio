@@ -1,12 +1,10 @@
 //! One-call JIT execution: a SQL string over one `RecordBatch` → a result
 //! `RecordBatch`. The single entry point for running queries.
 
-use std::cell::Cell;
-use std::collections::HashMap;
+use std::cell::{Cell, RefCell};
 use std::rc::Rc;
 use std::sync::Arc;
 
-use crate::arena::ByteArena;
 use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
 use arrow::record_batch::RecordBatch;
 use datafusion_common::{DataFusionError, Result};
@@ -16,10 +14,10 @@ use rust_lms::prelude::*;
 use datafusion_expr::Expr;
 
 use crate::codegen::{
-    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, collect_str_literals, gen_build,
-    gen_build_index, gen_collect, group_template,
+    CodegenCtx, GroupHandle, JoinHandle, agg_output_types, gen_build, gen_build_index, gen_collect,
+    group_key_kind, group_template,
 };
-use crate::group::{GroupState, KeyKind};
+use crate::group::GroupState;
 use crate::join::JoinState;
 use crate::output::{OutCols, OutputHandle};
 use crate::plan::Operator;
@@ -223,7 +221,7 @@ fn build_join_index(
     // Minimal codegen context — the index kernel only uses `rt` + `join`.
     let cx = CodegenCtx {
         rt,
-        lits: Rc::new(HashMap::new()),
+        literals: Rc::default(),
         group: None,
         out: Rc::new(OutputHandle { cols: Vec::new() }),
         join: Some(handle),
@@ -256,23 +254,15 @@ fn build_join_materialized(
     let mut compiler = Compiler::new().with_backend(backend);
     let rt = Runtime::register(&mut compiler);
 
-    // Intern the build subtree's string literals (kept alive until after the run).
-    let mut pool = ByteArena::new();
-    let mut lit_strs = Vec::new();
-    collect_str_literals(build, &mut lit_strs);
-    let mut lits: HashMap<String, *const u8> = HashMap::new();
-    for s in lit_strs {
-        if !lits.contains_key(s) {
-            lits.insert(s.to_string(), pool.append(s.as_bytes()));
-        }
-    }
+    // The build subtree's string literals, read by address: kept until after the run.
+    let literals = Rc::new(RefCell::new(ByteLiterals::new()));
 
     let handle = Rc::new(JoinHandle {
         state: &mut *js as *mut JoinState,
     });
     let cx = CodegenCtx {
         rt,
-        lits: Rc::new(lits),
+        literals: literals.clone(),
         group: None,
         out: Rc::new(out.handle()),
         join: Some(handle),
@@ -309,10 +299,8 @@ fn run_kernel(
 ) -> Result<RecordBatch> {
     let out_schema = normalize_out_schema(&op.output_schema());
 
-    // Reject GROUP BY key types we don't support yet. A single key may be
-    // `Int32`/`Int64`, `Float64`, or `Utf8View` (nullable or not). A composite
-    // (multi-column) key is fixed-width only for now — each column `Int32`/`Int64`/
-    // `Float64` (strings inside a composite key are a follow-up).
+    // Reject GROUP BY key types we don't support: each key column, nullable or not,
+    // is `Int32`/`Int64`, `Float64` or `Utf8View`.
     if let Some(Operator::Aggregate {
         schema,
         group_exprs,
@@ -327,18 +315,8 @@ fn run_kernel(
     let mut compiler = Compiler::new().with_backend(backend);
     let rt = Runtime::register(&mut compiler);
 
-    // Intern every string literal into a pool that outlives the run; codegen bakes
-    // each literal's stable pointer as a constant. The pool must stay alive until
-    // after `as_fn` (the baked pointers reference its bytes).
-    let mut pool = ByteArena::new();
-    let mut lit_strs = Vec::new();
-    collect_str_literals(op, &mut lit_strs);
-    let mut lits: HashMap<String, *const u8> = HashMap::new();
-    for s in lit_strs {
-        if !lits.contains_key(s) {
-            lits.insert(s.to_string(), pool.append(s.as_bytes()));
-        }
-    }
+    // The string literals codegen bakes in, read by address: kept until after the run.
+    let literals = Rc::new(RefCell::new(ByteLiterals::new()));
 
     // Allocate the GROUP BY state (sized to the row count, groups ≤ rows) and bake
     // its pointers. Must outlive `as_fn` — kept in `group_state` below.
@@ -369,7 +347,7 @@ fn run_kernel(
     // outlive the run (its control blocks / builders are referenced by the kernel).
     let cx = CodegenCtx {
         rt,
-        lits: Rc::new(lits),
+        literals: literals.clone(),
         group,
         out: Rc::new(out.handle()),
         join,
@@ -391,54 +369,25 @@ fn run_kernel(
         gs.check()?;
     }
     let result = out.into_record_batch(n as usize);
-    // Keep the interned-literal bytes and group state alive across the run (the
-    // kernel holds pointers into them).
-    drop(pool);
+    // Keep the literals and group state alive across the run (the kernel holds
+    // pointers into them).
+    drop(literals);
     drop(group_state);
     Ok(result)
 }
 
-/// The [`KeyKind`] for a single GROUP BY key column type, or `None` if unsupported.
-fn key_kind(dt: &DataType) -> Option<KeyKind> {
-    match dt {
-        DataType::Int32 | DataType::Int64 => Some(KeyKind::Int),
-        DataType::Float64 => Some(KeyKind::Float),
-        DataType::Utf8View => Some(KeyKind::Str),
-        _ => None,
-    }
-}
-
-/// The [`KeyKind`] for the whole GROUP BY key — a composite key is a packed byte key,
-/// so it uses the `Str` (bytes) table. Assumes [`check_group_key`] already passed.
-fn group_key_kind(schema: &SchemaRef, n_keys: usize) -> KeyKind {
-    if n_keys > 1 {
-        KeyKind::Str
-    } else {
-        key_kind(schema.field(0).data_type()).expect("checked")
-    }
-}
-
-/// Reject unsupported GROUP BY key columns (single: int/float/string; composite:
-/// int/float/string columns).
+/// Reject unsupported GROUP BY key columns: each, single or composite, is an integer,
+/// a float or a string.
 fn check_group_key(schema: &SchemaRef, n_keys: usize) -> Result<()> {
-    if n_keys == 1 {
-        let ty = schema.field(0).data_type();
-        if key_kind(ty).is_none() {
+    for field in &schema.fields()[..n_keys] {
+        let ty = field.data_type();
+        if !matches!(
+            ty,
+            DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8View
+        ) {
             return Err(DataFusionError::NotImplemented(format!(
                 "GROUP BY key type {ty}"
             )));
-        }
-    } else {
-        for i in 0..n_keys {
-            let ty = schema.field(i).data_type();
-            if !matches!(
-                ty,
-                DataType::Int32 | DataType::Int64 | DataType::Float64 | DataType::Utf8View
-            ) {
-                return Err(DataFusionError::NotImplemented(format!(
-                    "composite GROUP BY key column type {ty}"
-                )));
-            }
         }
     }
     Ok(())

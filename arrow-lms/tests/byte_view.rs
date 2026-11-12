@@ -218,3 +218,60 @@ fn descriptors_can_move() {
         before
     );
 }
+
+/// A record batch with a primitive and a string column, read through its `FfiBatch`: the
+/// row count, the primitive column through `arrays`, and the strings at the same column
+/// index through `strings`.
+#[test]
+fn a_batch_reads_primitive_and_string_columns_by_index() {
+    use std::sync::Arc;
+
+    use arrow::array::Int64Array;
+    use arrow::datatypes::{DataType, Field, Schema};
+    use arrow::record_batch::RecordBatch;
+    use arrow_lms::{ArrayBatchOps, FfiBatch, FfiBatchOps, FfiRecordBatch};
+
+    let values = strings(3);
+    let schema = Arc::new(Schema::new(vec![
+        Field::new("n", DataType::Int64, false),
+        Field::new("s", DataType::Utf8View, true),
+    ]));
+    let ints = Int64Array::from_iter_values(0..values.len() as i64);
+    let rb = RecordBatch::try_new(
+        schema,
+        vec![Arc::new(ints), Arc::new(string_array(&values))],
+    )
+    .unwrap();
+    let batch = FfiRecordBatch::new(rb).unwrap();
+    assert_eq!(batch.batch().num_rows(), values.len());
+    assert_eq!(batch.batch().num_columns(), 2);
+
+    // The sum of `n` over the rows whose `s` is valid and longer than twelve bytes.
+    let mut compiler = Compiler::new();
+    let fun = compiler.fun1("sum_long", |ctx, b: Var<SRef<FfiBatch>>| {
+        // SAFETY: column 0 is `Int64`, column 1 `Utf8View`, in every batch passed.
+        let (n, s) = unsafe { (b.arrays().primitive::<i64>(0), b.strings(1)) };
+        let sum = ctx.var(0i64);
+        let i = ctx.var(0u64);
+        ctx.while_loop(lt(i, b.num_rows()), |ctx| {
+            // SAFETY: `i` is a row; the string is read only when it is valid.
+            ctx.if_then(unsafe { s.validity().is_valid(i) }, |ctx| {
+                let value = ctx.bind(unsafe { s.value_unchecked(i) });
+                ctx.if_then(gt(value.byte_len(), 12u64), |ctx| {
+                    ctx.store(sum, sum + unsafe { n.value_unchecked(i) });
+                });
+            });
+            ctx.store(i, i + 1u64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(fun).expect("compile");
+    let want: i64 = values
+        .iter()
+        .enumerate()
+        .filter(|(_, v)| v.as_ref().is_some_and(|v| v.len() > 12))
+        .map(|(i, _)| i as i64)
+        .sum();
+    assert!(want > 0);
+    assert_eq!(compiled.as_fn().call(batch.batch()), want);
+}

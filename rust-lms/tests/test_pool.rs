@@ -18,7 +18,7 @@ fn a_kernel_reads_values_from_every_block() {
         })
         .collect();
     let views: Vec<u128> = values.iter().map(|v| pool.append(v.as_bytes())).collect();
-    assert!(pool.blocks().len() > 3);
+    assert!(pool.buffers().len() > 3);
     let table = pool.buffers().as_ptr();
 
     for_each_backend(|mut compiler| {

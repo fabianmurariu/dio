@@ -20,7 +20,8 @@
 //!
 //! [`ByteView`]: crate::byte_view::ByteView
 
-use crate::byte_view::{ByteBuffer, MAX_INLINE_LEN, RawByteView, make_view};
+use crate::byte_view::{ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, RawByteView, make_view};
+use crate::staged::Const;
 
 /// Default block size (64 KiB): large enough that most values share a block, small
 /// enough not to over-allocate for a few literals.
@@ -83,25 +84,62 @@ impl BytesPool {
         &self.buffers
     }
 
-    /// `view`, one of this pool's, with the table it indexes.
-    pub fn value(&self, view: u128) -> RawByteView {
-        RawByteView::new(view, self.buffers.as_ptr())
-    }
-
-    /// The blocks, for handing them on without copying.
-    pub fn blocks(&self) -> &[Vec<u8>] {
-        &self.blocks
-    }
-
-    /// Consume the pool, yielding its blocks.
-    pub fn into_blocks(self) -> Vec<Vec<u8>> {
-        self.blocks
+    /// `view` with the table it indexes.
+    ///
+    /// # Safety
+    ///
+    /// `view` is one this pool returned, and the value is read only while the pool is
+    /// alive and nothing is appended to it.
+    pub unsafe fn value(&self, view: u128) -> RawByteView {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { RawByteView::new(view, self.buffers.as_ptr()) }
     }
 }
 
 impl Default for BytesPool {
     fn default() -> Self {
         Self::new()
+    }
+}
+
+/// Byte strings a kernel bakes in as constants. A short one is inline and stored nowhere;
+/// a long one is copied here with a one-entry table of its own, so adding a value never
+/// moves another's and constants can be made while a kernel is staged. Whoever owns the
+/// kernel keeps this alive.
+#[derive(Default)]
+pub struct ByteLiterals {
+    /// Each long value's bytes and its table, boxed so they stay where they are.
+    values: Vec<(Box<[u8]>, Box<ByteBuffer>)>,
+}
+
+// SAFETY: it owns its bytes and never changes a value once added; the pointers inside
+// its tables point into those bytes.
+unsafe impl Send for ByteLiterals {}
+unsafe impl Sync for ByteLiterals {}
+
+impl ByteLiterals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `bytes` as a staged constant of kind `K`.
+    ///
+    /// # Safety
+    ///
+    /// Every kernel the constant is baked into runs only while `self` is alive, and for
+    /// `Utf8` the bytes are valid UTF-8.
+    pub unsafe fn constant<K: ByteKind>(&mut self, bytes: &[u8]) -> Const<ByteView<K>> {
+        if let Some(inline) = RawByteView::inline(bytes) {
+            return Const::new(inline);
+        }
+        let bytes: Box<[u8]> = bytes.into();
+        let table = Box::new(ByteBuffer::new(&bytes));
+        let table_ptr: *const ByteBuffer = &*table;
+        let view = make_view(&bytes, 0, 0);
+        self.values.push((bytes, table));
+        // SAFETY: the view names all of the bytes boxed above, in its one-entry table,
+        // and both stay put for as long as `self` lives (this function's contract).
+        Const::new(unsafe { RawByteView::new(view, table_ptr) })
     }
 }
 
@@ -119,7 +157,7 @@ mod tests {
     fn short_values_are_inline_and_store_nothing() {
         let mut pool = BytesPool::new();
         let view = pool.append(b"twelve bytes");
-        assert!(pool.blocks().is_empty());
+        assert!(pool.blocks.is_empty());
         assert_eq!(read(&pool, view), b"twelve bytes");
     }
 
@@ -130,10 +168,10 @@ mod tests {
         let b = pool.append(b"fourteen bytes");
         let c = pool.append(b"no room left in block 0");
 
-        assert_eq!(pool.blocks().len(), 2);
-        assert_eq!(pool.blocks()[0], b"thirteen bytefourteen bytes");
+        assert_eq!(pool.blocks.len(), 2);
+        assert_eq!(pool.blocks[0], b"thirteen bytefourteen bytes");
         assert_eq!(pool.buffers().len(), 2);
-        assert_eq!(pool.buffers()[0], ByteBuffer::new(&pool.blocks()[0]));
+        assert_eq!(pool.buffers()[0], ByteBuffer::new(&pool.blocks[0]));
         assert_eq!((b >> 64) as u32, 0, "b is in block 0");
         assert_eq!((b >> 96) as u32, 13, "after a");
         assert_eq!((c >> 64) as u32, 1, "c starts block 1");
@@ -146,11 +184,11 @@ mod tests {
     fn blocks_never_move() {
         let mut pool = BytesPool::with_block_size(16);
         let first = pool.append(b"the first long value");
-        let block = pool.blocks()[0].as_ptr();
+        let block = pool.blocks[0].as_ptr();
         for i in 0..100 {
             pool.append(format!("another long value {i}").as_bytes());
         }
-        assert_eq!(pool.blocks()[0].as_ptr(), block);
+        assert_eq!(pool.blocks[0].as_ptr(), block);
         assert_eq!(read(&pool, first), b"the first long value");
     }
 
@@ -160,8 +198,8 @@ mod tests {
         pool.append(b"a long-ish value");
         let big = vec![7u8; 100];
         let view = pool.append(&big);
-        assert_eq!(pool.blocks().len(), 2);
-        assert_eq!(pool.blocks()[1].len(), 100);
+        assert_eq!(pool.blocks.len(), 2);
+        assert_eq!(pool.blocks[1].len(), 100);
         assert_eq!(read(&pool, view), big);
     }
 }

@@ -7,14 +7,14 @@ use datafusion_expr::Expr;
 use rust_lms::prelude::*;
 use rust_lms_std::{DynamicRecord, FieldId, RecordLayout};
 
-use crate::group::GroupState;
+use crate::group::{GroupState, KeyKind};
 use crate::plan::Operator;
-use crate::value::{ColVal, Nullness, Row, StrVal};
+use crate::value::{ColVal, Nullness, Row};
 
 use super::aggregate::AggKind;
 use super::expr::gen_expr;
 use super::numeric::{canonical_f64, coerce_f64, to_f64, to_i64};
-use super::strings::{as_str, resolve};
+use super::strings::as_str;
 use super::{CodegenCtx, InputsSource, Yld, gen_op};
 
 fn group_ref(state: *mut GroupState) -> impl Staged<Out = SPtr<Opaque<GroupState>>> + Copy {
@@ -57,19 +57,11 @@ pub(crate) fn gen_grouped<I: InputsSource>(
     let key_fields = record.key;
     let key_valid = record.key_valid;
     let state = handle.state;
-    // How the fold computes the key: one expression (single key) or a packed layout
-    // over all key columns (composite).
-    let key_source = match &key_spec {
+    // How the fold computes the key: one expression (an integer or float key) or a
+    // packed layout over every key column.
+    let key_source = match key_spec {
         KeySpec::Single { .. } => KeySource::Single(group_exprs[0].clone()),
-        KeySpec::Composite(cols) => {
-            // A string column forces the variable-length builder; otherwise the fast
-            // fixed-size stack pack.
-            if cols.iter().any(|(ty, _)| *ty == DataType::Utf8View) {
-                KeySource::CompositeBytes(bytes_key(group_exprs, cols))
-            } else {
-                KeySource::CompositeFixed(packed_key(group_exprs, cols))
-            }
-        }
+        KeySpec::Packed(packed) => KeySource::Packed(packed, group_exprs.clone()),
     };
     let n_keys = group_exprs.len();
     // Resolve each aggregate to its record fields (byte offsets) + its argument.
@@ -106,11 +98,8 @@ pub(crate) fn gen_grouped<I: InputsSource>(
                     let key_cv = gen_expr(ctx, expr, &schema_f, &row, &cx_c);
                     fold_single_key(ctx, key_fields, key_valid, key_cv, state, &cx_c, layout)
                 }
-                KeySource::CompositeFixed(packed) => {
-                    pack_and_upsert(ctx, packed, &row, &schema_f, &cx_c, state)
-                }
-                KeySource::CompositeBytes(bk) => {
-                    build_bytes_key(ctx, bk, &row, &schema_f, &cx_c, state)
+                KeySource::Packed(packed, exprs) => {
+                    pack_and_upsert(ctx, packed, exprs, &row, &schema_f, &cx_c, state)
                 }
             };
             // A null record pointer is the upsert's error sentinel (e.g. group
@@ -133,6 +122,9 @@ pub(crate) fn gen_grouped<I: InputsSource>(
     let num_groups = ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_len, group_ref(state)) });
     let base =
         ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_records_base, group_mut(state)) });
+    // The interned strings' table, which a packed key's string views index.
+    let strings =
+        ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_strings, group_ref(state)) });
     range(0u64, num_groups).for_each(ctx, move |ctx, g| {
         // SAFETY: `g < num_groups`, and `base` addresses the stable records
         // buffer after the fold has completed.
@@ -141,20 +133,7 @@ pub(crate) fn gen_grouped<I: InputsSource>(
             KeySource::Single(_) => {
                 vec![emit_single_key(ctx, key_fields, key_valid, rec)]
             }
-            KeySource::CompositeFixed(packed) => {
-                let KeyFields::Composite { ptr } = key_fields else {
-                    unreachable!("composite key source without composite key fields")
-                };
-                let packed_ptr = rec.get(ctx, ptr);
-                unpack_composite(ctx, packed, packed_ptr)
-            }
-            KeySource::CompositeBytes(bk) => {
-                let KeyFields::Composite { ptr } = key_fields else {
-                    unreachable!("composite key source without composite key fields")
-                };
-                let flat_ptr = rec.get(ctx, ptr);
-                unpack_bytes(ctx, bk, flat_ptr)
-            }
+            KeySource::Packed(packed, _) => unpack_packed(ctx, packed, rec, strings),
         };
         let mut row: Row = Vec::with_capacity(n_keys + resolved.len());
         row.extend(key_cols);
@@ -165,9 +144,9 @@ pub(crate) fn gen_grouped<I: InputsSource>(
     });
 }
 
-/// Fold-time upsert for a **single** key: dispatch on the key type, then finish (null
-/// handling) via [`finish_upsert`]. The key computation runs unconditionally but is
-/// harmless on a null row (unused; `str_ptr` reads a null row safely).
+/// Fold-time upsert for a **single** integer or float key: dispatch on the key type,
+/// then finish (null handling) via [`finish_upsert`]. The key computation runs
+/// unconditionally but is harmless on a null row (its value is unused).
 fn fold_single_key(
     ctx: &Ctx,
     key_fields: KeyFields,
@@ -198,19 +177,7 @@ fn fold_single_key(
                 unsafe { call_extern2_unchecked(cx.rt.group_upsert, group_mut(state), key_bits) };
             finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
         }
-        KeyFields::Str { .. } => {
-            // Pass the key's content bytes; the extern copies them into its pool.
-            let (ptr, len) = resolve(ctx, as_str(key_cv), cx.rt.str_ptr);
-            // SAFETY: state is exclusively available and `resolve` returns live
-            // string bytes with the corresponding length.
-            let call = unsafe {
-                call_extern3_unchecked(cx.rt.group_upsert_str, group_mut(state), ptr, len)
-            };
-            finish_upsert(ctx, call, key_valid, key_cv, state, cx, layout)
-        }
-        KeyFields::Composite { .. } => {
-            unreachable!("composite key in the single-key fold")
-        }
+        KeyFields::Packed => unreachable!("a packed key in the single-key fold"),
     }
 }
 
@@ -232,19 +199,7 @@ fn emit_single_key(
     match key_fields {
         KeyFields::Int(f) => ColVal::I64(rec.get(ctx, f), key_null),
         KeyFields::Float(f) => ColVal::F64(rec.get(ctx, f), key_null),
-        KeyFields::Str { ptr, len } => {
-            let ptr = rec.get(ctx, ptr);
-            let len = rec.get(ctx, len);
-            ColVal::Str(
-                StrVal::Bytes {
-                    ptr,
-                    len,
-                    view: None,
-                },
-                key_null,
-            )
-        }
-        KeyFields::Composite { .. } => unreachable!("composite key in the single-key emit"),
+        KeyFields::Packed => unreachable!("a packed key in the single-key emit"),
     }
 }
 
@@ -288,77 +243,25 @@ where
 }
 
 /// How the fold obtains the key: a single key expression, or a packed layout over all
-/// key columns (composite). Cloned into the fold closure and kept for emit.
+/// key columns and their expressions, in order. Cloned into the fold closure and kept
+/// for emit.
 #[derive(Clone)]
 enum KeySource {
     Single(Expr),
-    /// All-fixed-width composite — packed into a fixed-size stack key (fast path).
-    CompositeFixed(PackedKey),
-    /// Composite with ≥1 variable-length (string) column — built via the host key
-    /// builder into a flat byte key (`group_key_*` + `group_upsert_composite`).
-    CompositeBytes(BytesKey),
+    Packed(PackedKey, Vec<Expr>),
 }
 
-/// A composite key containing string columns: an ordered list of columns (fixed or
-/// string) plus a null bitmap. The fold pushes each column's bytes into the host
-/// scratch (`group_key_*`), then interns the assembled flat key; emit unpacks it with
-/// a running byte offset (string lengths make offsets runtime-dependent).
-#[derive(Clone)]
-struct BytesKey {
-    cols: Vec<BytesCol>,
-}
-
-#[derive(Clone)]
-struct BytesCol {
-    kind: BytesColKind,
-    /// Null-bitmap bit index (= column position).
-    bit: usize,
-    nullable: bool,
-    expr: Expr,
-}
-
-#[derive(Clone, Copy, PartialEq)]
-enum BytesColKind {
-    I64,
-    F64,
-    Str,
-}
-
-/// Build the byte-key descriptor for a string-containing composite key.
-fn bytes_key(group_exprs: &[Expr], cols: &[(DataType, bool)]) -> BytesKey {
-    let cols = group_exprs
-        .iter()
-        .zip(cols)
-        .enumerate()
-        .map(|(i, (expr, (ty, nullable)))| {
-            let kind = match ty {
-                DataType::Int32 | DataType::Int64 => BytesColKind::I64,
-                DataType::Float64 => BytesColKind::F64,
-                DataType::Utf8View => BytesColKind::Str,
-                other => panic!("unsupported composite key column type: {other}"),
-            };
-            BytesCol {
-                kind,
-                bit: i,
-                nullable: *nullable,
-                expr: expr.clone(),
-            }
-        })
-        .collect();
-    BytesKey { cols }
-}
-
-/// A composite key's **packed** layout: one 8-byte cell per key column (`i64`/`f64`)
-/// plus a trailing `u64` null bitmap (bit `i` = column `i` is NULL). The fold writes
-/// the canonicalized column values + bitmap into a stack scratch of this shape — the
-/// bytes handed to `group_upsert_str` — and emit reads them back to produce the output
-/// key columns. One `RecordLayout` is shared by pack and unpack, so offsets agree.
+/// A packed key's layout: one cell per key column — 8 bytes for an `i64`/`f64`, a
+/// string's 16-byte view as two `u64` halves — plus a trailing `u64` null bitmap (bit
+/// `i` = column `i` is NULL). Strings are interned, so equal keys have equal bytes. The
+/// fold writes the canonicalized values + bitmap into a stack scratch of this shape —
+/// the bytes `group_upsert_packed` hashes and stores at the head of the group's record
+/// — and emit reads them back from the record, whose layout starts as this one.
 #[derive(Clone)]
 struct PackedKey {
     layout: RecordLayout,
     cols: Vec<PackedCol>,
     bitmap: FieldId<u64>,
-    nbytes: usize,
 }
 
 #[derive(Clone)]
@@ -367,70 +270,82 @@ struct PackedCol {
     /// Null-bitmap bit index (= column position).
     bit: usize,
     nullable: bool,
-    /// The group-by expression producing this column's value.
-    expr: Expr,
 }
 
 #[derive(Clone, Copy)]
 enum PackedColField {
     I64(FieldId<i64>),
     F64(FieldId<f64>),
+    /// A string's interned view, low and high halves.
+    Str {
+        lo: FieldId<u64>,
+        hi: FieldId<u64>,
+    },
 }
 
-/// Build the packed-key layout from the key columns (fixed-width only for now).
-fn packed_key(group_exprs: &[Expr], cols: &[(DataType, bool)]) -> PackedKey {
-    let mut layout = RecordLayout::new();
-    let packed_cols = group_exprs
-        .iter()
-        .zip(cols)
-        .enumerate()
-        .map(|(i, (expr, (ty, nullable)))| {
-            let field = match ty {
-                DataType::Int32 | DataType::Int64 => PackedColField::I64(layout.field::<i64>()),
-                DataType::Float64 => PackedColField::F64(layout.field::<f64>()),
-                other => panic!("unsupported composite key column type: {other}"),
-            };
-            PackedCol {
-                field,
-                bit: i,
-                nullable: *nullable,
-                expr: expr.clone(),
-            }
-        })
-        .collect();
-    let bitmap = layout.field::<u64>();
-    let nbytes = layout.stride();
-    PackedKey {
-        layout,
-        cols: packed_cols,
-        bitmap,
-        nbytes,
+impl PackedKey {
+    /// The layout for key columns `cols`, `(type, nullable)` each, in order.
+    fn new(cols: &[(DataType, bool)]) -> Self {
+        let mut layout = RecordLayout::new();
+        let cols = cols
+            .iter()
+            .enumerate()
+            .map(|(bit, (ty, nullable))| {
+                let field = match ty {
+                    DataType::Int32 | DataType::Int64 => PackedColField::I64(layout.field()),
+                    DataType::Float64 => PackedColField::F64(layout.field()),
+                    DataType::Utf8View => PackedColField::Str {
+                        lo: layout.field(),
+                        hi: layout.field(),
+                    },
+                    other => panic!("unsupported GROUP BY key column type: {other}"),
+                };
+                PackedCol {
+                    field,
+                    bit,
+                    nullable: *nullable,
+                }
+            })
+            .collect();
+        let bitmap = layout.field::<u64>();
+        PackedKey {
+            layout,
+            cols,
+            bitmap,
+        }
+    }
+
+    /// The key's length in bytes.
+    fn len(&self) -> usize {
+        self.layout.stride()
     }
 }
 
-/// Pack the composite key columns into a fresh stack scratch (canonicalized values +
-/// null bitmap) then find-or-insert via `group_upsert_str` (which copies the packed
-/// bytes into the pool on a miss). Returns the group's record pointer.
+/// Pack the key columns into a fresh stack scratch (canonicalized values, interned
+/// string views, null bitmap), then find-or-insert via `group_upsert_packed`, which
+/// copies the bytes into a new group's record. Returns the group's record pointer.
 fn pack_and_upsert(
     ctx: &Ctx,
     packed: &PackedKey,
+    exprs: &[Expr],
     row: &Row,
     schema: &SchemaRef,
     cx: &CodegenCtx,
     state: *mut GroupState,
 ) -> Var<SMutPtr<u8>> {
-    let scratch = ctx.bind(stack_alloc(packed.nbytes));
+    let scratch = ctx.bind(stack_alloc(packed.len()));
     // SAFETY: the stack allocation is exactly one record using `packed.layout`
     // and remains live throughout this generated function.
     let prec = unsafe { packed.layout.wrap(scratch) };
     let bitmap = ctx.var(0u64);
-    for col in &packed.cols {
-        let cv = gen_expr(ctx, &col.expr, schema, row, cx);
+    for (col, expr) in packed.cols.iter().zip(exprs) {
+        let cv = gen_expr(ctx, expr, schema, row, cx);
         let valid = match cv.nullness() {
             Nullness::Nullable(b) => Some(b),
             Nullness::NonNull => None,
         };
-        // NULL columns pack a canonical value (0 / +0.0); the bitmap distinguishes them.
+        // NULL columns pack a canonical value (0 / +0.0 / the empty string); the bitmap
+        // distinguishes them.
         match col.field {
             PackedColField::I64(f) => {
                 let v = to_i64(ctx, cv);
@@ -449,6 +364,16 @@ fn pack_and_upsert(
                 };
                 prec.set(ctx, f, stored);
             }
+            PackedColField::Str { lo, hi } => {
+                // A null row's value is the empty string already (`gen_read`).
+                let view = intern(ctx, as_str(cv), state, cx);
+                prec.set(ctx, lo, ctx.bind(int_cast::<u64, u128, _>(view)));
+                prec.set(
+                    ctx,
+                    hi,
+                    ctx.bind(int_cast::<u64, u128, _>(shr(view, 64u128))),
+                );
+            }
         }
         if let Some(vb) = valid {
             // null → set bit `col.bit`; valid → 0.
@@ -458,29 +383,44 @@ fn pack_and_upsert(
         }
     }
     prec.set(ctx, packed.bitmap, bitmap);
-    // SAFETY: state is exclusively available; `scratch` contains exactly one
-    // initialized packed key of `packed.nbytes` bytes.
-    ctx.bind(unsafe {
-        call_extern3_unchecked(
-            cx.rt.group_upsert_str,
-            group_mut(state),
+    // SAFETY: `scratch` holds exactly one initialized packed key of `packed.len()`
+    // bytes, alive for the call.
+    let key = unsafe {
+        slice_from_raw_parts::<u8, _, _>(
             ptr_as_const(scratch),
-            Const::<u64>::new(packed.nbytes as u64),
+            Const::<u64>::new(packed.len() as u64),
         )
-    })
+    };
+    // SAFETY: state is exclusively available to this call.
+    ctx.bind(unsafe { call_extern2_unchecked(cx.rt.group_upsert_packed, group_mut(state), key) })
 }
 
-/// Unpack a group's pooled packed key into its output key `ColVal`s (nulls from the
-/// bitmap).
-fn unpack_composite(
+/// The interned view of `s`: its own view when it is short, else the one
+/// `group_intern` gives every equal string.
+fn intern(ctx: &Ctx, s: Var<Str>, state: *mut GroupState, cx: &CodegenCtx) -> Var<u128> {
+    let slot = ctx.bind(stack_array::<u128>(1));
+    // SAFETY: the slot holds one `u128`.
+    ctx.emit(unsafe { store(slot, s.view()) });
+    let intern = cx.rt.group_intern;
+    ctx.if_then(not(s.is_inline()), move |ctx| {
+        let bytes = s.as_slice(ctx);
+        // SAFETY: state is exclusively available; `bytes` are the string's, alive for
+        // the call, and `slot` is a `u128` on this kernel's stack.
+        ctx.emit(unsafe { call_extern3_unchecked(intern, group_mut(state), bytes, slot) });
+    });
+    // SAFETY: the slot was written above.
+    ctx.bind(unsafe { load_mut(slot) })
+}
+
+/// A group's key columns, read from the head of its record (nulls from the bitmap; a
+/// string's view against the interned strings' table).
+fn unpack_packed(
     ctx: &Ctx,
     packed: &PackedKey,
-    packed_ptr: Var<SMutPtr<u8>>,
+    rec: DynamicRecord,
+    strings: Var<SPtr<ByteBuffer>>,
 ) -> Vec<ColVal> {
-    // SAFETY: `packed_ptr` was stored by the matching packed-key layout and the
-    // group state retains its backing pool while results are emitted.
-    let prec = unsafe { packed.layout.wrap(packed_ptr) };
-    let bitmap = prec.get(ctx, packed.bitmap);
+    let bitmap = rec.get(ctx, packed.bitmap);
     packed
         .cols
         .iter()
@@ -493,169 +433,21 @@ fn unpack_composite(
                 Nullness::NonNull
             };
             match col.field {
-                PackedColField::I64(f) => ColVal::I64(prec.get(ctx, f), null),
-                PackedColField::F64(f) => ColVal::F64(prec.get(ctx, f), null),
+                PackedColField::I64(f) => ColVal::I64(rec.get(ctx, f), null),
+                PackedColField::F64(f) => ColVal::F64(rec.get(ctx, f), null),
+                PackedColField::Str { lo, hi } => {
+                    let lo = int_cast::<u128, u64, _>(rec.get(ctx, lo));
+                    let hi = int_cast::<u128, u64, _>(rec.get(ctx, hi));
+                    let view = ctx.bind(bitor(lo, shl(hi, 64u128)));
+                    // SAFETY: the view is one `group_intern` returned (or a short one),
+                    // and the group state keeps the interned strings, unchanged, while
+                    // groups are emitted.
+                    let s = ctx.bind(unsafe { ByteView::<Utf8>::from_parts(view, strings) });
+                    ColVal::Str(s, null)
+                }
             }
         })
         .collect()
-}
-
-/// A column's pushable form for the variable-length composite key builder.
-enum Pushable {
-    /// A fixed-width column's canonicalized bits (or the null bitmap).
-    U64(Var<u64>),
-    /// A string column's content reference.
-    Bytes(Var<SPtr<u8>>, Var<u64>),
-}
-
-/// Build a **variable-length** composite key: evaluate each column (computing its
-/// pushable form + the null bitmap), then push the bitmap and each column's bytes into
-/// the host scratch (`group_key_*`) and intern the assembled flat key
-/// (`group_upsert_composite`). Returns the group's record pointer.
-fn build_bytes_key(
-    ctx: &Ctx,
-    bk: &BytesKey,
-    row: &Row,
-    schema: &SchemaRef,
-    cx: &CodegenCtx,
-    state: *mut GroupState,
-) -> Var<SMutPtr<u8>> {
-    // SAFETY: the run owns `state`, and generated state mutations are sequenced.
-    ctx.emit(unsafe { call_extern1_unchecked(cx.rt.group_key_reset, group_mut(state)) });
-    let bitmap = ctx.var(0u64);
-    let mut pushables = Vec::with_capacity(bk.cols.len());
-    for col in &bk.cols {
-        let cv = gen_expr(ctx, &col.expr, schema, row, cx);
-        let valid = match cv.nullness() {
-            Nullness::Nullable(b) => Some(b),
-            Nullness::NonNull => None,
-        };
-        // NULL columns push a canonical value (0 / +0.0 / empty); the bitmap tells apart.
-        let pushable = match col.kind {
-            BytesColKind::I64 => {
-                let v = to_i64(ctx, cv);
-                let v = match valid {
-                    Some(vb) => ctx.bind(select(vb, v, 0i64)),
-                    None => v,
-                };
-                Pushable::U64(ctx.bind(int_cast::<u64, i64, _>(v)))
-            }
-            BytesColKind::F64 => {
-                let v = coerce_f64(ctx, cv);
-                let canon = canonical_f64(ctx, v);
-                let v = match valid {
-                    Some(vb) => ctx.bind(select(vb, canon, 0.0f64)),
-                    None => canon,
-                };
-                Pushable::U64(ctx.bind(bitcast::<u64, f64, _>(v)))
-            }
-            BytesColKind::Str => {
-                let (ptr, len) = resolve(ctx, as_str(cv), cx.rt.str_ptr);
-                Pushable::Bytes(ptr, len)
-            }
-        };
-        if let Some(vb) = valid {
-            let bit = ctx.bind(select(vb, 0u64, 1u64 << col.bit));
-            let next = ctx.bind(bitor(bitmap, bit));
-            ctx.store(bitmap, next);
-        }
-        pushables.push(pushable);
-    }
-    // Push the bitmap first, then each column in order.
-    // SAFETY: state is live and exclusively available for this mutation.
-    ctx.emit(unsafe { call_extern2_unchecked(cx.rt.group_key_push_u64, group_mut(state), bitmap) });
-    for p in pushables {
-        match p {
-            Pushable::U64(v) => {
-                // SAFETY: state is live and mutations are sequenced.
-                ctx.emit(unsafe {
-                    call_extern2_unchecked(cx.rt.group_key_push_u64, group_mut(state), v)
-                })
-            }
-            // SAFETY: `ptr` and `len` come from a resolved Arrow string that
-            // remains live for the duration of this generated call.
-            Pushable::Bytes(ptr, len) => ctx.emit(unsafe {
-                call_extern3_unchecked(cx.rt.group_key_push_bytes, group_mut(state), ptr, len)
-            }),
-        }
-    }
-    // SAFETY: state is live and exclusively available for the completed key.
-    ctx.bind(unsafe { call_extern1_unchecked(cx.rt.group_upsert_composite, group_mut(state)) })
-}
-
-/// Load a value of type `T` at byte offset `off` in `base` (a runtime offset, since a
-/// string column's length shifts everything after it).
-unsafe fn load_at_unchecked<T: StagedType + CopyType + 'static>(
-    ctx: &Ctx,
-    base: Var<SMutPtr<u8>>,
-    off: Var<i64>,
-) -> Var<T> {
-    // SAFETY: required by this helper's caller.
-    ctx.bind(unsafe { load_mut(ptr_cast_mut::<T, u8, _>(ptr_offset_mut(base, off))) })
-}
-
-/// A `*const u8` at byte offset `off` in `base`.
-unsafe fn ptr_at_unchecked(ctx: &Ctx, base: Var<SMutPtr<u8>>, off: Var<i64>) -> Var<SPtr<u8>> {
-    // SAFETY: required by this helper's caller.
-    ctx.bind(ptr_as_const(unsafe { ptr_offset_mut(base, off) }))
-}
-
-/// Unpack a variable-length composite key (the pooled flat bytes: `[bitmap | col0 |
-/// …]`, each fixed column 8 bytes, each string `[len | content]`) into its output key
-/// `ColVal`s, walking a running byte offset.
-fn unpack_bytes(ctx: &Ctx, bk: &BytesKey, flat_ptr: Var<SMutPtr<u8>>) -> Vec<ColVal> {
-    let off0 = ctx.var(0i64);
-    // SAFETY: the group state created this flat key using `bk`'s format and
-    // retains the complete allocation while groups are emitted.
-    let bitmap = unsafe { load_at_unchecked::<u64>(ctx, flat_ptr, off0) };
-    let offset = ctx.var(8i64); // running byte offset (past the bitmap)
-    let mut out = Vec::with_capacity(bk.cols.len());
-    for col in &bk.cols {
-        let null = if col.nullable {
-            let shifted = ctx.bind(shr(bitmap, col.bit as u64));
-            let bit = ctx.bind(bitand(shifted, 1u64));
-            Nullness::Nullable(ctx.bind(eq(bit, 0u64)))
-        } else {
-            Nullness::NonNull
-        };
-        match col.kind {
-            BytesColKind::I64 => {
-                // SAFETY: `offset` follows `bk`'s encoded column layout.
-                let value = unsafe { load_at_unchecked::<i64>(ctx, flat_ptr, offset) };
-                out.push(ColVal::I64(value, null));
-                let next = ctx.bind(add(offset, 8i64));
-                ctx.store(offset, next);
-            }
-            BytesColKind::F64 => {
-                // SAFETY: `offset` follows `bk`'s encoded column layout.
-                let value = unsafe { load_at_unchecked::<f64>(ctx, flat_ptr, offset) };
-                out.push(ColVal::F64(value, null));
-                let next = ctx.bind(add(offset, 8i64));
-                ctx.store(offset, next);
-            }
-            BytesColKind::Str => {
-                // SAFETY: string columns encode an in-allocation u64 length at
-                // the current offset, followed by exactly that many bytes.
-                let len = unsafe { load_at_unchecked::<u64>(ctx, flat_ptr, offset) };
-                let content_off = ctx.bind(add(offset, 8i64));
-                // SAFETY: `content_off` addresses the encoded string bytes.
-                let ptr = unsafe { ptr_at_unchecked(ctx, flat_ptr, content_off) };
-                out.push(ColVal::Str(
-                    StrVal::Bytes {
-                        ptr,
-                        len,
-                        view: None,
-                    },
-                    null,
-                ));
-                // advance past [len | content] = 8 + len.
-                let len_i = ctx.bind(int_cast::<i64, u64, _>(len));
-                let next = ctx.bind(add(content_off, len_i));
-                ctx.store(offset, next);
-            }
-        }
-    }
-    out
 }
 
 /// The physical cell type an aggregate accumulates in: an `i64` cell or an `f64`
@@ -716,57 +508,55 @@ struct AggFields {
     count: Option<FieldId<i64>>,
 }
 
-/// The group key's field(s) in the record — an `i64` for an integer key, or a
-/// `(ptr, len)` byte reference for a `Utf8View` key (the extern writes the pooled
-/// pointer; emit reads it to produce the output string). Always the record's leading
-/// field(s), at offset 0 — the `group_upsert*` externs rely on this.
+/// The group key's field in the record, its leading one — the `group_upsert*` externs
+/// write the key there.
 #[derive(Clone, Copy)]
 enum KeyFields {
     Int(FieldId<i64>),
     /// A `Float64` key. Stored (by the `Int` upsert extern) as its `u64` bits in the
     /// leading cell; read back as `f64` at emit (the token reinterprets those bytes).
     Float(FieldId<f64>),
-    Str {
-        ptr: FieldId<SPtr<u8>>,
-        len: FieldId<u64>,
-    },
-    /// A **composite** (multi-column) key, stored like a string key — a pointer to the
-    /// pooled *packed* key bytes (the `len` cell the extern also writes is reserved but
-    /// unread; the packed length is a compile-time constant). The fold packs the
-    /// columns; emit unpacks them (see [`PackedKey`]). Nulls ride in the packed bitmap,
-    /// not a `key_valid` cell, so each `(a, b, …)` combination is its own group.
-    Composite {
-        ptr: FieldId<SMutPtr<u8>>,
-    },
+    /// A packed key: the record's layout starts as the key's (see [`PackedKey`]), and
+    /// nulls ride in its bitmap, not a `key_valid` cell, so each `(a, b, …)` combination
+    /// is its own group.
+    Packed,
 }
 
-/// What the GROUP BY key is: one column (specialised int/float/string paths) or
-/// several (a packed byte key). Drives the record's key fields and the fold/emit.
+/// What the GROUP BY key is: one integer or float column (the `u64`-keyed table, a
+/// separate null group), or a packed key over every key column — strings, several
+/// columns.
 enum KeySpec {
     Single { ty: DataType, nullable: bool },
-    Composite(Vec<(DataType, bool)>), // (type, nullable) per key column, in order
+    Packed(PackedKey),
 }
 
 impl KeySpec {
     /// Derive the key spec from the aggregate's output schema (its first `n_keys`
     /// fields are the group keys).
     fn from_schema(out_schema: &SchemaRef, n_keys: usize) -> KeySpec {
-        if n_keys == 1 {
-            let f = out_schema.field(0);
-            KeySpec::Single {
-                ty: f.data_type().clone(),
-                nullable: f.is_nullable(),
-            }
-        } else {
-            KeySpec::Composite(
-                (0..n_keys)
-                    .map(|i| {
-                        let f = out_schema.field(i);
-                        (f.data_type().clone(), f.is_nullable())
-                    })
-                    .collect(),
-            )
+        let cols: Vec<(DataType, bool)> = out_schema.fields()[..n_keys]
+            .iter()
+            .map(|f| (f.data_type().clone(), f.is_nullable()))
+            .collect();
+        match cols.as_slice() {
+            [(ty, nullable)] if *ty != DataType::Utf8View => KeySpec::Single {
+                ty: ty.clone(),
+                nullable: *nullable,
+            },
+            _ => KeySpec::Packed(PackedKey::new(&cols)),
         }
+    }
+}
+
+/// The table a GROUP BY with this output schema and `n_keys` keys uses.
+pub fn group_key_kind(out_schema: &SchemaRef, n_keys: usize) -> KeyKind {
+    match KeySpec::from_schema(out_schema, n_keys) {
+        KeySpec::Single {
+            ty: DataType::Float64,
+            ..
+        } => KeyKind::Float,
+        KeySpec::Single { .. } => KeyKind::Int,
+        KeySpec::Packed(packed) => KeyKind::Packed(packed.len()),
     }
 }
 
@@ -778,23 +568,19 @@ impl KeySpec {
 struct GroupRecord {
     layout: RecordLayout,
     key: KeyFields,
-    /// A key-validity cell — `Some` only when the key column is **nullable**. The fold
-    /// stores `1` for a real key and `0` for the null group; emit reads it to decide
-    /// whether the key is NULL. Absent (and zero overhead) for non-nullable keys.
+    /// A key-validity cell — `Some` only when a single key column is **nullable**. The
+    /// fold stores `1` for a real key and `0` for the null group; emit reads it to
+    /// decide whether the key is NULL. Absent (and zero overhead) otherwise.
     key_valid: Option<FieldId<i64>>,
     aggs: Vec<AggFields>,
 }
 
-/// Reserve the leading key field(s) for a single-column key of type `key_ty`. Must be
-/// first (offset 0) — the `group_upsert*` externs write the key there.
+/// Reserve the leading key field for a single integer or float key of type `key_ty`.
+/// Must be first (offset 0) — the `group_upsert` extern writes the key there.
 fn key_fields_single(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields {
     match key_ty {
         DataType::Int32 | DataType::Int64 => KeyFields::Int(layout.field::<i64>()),
         DataType::Float64 => KeyFields::Float(layout.field::<f64>()),
-        DataType::Utf8View => KeyFields::Str {
-            ptr: layout.field::<SPtr<u8>>(),
-            len: layout.field::<u64>(),
-        },
         other => panic!("unsupported GROUP BY key type: {other}"),
     }
 }
@@ -803,20 +589,16 @@ fn key_fields_single(layout: &mut RecordLayout, key_ty: &DataType) -> KeyFields 
 /// `DataType`s (parallel to `aggs`). The output type picks the value cell ([`acc_ty`]);
 /// `sum`/`min`/`max` over `Float64` fold in an `f64` field, everything else `i64`.
 fn group_record(aggs: &[Expr], agg_tys: &[DataType], key_spec: &KeySpec) -> GroupRecord {
-    let mut layout = RecordLayout::new();
-    let (key, key_valid) = match key_spec {
+    let (mut layout, key, key_valid) = match key_spec {
         KeySpec::Single { ty, nullable } => {
+            let mut layout = RecordLayout::new();
             let key = key_fields_single(&mut layout, ty);
             // A nullable single key routes NULLs to the null group via a validity cell.
-            (key, nullable.then(|| layout.field::<i64>()))
+            let key_valid = nullable.then(|| layout.field::<i64>());
+            (layout, key, key_valid)
         }
-        KeySpec::Composite(_) => {
-            // A `(ptr, len)` to the pooled packed key (like a string key); nulls are in
-            // the packed bitmap, so no separate validity cell.
-            let ptr = layout.field::<SMutPtr<u8>>();
-            let _len = layout.field::<u64>(); // reserved for the extern's len write; unread
-            (KeyFields::Composite { ptr }, None)
-        }
+        // The key's own fields lead the record; nulls are in its bitmap.
+        KeySpec::Packed(packed) => (packed.layout, KeyFields::Packed, None),
     };
     let mut agg_fields = Vec::with_capacity(aggs.len());
     for (e, out) in aggs.iter().zip(agg_tys) {

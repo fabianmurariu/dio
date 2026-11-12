@@ -26,12 +26,12 @@ use std::marker::PhantomData;
 
 use rust_lms_derive::{StagedType, extern_fn};
 
-use crate::ffi::{ExternRef, FatSlice, call_extern1, slice_from_raw_parts, stack_array};
+use crate::ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array};
 use crate::func::Ctx;
 use crate::num::{
     bitand, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr, swap_bytes,
 };
-use crate::refer::{SPtr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store};
+use crate::refer::{SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store};
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
 use crate::r#struct::{Field, load_field_unchecked};
 use crate::types::{
@@ -100,39 +100,60 @@ pub fn view_len(view: u128) -> usize {
 }
 
 /// The runtime value of a [`ByteView<K>`]: an Arrow view and the table it indexes.
+///
+/// Kernels read a long value's bytes through its table without a check, and a
+/// `RawByteView` reaches them safely (a [`Const`], a kernel argument). So only an inline
+/// value, which never reads its table, is built safely; a long one comes from
+/// [`new`](Self::new), whose caller vouches for the table.
 #[repr(C)]
 #[derive(Clone, Copy, Debug, PartialEq, Eq, StagedType)]
 pub struct RawByteView {
     #[staged(u128)]
-    pub view: u128,
+    view: u128,
     #[staged(SPtr<ByteBuffer>)]
-    pub buffers: *const ByteBuffer,
+    buffers: *const ByteBuffer,
 }
 
 /// The empty string: an inline view of no bytes, with no table.
 impl Default for RawByteView {
     fn default() -> Self {
-        Self::new(0, std::ptr::null())
+        Self {
+            view: 0,
+            buffers: std::ptr::null(),
+        }
     }
 }
 
 impl RawByteView {
     /// A view and the table it indexes (null for an inline view).
-    pub fn new(view: u128, buffers: *const ByteBuffer) -> Self {
+    ///
+    /// # Safety
+    ///
+    /// For a long view, `buffers[buf_idx]` and the bytes the view names inside it stay
+    /// alive and unchanged while this value, or any copy of it (a kernel it is baked
+    /// into or passed to), is read; an inline view's data past its length is zero.
+    pub unsafe fn new(view: u128, buffers: *const ByteBuffer) -> Self {
         Self { view, buffers }
     }
 
     /// An inline value, with no table. `None` when `bytes` is too long to be one.
     pub fn inline(bytes: &[u8]) -> Option<Self> {
-        (bytes.len() <= MAX_INLINE_LEN).then(|| Self::new(make_view(bytes, 0, 0), std::ptr::null()))
+        (bytes.len() <= MAX_INLINE_LEN).then(|| Self {
+            view: make_view(bytes, 0, 0),
+            buffers: std::ptr::null(),
+        })
+    }
+
+    /// The Arrow view.
+    pub fn view(&self) -> u128 {
+        self.view
     }
 
     /// The bytes it stands for.
     ///
     /// # Safety
     ///
-    /// For a long view, `buffers` and the bytes its entries describe are alive and
-    /// unchanged, and the view's `(buf_idx, offset, len)` lies inside them.
+    /// For a long view, the table it was built with is still alive (see [`new`](Self::new)).
     pub unsafe fn bytes(&self) -> &[u8] {
         let len = view_len(self.view);
         if len <= MAX_INLINE_LEN {
@@ -159,8 +180,9 @@ mod sealed {
     pub trait Sealed {}
 }
 
-/// What a view's bytes are, as Arrow's `ByteViewType`.
-pub trait ByteKind: sealed::Sealed + 'static {}
+/// What a view's bytes are, as Arrow's `ByteViewType`. `Copy`, like every kind marker,
+/// so types generic over a kind derive `Clone` and `Copy`.
+pub trait ByteKind: sealed::Sealed + Copy + 'static {}
 
 /// Valid UTF-8, as Arrow's `StringViewType`.
 #[derive(Clone, Copy, Debug)]
@@ -182,6 +204,7 @@ impl ByteKind for Binary {}
 /// A byte string of kind `K`: an Arrow view and its buffer table (a [`RawByteView`] at
 /// run time). `Copy`, no lifetime; the host keeps the table and its blocks alive for the
 /// kernel call.
+#[derive(Clone, Copy)]
 pub struct ByteView<K: ByteKind>(PhantomData<fn() -> K>);
 
 /// A staged `&str`: valid UTF-8.
@@ -189,14 +212,6 @@ pub type Str = ByteView<Utf8>;
 
 /// A staged `&[u8]`.
 pub type Bin = ByteView<Binary>;
-
-impl<K: ByteKind> Clone for ByteView<K> {
-    fn clone(&self) -> Self {
-        *self
-    }
-}
-
-impl<K: ByteKind> Copy for ByteView<K> {}
 
 // SAFETY: every layout question is answered by `RawByteView`, its runtime value.
 unsafe impl<K: ByteKind> StagedType for ByteView<K> {
@@ -233,12 +248,12 @@ unsafe impl<K: ByteKind> RuntimeResult for ByteView<K> {
     type Output<'call> = RawByteView;
 }
 
-// SAFETY: the view and the table's address, as `RawByteView` lays them out.
+// SAFETY: the view and the table's address, as `RawByteView` lays them out. A long
+// value's table outlives the kernel: `RawByteView::new`'s contract.
 unsafe impl<K: ByteKind> ConstantType for ByteView<K> {
     fn codegen_constant(value: &RawByteView, ctx: &mut CompilationContext<'_>) -> Value {
         let view = u128::codegen_constant(&value.view, ctx);
-        let addr = ctx.iconst(ScalarType::I64, value.buffers as i64);
-        let buffers = Value::scalar(ctx.addr_to_ptr(addr));
+        let buffers = const_ptr::<ByteBuffer>(value.buffers).codegen(ctx);
         view_value(ctx, view, buffers)
     }
 }
@@ -260,23 +275,12 @@ fn view_value(ctx: &mut CompilationContext, view: Value, buffers: Value) -> Valu
 }
 
 /// A [`ByteView`] from a view and the table it indexes. See [`ByteView::from_parts`].
+#[derive(Clone, Copy)]
 pub struct MakeByteView<V, B, K> {
     view: V,
     buffers: B,
     _k: PhantomData<fn() -> K>,
 }
-
-impl<V: Clone, B: Clone, K> Clone for MakeByteView<V, B, K> {
-    fn clone(&self) -> Self {
-        Self {
-            view: self.view.clone(),
-            buffers: self.buffers.clone(),
-            _k: PhantomData,
-        }
-    }
-}
-
-impl<V: Copy, B: Copy, K> Copy for MakeByteView<V, B, K> {}
 
 unsafe impl<V, B, K> Staged for MakeByteView<V, B, K>
 where
@@ -350,32 +354,39 @@ fn byte(ctx: &Ctx, ptr: Var<SPtr<u8>>, i: Var<u64>) -> Var<u8> {
     ctx.bind(unsafe { read_unaligned::<u8, _>(byte_at(ptr, i)) })
 }
 
-/// Whether `n` bytes at `a + start` and `b + start` are equal: 8 at a time, then one at a
-/// time.
+/// The first index in `start..end` where the bytes at `a` and `b` differ, `end` if none
+/// does: 8 at a time while a word fits, then one at a time (from inside the differing
+/// word, if one was found).
+fn first_difference(
+    ctx: &Ctx,
+    a: Var<SPtr<u8>>,
+    b: Var<SPtr<u8>>,
+    start: Var<u64>,
+    end: Var<u64>,
+) -> Var<u64> {
+    let i = ctx.var(start);
+    ctx.iterate(|ctx, done| {
+        ctx.exit_if(gt(i + 8u64, end), done);
+        ctx.exit_if(ne(word_be(ctx, a, i), word_be(ctx, b, i)), done);
+        ctx.store(i, i + 8u64);
+    });
+    ctx.iterate(|ctx, done| {
+        ctx.exit_if(ge(i, end), done);
+        ctx.exit_if(ne(byte(ctx, a, i), byte(ctx, b, i)), done);
+        ctx.store(i, i + 1u64);
+    });
+    i
+}
+
+/// Whether the bytes at `a` and `b` in `start..end` are equal.
 fn bytes_eq(
     ctx: &Ctx,
     a: Var<SPtr<u8>>,
     b: Var<SPtr<u8>>,
     start: Var<u64>,
-    n: Var<u64>,
+    end: Var<u64>,
 ) -> Var<bool> {
-    let end = ctx.bind(start + n);
-    ctx.join(|ctx, out| {
-        let i = ctx.var(start);
-        ctx.iterate(|ctx, done| {
-            ctx.exit_if(gt(i + 8u64, end), done);
-            let (wa, wb) = (word_be(ctx, a, i), word_be(ctx, b, i));
-            ctx.if_then(ne(wa, wb), |ctx| ctx.goto(out, false));
-            ctx.store(i, i + 8u64);
-        });
-        ctx.iterate(|ctx, done| {
-            ctx.exit_if(ge(i, end), done);
-            let (ba, bb) = (byte(ctx, a, i), byte(ctx, b, i));
-            ctx.if_then(ne(ba, bb), |ctx| ctx.goto(out, false));
-            ctx.store(i, i + 1u64);
-        });
-        true
-    })
+    ctx.bind(eq(first_difference(ctx, a, b, start, end), end))
 }
 
 impl<K: ByteKind> Var<ByteView<K>> {
@@ -429,6 +440,15 @@ impl<K: ByteKind> Var<ByteView<K>> {
         })
     }
 
+    /// Its bytes, for an extern that reads them during the call. An inline value's
+    /// bytes are a copy on this kernel's stack, so the slice is valid only while the
+    /// kernel runs.
+    pub fn as_slice(self, ctx: &Ctx) -> Var<RawSlice<u8>> {
+        let (data, len) = (self.data(ctx), ctx.bind(self.byte_len()));
+        // SAFETY: `len` bytes at `data`: the value's own (`ByteView::from_parts`).
+        ctx.bind(unsafe { slice_from_raw_parts::<u8, _, _>(data, len) })
+    }
+
     /// Whether the two hold the same bytes. Both are of one kind:
     ///
     /// ```compile_fail
@@ -448,8 +468,7 @@ impl<K: ByteKind> Var<ByteView<K>> {
             // Both long, of one length: the bytes after the prefix.
             let len = ctx.bind(self.byte_len());
             let (da, db) = (self.data(ctx), other.data(ctx));
-            let start = ctx.var(4u64);
-            bytes_eq(ctx, da, db, start, ctx.bind(len - 4u64))
+            bytes_eq(ctx, da, db, ctx.var(4u64), len)
         })
     }
 
@@ -472,21 +491,13 @@ impl<K: ByteKind> Var<ByteView<K>> {
                 ctx.bind(swap_bytes(other.prefix())),
             );
             ctx.if_then(ne(pa, pb), |ctx| ctx.goto(out, sign(pa, pb)));
-            // The bytes after the prefix, to the shorter's end; then the lengths.
+            // The first differing byte after the prefix, to the shorter's end; else the
+            // lengths.
             let (da, db) = (self.data(ctx), other.data(ctx));
             let n = ctx.bind(min(len_a, len_b));
-            let i = ctx.var(4u64);
-            ctx.iterate(|ctx, done| {
-                ctx.exit_if(gt(i + 8u64, n), done);
-                let (wa, wb) = (word_be(ctx, da, i), word_be(ctx, db, i));
-                ctx.if_then(ne(wa, wb), |ctx| ctx.goto(out, sign(wa, wb)));
-                ctx.store(i, i + 8u64);
-            });
-            ctx.iterate(|ctx, done| {
-                ctx.exit_if(ge(i, n), done);
-                let (ba, bb) = (byte(ctx, da, i), byte(ctx, db, i));
-                ctx.if_then(ne(ba, bb), |ctx| ctx.goto(out, sign(ba, bb)));
-                ctx.store(i, i + 1u64);
+            let i = first_difference(ctx, da, db, ctx.var(4u64), n);
+            ctx.if_then(lt(i, n), |ctx| {
+                ctx.goto(out, sign(byte(ctx, da, i), byte(ctx, db, i)));
             });
             sign(len_a, len_b)
         })
@@ -497,13 +508,13 @@ impl<K: ByteKind> Var<ByteView<K>> {
         let (len, n) = (ctx.bind(self.byte_len()), ctx.bind(prefix.byte_len()));
         ctx.join(|ctx, out| {
             ctx.if_then(gt(n, len), |ctx| ctx.goto(out, false));
-            // The first `min(n, 4)` bytes, from the prefixes.
-            let bits = ctx.bind(min(n, 4u64) * 8u64);
-            let mask = ctx.bind(int_cast::<u32, u64, _>(shl(1u64, bits) - 1u64));
+            // The first `min(n, 4)` bytes, from the prefixes; then the rest.
+            let checked = ctx.bind(min(n, 4u64));
+            let mask = ctx.bind(int_cast::<u32, u64, _>(shl(1u64, checked * 8u64) - 1u64));
             let differ = bitand(bitxor(self.prefix(), prefix.prefix()), mask);
             ctx.if_then(ne(differ, 0u32), |ctx| ctx.goto(out, false));
             let (da, dp) = (self.data(ctx), prefix.data(ctx));
-            bytes_eq(ctx, da, dp, ctx.var(0u64), n)
+            bytes_eq(ctx, da, dp, checked, n)
         })
     }
 
@@ -568,10 +579,7 @@ impl Var<Str> {
                 let continuation = int_cast::<u64, u128, _>(count_ones(continuation));
                 ctx.goto(out, len - continuation);
             });
-            let data = self.data(ctx);
-            // SAFETY: the value's bytes, alive for the call (`ByteView::from_parts`).
-            let bytes = unsafe { slice_from_raw_parts::<u8, _, _>(data, len) };
-            call_extern1(utf8_len, bytes)
+            call_extern1(utf8_len, self.as_slice(ctx))
         })
     }
 }
@@ -595,8 +603,8 @@ mod tests {
         let block = b"0123456789abcdefghijklmnopqrstuvwxyz".to_vec();
         let table = [ByteBuffer::new(b""), ByteBuffer::new(&block)];
         for (bytes, offset) in [(&block[..0], 0), (&block[3..15], 3), (&block[5..30], 5)] {
-            let view = RawByteView::new(make_view(bytes, 1, offset), table.as_ptr());
-            // SAFETY: `table` and `block` outlive the read.
+            // SAFETY: `table` and `block` outlive every read below.
+            let view = unsafe { RawByteView::new(make_view(bytes, 1, offset), table.as_ptr()) };
             assert_eq!(unsafe { view.bytes() }, bytes);
             assert_eq!(view_len(view.view), bytes.len());
         }

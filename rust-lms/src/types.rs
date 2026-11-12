@@ -661,13 +661,20 @@ unsafe impl StagedType for i128 {
     }
 }
 
-unsafe impl ConstantType for i128 {
-    fn codegen_constant(value: &i128, ctx: &mut CompilationContext<'_>) -> Value {
-        let lo = ctx.iconst(ScalarType::I64, *value as i64);
-        let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
-        Value::scalar(ctx.iconcat(lo, hi))
-    }
+/// A 128-bit constant, as its two 64-bit halves.
+macro_rules! impl_constant_128 {
+    ($($ty:ty),+) => {$(
+        unsafe impl ConstantType for $ty {
+            fn codegen_constant(value: &$ty, ctx: &mut CompilationContext<'_>) -> Value {
+                let lo = ctx.iconst(ScalarType::I64, *value as i64);
+                let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
+                Value::scalar(ctx.iconcat(lo, hi))
+            }
+        }
+    )+};
 }
+
+impl_constant_128!(i128, u128);
 
 unsafe impl CopyType for i128 {}
 
@@ -684,14 +691,6 @@ unsafe impl StagedType for u128 {
 
     fn align_of() -> usize {
         std::mem::align_of::<u128>()
-    }
-}
-
-unsafe impl ConstantType for u128 {
-    fn codegen_constant(value: &u128, ctx: &mut CompilationContext<'_>) -> Value {
-        let lo = ctx.iconst(ScalarType::I64, *value as i64);
-        let hi = ctx.iconst(ScalarType::I64, (*value >> 64) as i64);
-        Value::scalar(ctx.iconcat(lo, hi))
     }
 }
 

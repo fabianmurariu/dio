@@ -100,27 +100,15 @@ pub trait FloatNum: Num {}
 // =============================================================================
 
 macro_rules! impl_int {
-    ($ty:ty, signed) => {
+    ($ty:ty, $signed:literal, $shr:ident) => {
         impl Int for $ty {
-            const SIGNED: bool = true;
+            const SIGNED: bool = $signed;
 
             fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
             }
             fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.sshr(l.leaf(), r.leaf()))
-            }
-        }
-    };
-    ($ty:ty, unsigned) => {
-        impl Int for $ty {
-            const SIGNED: bool = false;
-
-            fn codegen_shl(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.ishl(l.leaf(), r.leaf()))
-            }
-            fn codegen_shr(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
-                Value::scalar(ctx.ushr(l.leaf(), r.leaf()))
+                Value::scalar(ctx.$shr(l.leaf(), r.leaf()))
             }
         }
     };
@@ -171,7 +159,7 @@ macro_rules! impl_int_num {
             }
         }
         impl_int_ordered!($ty, Slt, Sgt, Sle, Sge);
-        impl_int!($ty, signed);
+        impl_int!($ty, true, sshr);
         impl IntNum for $ty {
             fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.srem(l.leaf(), r.leaf()))
@@ -196,7 +184,7 @@ macro_rules! impl_int_num {
             }
         }
         impl_int_ordered!($ty, Ult, Ugt, Ule, Uge);
-        impl_int!($ty, unsigned);
+        impl_int!($ty, false, ushr);
         impl IntNum for $ty {
             fn codegen_rem(l: Value, r: Value, ctx: &mut CompilationContext<'_>) -> Value {
                 Value::scalar(ctx.urem(l.leaf(), r.leaf()))
@@ -218,12 +206,12 @@ impl_int_num!(u32, unsigned);
 impl sealed::Sealed for i128 {}
 impl Bits for i128 {}
 impl_int_ordered!(i128, Slt, Sgt, Sle, Sge);
-impl_int!(i128, signed);
+impl_int!(i128, true, sshr);
 
 impl sealed::Sealed for u128 {}
 impl Bits for u128 {}
 impl_int_ordered!(u128, Ult, Ugt, Ule, Uge);
-impl_int!(u128, unsigned);
+impl_int!(u128, false, ushr);
 
 impl sealed::Sealed for bool {}
 impl Bits for bool {}

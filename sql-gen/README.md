@@ -97,7 +97,7 @@ the difference the paper describes.
 | `Operator` ADT — `Scan`/`Project`/`Filter`/`HashJoin`/`Group` | `plan::Operator` — the same set |
 | `Record(fields: Vector[Rep[String]], schema: Schema)` | `value::Row = Vec<ColVal>` + an Arrow `SchemaRef` |
 | `Value` / `StringValue` / `IntValue` hierarchy (§5) | `value::ColVal` — `I32`/`I64`/`F64`/`Bool`/`Str` |
-| `StringValue(Rep[Pointer[Char]], Rep[Int])` | `StrVal::Bytes { ptr: Var<SPtr<u8>>, len: Var<u64> }` |
+| `StringValue(Rep[Pointer[Char]], Rep[Int])` | `Var<Str>` — an Arrow byte view and its buffer table (`rust-lms`'s `ByteView`) |
 | `ColBuffer` / `ArrayBuffer` — column storage (§5) | `output::OutCols` — one growable `SVec<T>` per column |
 | `HashMapAgg`, `HashMapBuffer` (§4) | `group::GroupState`, `join::JoinState` |
 | `processCSV(file)(yld)` | `gen_scan` / `for_each_batch` over Arrow batches |
@@ -121,7 +121,7 @@ because Arrow columns are typed on arrival.
 
 ## Where sql-gen goes further
 
-The paper is deliberately a 500-line teaching artifact. sql-gen is ~4,800 lines,
+The paper is deliberately a 500-line teaching artifact. sql-gen is ~4,200 lines,
 and most of the difference is the things a working engine cannot skip.
 
 ### NULLs, decided at stage 0
@@ -189,9 +189,12 @@ CSV's way* — `mmap`, pointers into the mapped file, avoiding copies into strin
 objects.
 
 sql-gen skips that problem: input is already columnar, already typed, and already
-carries validity bitmaps. `arrow-lms` hands the kernel lifetime-free `FfiArray`
-descriptors, and output goes into growable Arrow builders. The scan is a batch-pull
-loop over a stream, not a tokenizer.
+carries validity bitmaps. `arrow-lms` hands the kernel a lifetime-free `FfiBatch` per
+batch, a descriptor per column, and output goes into growable Arrow builders. The
+scan is a batch-pull loop over a stream, not a tokenizer. A string is never copied to
+be read: a `Utf8View` row is its 16-byte view plus its array's buffer table, compared
+and measured in staged code; literals are baked-in views, and GROUP BY interns string
+keys so a key is fixed-width bytes.
 
 ### Errors from generated code
 

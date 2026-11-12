@@ -5,9 +5,9 @@
 //! the lifecycle of the single live batch: each `next_batch`
 //! drops the previous `RecordBatch` (freeing its Arrow buffers) before pulling the
 //! next, so a scan over a huge table keeps only **one input batch resident** at a
-//! time. `next_batch` returns a pointer to a reused descriptor buffer (or null at
-//! end-of-stream); the kernel rebuilds a `&[FfiArray]` batch from it and runs the
-//! inner row loop. See `docs/table_scan.md` §3/§6.
+//! time. `next_batch` returns a pointer to the batch's [`FfiBatch`] (or null at
+//! end-of-stream), which the kernel reads its rows through. See
+//! `docs/table_scan.md` §3/§6.
 //!
 //! Single-partition for now; a JOIN's build side (which must retain its batches)
 //! and parallelism are later milestones.
@@ -16,7 +16,7 @@ use std::ptr;
 
 use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArray, prepare_record_batch};
+use arrow_lms::{FfiBatch, FfiRecordBatch};
 use datafusion_common::{DataFusionError, Result};
 use rust_lms::prelude::*;
 
@@ -24,12 +24,10 @@ use rust_lms::prelude::*;
 pub struct ScanStream {
     expected_schema: SchemaRef,
     iter: Box<dyn Iterator<Item = RecordBatch>>,
-    /// The batch currently exposed to the kernel. Dropping it frees that batch's
-    /// Arrow buffers; exactly one input batch is resident at a time.
-    current: Option<RecordBatch>,
-    /// Reused descriptor buffer, refilled in place each `next_batch`. Its pointer is
-    /// handed to the kernel and stays valid until the following `next_batch`.
-    descs: Vec<FfiArray>,
+    /// The batch currently exposed to the kernel, with its descriptors, which stay
+    /// valid until the following `next_batch`. Dropping it frees that batch's Arrow
+    /// buffers; exactly one input batch is resident at a time.
+    current: Option<FfiRecordBatch>,
 }
 
 impl ScanStream {
@@ -39,7 +37,6 @@ impl ScanStream {
             expected_schema,
             iter,
             current: None,
-            descs: Vec::new(),
         }
     }
 
@@ -55,26 +52,19 @@ impl ScanStream {
         )))
     }
 
-    /// Advance to the next batch; return a pointer to its descriptor buffer, or
-    /// null when the stream is exhausted. Drops the previous batch first.
-    fn next_batch(&mut self) -> Result<Option<&[FfiArray]>> {
+    /// Advance to the next batch and return its descriptors, or `None` when the
+    /// stream is exhausted. Drops the previous batch first.
+    fn next_batch(&mut self) -> Result<Option<&FfiBatch>> {
         // Release the previous batch (its Arrow buffers are freed here).
         self.current = None;
         let Some(rb) = self.iter.next() else {
             return Ok(None);
         };
         self.validate_schema(&rb)?;
-        // Build the descriptors while borrowing `rb`, copy them into the reused
-        // buffer (they're `Copy`, holding only pointers into `rb`'s buffers), then
-        // release the borrow and keep `rb` alive so those pointers stay valid.
-        let prepared = prepare_record_batch(&rb).map_err(|error| {
+        let batch = FfiRecordBatch::new(rb).map_err(|error| {
             DataFusionError::Execution(format!("failed to prepare input batch: {error}"))
         })?;
-        self.descs.clear();
-        self.descs.extend_from_slice(prepared.arrays());
-        drop(prepared);
-        self.current = Some(rb);
-        Ok(Some(&self.descs))
+        Ok(Some(self.current.insert(batch).batch()))
     }
 
     fn drain_validated(&mut self) -> Result<Box<dyn Iterator<Item = RecordBatch>>> {
@@ -137,11 +127,11 @@ impl Inputs {
     }
 }
 
-/// Pull the next batch of table `table`, returning its descriptor pointer (null =
-/// exhausted). `table` is a stage-0 constant in the kernel, so dispatch is free.
+/// Pull the next batch of table `table`, returning its descriptors (null = exhausted).
+/// `table` is a stage-0 constant in the kernel, so dispatch is free.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn scan_next(inputs: &mut Inputs, table: u64) -> *const FfiArray {
+pub extern "C" fn scan_next(inputs: &mut Inputs, table: u64) -> *const FfiBatch {
     let result = usize::try_from(table)
         .map_err(|_| DataFusionError::Execution(format!("input table index {table} is invalid")))
         .and_then(|table| {
@@ -154,7 +144,7 @@ pub extern "C" fn scan_next(inputs: &mut Inputs, table: u64) -> *const FfiArray 
                     ))
                 })?
                 .next_batch()
-                .map(|batch| batch.map(<[FfiArray]>::as_ptr))
+                .map(|batch| batch.map(|batch| batch as *const FfiBatch))
         });
 
     match result {
@@ -189,16 +179,14 @@ mod tests {
         let schema = first.schema();
         let mut s = ScanStream::new(schema, Box::new(vec![first, batch(vec![4, 5])].into_iter()));
 
-        // `v` is the descriptor vec (one `FfiArray` per column); the row count is
-        // column 0's element count (`FfiArray::len`), not the vec length.
         let p1 = s.next_batch().unwrap();
-        assert_eq!(p1.map(|v| v.len()), Some(1)); // 1 column
-        assert_eq!(p1.map(|v| v[0].len()), Some(3)); // batch 1: 3 rows
+        assert_eq!(p1.map(FfiBatch::num_columns), Some(1));
+        assert_eq!(p1.map(FfiBatch::num_rows), Some(3)); // batch 1: 3 rows
         assert!(s.current.is_some()); // one batch resident
 
         let p2 = s.next_batch().unwrap();
-        assert_eq!(p2.map(|v| v.len()), Some(1)); // 1 column
-        assert_eq!(p2.map(|v| v[0].len()), Some(2)); // batch 2: 2 rows
+        assert_eq!(p2.map(FfiBatch::num_columns), Some(1));
+        assert_eq!(p2.map(FfiBatch::num_rows), Some(2)); // batch 2: 2 rows
         assert!(s.current.is_some());
 
         assert!(s.next_batch().unwrap().is_none()); // exhausted

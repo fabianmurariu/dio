@@ -774,6 +774,24 @@ where
     }
 }
 
+/// Promote a raw pointer to a shared reference at the same address (no code
+/// emitted): the inverse of [`ref_as_ptr`], for a pointer an extern returns.
+///
+/// # Safety
+///
+/// At execution the pointer is non-null, aligned, and addresses a live `T` that
+/// nothing writes for as long as the reference is used.
+pub unsafe fn ptr_as_ref<T, P>(ptr: P) -> PtrCast<P, SRef<T>>
+where
+    T: StagedType,
+    P: Staged<Out = SPtr<T>>,
+{
+    PtrCast {
+        ptr,
+        _s: PhantomData,
+    }
+}
+
 /// Expose a staged mutable reference as a mutable raw pointer at the same
 /// address.
 ///

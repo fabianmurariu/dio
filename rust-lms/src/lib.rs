@@ -129,12 +129,12 @@ pub mod prelude {
         is_mut_ref_some, is_none, is_ref_none, is_ref_some, is_some, match_opt, match_opt_mut_ref,
         match_opt_ref, opt_mut_ref_none, opt_mut_ref_some, opt_ref_none, opt_ref_some, unwrap_or,
     };
-    pub use crate::pool::BytesPool;
+    pub use crate::pool::{ByteLiterals, BytesPool};
     pub use crate::refer::{
         ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
         PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
         StoreRef, array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
-        ptr_as_const, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
+        ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
         read_unaligned, ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
     };
     pub use crate::slice::{
