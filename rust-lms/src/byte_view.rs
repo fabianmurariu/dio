@@ -109,6 +109,13 @@ pub struct RawByteView {
     pub buffers: *const ByteBuffer,
 }
 
+/// The empty string: an inline view of no bytes, with no table.
+impl Default for RawByteView {
+    fn default() -> Self {
+        Self::new(0, std::ptr::null())
+    }
+}
+
 impl RawByteView {
     /// A view and the table it indexes (null for an inline view).
     pub fn new(view: u128, buffers: *const ByteBuffer) -> Self {
