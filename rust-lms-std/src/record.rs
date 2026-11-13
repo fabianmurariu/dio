@@ -131,11 +131,15 @@ impl Default for RecordLayout {
 /// staged type `T`, tagged with the id of the [`RecordLayout`] that issued it.
 /// Only a [`RecordLayout::field`] call can make one, so its offset is always valid
 /// for that layout; [`DynamicRecord`] checks the brand before touching memory.
+///
+/// A token holds no `T`, so it is `Send` and `Sync` whatever `T` is (a pointer
+/// field's token among them): a layout can be shared by threads that each fill a
+/// record of it.
 pub struct FieldId<T> {
     layout: u32,
     index: usize,
     offset: usize,
-    _t: PhantomData<T>,
+    _t: PhantomData<fn() -> T>,
 }
 
 impl<T> Clone for FieldId<T> {
