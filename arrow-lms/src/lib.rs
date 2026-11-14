@@ -7,13 +7,16 @@
 //! `OutCols`). Read descriptors and owner-backed writable validity descriptors
 //! are separate types.
 //!
-//! Scope: primitive and `Boolean` arrays (and `Utf8View` views). Validity is a first-class staged view.
+//! Scope: primitive and `Boolean` arrays, and byte-view arrays (`Utf8View`,
+//! `BinaryView`) read as `ByteView<K>` rows ([`ByteViewDescriptors`]). Validity is a first-class staged view.
 
 // `#[derive(StagedType)]` generates field-token modules with lowercase field
 // names, which trips the case lints.
 #![allow(non_camel_case_types, non_snake_case)]
 
 mod array;
+mod batch;
+mod byte_view;
 pub mod ffi;
 pub mod ffi_mut;
 
@@ -21,8 +24,12 @@ pub use array::{
     ArrayBatchOps, ArraySource, BooleanArrayView, FfiArrayOps, PrimitiveArrayView, ValidityIsValid,
     ValidityLen, ValidityNullCount, ValiditySource, ValidityView,
 };
+pub use batch::{FfiBatch, FfiBatchOps, FfiBatchType};
+pub use byte_view::{
+    ArrowByteKind, ByteViewArrayView, ByteViewDescriptors, FfiByteViewArray, FfiByteViewArrayOps,
+};
 pub use ffi::{
-    FfiArray, FfiBuffer, FfiError, FfiValidity, FfiValidityMut, PreparedFfiBatch,
+    FfiArray, FfiBuffer, FfiError, FfiRecordBatch, FfiValidity, FfiValidityMut, PreparedFfiBatch,
     PreparedFfiValidityMut, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
     prepare_record_batch, prepare_validity_mut,
 };

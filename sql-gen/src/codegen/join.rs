@@ -12,6 +12,7 @@
 //! Phase 1: inner join, single `Int` key.
 
 use arrow::datatypes::{Field, SchemaRef};
+use arrow_lms::FfiBatchOps;
 use datafusion_expr::Expr;
 use rust_lms::prelude::*;
 
@@ -21,9 +22,7 @@ use crate::value::{Nullness, Row};
 
 use super::expr::gen_expr;
 use super::numeric::to_i64;
-use super::{
-    CodegenCtx, InputsSource, Yld, batch_from_descs, gen_len, gen_op, gen_read, write_col,
-};
+use super::{CodegenCtx, InputsSource, Yld, batch_ref, gen_op, gen_read, write_col};
 
 fn join_ref(state: *mut JoinState) -> impl Staged<Out = SPtr<Opaque<JoinState>>> + Copy {
     const_ptr::<Opaque<JoinState>>(state)
@@ -62,33 +61,29 @@ fn emit_key_insert(
 /// Bare-scan build index kernel: iterate the (host-cloned) relation and, per
 /// non-null row, read the `Int` key column (typed) and `join_insert` its
 /// `Locator(batch_idx, row)`.
-pub(crate) fn gen_build_index(
-    ctx: &Ctx,
-    rel_schema: SchemaRef,
-    key_col: usize,
-    cx: &CodegenCtx,
-) {
+pub(crate) fn gen_build_index(ctx: &Ctx, rel_schema: SchemaRef, key_col: usize, cx: &CodegenCtx) {
     let handle = cx
         .join
         .clone()
         .expect("build index without a baked JoinState");
     let state = handle.state;
     let rt = cx.rt;
-    let ncols = rel_schema.fields().len() as u64;
     let key_field: Field = rel_schema.field(key_col).clone();
-    let key_dt = key_field.data_type().clone();
 
     // SAFETY: the build driver retains `state` and does not mutate it while
     // this shared call executes.
     let count = ctx.bind(unsafe { call_extern1_unchecked(rt.join_rel_count, join_ref(state)) });
     range(0u64, count).for_each(ctx, move |ctx, b| {
-        // SAFETY: `b < count`; `state` retains all relation batches.
-        let descs =
-            ctx.bind(unsafe { call_extern2_unchecked(rt.join_left_batch, join_ref(state), b) });
-        // SAFETY: `JoinState` retains each descriptor array, and schema
-        // validation guarantees exactly `ncols` entries.
-        let batch = ctx.bind(unsafe { batch_from_descs(descs, ncols) });
-        let len = gen_len(ctx, batch, &key_dt);
+        // SAFETY: `b < count`; `state` retains all relation batches, so the batch is
+        // not null and outlives the kernel.
+        let batch = ctx.bind(unsafe {
+            batch_ref(call_extern2_unchecked(
+                rt.join_left_batch,
+                join_ref(state),
+                b,
+            ))
+        });
+        let len = ctx.bind(batch.num_rows());
         range(0u64, len).for_each(ctx, move |ctx, row| {
             let key_cv = gen_read(ctx, batch, key_col, &key_field, row);
             let rb_pos = ctx.bind(int_cast::<u32, u64, _>(b));
@@ -205,15 +200,15 @@ pub(crate) fn gen_join<I: InputsSource>(
                         ctx.bind(unsafe { load_field_unchecked(loc, LocatorType::row()) });
                     let b = ctx.bind(int_cast::<u64, u32, _>(rb_pos));
                     let r = ctx.bind(int_cast::<u64, u32, _>(row_u32));
-                    // SAFETY: locators were created from retained relation
-                    // batches, so `b` identifies a live descriptor array.
-                    let descs = ctx.bind(unsafe {
-                        call_extern2_unchecked(rt.join_left_batch, join_ref(state), b)
+                    // SAFETY: locators were created from retained relation batches, so
+                    // `b` identifies a live batch.
+                    let left_batch = ctx.bind(unsafe {
+                        batch_ref(call_extern2_unchecked(
+                            rt.join_left_batch,
+                            join_ref(state),
+                            b,
+                        ))
                     });
-                    // SAFETY: `JoinState` retains this batch and its validated
-                    // schema guarantees `ncols_left` descriptor entries.
-                    let left_batch =
-                        ctx.bind(unsafe { batch_from_descs(descs, ncols_left as u64) });
                     let mut row: Row = (0..ncols_left)
                         .map(|c| gen_read(ctx, left_batch, c, left_schema.field(c), r))
                         .collect();

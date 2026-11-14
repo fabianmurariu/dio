@@ -197,6 +197,15 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
     fn ctz(&mut self, a: ValueId) -> ValueId {
         ValueId::from_cranelift(self.builder.ins().ctz(a.cranelift()), a.scalar_type())
     }
+    fn clz(&mut self, a: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().clz(a.cranelift()), a.scalar_type())
+    }
+    fn popcnt(&mut self, a: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().popcnt(a.cranelift()), a.scalar_type())
+    }
+    fn bswap(&mut self, a: ValueId) -> ValueId {
+        ValueId::from_cranelift(self.builder.ins().bswap(a.cranelift()), a.scalar_type())
+    }
     // ---- compare / select ----
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId {
         ValueId::from_cranelift(
@@ -300,6 +309,28 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
         let flags = match kind {
             LoadKind::Plain => MemFlagsData::trusted(),
             LoadKind::Invariant => MemFlagsData::trusted().with_readonly().with_can_move(),
+        };
+        ValueId::from_cranelift(
+            self.builder
+                .ins()
+                .load(ty.to_cranelift(), flags, ptr.cranelift(), offset),
+            ty,
+        )
+    }
+    fn load_unaligned(
+        &mut self,
+        ty: ScalarType,
+        ptr: ValueId,
+        offset: i32,
+        kind: LoadKind,
+    ) -> ValueId {
+        // `trusted()` without `aligned`.
+        let flags = match kind {
+            LoadKind::Plain => MemFlagsData::new().with_notrap(),
+            LoadKind::Invariant => MemFlagsData::new()
+                .with_notrap()
+                .with_readonly()
+                .with_can_move(),
         };
         ValueId::from_cranelift(
             self.builder

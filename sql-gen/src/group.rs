@@ -1,34 +1,37 @@
 //! GROUP BY support — a Rust-hosted hash table mapping group keys to dense group
 //! indices, driven from the JIT kernel.
 //!
-//! The kernel keeps the *hot* aggregation loop: per input row it computes the
-//! group key, calls `group_find_or_insert` to get a group index, and JIT-folds each
-//! accumulator into an output array slot at that index. This struct owns only the
-//! `key -> index` map; the accumulator storage and group-key column are ordinary
-//! JIT-written output arrays (sized to the row count, so indices never overflow).
+//! The kernel keeps the *hot* aggregation loop: per input row it computes the group
+//! key, calls `group_upsert*` to get the group's record, and JIT-folds each accumulator
+//! into it. This state owns the key → index map and the records.
 //!
-//! Hosting the state in Rust is deliberate: it's the same pattern as the string
-//! `BytesPool`, and it's what lets these kernels later become partial aggregates
-//! whose `[keys | accumulators]` state is merged across parallel workers.
+//! Every key is fixed-width: an integer or float key is one `u64`, and any other key
+//! (strings, several columns) is a **packed** byte key the kernel assembles, a string
+//! in it being its view. Strings are interned ([`group_intern`]): each distinct one is
+//! stored once, so equal strings have equal views and a packed key's bytes stand for
+//! its content.
+//!
+//! Hosting the state in Rust is deliberate: it's what lets these kernels later become
+//! partial aggregates whose `[keys | accumulators]` state is merged across parallel
+//! workers.
 
 use ahash::RandomState;
 use datafusion_common::{DataFusionError, Result};
 use hashbrown::HashTable;
-use rust_lms::pool::BytesPool;
+use rust_lms::byte_view::{ByteBuffer, MAX_INLINE_LEN, make_view};
 use rust_lms::prelude::*;
 
 use crate::status::RuntimeStatus;
 
-/// All host-side state for one GROUP BY, allocated before the kernel is compiled
-/// and kept alive across the run (its buffer pointers are baked into the kernel as
-/// constants — the same "host outlives the run" contract as the string pool).
+/// All host-side state for one GROUP BY, allocated before the kernel is compiled and
+/// kept alive across the run (its pointer is baked into the kernel as a constant).
 ///
-/// The kernel folds each input row into a group's packed record: `group_upsert` the
+/// The kernel folds each input row into a group's packed record: `group_upsert*` the
 /// key → the record pointer, then read-modify-write its fields. Records are `u64`-
 /// backed for 8-byte alignment (every field is an `i64`/`f64` cell) and the buffer
 /// **grows with the group count** (`O(groups)`, not `O(rows)`) — a new group appends
-/// one identity record. This is also the mergeable partial state for parallel
-/// aggregation.
+/// one identity record with its key at the head. This is also the mergeable partial
+/// state for parallel aggregation.
 pub struct GroupState {
     /// The key → `gidx` map, specialised to the key type (see [`KeyKind`]).
     table: KeyTable,
@@ -38,39 +41,36 @@ pub struct GroupState {
     /// The identity record (per-field start values — see `codegen::group_template`),
     /// copied in whenever a new group is appended.
     template: Vec<u64>,
-    /// The dense index of the *null-key* group (SQL: all NULL keys form one group),
-    /// minted lazily on the first null-key row. Kept **out of the hash table** — the
-    /// null key is never hashed/interned — but it still occupies a normal record slot,
-    /// so the single emit loop covers it. `None` until (and unless) a null key appears.
+    /// The dense index of the *null-key* group of a single integer or float key (SQL:
+    /// all NULL keys form one group), minted lazily on the first null-key row. Kept
+    /// **out of the hash table**, but it occupies a normal record slot, so the single
+    /// emit loop covers it. A packed key carries its nulls in its own bitmap instead.
     null_gidx: Option<u32>,
-    /// Reused scratch for building a *variable-length* composite key (columns with a
-    /// string): the kernel pushes each column's bytes (`group_key_*`), then
-    /// `group_upsert_composite` interns the assembled bytes. Cleared per row.
-    key_scratch: Vec<u8>,
+    /// The string keys, each once.
+    strings: Interner,
     /// First-error sink. A fallible `group_upsert*` records its `DataFusionError`
     /// here and returns a null record pointer; the driver calls
     /// [`RuntimeStatus::check`] after the kernel returns. See [`crate::status`].
     status: RuntimeStatus,
 }
 
-/// Which key type a GROUP BY uses — picks the [`GroupTable`] instantiation.
+/// Which key type a GROUP BY uses — picks the [`KeyTable`].
 #[derive(Clone, Copy)]
 pub enum KeyKind {
     /// A widened `Int32`/`Int64` column, keyed on its `u64` bits.
     Int,
-    /// A `Float64` column, keyed on its `u64` *bits* (reuses the `Int` table — the
-    /// kernel bitcasts the key; equal floats have equal bits).
+    /// A `Float64` column, keyed on its `u64` *bits* (the `Int` table — the kernel
+    /// canonicalizes and bitcasts the key; equal floats have equal bits).
     Float,
-    /// A `Utf8View` column, keyed on its content bytes (copied into the table's pool).
-    Str,
+    /// A packed key of this many bytes: a string column, or several columns.
+    Packed(usize),
 }
 
-/// The group table, monomorphised per key type but type-erased here so [`GroupState`]
-/// (and the shared `group_len`/`group_records_base` externs) stay non-generic. Only
-/// `group_upsert`/`group_upsert_str` branch on the variant.
+/// The group table for the query's key type. Only the `group_upsert*` externs branch
+/// on the variant.
 enum KeyTable {
-    Int(GroupTable<u64>),
-    Str(GroupTable<StrKey>),
+    Int(IntTable),
+    Packed(PackedTable),
 }
 
 impl GroupState {
@@ -78,16 +78,21 @@ impl GroupState {
     /// `key` selects the table's key type.
     pub fn new(template: Vec<u64>, key: KeyKind) -> Self {
         let table = match key {
-            // `Float` keys on `u64` bits, so they share the `Int` table.
-            KeyKind::Int | KeyKind::Float => KeyTable::Int(GroupTable::new()),
-            KeyKind::Str => KeyTable::Str(GroupTable::new()),
+            KeyKind::Int | KeyKind::Float => KeyTable::Int(IntTable::default()),
+            KeyKind::Packed(len) => {
+                assert!(
+                    len <= template.len() * 8,
+                    "a packed key fits at its record's head"
+                );
+                KeyTable::Packed(PackedTable::new(len))
+            }
         };
         GroupState {
             table,
             records: Vec::new(),
             template,
             null_gidx: None,
-            key_scratch: Vec::new(),
+            strings: Interner::default(),
             status: RuntimeStatus::default(),
         }
     }
@@ -133,14 +138,13 @@ impl GroupState {
 }
 
 /// A mutable, host-side view of one group's packed record — its `stride_words`
-/// `u64` cells. Every host write into a record (only the group key, today) goes
-/// through a named method here, so the `group_upsert*` externs carry no ad-hoc
-/// `unsafe` or pointer math. The raw byte pointer escapes exactly once — via
+/// `u64` cells. Every host write into a record (only the group key) goes through a
+/// named method here. The raw byte pointer escapes exactly once — via
 /// [`Record::as_ptr`], handed to the JIT kernel at the extern boundary, which then
 /// owns all further (typed) field access through `DynamicRecord`.
 struct Record<'a> {
-    /// The record's cells; cell 0 (and, for a string key, cell 1) hold the key —
-    /// the record's leading field(s), matching `codegen::group_record`.
+    /// The record's cells; the leading ones hold the key, matching
+    /// `codegen::group_record`.
     cells: &'a mut [u64],
 }
 
@@ -150,11 +154,9 @@ impl Record<'_> {
         self.cells[0] = key;
     }
 
-    /// Store a string key's pooled `(ptr, len)` in the two leading cells (fields 0/1).
-    /// The pointer is stored as its address; the kernel reads it back as an `SPtr<u8>`.
-    fn set_str_key(&mut self, ptr: *const u8, len: usize) {
-        self.cells[0] = ptr as u64;
-        self.cells[1] = len as u64;
+    /// Store a packed key's bytes at the record's head.
+    fn set_packed_key(&mut self, key: &[u8]) {
+        record_bytes_mut(self.cells)[..key.len()].copy_from_slice(key);
     }
 
     /// The record's byte pointer — handed to the kernel, which owns all further
@@ -164,132 +166,136 @@ impl Record<'_> {
     }
 }
 
-/// A group key we can hash, compare, and **persist** — the specialization seam (the
-/// "Tidy Tuples" trick of tailoring hash/equality to the key). `store` copies any
-/// variable-length payload (a string's bytes) into the table's pool so the stored
-/// key outlives the input batch (needed once inputs stream); it is the identity for
-/// scalar keys. Today `u64` and [`StrKey`]; composite keys add impls later.
-pub trait GroupKey: Copy {
-    /// Hash this (probe or stored) key's content with the table's `state`.
-    fn hash_one(&self, state: &RandomState) -> u64;
-    /// Content equality (for `StrKey`, a byte compare — *not* pointer equality).
-    fn matches(&self, other: &Self) -> bool;
-    /// Produce the **stored** form of this probe key, copying any variable data into
-    /// `pool` so it stays valid for the table's lifetime. Identity for scalar keys.
-    fn store(&self, pool: &mut BytesPool) -> Self;
+/// `cells` as bytes.
+fn record_bytes(cells: &[u64]) -> &[u8] {
+    // SAFETY: any `u64` is 8 initialized bytes, and `u8` has no alignment.
+    unsafe { std::slice::from_raw_parts(cells.as_ptr().cast::<u8>(), cells.len() * 8) }
 }
 
-impl GroupKey for u64 {
-    fn hash_one(&self, state: &RandomState) -> u64 {
-        state.hash_one(*self)
-    }
-    fn matches(&self, other: &Self) -> bool {
-        self == other
-    }
-    fn store(&self, _pool: &mut BytesPool) -> Self {
-        *self
+fn record_bytes_mut(cells: &mut [u64]) -> &mut [u8] {
+    // SAFETY: as `record_bytes`; any bytes are a valid `u64`.
+    unsafe { std::slice::from_raw_parts_mut(cells.as_mut_ptr().cast::<u8>(), cells.len() * 8) }
+}
+
+/// Maps an integer key (or a float's bits) to its group's dense index. Fixed seed →
+/// deterministic group order for a given input (tests, and reproducible output);
+/// grouping correctness doesn't depend on the seed.
+struct IntTable {
+    table: HashTable<(u64, u32)>,
+    state: RandomState,
+}
+
+impl Default for IntTable {
+    fn default() -> Self {
+        Self {
+            table: HashTable::new(),
+            state: RandomState::with_seed(0),
+        }
     }
 }
 
-/// A `Utf8View` group key: a `(ptr, len)` byte reference. A **probe** points into the
-/// live input array; the **stored** form ([`GroupKey::store`]) points into the table's
-/// pool. Hash/equality are on content, so equal strings group even when their views
-/// (buffer/offset) differ.
-#[derive(Clone, Copy)]
-pub struct StrKey {
-    ptr: *const u8,
+impl IntTable {
+    /// `key`'s group, or `next_gidx` for a new one, and whether it is new.
+    fn find_or_insert(&mut self, key: u64, next_gidx: u32) -> (u32, bool) {
+        let state = &self.state;
+        let hash = state.hash_one(key);
+        if let Some(&(_, gidx)) = self.table.find(hash, |&(k, _)| k == key) {
+            return (gidx, false);
+        }
+        self.table
+            .insert_unique(hash, (key, next_gidx), |&(k, _)| state.hash_one(k));
+        (next_gidx, true)
+    }
+}
+
+/// Maps a packed key to its group's dense index. A key is stored once, at the head of
+/// its group's record, so the table holds only indices and compares a probe against
+/// the records.
+struct PackedTable {
+    table: HashTable<u32>,
+    state: RandomState,
+    /// Every key's length in bytes.
     len: usize,
 }
 
-impl StrKey {
-    /// # Safety
-    /// `ptr`/`len` name a valid byte range for the duration of the call.
-    fn bytes(&self) -> &[u8] {
-        unsafe { std::slice::from_raw_parts(self.ptr, self.len) }
-    }
-}
-
-impl GroupKey for StrKey {
-    fn hash_one(&self, state: &RandomState) -> u64 {
-        state.hash_one(self.bytes())
-    }
-    fn matches(&self, other: &Self) -> bool {
-        self.bytes() == other.bytes()
-    }
-    fn store(&self, pool: &mut BytesPool) -> Self {
-        // Copy the key bytes into the pool — the stored key must outlive the input.
-        StrKey {
-            ptr: pool.append(self.bytes()),
-            len: self.len,
-        }
-    }
-}
-
-/// One occupied slot: the group's key (stored inline in the table — decoupled from
-/// the records buffer) and its dense index.
-struct Entry<K> {
-    key: K,
-    gidx: u32,
-}
-
-/// Maps a group key to its dense index (`0..num_groups`), assigning the next index
-/// the first time a key is seen. Built on [`hashbrown::HashTable`] — the *raw* Swiss
-/// table where we supply hash + equality per op ([`GroupKey`]), so the key type is
-/// open (composite/string keys are new [`GroupKey`] impls, not a rewrite). The value
-/// is just the dense index; aggregates live in the separate packed records buffer.
-/// The `pool` holds copied variable-length key bytes (empty/unused for scalar keys).
-pub struct GroupTable<K> {
-    table: HashTable<Entry<K>>,
-    state: RandomState,
-    pool: BytesPool,
-}
-
-impl<K: GroupKey> GroupTable<K> {
-    pub fn new() -> Self {
-        GroupTable {
+impl PackedTable {
+    fn new(len: usize) -> Self {
+        Self {
             table: HashTable::new(),
-            // Fixed seed → deterministic group order for a given input (tests, and
-            // reproducible output); grouping correctness doesn't depend on the seed.
             state: RandomState::with_seed(0),
-            pool: BytesPool::new(),
+            len,
         }
     }
 
-    /// Number of distinct groups seen so far.
-    pub fn len(&self) -> usize {
-        self.table.len()
+    /// Group `gidx`'s key, the head of its record in `records`.
+    fn key<'r>(&self, records: &'r [u64], stride_words: usize, gidx: u32) -> &'r [u8] {
+        let start = gidx as usize * stride_words;
+        &record_bytes(&records[start..start + stride_words])[..self.len]
     }
 
-    pub fn is_empty(&self) -> bool {
-        self.table.is_empty()
+    /// `probe`'s group, if it has one.
+    fn find(&self, records: &[u64], stride_words: usize, probe: &[u8]) -> (u64, Option<u32>) {
+        let hash = self.state.hash_one(probe);
+        let found = self
+            .table
+            .find(hash, |&g| self.key(records, stride_words, g) == probe)
+            .copied();
+        (hash, found)
     }
 
-    /// Find `probe` (returning its `gidx` + stored key), or insert it at `next_gidx`.
-    /// The caller supplies `next_gidx` (the records-buffer count) rather than the
-    /// table's own `len`, so the gidx space stays dense even when a *null* group —
-    /// which bypasses the table — also consumes a record slot.
-    pub fn find_or_insert(&mut self, probe: K, next_gidx: u32) -> (u32, K) {
-        let hash = probe.hash_one(&self.state);
-        if let Some(entry) = self.table.find(hash, |e| e.key.matches(&probe)) {
-            return (entry.gidx, entry.key);
-        }
-        let stored = probe.store(&mut self.pool); // copy variable data (not borrowing `table`)
-        let state = &self.state;
-        self.table.insert_unique(
-            hash,
-            Entry {
-                key: stored,
-                gidx: next_gidx,
-            },
-            |e| e.key.hash_one(state),
-        );
-        (next_gidx, stored)
+    /// Add group `gidx`, whose record already holds its key, under `hash`.
+    fn insert(&mut self, records: &[u64], stride_words: usize, hash: u64, gidx: u32) {
+        let Self { table, state, len } = self;
+        table.insert_unique(hash, gidx, |&g| {
+            let start = g as usize * stride_words;
+            state.hash_one(&record_bytes(&records[start..start + stride_words])[..*len])
+        });
     }
 }
 
-impl<K: GroupKey> Default for GroupTable<K> {
+/// Each distinct string once, so equal strings have equal views: a short one's view is
+/// its bytes, and a long one's points into the pool, where it is stored the first time
+/// it is seen.
+struct Interner {
+    pool: BytesPool,
+    /// The long strings' views, keyed by their bytes.
+    views: HashTable<u128>,
+    state: RandomState,
+}
+
+impl Default for Interner {
     fn default() -> Self {
-        Self::new()
+        Self {
+            pool: BytesPool::new(),
+            views: HashTable::new(),
+            state: RandomState::with_seed(0),
+        }
+    }
+}
+
+impl Interner {
+    /// The view of `bytes`, the same for every equal string.
+    fn intern(&mut self, bytes: &[u8]) -> u128 {
+        if bytes.len() <= MAX_INLINE_LEN {
+            return make_view(bytes, 0, 0);
+        }
+        let Self { pool, views, state } = self;
+        // SAFETY (both reads): every view in `views` is one `pool` returned, read while
+        // nothing is appended.
+        let hash = state.hash_one(bytes);
+        let found = views.find(hash, |&v| {
+            let value = unsafe { pool.value(v) };
+            (unsafe { value.bytes() }) == bytes
+        });
+        if let Some(&view) = found {
+            return view;
+        }
+        let view = pool.append(bytes);
+        views.insert_unique(hash, view, |&v| {
+            let value = unsafe { pool.value(v) };
+            state.hash_one(unsafe { value.bytes() })
+        });
+        view
     }
 }
 
@@ -343,30 +349,32 @@ fn group_next_index(state: &GroupState) -> Result<u32> {
 
 /// Find-or-insert an `Int` group by its `u64` key and return its **record pointer** —
 /// the per-row proxy call from the kernel (Umbra's `insert`). The table mechanics and
-/// records-buffer growth are host code; the extern also writes the key into the
-/// record's leading field (offset 0), so the kernel only folds aggregates. The
-/// returned pointer is valid until the next `group_upsert*` (which may grow and move
-/// the buffer) — the fold uses it immediately, so this holds. Returns null (with the
-/// error recorded) if the group count would exceed `u32` (see `upsert_guard`).
+/// records-buffer growth are host code; a new group's record gets the key in its
+/// leading field (offset 0), so the kernel only folds aggregates. The returned pointer
+/// is valid until the next `group_upsert*` (which may grow and move the buffer) — the
+/// fold uses it immediately, so this holds. Returns null (with the error recorded) if
+/// the group count would exceed `u32` (see `upsert_guard`).
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn group_upsert(state: &mut GroupState, key: u64) -> *mut u8 {
     upsert_guard(state, |state| {
         let next = group_next_index(state)?;
-        let (gidx, stored) = match &mut state.table {
-            KeyTable::Int(t) => t.find_or_insert(key, next),
-            KeyTable::Str(_) => unreachable!("group_upsert on a string-keyed table"),
+        let KeyTable::Int(table) = &mut state.table else {
+            unreachable!("group_upsert on a packed-key table")
         };
+        let (gidx, new) = table.find_or_insert(key, next);
         let mut rec = state.ensure_record(gidx as usize);
-        rec.set_int_key(stored);
+        if new {
+            rec.set_int_key(key);
+        }
         Ok(rec.as_ptr())
     })
 }
 
-/// Find-or-insert the **null-key** group and return its record pointer. The null key
-/// bypasses the hash table (see `GroupState::null_gidx`); it just gets a record slot
-/// like any other group. No key is written — the emit path reads the record's
-/// key-valid cell to know it is null.
+/// Find-or-insert the **null-key** group of a single integer or float key and return
+/// its record pointer. The null key bypasses the hash table (see
+/// `GroupState::null_gidx`); it just gets a record slot like any other group. No key is
+/// written — the emit path reads the record's key-valid cell to know it is null.
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn group_upsert_null(state: &mut GroupState) -> *mut u8 {
@@ -384,82 +392,54 @@ pub extern "C" fn group_upsert_null(state: &mut GroupState) -> *mut u8 {
     })
 }
 
-/// Find-or-insert a `Str` group by its content bytes and return its record pointer.
-/// The key bytes are copied into the table's pool on a new group; the record's
-/// leading `(ptr, len)` fields (offsets 0 and 8) get the **pooled** reference, so the
-/// emit loop reads stable bytes.
+/// Find-or-insert a group by its packed key and return its record pointer. A new
+/// group's record gets the key's bytes at its head, where the table compares later
+/// probes and the emit loop reads the key columns back.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_upsert_str(state: &mut GroupState, ptr: *const u8, len: u64) -> *mut u8 {
+pub extern "C" fn group_upsert_packed(state: &mut GroupState, key: FatSlice<u8>) -> *mut u8 {
     upsert_guard(state, |state| {
-        let probe = StrKey {
-            ptr,
-            len: len as usize,
-        };
+        // SAFETY: the kernel's packed key, alive for the call.
+        let key = unsafe { key.as_slice() };
         let next = group_next_index(state)?;
-        let (gidx, stored) = match &mut state.table {
-            KeyTable::Str(t) => t.find_or_insert(probe, next),
-            KeyTable::Int(_) => unreachable!("group_upsert_str on an int-keyed table"),
+        let w = state.stride_words();
+        let KeyTable::Packed(table) = &state.table else {
+            unreachable!("group_upsert_packed on an int-keyed table")
         };
-        let mut rec = state.ensure_record(gidx as usize);
-        rec.set_str_key(stored.ptr, stored.len);
-        Ok(rec.as_ptr())
+        debug_assert_eq!(
+            key.len(),
+            table.len,
+            "every packed key has the layout's length"
+        );
+        let (hash, found) = table.find(&state.records, w, key);
+        if let Some(gidx) = found {
+            return Ok(state.ensure_record(gidx as usize).as_ptr());
+        }
+        state.ensure_record(next as usize).set_packed_key(key);
+        let KeyTable::Packed(table) = &mut state.table else {
+            unreachable!()
+        };
+        table.insert(&state.records, w, hash, next);
+        Ok(state.ensure_record(next as usize).as_ptr())
     })
 }
 
-// --- Variable-length composite key builder: the kernel pushes each key column's
-// bytes into `key_scratch`, then `group_upsert_composite` interns the assembled bytes
-// (a flat byte key, so the `Str` table's content hash/eq apply). ---
-
-/// Start a new composite key (clear the scratch).
+/// Intern a string key: write the view every equal string shares to `out`. The kernel
+/// calls this for long strings only; a short one's view is already its content.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_key_reset(state: &mut GroupState) {
-    state.key_scratch.clear();
+pub extern "C" fn group_intern(state: &mut GroupState, bytes: FatSlice<u8>, out: *mut u128) {
+    // SAFETY: the string's bytes, alive for the call; `out` is the kernel's slot for
+    // the view.
+    unsafe { *out = state.strings.intern(bytes.as_slice()) };
 }
 
-/// Append 8 bytes (a fixed-width column's canonicalized bits, or the null bitmap).
+/// The table the interned strings' views index, fetched once for the emit loop: nothing
+/// is interned after the fold, so it stays where it is.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn group_key_push_u64(state: &mut GroupState, v: u64) {
-    state.key_scratch.extend_from_slice(&v.to_le_bytes());
-}
-
-/// Append a string column: an 8-byte length prefix then the content bytes (so
-/// `"ab"+"c"` and `"a"+"bc"` can't collide). A null column pushes length 0 (the null
-/// bitmap tells it apart from an empty string).
-/// # Safety `(ptr, len)` is a valid byte range produced by staged code for this call.
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub unsafe extern "C" fn group_key_push_bytes(state: &mut GroupState, ptr: *const u8, len: u64) {
-    state.key_scratch.extend_from_slice(&len.to_le_bytes());
-    if len != 0 {
-        let content = unsafe { std::slice::from_raw_parts(ptr, len as usize) };
-        state.key_scratch.extend_from_slice(content);
-    }
-}
-
-/// Intern the assembled composite key (the current `key_scratch`) and return its
-/// record pointer — the composite counterpart of `group_upsert_str`. The scratch is a
-/// flat byte key, so the `Str` table's content hash/eq apply; it's copied into the
-/// pool on a miss.
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn group_upsert_composite(state: &mut GroupState) -> *mut u8 {
-    upsert_guard(state, |state| {
-        let probe = StrKey {
-            ptr: state.key_scratch.as_ptr(),
-            len: state.key_scratch.len(),
-        };
-        let next = group_next_index(state)?;
-        let (gidx, stored) = match &mut state.table {
-            KeyTable::Str(t) => t.find_or_insert(probe, next),
-            KeyTable::Int(_) => unreachable!("group_upsert_composite on an int-keyed table"),
-        };
-        let mut rec = state.ensure_record(gidx as usize);
-        rec.set_str_key(stored.ptr, stored.len);
-        Ok(rec.as_ptr())
-    })
+pub extern "C" fn group_strings(state: &GroupState) -> *const ByteBuffer {
+    state.strings.pool.buffers().as_ptr()
 }
 
 /// Base of the fully-grown records buffer, fetched once for the emit loop.

@@ -1,89 +1,98 @@
-//! A host-owned, append-only byte pool — a bump arena with **stable pointers**.
+//! A host-owned, append-only pool of byte strings, addressed as Arrow **byte views**.
 //!
-//! Scratch/output memory for JIT kernels that need to produce bytes at runtime
-//! (string intermediates, materialized values) without the kernel ever freeing.
-//! The *host* owns a [`BytesPool`], the kernel appends into it via the
-//! [`pool_append`] extern, and nothing is released until the host drops the pool
-//! — or hands its chunks off elsewhere (e.g. an Arrow `Buffer`) for zero-copy
-//! recovery.
+//! [`BytesPool`] stores values the way Arrow's `GenericByteViewBuilder` does: a value of
+//! at most [`MAX_INLINE_LEN`] bytes is its view and is not stored at all; a longer one is
+//! copied into a **block** and its view is `(len, prefix, buf_idx, offset)` into the
+//! pool's blocks. [`BytesPool::buffers`] is the table those views index, so a kernel
+//! reads a pool's value as it reads a row of an Arrow array: a [`ByteView`] of the view
+//! and the table.
 //!
-//! **Why chunked, not one growing `Vec`:** a `Vec` that reallocates on growth
-//! would dangle every pointer handed out earlier. [`BytesPool`] instead holds a
-//! list of chunks, each pre-sized and **never reallocated** once created, so a
-//! returned pointer stays valid for the pool's whole lifetime. Each appended
-//! value is stored **contiguously in a single chunk** (a fresh chunk is started
-//! if it wouldn't fit), which is also exactly what Arrow's `GenericByteView`
-//! requires — a string may not span two buffers.
+//! **Stable addresses.** A block is allocated at its full size and never reallocated,
+//! and a value never spans two blocks (one that does not fit starts a new block; one
+//! larger than the block size gets a block of its own), so the bytes a view names stay
+//! where they are for the pool's lifetime. The *table* grows by one entry per block: its
+//! address is stable only while nothing is appended. A plan appends its literals while it
+//! is compiled, then bakes the table's address into the kernel.
 //!
-//! **Lifetime contract (not expressed in the type system — it can't cross the
-//! JIT boundary):** the pool must outlive the kernel call and any recovery step.
-//! In a compile-and-run driver that holds the pool as a local across
-//! build → run → finalize, this is upheld by construction — the same invariant
-//! class as `Compiled` outliving its `as_fn` pointer.
+//! **Lifetime contract (not expressed in the type system; it cannot cross the JIT
+//! boundary):** the pool outlives every kernel call that reads its views, and nothing is
+//! appended while one runs.
+//!
+//! [`ByteView`]: crate::byte_view::ByteView
 
-use crate::ffi::FatSlice;
-use rust_lms_derive::extern_fn;
+use crate::byte_view::{ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, RawByteView, make_view};
+use crate::staged::Const;
 
-/// Default chunk size (64 KiB) — large enough that most appends share a chunk,
-/// small enough not to over-allocate for tiny pools.
-const DEFAULT_CHUNK: usize = 64 * 1024;
+/// Default block size (64 KiB): large enough that most values share a block, small
+/// enough not to over-allocate for a few literals.
+const DEFAULT_BLOCK: usize = 64 * 1024;
 
-/// An append-only bump arena of `u8` with stable pointers. See the [module
-/// docs](self).
+/// An append-only pool of byte strings with stable addresses, its values Arrow views.
+/// See the [module docs](self).
 pub struct BytesPool {
-    /// Each chunk is pre-sized to its capacity and never reallocated, so its
-    /// `as_ptr()` stays stable for the pool's lifetime.
-    chunks: Vec<Vec<u8>>,
-    /// Capacity handed to each newly created chunk (an oversized value gets its
-    /// own larger chunk instead).
-    chunk_size: usize,
+    /// Each block is allocated at its capacity and never reallocated.
+    blocks: Vec<Vec<u8>>,
+    /// One entry per block, its length kept current: the table the views index.
+    buffers: Vec<ByteBuffer>,
+    /// The capacity of a new block (a larger value gets a block of its own size).
+    block_size: usize,
 }
 
 impl BytesPool {
-    /// A pool with the default chunk size.
+    /// A pool with the default block size.
     pub fn new() -> Self {
-        Self::with_chunk_size(DEFAULT_CHUNK)
+        Self::with_block_size(DEFAULT_BLOCK)
     }
 
-    /// A pool whose chunks are (at least) `chunk_size` bytes each.
-    pub fn with_chunk_size(chunk_size: usize) -> Self {
+    /// A pool whose blocks are (at least) `block_size` bytes each.
+    pub fn with_block_size(block_size: usize) -> Self {
         BytesPool {
-            chunks: Vec::new(),
-            chunk_size: chunk_size.max(1),
+            blocks: Vec::new(),
+            buffers: Vec::new(),
+            block_size: block_size.max(1),
         }
     }
 
-    /// Copy `bytes` into the pool and return a **stable** pointer to the copy.
-    /// The bytes are contiguous within one chunk; the pointer is valid for
-    /// `bytes.len()` bytes until the pool is dropped.
-    pub fn append(&mut self, bytes: &[u8]) -> *const u8 {
+    /// The view of `bytes`: inline when short (nothing stored), else a copy in one block,
+    /// addressed by `(buf_idx, offset)` into [`buffers`](Self::buffers).
+    pub fn append(&mut self, bytes: &[u8]) -> u128 {
+        if bytes.len() <= MAX_INLINE_LEN {
+            return make_view(bytes, 0, 0);
+        }
         let n = bytes.len();
-        // Start a new chunk unless the current one has contiguous room for `n`.
-        let need_new = match self.chunks.last() {
-            Some(c) => c.len() + n > c.capacity(),
-            None => true,
-        };
-        if need_new {
-            self.chunks.push(Vec::with_capacity(n.max(self.chunk_size)));
+        let fits = self
+            .blocks
+            .last()
+            .is_some_and(|block| block.len() + n <= block.capacity());
+        if !fits {
+            self.blocks.push(Vec::with_capacity(n.max(self.block_size)));
+            self.buffers.push(ByteBuffer::new(&[]));
         }
-        let chunk = self.chunks.last_mut().unwrap();
-        let start = chunk.len();
-        chunk.extend_from_slice(bytes);
-        // SAFETY: `need_new` guaranteed `capacity() >= len() + n`, so
-        // `extend_from_slice` did not reallocate and `start` is in bounds.
-        unsafe { chunk.as_ptr().add(start) }
+        let buf_idx = self.blocks.len() - 1;
+        let block = &mut self.blocks[buf_idx];
+        let offset = block.len();
+        // No reallocation: `fits` (or the fresh block) leaves room for `n` more bytes.
+        block.extend_from_slice(bytes);
+        self.buffers[buf_idx] = ByteBuffer::new(block);
+        let buf_idx = u32::try_from(buf_idx).expect("fewer than 2^32 blocks");
+        let offset = u32::try_from(offset).expect("a block is smaller than 4 GiB");
+        make_view(bytes, buf_idx, offset)
     }
 
-    /// The pool's chunks, for zero-copy handoff (e.g. adopting each as an Arrow
-    /// `Buffer`). See also [`into_chunks`](Self::into_chunks).
-    pub fn chunks(&self) -> &[Vec<u8>] {
-        &self.chunks
+    /// The table the pool's views index: one entry per block.
+    pub fn buffers(&self) -> &[ByteBuffer] {
+        &self.buffers
     }
 
-    /// Consume the pool, yielding ownership of its chunk buffers — hand these to
-    /// a consumer that adopts `Vec<u8>` without copying.
-    pub fn into_chunks(self) -> Vec<Vec<u8>> {
-        self.chunks
+    /// `view` with the table it indexes.
+    ///
+    /// # Safety
+    ///
+    /// `view` is one this pool returned, and the value is read only while the pool is
+    /// alive and nothing is appended to it.
+    pub unsafe fn value(&self, view: u128) -> RawByteView {
+        // SAFETY: forwarded from this function's contract.
+        unsafe { RawByteView::new(view, self.buffers.as_ptr()) }
     }
 }
 
@@ -93,54 +102,104 @@ impl Default for BytesPool {
     }
 }
 
-/// Append `bytes` into `pool`, returning a stable pointer (as `u64`) to the
-/// stored copy — the kernel-facing entry point for [`BytesPool::append`].
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn pool_append(pool: &mut BytesPool, bytes: FatSlice<u8>) -> u64 {
-    // SAFETY: `bytes` is a valid `(ptr, len)` produced by staged code for the
-    // duration of this call.
-    let src = unsafe { bytes.as_slice() };
-    pool.append(src) as u64
+/// Byte strings a kernel bakes in as constants. A short one is inline and stored nowhere;
+/// a long one is copied here with a one-entry table of its own, so adding a value never
+/// moves another's and constants can be made while a kernel is staged. Whoever owns the
+/// kernel keeps this alive.
+#[derive(Default)]
+pub struct ByteLiterals {
+    /// Each long value's bytes and its table, boxed so they stay where they are.
+    values: Vec<(Box<[u8]>, Box<ByteBuffer>)>,
+}
+
+// SAFETY: it owns its bytes and never changes a value once added; the pointers inside
+// its tables point into those bytes.
+unsafe impl Send for ByteLiterals {}
+unsafe impl Sync for ByteLiterals {}
+
+impl ByteLiterals {
+    pub fn new() -> Self {
+        Self::default()
+    }
+
+    /// `bytes` as a staged constant of kind `K`.
+    ///
+    /// # Safety
+    ///
+    /// Every kernel the constant is baked into runs only while `self` is alive, and for
+    /// `Utf8` the bytes are valid UTF-8.
+    pub unsafe fn constant<K: ByteKind>(&mut self, bytes: &[u8]) -> Const<ByteView<K>> {
+        if let Some(inline) = RawByteView::inline(bytes) {
+            return Const::new(inline);
+        }
+        let bytes: Box<[u8]> = bytes.into();
+        let table = Box::new(ByteBuffer::new(&bytes));
+        let table_ptr: *const ByteBuffer = &*table;
+        let view = make_view(&bytes, 0, 0);
+        self.values.push((bytes, table));
+        // SAFETY: the view names all of the bytes boxed above, in its one-entry table,
+        // and both stay put for as long as `self` lives (this function's contract).
+        Const::new(unsafe { RawByteView::new(view, table_ptr) })
+    }
 }
 
 #[cfg(test)]
 mod tests {
     use super::*;
 
-    #[test]
-    fn appends_contiguously_and_starts_new_chunks() {
-        let mut pool = BytesPool::with_chunk_size(8);
-        let p1 = pool.append(b"aaaa"); // chunk 0
-        let p2 = pool.append(b"bbbb"); // fits (4+4 == 8), still chunk 0
-        let p3 = pool.append(b"c"); // no room -> chunk 1
-
-        assert_eq!(pool.chunks().len(), 2);
-        assert_eq!(pool.chunks()[0], b"aaaabbbb");
-        assert_eq!(pool.chunks()[1], b"c");
-
-        // Pointers handed out earlier remain valid and correct.
-        unsafe {
-            assert_eq!(*p1, b'a');
-            assert_eq!(*p2, b'b');
-            assert_eq!(*p3, b'c');
-            // p2 is 4 bytes past p1 within the same chunk.
-            assert_eq!(p2, p1.add(4));
-        }
+    /// The bytes of `view`, read through the pool's table.
+    fn read(pool: &BytesPool, view: u128) -> Vec<u8> {
+        // SAFETY: the pool is alive and unchanged during the read.
+        unsafe { pool.value(view).bytes().to_vec() }
     }
 
     #[test]
-    fn oversized_value_gets_its_own_chunk_contiguously() {
-        let mut pool = BytesPool::with_chunk_size(8);
-        pool.append(b"x");
-        let big = vec![7u8; 100]; // larger than chunk_size
-        let pb = pool.append(&big);
+    fn short_values_are_inline_and_store_nothing() {
+        let mut pool = BytesPool::new();
+        let view = pool.append(b"twelve bytes");
+        assert!(pool.blocks.is_empty());
+        assert_eq!(read(&pool, view), b"twelve bytes");
+    }
 
-        assert_eq!(pool.chunks().len(), 2);
-        assert_eq!(pool.chunks()[1].len(), 100);
-        // Stored contiguously — the whole value lives in one chunk.
-        unsafe {
-            assert_eq!(std::slice::from_raw_parts(pb, 100), &big[..]);
+    #[test]
+    fn long_values_share_a_block_until_it_is_full() {
+        let mut pool = BytesPool::with_block_size(32);
+        let a = pool.append(b"thirteen byte");
+        let b = pool.append(b"fourteen bytes");
+        let c = pool.append(b"no room left in block 0");
+
+        assert_eq!(pool.blocks.len(), 2);
+        assert_eq!(pool.blocks[0], b"thirteen bytefourteen bytes");
+        assert_eq!(pool.buffers().len(), 2);
+        assert_eq!(pool.buffers()[0], ByteBuffer::new(&pool.blocks[0]));
+        assert_eq!((b >> 64) as u32, 0, "b is in block 0");
+        assert_eq!((b >> 96) as u32, 13, "after a");
+        assert_eq!((c >> 64) as u32, 1, "c starts block 1");
+        assert_eq!(read(&pool, a), b"thirteen byte");
+        assert_eq!(read(&pool, b), b"fourteen bytes");
+        assert_eq!(read(&pool, c), b"no room left in block 0");
+    }
+
+    #[test]
+    fn blocks_never_move() {
+        let mut pool = BytesPool::with_block_size(16);
+        let first = pool.append(b"the first long value");
+        let block = pool.blocks[0].as_ptr();
+        for i in 0..100 {
+            pool.append(format!("another long value {i}").as_bytes());
         }
+        assert_eq!(pool.blocks[0].as_ptr(), block);
+        assert_eq!(read(&pool, first), b"the first long value");
+    }
+
+    #[test]
+    fn an_oversized_value_gets_its_own_block() {
+        let mut pool = BytesPool::with_block_size(16);
+        pool.append(b"a long-ish value");
+        let big = vec![7u8; 100];
+        let view = pool.append(&big);
+        assert_eq!(pool.blocks.len(), 2);
+        assert_eq!(pool.blocks[1].len(), 100);
+        assert_eq!(read(&pool, view), big);
     }
 }

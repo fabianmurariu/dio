@@ -432,6 +432,12 @@ pub trait Backend {
     fn ushr(&mut self, a: ValueId, b: ValueId) -> ValueId;
     /// Count trailing zero bits; the bit width for zero.
     fn ctz(&mut self, a: ValueId) -> ValueId;
+    /// Count leading zero bits; the bit width for zero.
+    fn clz(&mut self, a: ValueId) -> ValueId;
+    /// Count the one bits.
+    fn popcnt(&mut self, a: ValueId) -> ValueId;
+    /// Reverse the bytes of an integer at least 16 bits wide.
+    fn bswap(&mut self, a: ValueId) -> ValueId;
     // compare / select
     fn icmp(&mut self, cc: IntCmp, a: ValueId, b: ValueId) -> ValueId;
     fn icmp_imm(&mut self, cc: IntCmp, a: ValueId, imm: i64) -> ValueId;
@@ -450,6 +456,14 @@ pub trait Backend {
     fn bitcast(&mut self, to: ScalarType, v: ValueId) -> ValueId;
     // memory
     fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32, kind: LoadKind) -> ValueId;
+    /// A load at any byte address, with no alignment assumed.
+    fn load_unaligned(
+        &mut self,
+        ty: ScalarType,
+        ptr: ValueId,
+        offset: i32,
+        kind: LoadKind,
+    ) -> ValueId;
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
     fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId;
     /// Allocate an explicit stack slot of `size` bytes with alignment `1 << align_shift`.
@@ -789,6 +803,13 @@ impl<'c> CompilationContext<'c> {
     pub fn load(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
         expect_type(ptr, ScalarType::Ptr, "load pointer");
         let result = self.backend.load(ty, ptr, offset, self.load_kind);
+        expect_type(result, ty, "load")
+    }
+
+    #[doc(hidden)]
+    pub fn load_unaligned(&mut self, ty: ScalarType, ptr: ValueId, offset: i32) -> ValueId {
+        expect_type(ptr, ScalarType::Ptr, "load pointer");
+        let result = self.backend.load_unaligned(ty, ptr, offset, self.load_kind);
         expect_type(result, ty, "load")
     }
 
@@ -1586,6 +1607,20 @@ impl IntoStaged<i64> for i64 {
 
 impl IntoStaged<u64> for u64 {
     type Staged = Const<u64>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<i128> for i128 {
+    type Staged = Const<i128>;
+    fn into_staged(self) -> Self::Staged {
+        Const::new(self)
+    }
+}
+
+impl IntoStaged<u128> for u128 {
+    type Staged = Const<u128>;
     fn into_staged(self) -> Self::Staged {
         Const::new(self)
     }

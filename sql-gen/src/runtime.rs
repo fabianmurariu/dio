@@ -1,21 +1,15 @@
-//! Runtime primitives — Rust `extern "C"` functions the generated kernel calls
-//! for string semantics we deliberately don't emit in codegen (UTF-8, byte
-//! access). The paper's `printf`/`Scanner` equivalents.
-//!
-//! A string reaches the runtime as a resolved byte reference (`&[u8]` /
-//! `FatSlice<u8>`) — the *generic* representation every string container produces
-//! (see `codegen::resolve`). So these ops are a flat library over bytes: compare,
-//! append to output. The generated code keeps the fast paths (short-literal `=` is
-//! a pure staged view compare) and only falls back here for real byte work.
+//! Runtime primitives — Rust `extern "C"` functions the generated kernel calls for
+//! what lives on the host: output builders, the GROUP BY and join state, the input
+//! streams. The paper's `printf`/`Scanner` equivalents. String operations are staged
+//! (`rust-lms`'s `ByteView`); a string reaches an extern as its bytes, `FatSlice<u8>`.
 
-use arrow::array::{StringViewArray, StringViewBuilder};
+use arrow::array::StringViewBuilder;
 use rust_lms::prelude::*;
 use rust_lms_std::SvecGrowExtern;
 
 use crate::group::{
-    GroupKeyPushBytesExtern, GroupKeyPushU64Extern, GroupKeyResetExtern, GroupLenExtern,
-    GroupRecordsBaseExtern, GroupUpsertCompositeExtern, GroupUpsertExtern, GroupUpsertNullExtern,
-    GroupUpsertStrExtern,
+    GroupInternExtern, GroupLenExtern, GroupRecordsBaseExtern, GroupStringsExtern,
+    GroupUpsertExtern, GroupUpsertNullExtern, GroupUpsertPackedExtern,
 };
 use crate::join::{
     JoinInsertExtern, JoinLeftBatchExtern, JoinProbeBaseExtern, JoinProbeCountExtern,
@@ -23,26 +17,8 @@ use crate::join::{
 };
 use crate::scan::ScanNextExtern;
 
-/// The byte pointer of a `Utf8View` row: `arr.value(row).into_ptr()`. Valid for the
-/// life of the source array (points into its views/data buffers); the length
-/// comes free from the staged view (`lo & 0xFFFF_FFFF`), so it needs no extern.
-/// A null row reads as an empty inline view — safe, never out of bounds.
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn str_ptr(arr: &StringViewArray, row: usize) -> *const u8 {
-    arr.value(row).as_ptr()
-}
-
-/// Full byte-equality of two resolved strings — the uniform fallback for every
-/// source combination that isn't a pure staged view compare.
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn bytes_eq(a: FatSlice<u8>, b: FatSlice<u8>) -> bool {
-    unsafe { a.as_slice() == b.as_slice() }
-}
-
-/// Append a (non-null) resolved string to an output `StringViewBuilder`. The bytes
-/// are always valid UTF-8 (from an arrow string or a checked literal).
+/// Append a (non-null) string's bytes to an output `StringViewBuilder`. They are valid
+/// UTF-8: a `Utf8View` row, a literal or a group key that was one.
 #[extern_fn]
 #[unsafe(no_mangle)]
 pub extern "C" fn strview_append_bytes(sink: &mut StringViewBuilder, bytes: FatSlice<u8>) {
@@ -58,20 +34,16 @@ pub extern "C" fn strview_append_null(sink: &mut StringViewBuilder) {
 }
 
 /// Handles to the runtime externs, registered once per compile and threaded
-/// through codegen so `resolve`/`str_eq`/`write_str_col` can call them.
+/// through codegen.
 #[derive(Clone, Copy)]
 pub struct Runtime {
-    pub str_ptr: ExternRef<StrPtrExtern>,
-    pub bytes_eq: ExternRef<BytesEqExtern>,
     pub strview_append_bytes: ExternRef<StrviewAppendBytesExtern>,
     pub strview_append_null: ExternRef<StrviewAppendNullExtern>,
     pub group_upsert: ExternRef<GroupUpsertExtern>,
-    pub group_upsert_str: ExternRef<GroupUpsertStrExtern>,
     pub group_upsert_null: ExternRef<GroupUpsertNullExtern>,
-    pub group_key_reset: ExternRef<GroupKeyResetExtern>,
-    pub group_key_push_u64: ExternRef<GroupKeyPushU64Extern>,
-    pub group_key_push_bytes: ExternRef<GroupKeyPushBytesExtern>,
-    pub group_upsert_composite: ExternRef<GroupUpsertCompositeExtern>,
+    pub group_upsert_packed: ExternRef<GroupUpsertPackedExtern>,
+    pub group_intern: ExternRef<GroupInternExtern>,
+    pub group_strings: ExternRef<GroupStringsExtern>,
     pub group_records_base: ExternRef<GroupRecordsBaseExtern>,
     pub group_len: ExternRef<GroupLenExtern>,
     /// Grow an output column's `SVec` (cold path of `SVec::push`). See `output.rs`.
@@ -91,17 +63,13 @@ impl Runtime {
     /// Register every runtime extern with `compiler` and collect their handles.
     pub fn register(compiler: &mut Compiler) -> Self {
         Self {
-            str_ptr: compiler.extern_fn::<StrPtrExtern>(),
-            bytes_eq: compiler.extern_fn::<BytesEqExtern>(),
             strview_append_bytes: compiler.extern_fn::<StrviewAppendBytesExtern>(),
             strview_append_null: compiler.extern_fn::<StrviewAppendNullExtern>(),
             group_upsert: compiler.extern_fn::<GroupUpsertExtern>(),
-            group_upsert_str: compiler.extern_fn::<GroupUpsertStrExtern>(),
             group_upsert_null: compiler.extern_fn::<GroupUpsertNullExtern>(),
-            group_key_reset: compiler.extern_fn::<GroupKeyResetExtern>(),
-            group_key_push_u64: compiler.extern_fn::<GroupKeyPushU64Extern>(),
-            group_key_push_bytes: compiler.extern_fn::<GroupKeyPushBytesExtern>(),
-            group_upsert_composite: compiler.extern_fn::<GroupUpsertCompositeExtern>(),
+            group_upsert_packed: compiler.extern_fn::<GroupUpsertPackedExtern>(),
+            group_intern: compiler.extern_fn::<GroupInternExtern>(),
+            group_strings: compiler.extern_fn::<GroupStringsExtern>(),
             group_records_base: compiler.extern_fn::<GroupRecordsBaseExtern>(),
             group_len: compiler.extern_fn::<GroupLenExtern>(),
             svec_grow: compiler.extern_fn::<SvecGrowExtern>(),

@@ -7,11 +7,11 @@ use datafusion_expr::expr::ScalarFunction;
 use datafusion_expr::{BinaryExpr, Expr, Operator as DfOp};
 use rust_lms::prelude::*;
 
-use crate::value::{ColVal, Nullness, Row, StrVal};
+use crate::value::{ColVal, Nullness, Row};
 
 use super::CodegenCtx;
 use super::numeric::{as_bool, tag, to_i64};
-use super::strings::{gen_str_literal, is_str, str_eq};
+use super::strings::{gen_str_literal, is_str};
 
 pub(crate) fn gen_predicate(
     ctx: &Ctx,
@@ -61,25 +61,20 @@ fn gen_scalar_fn(
     cx: &CodegenCtx,
 ) -> ColVal {
     match f.func.name().to_ascii_lowercase().as_str() {
-        // Octet length: the byte length, from the view (`lo & 0xFFFF_FFFF`) for a
-        // column or directly from `len` for resolved bytes.
+        // Octet length: the byte length, from the view.
         "octet_length" => match gen_expr(ctx, &f.args[0], schema, row, cx) {
-            ColVal::Str(sv, null) => {
-                let len = match sv {
-                    StrVal::Column { lo, .. } => ctx.bind(bitand::<u64, _, _>(lo, 0xFFFF_FFFFu64)),
-                    StrVal::Bytes { len, .. } => len,
-                };
-                ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(len)), null)
+            ColVal::Str(s, null) => {
+                ColVal::I64(ctx.bind(int_cast::<i64, u64, _>(s.byte_len())), null)
             }
             other => panic!("octet_length expects a string, got {}", tag(other)),
         },
         other => panic!("unsupported scalar function: {other}"),
     }
 }
-/// Equality: string operands compare by view/bytes, numeric operands by value.
-fn gen_eq(ctx: &Ctx, l: ColVal, r: ColVal, cx: &CodegenCtx) -> Var<bool> {
+/// Equality: string operands compare by bytes, numeric operands by value.
+fn gen_eq(ctx: &Ctx, l: ColVal, r: ColVal) -> Var<bool> {
     match (l, r) {
-        (ColVal::Str(a, _), ColVal::Str(b, _)) => str_eq(ctx, a, b, cx),
+        (ColVal::Str(a, _), ColVal::Str(b, _)) => a.bytes_eq(ctx, b),
         _ if is_str(l) || is_str(r) => panic!("string compared with non-string"),
         _ => num_cmp(ctx, Cmp::Eq, l, r),
     }
@@ -109,9 +104,9 @@ fn gen_binary(
     let r = gen_expr(ctx, &be.right, schema, row, cx);
     let null = combine_null(ctx, l.nullness(), r.nullness());
     match be.op {
-        DfOp::Eq => ColVal::Bool(gen_eq(ctx, l, r, cx), null),
+        DfOp::Eq => ColVal::Bool(gen_eq(ctx, l, r), null),
         DfOp::NotEq => {
-            let e = gen_eq(ctx, l, r, cx);
+            let e = gen_eq(ctx, l, r);
             ColVal::Bool(ctx.bind(not(e)), null)
         }
         DfOp::Lt => ColVal::Bool(num_cmp(ctx, Cmp::Lt, l, r), null),

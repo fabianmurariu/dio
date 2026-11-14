@@ -8,7 +8,7 @@ use std::collections::HashMap;
 use std::ptr;
 
 use arrow::record_batch::RecordBatch;
-use arrow_lms::{FfiArray, prepare_record_batch};
+use arrow_lms::{FfiBatch, FfiRecordBatch};
 use rust_lms::prelude::*;
 
 /// Where a build row lives: its batch index in the relation and its row within it.
@@ -28,29 +28,22 @@ pub struct Locator {
 /// future spill-to-disk / mmap-backed store can slot in without touching codegen.
 pub trait BuildRelation {
     fn num_batches(&self) -> usize;
-    /// FFI descriptors for batch `i`, stable for the whole probe (the batch is
-    /// retained). The probe rebuilds a `&[FfiArray]` from this pointer and reuses
-    /// `gen_read` to lift the located row's columns.
-    fn batch_descriptors(&self, i: usize) -> *const FfiArray;
+    /// Batch `i`'s descriptors, stable for the whole probe (the batch is retained).
+    /// The probe reads the located row's columns through them with `gen_read`.
+    fn batch(&self, i: usize) -> &FfiBatch;
 }
 
-/// In-memory build relation: the retained batches plus their FFI descriptors.
+/// In-memory build relation: the retained batches with their descriptors.
 /// (Phase 1 fills this by cloning a bare scan's input batches.)
 #[derive(Default)]
 pub struct InMemoryRelation {
-    batches: Vec<RecordBatch>,
-    descs: Vec<Vec<FfiArray>>,
+    batches: Vec<FfiRecordBatch>,
 }
 
 impl InMemoryRelation {
     fn push(&mut self, rb: RecordBatch) {
-        // Descriptors hold raw pointers into `rb`'s Arrow buffers; `rb` is retained
-        // in `batches`, so they stay valid for the whole probe.
-        let prepared = prepare_record_batch(&rb).expect("prepare build batch");
-        let d = prepared.arrays().to_vec();
-        drop(prepared);
-        self.batches.push(rb);
-        self.descs.push(d);
+        self.batches
+            .push(FfiRecordBatch::new(rb).expect("prepare build batch"));
     }
 }
 
@@ -58,8 +51,8 @@ impl BuildRelation for InMemoryRelation {
     fn num_batches(&self) -> usize {
         self.batches.len()
     }
-    fn batch_descriptors(&self, i: usize) -> *const FfiArray {
-        self.descs[i].as_ptr()
+    fn batch(&self, i: usize) -> &FfiBatch {
+        self.batches[i].batch()
     }
 }
 
@@ -156,6 +149,6 @@ pub extern "C" fn join_probe_base(js: &JoinState, key: u64) -> *const Locator {
 /// Descriptors for build-relation batch `batch_idx`, for the probe's `gen_read`.
 #[extern_fn]
 #[unsafe(no_mangle)]
-pub extern "C" fn join_left_batch(js: &JoinState, batch_idx: u64) -> *const FfiArray {
-    js.relation.batch_descriptors(batch_idx as usize)
+pub extern "C" fn join_left_batch(js: &JoinState, batch_idx: u64) -> *const FfiBatch {
+    js.relation.batch(batch_idx as usize)
 }
