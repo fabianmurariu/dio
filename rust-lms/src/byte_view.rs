@@ -29,7 +29,8 @@ use rust_lms_derive::{StagedType, extern_fn};
 use crate::ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array};
 use crate::func::Ctx;
 use crate::num::{
-    bitand, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr, swap_bytes,
+    bitand, bitor, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr,
+    swap_bytes,
 };
 use crate::refer::{SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store};
 use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
@@ -92,6 +93,23 @@ pub fn make_view(bytes: &[u8], buffer_index: u32, offset: u32) -> u128 {
         view[12..16].copy_from_slice(&offset.to_le_bytes());
     }
     u128::from_le_bytes(view)
+}
+
+/// The view of a long value whose bytes now lie at `(buf_idx, offset)`: `view`'s length
+/// and prefix with the new address. The staged twin of [`make_view`] for a value already
+/// viewed, so the prefix is never read again from the bytes.
+///
+/// For a long `view` only: an inline view's data would be overwritten.
+pub fn relocate_view<V, B, O>(view: V, buf_idx: B, offset: O) -> impl Staged<Out = u128>
+where
+    V: Staged<Out = u128>,
+    B: Staged<Out = u32>,
+    O: Staged<Out = u32>,
+{
+    let len_and_prefix = bitand(view, u64::MAX as u128);
+    let buf_idx = shl(int_cast::<u128, u32, _>(buf_idx), 64u128);
+    let offset = shl(int_cast::<u128, u32, _>(offset), 96u128);
+    bitor(bitor(len_and_prefix, buf_idx), offset)
 }
 
 /// A view's length.
@@ -430,14 +448,26 @@ impl<K: ByteKind> Var<ByteView<K>> {
                 // SAFETY: the data starts 4 bytes into the 16-byte slot.
                 ctx.goto(out, unsafe { ptr_offset(bytes, Const::new(4i64)) });
             });
-            let buf_idx = int_cast::<i64, u32, _>(low_u32(view >> 64u128));
-            let offset = int_cast::<i64, u32, _>(low_u32(view >> 96u128));
-            // SAFETY: a long view's `buf_idx` is an entry of its table (`ByteView::from_parts`).
-            let buffer = unsafe { ptr_offset(self.buffers(), buf_idx) };
-            let base = unsafe { load_field_unchecked(buffer, ByteBufferType::ptr()) };
-            // SAFETY: and its `offset` lies inside that entry's bytes.
-            unsafe { ptr_offset(base, offset) }
+            // SAFETY: the value is not inline.
+            unsafe { self.long_data(ctx) }
         })
+    }
+
+    /// The address of a long value's bytes: `offset` into entry `buf_idx` of its table.
+    ///
+    /// # Safety
+    ///
+    /// At execution, the value is longer than [`MAX_INLINE_LEN`]: an inline view has no
+    /// table entry.
+    pub unsafe fn long_data(self, ctx: &Ctx) -> Var<SPtr<u8>> {
+        let view = ctx.bind(self.view());
+        let buf_idx = int_cast::<i64, u32, _>(low_u32(view >> 64u128));
+        let offset = int_cast::<i64, u32, _>(low_u32(view >> 96u128));
+        // SAFETY: a long view's `buf_idx` is an entry of its table (`ByteView::from_parts`).
+        let buffer = unsafe { ptr_offset(self.buffers(), buf_idx) };
+        let base = unsafe { load_field_unchecked(buffer, ByteBufferType::ptr()) };
+        // SAFETY: and its `offset` lies inside that entry's bytes.
+        ctx.bind(unsafe { ptr_offset(base, offset) })
     }
 
     /// Its bytes, for an extern that reads them during the call. An inline value's

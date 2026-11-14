@@ -347,6 +347,15 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             offset,
         );
     }
+    fn store_unaligned(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
+        // `trusted()` without `aligned`.
+        self.builder.ins().store(
+            MemFlagsData::new().with_notrap(),
+            val.cranelift(),
+            ptr.cranelift(),
+            offset,
+        );
+    }
     fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId {
         ValueId::from_cranelift(
             self.builder

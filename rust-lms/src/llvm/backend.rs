@@ -712,6 +712,18 @@ impl<'c> Backend for MlirBackend<'c> {
             LoadStoreOptions::new(),
         ));
     }
+    fn store_unaligned(&mut self, val: ValueId, ptr: ValueId, offset: i32) {
+        let ptr = self.offset_ptr_const(ptr, offset);
+        let (val, ptr) = (self.get(val), self.get(ptr));
+        let i64_ty = IntegerType::new(self.context, 64).into();
+        self.emit(llvm::store(
+            self.context,
+            val,
+            ptr,
+            self.location,
+            LoadStoreOptions::new().align(Some(IntegerAttribute::new(i64_ty, 1))),
+        ));
+    }
     fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId {
         let base = self.slots[slot.as_u32() as usize];
         self.offset_ptr_const(base, offset)

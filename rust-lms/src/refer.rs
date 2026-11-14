@@ -10,7 +10,8 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::num::Int;
+use crate::func::Ctx;
+use crate::num::{Int, ge, gt, int_cast};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var, VarUse};
 use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
 use std::marker::PhantomData;
@@ -300,6 +301,92 @@ where
         ptr: ptr.into_staged(),
         _t: PhantomData,
     }
+}
+
+/// Write an integer at any byte address, as `ptr::write_unaligned`.
+pub struct WriteUnaligned<P, V, T> {
+    ptr: P,
+    val: V,
+    _t: PhantomData<fn() -> T>,
+}
+
+unsafe impl<P, V, T> Staged for WriteUnaligned<P, V, T>
+where
+    P: Staged<Out = SMutPtr<u8>>,
+    V: Staged<Out = T>,
+    T: Int,
+{
+    type Out = ();
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let ptr = self.ptr.codegen(ctx);
+        let val = self.val.codegen(ctx);
+        ctx.store_unaligned(val.leaf(), ptr.leaf(), 0);
+        Value::scalar(ctx.get_unit_value())
+    }
+}
+
+/// Write a `T` to the bytes at `ptr`, which need not be aligned for `T`: a word of a
+/// byte string, written at any offset.
+///
+/// # Safety
+///
+/// At execution, `ptr` must be writable for `size_of::<T>()` bytes, with no conflicting
+/// live references.
+pub unsafe fn write_unaligned<T, P, V>(ptr: P, val: V) -> WriteUnaligned<P::Staged, V::Staged, T>
+where
+    T: Int,
+    P: IntoStaged<SMutPtr<u8>>,
+    V: IntoStaged<T>,
+{
+    WriteUnaligned {
+        ptr: ptr.into_staged(),
+        val: val.into_staged(),
+        _t: PhantomData,
+    }
+}
+
+/// Copies `len` bytes from `src` to `dst`, as `ptr::copy_nonoverlapping` of a length known
+/// only at run time, inline: 8 bytes at a time, the last 8 overlapping the ones before
+/// (so no byte loop for 8 bytes or more), and byte by byte below 8.
+///
+/// # Safety
+///
+/// At execution, `src` is readable and `dst` writable for `len` bytes, and the two do not
+/// overlap.
+pub unsafe fn copy_bytes(ctx: &Ctx, dst: Var<SMutPtr<u8>>, src: Var<SPtr<u8>>, len: Var<u64>) {
+    // SAFETY (every access below): an offset below `len`, and a word ending at `len` at
+    // the latest, inside both ranges (the caller).
+    let word = |ctx: &Ctx, at: Var<u64>| {
+        let at = ctx.bind(int_cast::<i64, u64, _>(at));
+        let w = ctx.bind(unsafe { read_unaligned::<u64, _>(ptr_offset(src, at)) });
+        ctx.emit(unsafe { write_unaligned::<u64, _, _>(ptr_offset_mut(dst, at), w) });
+    };
+    let byte = |ctx: &Ctx, at: Var<u64>| {
+        let at = ctx.bind(int_cast::<i64, u64, _>(at));
+        let b = ctx.bind(unsafe { read_unaligned::<u8, _>(ptr_offset(src, at)) });
+        ctx.emit(unsafe { write_unaligned::<u8, _, _>(ptr_offset_mut(dst, at), b) });
+    };
+    ctx.if_then_else(
+        ge(len, 8u64),
+        |ctx| {
+            let i = ctx.var(0u64);
+            ctx.iterate(|ctx, done| {
+                ctx.exit_if(gt(i + 8u64, len), done);
+                word(ctx, i);
+                ctx.store(i, i + 8u64);
+            });
+            word(ctx, ctx.bind(len - 8u64));
+        },
+        |ctx| {
+            let i = ctx.var(0u64);
+            ctx.iterate(|ctx, done| {
+                ctx.exit_if(ge(i, len), done);
+                byte(ctx, i);
+                ctx.store(i, i + 1u64);
+            });
+        },
+    );
 }
 
 /// Load from mutable reference/pointer

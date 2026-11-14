@@ -465,6 +465,8 @@ pub trait Backend {
         kind: LoadKind,
     ) -> ValueId;
     fn store(&mut self, val: ValueId, ptr: ValueId, offset: i32);
+    /// A store at any byte address, with no alignment assumed.
+    fn store_unaligned(&mut self, val: ValueId, ptr: ValueId, offset: i32);
     fn stack_addr(&mut self, slot: StackSlotId, offset: i32) -> ValueId;
     /// Allocate an explicit stack slot of `size` bytes with alignment `1 << align_shift`.
     fn alloc_stack_slot(&mut self, size: u32, align_shift: u8) -> StackSlotId;
@@ -817,6 +819,12 @@ impl<'c> CompilationContext<'c> {
     pub fn store(&mut self, value: ValueId, ptr: ValueId, offset: i32) {
         expect_type(ptr, ScalarType::Ptr, "store pointer");
         self.backend.store(value, ptr, offset);
+    }
+
+    #[doc(hidden)]
+    pub fn store_unaligned(&mut self, value: ValueId, ptr: ValueId, offset: i32) {
+        expect_type(ptr, ScalarType::Ptr, "store pointer");
+        self.backend.store_unaligned(value, ptr, offset);
     }
 
     #[doc(hidden)]

@@ -87,7 +87,7 @@ pub mod _internal {
 pub mod prelude {
     pub use crate::byte_view::{
         Bin, Binary, ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, MakeByteView, RawByteView,
-        Str, Utf8, Utf8LenExtern, make_view, utf8_len, view_len,
+        Str, Utf8, Utf8LenExtern, make_view, relocate_view, utf8_len, view_len,
     };
     pub use crate::control::{
         IfThen, IfThenElse, Not, While, if_then, if_then_else, not, while_loop,
@@ -133,9 +133,10 @@ pub mod prelude {
     pub use crate::refer::{
         ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
         PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
-        StoreRef, array_index, const_mut_ptr, const_ptr, load, load_mut, load_ref, load_ref_mut,
-        ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut, ptr_is_null, ptr_offset, ptr_offset_mut,
-        read_unaligned, ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref,
+        StoreRef, WriteUnaligned, array_index, const_mut_ptr, const_ptr, copy_bytes, load,
+        load_mut, load_ref, load_ref_mut, ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut,
+        ptr_is_null, ptr_offset, ptr_offset_mut, read_unaligned, ref_as_const, ref_as_ptr,
+        ref_mut_as_ptr, store, store_ref, write_unaligned,
     };
     pub use crate::slice::{
         AsMutSlice, AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceRepr,
