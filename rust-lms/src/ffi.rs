@@ -222,7 +222,7 @@ unsafe impl<T: StagedType> Sync for FfiSlice<T> where T::RuntimeValue: Sync {}
 
 impl<T: StagedType> FfiSlice<T> {
     /// The descriptor of `values`, read while they are alive and unchanged.
-    pub fn new(values: &[T::RuntimeValue]) -> Self {
+    pub const fn new(values: &[T::RuntimeValue]) -> Self {
         Self {
             ptr: values.as_ptr(),
             len: values.len(),
@@ -230,12 +230,12 @@ impl<T: StagedType> FfiSlice<T> {
     }
 
     /// No values; its pointer is dangling, never null, so it is read as an empty slice.
-    pub fn empty() -> Self {
+    pub const fn empty() -> Self {
         Self::new(&[])
     }
 
     /// How many `T`s.
-    pub fn len(&self) -> usize {
+    pub const fn len(&self) -> usize {
         self.len
     }
 

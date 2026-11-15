@@ -1,14 +1,14 @@
 //! # arrow-lms: staged Apache Arrow interop for `rust-lms`
 //!
-//! Bridges primitive Apache Arrow arrays into staged `rust-lms` kernels. A batch
-//! is a `Slice<FfiArray>`: host code prepares one with [`prepare_record_batch`]
-//! (read), and staged code recovers typed columns with `batch.primitive::<T>(idx)`.
-//! Output materialization lives in the consumer (`sql-gen`'s `SVec`-backed
-//! `OutCols`). Read descriptors and owner-backed writable validity descriptors
-//! are separate types.
+//! Reads Apache Arrow arrays in staged `rust-lms` kernels, without copying them. Host
+//! code describes a batch's columns with [`prepare_record_batch`] (or keeps the batch,
+//! [`FfiRecordBatch`]); a kernel reads typed columns through the [`FfiBatch`] it is
+//! given (`batch.arrays().primitive::<T>(i)`, `batch.strings(i)`). Read-only: kernels
+//! write their output elsewhere (`sql-gen`'s `OutCols`, db4's blocks).
 //!
 //! Scope: primitive and `Boolean` arrays, and byte-view arrays (`Utf8View`,
-//! `BinaryView`) read as `ByteView<K>` rows ([`ByteViewDescriptors`]). Validity is a first-class staged view.
+//! `BinaryView`) read as `ByteView<K>` rows ([`ByteViewDescriptors`]). Validity is a
+//! bitmap ([`FfiBitmap`]) and a null count ([`FfiValidity`]).
 
 // `#[derive(StagedType)]` generates field-token modules with lowercase field
 // names, which trips the case lints.
@@ -18,20 +18,15 @@ mod array;
 mod batch;
 mod byte_view;
 pub mod ffi;
-pub mod ffi_mut;
+mod validity;
 
-pub use array::{
-    ArrayBatchOps, ArraySource, BooleanArrayView, FfiArrayOps, PrimitiveArrayView, ValidityIsValid,
-    ValidityLen, ValidityNullCount, ValiditySource, ValidityView,
-};
+pub use array::{ArrayBatchOps, ArraySource, BooleanArrayView, FfiArrayOps, PrimitiveArrayView};
 pub use batch::{FfiBatch, FfiBatchOps, FfiBatchType};
 pub use byte_view::{
     ArrowByteKind, ByteViewArrayView, ByteViewDescriptors, FfiByteViewArray, FfiByteViewArrayOps,
 };
 pub use ffi::{
-    FfiArray, FfiBuffer, FfiError, FfiRecordBatch, FfiValidity, FfiValidityMut, PreparedFfiBatch,
-    PreparedFfiValidityMut, prepare_array_refs, prepare_arrays, prepare_dyn_arrays,
-    prepare_record_batch, prepare_validity_mut,
+    FfiArray, FfiBuffer, FfiError, FfiRecordBatch, PreparedFfiBatch, prepare_array_refs,
+    prepare_arrays, prepare_dyn_arrays, prepare_record_batch,
 };
-// `ffi_mut` now holds only the standalone `ValidityView` write ops (re-exported
-// from `array`); the host output path moved to the consumer.
+pub use validity::{BitmapWord, FfiBitmap, FfiValidity, ValidityView};

@@ -1,22 +1,18 @@
 //! Staged views over primitive Arrow arrays.
 //!
-//! A batch is a `Slice<FfiArray>`; `SRef` gives read access, `SRefMut` write
-//! access (see [`crate::ffi_mut`]). Arrow-specific logic is confined to validity
-//! bitmap interpretation; everything else is a `rust-lms` slice reinterpretation.
+//! A batch is a `Slice<FfiArray>`, read through `SRef`. Bits are read through
+//! [`crate::validity`]; everything else is a `rust-lms` slice reinterpretation.
 
 use std::marker::PhantomData;
 
 use rust_lms::prelude::*;
 
-use crate::ffi::{FfiArray, FfiArrayType, FfiValidity, FfiValidityType};
+use crate::ffi::{FfiArray, FfiArrayType};
+use crate::validity::{FfiValidity, ValidityView};
 
 /// A lifetime-free staged pointer to an `FfiArray` descriptor.
 pub trait ArraySource: Staged<Out = SPtr<FfiArray>> + Clone {}
 impl<T> ArraySource for T where T: Staged<Out = SPtr<FfiArray>> + Clone {}
-
-/// A lifetime-free staged pointer to read-only validity metadata.
-pub trait ValiditySource: Staged<Out = SPtr<FfiValidity>> + Clone {}
-impl<T> ValiditySource for T where T: Staged<Out = SPtr<FfiValidity>> + Clone {}
 
 // =============================================================================
 // Batch access: a batch is just SRef<Slice<FfiArray>>
@@ -162,9 +158,8 @@ impl<P: ArraySource + 'static> BooleanArrayView<P> {
     }
 
     pub fn validity(&self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P>> {
-        ValidityView {
-            validity: field_addr(self.array.clone(), FfiArrayType::validity()),
-        }
+        // SAFETY: part of the descriptor, alive as long as it is (the view's constructor).
+        unsafe { ValidityView::new(field_addr(self.array.clone(), FfiArrayType::validity())) }
     }
 }
 
@@ -174,8 +169,7 @@ impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<FfiArray>> + Sized 
 // PrimitiveArrayView: read methods
 // =============================================================================
 
-/// Typed staged primitive array view. Read methods below; write methods
-/// (`set`/`set_null`) live in [`crate::ffi_mut`] on the `SRefMut` flavor.
+/// Typed staged primitive array view.
 pub struct PrimitiveArrayView<P, M> {
     pub(crate) array: P,
     pub(crate) _elem: PhantomData<M>,
@@ -252,164 +246,9 @@ impl<P, M> PrimitiveArrayView<P, M> {
 
     pub fn validity(&self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P, M>>
     where
-        P: ArraySource,
+        P: ArraySource + 'static,
     {
-        ValidityView {
-            validity: field_addr(self.array.clone(), FfiArrayType::validity()),
-        }
-    }
-}
-
-// =============================================================================
-// Validity: read + shared bit addressing
-// =============================================================================
-
-/// Byte index and single-bit mask for global row `index` in a validity bitmap.
-/// Shared by the read (`is_valid`) and write (`set_null`) paths so the bit
-/// arithmetic lives in exactly one place.
-pub(crate) unsafe fn bit_location<V, I>(
-    validity: V,
-    index: I,
-) -> (
-    impl Staged<Out = u64> + Clone,
-    impl Staged<Out = u64> + Clone,
-)
-where
-    V: Staged + Clone,
-    V::Out: StagedType,
-    I: IntoStaged<u64>,
-    I::Staged: Clone,
-{
-    // SAFETY: callers guarantee `validity` is a reference to `FfiValidity`.
-    let bit_offset = unsafe { load_field_unchecked(validity, FfiValidityType::bit_offset()) };
-    let bit = add::<u64, _, _>(bit_offset, index.into_staged());
-    let byte_index = shr::<u64, _, _>(bit.clone(), 3u64);
-    let mask = shl::<u64, _, _>(Const::<u64>::new(1), bitand::<u64, _, _>(bit, 7u64));
-    (byte_index, mask)
-}
-
-/// Staged validity bitmap view.
-pub struct ValidityView<V> {
-    pub(crate) validity: V,
-}
-
-impl<V: Clone> Clone for ValidityView<V> {
-    fn clone(&self) -> Self {
-        Self {
-            validity: self.validity.clone(),
-        }
-    }
-}
-
-impl<V: Copy> Copy for ValidityView<V> {}
-
-impl<V> ValidityView<V> {
-    /// Wrap a staged `&FfiValidity` / `&mut FfiValidity`. Lets a validity bitmap
-    /// be manipulated on its own, independent of any primitive array.
-    pub fn new(validity: V) -> Self {
-        Self { validity }
-    }
-
-    /// The bitmap's bytes as a **trusted** staged slice — promoted here, at the
-    /// descriptor boundary, so readers use the ordinary slice surface.
-    ///
-    /// # Safety
-    ///
-    /// The `FfiValidity::bytes` descriptor must address a live byte buffer for
-    /// the duration of generated execution.
-    pub unsafe fn bytes(&self) -> impl Staged<Out = SRef<Slice<u8>>> + Clone + use<V>
-    where
-        V: ValiditySource,
-    {
-        // SAFETY: promoted under this method's own contract; the read is shared.
-        unsafe {
-            field_addr(self.validity.clone(), FfiValidityType::bytes())
-                .into_raw_slice::<u8>()
-                .assume_shared()
-        }
-    }
-
-    pub fn len(&self) -> LoadField<V, FfiValidityType::__field_bit_len>
-    where
-        V: ValiditySource,
-    {
-        // SAFETY: `ValiditySource` proves this expression is an
-        // `SRef<FfiValidity>` and the generated field token matches it.
-        unsafe { load_field_unchecked(self.validity.clone(), FfiValidityType::bit_len()) }
-    }
-
-    pub fn null_count(&self) -> LoadField<V, FfiValidityType::__field_null_count>
-    where
-        V: ValiditySource,
-    {
-        // SAFETY: `ValiditySource` proves this expression is an
-        // `SRef<FfiValidity>` and the generated field token matches it.
-        unsafe { load_field_unchecked(self.validity.clone(), FfiValidityType::null_count()) }
-    }
-
-    /// Test a validity bit without checking `bit_len`.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than the validity descriptor's bit
-    /// length.
-    pub unsafe fn is_valid<I>(&self, index: I) -> ValidityIsValid<V, I::Staged>
-    where
-        V: Clone,
-        I: IntoStaged<u64>,
-    {
-        ValidityIsValid {
-            validity: self.validity.clone(),
-            index: index.into_staged(),
-        }
-    }
-}
-
-/// Staged validity bitmap length / null count — plain field loads.
-pub type ValidityLen<V> = LoadField<V, FfiValidityType::__field_bit_len>;
-pub type ValidityNullCount<V> = LoadField<V, FfiValidityType::__field_null_count>;
-
-/// Staged validity bitmap random access: is row `index` valid?
-pub struct ValidityIsValid<V, I> {
-    validity: V,
-    index: I,
-}
-
-impl<V: Clone, I: Clone> Clone for ValidityIsValid<V, I> {
-    fn clone(&self) -> Self {
-        Self {
-            validity: self.validity.clone(),
-            index: self.index.clone(),
-        }
-    }
-}
-
-impl<V: Copy, I: Copy> Copy for ValidityIsValid<V, I> {}
-
-unsafe impl<V, I> Staged for ValidityIsValid<V, I>
-where
-    V: ValiditySource,
-    I: Staged<Out = u64> + Clone,
-{
-    type Out = bool;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> rust_lms::staged::Value {
-        let view = ValidityView {
-            validity: self.validity.clone(),
-        };
-        // SAFETY: `ValiditySource` proves the base is an `SRef<FfiValidity>`.
-        let (byte_index, mask) = unsafe { bit_location(self.validity.clone(), self.index.clone()) };
-        // SAFETY: `bit_location` establishes a byte index within the validity
-        // bitmap when the caller satisfies `is_valid`'s row bound.
-        let byte =
-            int_cast::<u64, u8, _>(unsafe { view.clone().bytes().get_unchecked(byte_index) });
-        let bit_is_set = not(eq(bitand::<u64, _, _>(byte, mask), 0u64));
-
-        if_then_else(
-            eq(view.null_count(), 0u64),
-            Const::<bool>::new(true),
-            bit_is_set,
-        )
-        .codegen(ctx)
+        // SAFETY: part of the descriptor, alive as long as it is (the view's constructor).
+        unsafe { ValidityView::new(field_addr(self.array.clone(), FfiArrayType::validity())) }
     }
 }

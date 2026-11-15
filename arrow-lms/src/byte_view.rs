@@ -18,8 +18,7 @@ use arrow::datatypes::{BinaryViewType, ByteViewType, StringViewType};
 use rust_lms::prelude::*;
 use rust_lms::types::{Leaves, ScalarType};
 
-use crate::array::ValidityView;
-use crate::ffi::{FfiBuffer, FfiValidity};
+use crate::validity::{FfiValidity, ValidityView};
 
 /// A byte kind with its Arrow array type: `Utf8` reads `StringViewArray`, `Binary`
 /// reads `BinaryViewArray`.
@@ -39,14 +38,11 @@ impl ArrowByteKind for Binary {
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 struct RawByteViewArray {
-    /// `SliceRepr<u128>`: one view per row.
-    #[staged(FfiBuffer)]
-    views: FfiBuffer,
-    #[staged(FfiValidity)]
+    /// One view per row.
+    views: FfiSlice<u128>,
     validity: FfiValidity,
-    /// `SliceRepr<ByteBuffer>`: the array's data buffers, by `buf_idx`.
-    #[staged(FfiBuffer)]
-    buffers: FfiBuffer,
+    /// The array's data buffers, by `buf_idx`.
+    buffers: FfiSlice<ByteBuffer>,
 }
 
 /// One Arrow byte-view array of kind `K`, as a kernel reads it. Built only by
@@ -64,9 +60,9 @@ impl<K: ByteKind> FfiByteViewArray<K> {
     pub const fn empty() -> Self {
         Self {
             raw: RawByteViewArray {
-                views: FfiBuffer::empty(),
-                validity: FfiValidity::all_valid(0),
-                buffers: FfiBuffer::empty(),
+                views: FfiSlice::empty(),
+                validity: FfiValidity::all_valid(),
+                buffers: FfiSlice::empty(),
             },
             _kind: PhantomData,
         }
@@ -82,7 +78,7 @@ impl<K: ByteKind> FfiByteViewArray<K> {
     }
 
     pub fn null_count(&self) -> u64 {
-        self.raw.validity.null_count
+        self.raw.validity.null_count()
     }
 
     /// How many data buffers its views index.
@@ -166,9 +162,9 @@ impl<K: ArrowByteKind> ByteViewDescriptors<K> {
                 start += window.len();
                 FfiByteViewArray {
                     raw: RawByteViewArray {
-                        views: FfiBuffer::from_typed_slice(array.views().as_ref()),
-                        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
-                        buffers: FfiBuffer::from_typed_slice(window),
+                        views: FfiSlice::new(array.views().as_ref()),
+                        validity: FfiValidity::from_nulls(array.nulls()),
+                        buffers: FfiSlice::new(window),
                     },
                     _kind: PhantomData,
                 }
@@ -265,7 +261,8 @@ where
     pub fn validity(
         &self,
     ) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P, K>> {
-        ValidityView::new(field_addr(self.raw(), RawByteViewArrayType::validity()))
+        // SAFETY: the descriptor is alive and unchanged for the kernel run, as `views`'.
+        unsafe { ValidityView::new(field_addr(self.raw(), RawByteViewArrayType::validity())) }
     }
 
     /// Row `index`: its view and the array's table. A copy of the view, nothing more.

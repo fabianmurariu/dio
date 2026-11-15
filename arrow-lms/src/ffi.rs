@@ -1,10 +1,8 @@
-//! FFI descriptors for primitive Arrow arrays.
+//! FFI descriptors for Arrow arrays, read-only.
 //!
-//! The wire structs remain lifetime-free because generated code consumes their
-//! `repr(C)` layout. Safe host construction is lifetime-bearing: read batches
-//! come from [`PreparedFfiBatch`], while writable bitmap descriptors come from
-//! [`PreparedFfiValidityMut`]. Their raw fields are private and read-only and
-//! writable buffers are distinct staged types.
+//! The descriptors are lifetime-free because generated code consumes their `repr(C)`
+//! layout. Safe host construction is lifetime-bearing: a batch's descriptors come from
+//! [`PreparedFfiBatch`] (borrowed) or [`FfiRecordBatch`] (owned).
 
 use std::fmt;
 use std::marker::PhantomData;
@@ -14,15 +12,17 @@ use arrow::array::{
     Array, ArrayRef, BooleanArray, Float32Array, Float64Array, Int8Array, Int16Array, Int32Array,
     Int64Array, PrimitiveArray, StringViewArray, UInt8Array, UInt16Array, UInt32Array, UInt64Array,
 };
-use arrow::buffer::NullBuffer;
 use arrow::datatypes::DataType;
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
 use crate::batch::FfiBatch;
 use crate::byte_view::ByteViewDescriptors;
+use crate::validity::FfiValidity;
 
-/// Erased read-only `(ptr, len)` buffer used inside prepared Arrow descriptors.
+/// An array's values as an erased `(ptr, len)`: what [`FfiArray`] holds until arrays are
+/// typed (`relational/jit_stage6a.md` M2), and nothing else. Every other descriptor field
+/// is an [`FfiSlice<T>`].
 #[repr(C)]
 #[derive(Clone, Copy, Debug, StagedType)]
 pub struct FfiBuffer {
@@ -52,66 +52,11 @@ impl FfiBuffer {
         }
     }
 
-    fn from_bytes(bytes: &[u8]) -> Self {
-        Self {
-            ptr: bytes.as_ptr(),
-            len: bytes.len(),
-        }
-    }
-
-    /// Its element count.
-    pub(crate) fn len(&self) -> usize {
-        self.len
-    }
-
     pub(crate) fn from_typed_slice<T>(slice: &[T]) -> Self {
         Self {
             ptr: slice.as_ptr().cast::<u8>(),
             len: slice.len(),
         }
-    }
-}
-
-/// Arrow validity bitmap descriptor (`1 = valid`, `0 = null`; `null_count == 0`
-/// means the bitmap can be ignored). Shared by read (`is_valid`) and write
-/// (`set_null`) — see `array.rs` for the staged bit ops.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiValidity {
-    #[staged(FfiBuffer)]
-    bytes: FfiBuffer,
-    #[staged(u64)]
-    bit_offset: u64,
-    #[staged(u64)]
-    bit_len: u64,
-    #[staged(u64)]
-    pub(crate) null_count: u64,
-}
-
-impl FfiValidity {
-    pub const fn all_valid(len: usize) -> Self {
-        Self {
-            bytes: FfiBuffer::empty(),
-            bit_offset: 0,
-            bit_len: len as u64,
-            null_count: 0,
-        }
-    }
-
-    pub(crate) fn from_nulls(nulls: Option<&NullBuffer>, len: usize) -> Self {
-        match nulls {
-            Some(nulls) if nulls.null_count() != 0 => Self {
-                bytes: FfiBuffer::from_bytes(nulls.inner().values()),
-                bit_offset: nulls.offset() as u64,
-                bit_len: nulls.len() as u64,
-                null_count: nulls.null_count() as u64,
-            },
-            _ => Self::all_valid(len),
-        }
-    }
-
-    pub fn all_valid_host(&self) -> bool {
-        self.null_count == 0
     }
 }
 
@@ -133,7 +78,7 @@ impl FfiArray {
     pub const fn empty() -> Self {
         Self {
             values: FfiBuffer::empty(),
-            validity: FfiValidity::all_valid(0),
+            validity: FfiValidity::all_valid(),
         }
     }
 
@@ -146,11 +91,7 @@ impl FfiArray {
     }
 
     pub fn null_count(&self) -> u64 {
-        self.validity.null_count
-    }
-
-    pub fn all_valid(&self) -> bool {
-        self.validity.all_valid_host()
+        self.validity.null_count()
     }
 }
 
@@ -190,8 +131,8 @@ impl Descriptors {
         );
         let batch = FfiBatch {
             num_rows: num_rows as u64,
-            arrays: FfiBuffer::from_typed_slice(&ffi),
-            strings: FfiBuffer::from_typed_slice(strings.arrays()),
+            arrays: FfiSlice::new(&ffi),
+            strings: FfiSlice::new(strings.arrays()),
         };
         Ok(Self {
             arrays: ffi,
@@ -237,55 +178,6 @@ impl FfiRecordBatch {
     }
 }
 
-/// Mutable `(ptr, len)` buffer used only by owner-backed writable descriptors.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiBufferMut {
-    #[staged(SMutPtr<u8>)]
-    ptr: *mut u8,
-    #[staged(u64)]
-    len: usize,
-}
-
-// SAFETY: this private repr(C) descriptor stores a writable byte pointer and a
-// u64-sized byte count at the offsets consumed by slice lowering.
-unsafe impl SliceRepr<u8> for FfiBufferMut {}
-unsafe impl MutSliceRepr<u8> for FfiBufferMut {}
-
-/// Writable validity descriptor. Safe construction requires a
-/// [`PreparedFfiValidityMut`] owner, so it cannot outlive or escape the mutable
-/// bitmap borrow.
-#[repr(C)]
-#[derive(Clone, Copy, Debug, StagedType)]
-pub struct FfiValidityMut {
-    #[staged(FfiBufferMut)]
-    bytes: FfiBufferMut,
-    #[staged(u64)]
-    bit_offset: u64,
-    #[staged(u64)]
-    bit_len: u64,
-    #[staged(u64)]
-    null_count: u64,
-}
-
-/// Host owner for a writable validity descriptor.
-pub struct PreparedFfiValidityMut<'data> {
-    descriptor: FfiValidityMut,
-    _borrow: PhantomData<&'data mut [u8]>,
-}
-
-impl PreparedFfiValidityMut<'_> {
-    /// Borrow the descriptor for a generated call. The borrow cannot outlive
-    /// the original mutable bitmap borrow held by this owner.
-    pub fn descriptor_mut(&mut self) -> &mut FfiValidityMut {
-        &mut self.descriptor
-    }
-
-    pub fn null_count(&self) -> u64 {
-        self.descriptor.null_count
-    }
-}
-
 impl<'data> PreparedFfiBatch<'data> {
     /// The columns' descriptors: `SRef<Slice<FfiArray>>` at runtime.
     pub fn arrays(&self) -> &[FfiArray] {
@@ -314,10 +206,6 @@ pub enum FfiError {
         expected: usize,
         actual: usize,
     },
-    BitmapTooShort {
-        bit_len: usize,
-        byte_len: usize,
-    },
     /// A `Boolean` array whose values start mid-byte, as a slice at a bit offset that is
     /// not a multiple of 8: its descriptor addresses whole bytes.
     UnalignedBooleanValues {
@@ -343,10 +231,6 @@ impl fmt::Display for FfiError {
             } => {
                 write!(f, "array {index} has length {actual}, expected {expected}")
             }
-            Self::BitmapTooShort { bit_len, byte_len } => write!(
-                f,
-                "validity bitmap has {byte_len} bytes, too short for {bit_len} bits"
-            ),
             Self::UnalignedBooleanValues { index, bit_offset } => write!(
                 f,
                 "boolean array {index} starts at bit {bit_offset}, not on a byte"
@@ -361,7 +245,7 @@ impl std::error::Error for FfiError {}
 fn ffi_from_primitive<A: ArrowPrimitiveType>(array: &PrimitiveArray<A>) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.values()),
-        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        validity: FfiValidity::from_nulls(array.nulls()),
     }
 }
 
@@ -380,7 +264,7 @@ fn ffi_from_boolean(index: usize, array: &BooleanArray) -> Result<FfiArray, FfiE
             ptr: bytes.as_ptr(),
             len: array.len(),
         },
-        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        validity: FfiValidity::from_nulls(array.nulls()),
     })
 }
 
@@ -389,37 +273,8 @@ fn ffi_from_boolean(index: usize, array: &BooleanArray) -> Result<FfiArray, FfiE
 fn ffi_from_string_view(array: &StringViewArray) -> FfiArray {
     FfiArray {
         values: FfiBuffer::from_typed_slice(array.views().as_ref()),
-        validity: FfiValidity::from_nulls(array.nulls(), array.len()),
+        validity: FfiValidity::from_nulls(array.nulls()),
     }
-}
-
-/// Prepare a writable validity bitmap over `bit_len` leading bits.
-pub fn prepare_validity_mut(
-    bitmap: &mut [u8],
-    bit_len: usize,
-) -> Result<PreparedFfiValidityMut<'_>, FfiError> {
-    let required = bit_len.div_ceil(8);
-    if bitmap.len() < required {
-        return Err(FfiError::BitmapTooShort {
-            bit_len,
-            byte_len: bitmap.len(),
-        });
-    }
-    let valid_count = (0..bit_len)
-        .filter(|bit| bitmap[*bit / 8] & (1 << (*bit % 8)) != 0)
-        .count();
-    Ok(PreparedFfiValidityMut {
-        descriptor: FfiValidityMut {
-            bytes: FfiBufferMut {
-                ptr: bitmap.as_mut_ptr(),
-                len: required,
-            },
-            bit_offset: 0,
-            bit_len: bit_len as u64,
-            null_count: (bit_len - valid_count) as u64,
-        },
-        _borrow: PhantomData,
-    })
 }
 
 /// Prepare a `RecordBatch` for a compiled kernel.
@@ -506,6 +361,7 @@ fn ffi_from_array(index: usize, array: &dyn Array) -> Result<FfiArray, FfiError>
 #[cfg(test)]
 mod tests {
     use super::*;
+    use arrow::buffer::NullBuffer;
 
     fn assert_read_slice_representation<T: StagedType>()
     where
@@ -513,17 +369,10 @@ mod tests {
     {
     }
 
-    fn assert_mut_slice_representation()
-    where
-        FfiBufferMut: SliceRepr<u8> + MutSliceRepr<u8>,
-    {
-    }
-
     #[test]
     fn buffer_is_an_explicit_slice_representation() {
         assert_read_slice_representation::<u8>();
         assert_read_slice_representation::<i64>();
-        assert_mut_slice_representation();
     }
 
     #[test]
@@ -532,7 +381,6 @@ mod tests {
         let ffi = ffi_from_primitive(&array);
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 0);
-        assert!(ffi.all_valid());
     }
 
     #[test]
@@ -542,6 +390,5 @@ mod tests {
         let ffi = ffi_from_primitive(&array);
         assert_eq!(ffi.len(), 3);
         assert_eq!(ffi.null_count(), 1);
-        assert!(!ffi.all_valid());
     }
 }

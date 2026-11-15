@@ -3,6 +3,10 @@ name = "arrow-lms"
 version.workspace = true
 edition.workspace = true
 
+[features]
+# Run the tests through the MLIR/LLVM backend as well, as rust-lms and sql-gen do.
+llvm = ["rust-lms/llvm"]
+
 [dependencies]
 rust-lms = { workspace = true }
 arrow = { workspace = true }

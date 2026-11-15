@@ -8,7 +8,7 @@
 use rust_lms::prelude::*;
 
 use crate::byte_view::{ByteViewArrayView, FfiByteViewArray};
-use crate::ffi::{FfiArray, FfiBuffer};
+use crate::ffi::FfiArray;
 
 /// One batch's descriptors, built by [`PreparedFfiBatch`](crate::PreparedFfiBatch) or
 /// [`FfiRecordBatch`](crate::FfiRecordBatch), which own what it points to.
@@ -17,12 +17,10 @@ use crate::ffi::{FfiArray, FfiBuffer};
 pub struct FfiBatch {
     #[staged(u64)]
     pub(crate) num_rows: u64,
-    /// `SliceRepr<FfiArray>`: one per column.
-    #[staged(FfiBuffer)]
-    pub(crate) arrays: FfiBuffer,
-    /// `SliceRepr<FfiByteViewArray<Utf8>>`: one per column.
-    #[staged(FfiBuffer)]
-    pub(crate) strings: FfiBuffer,
+    /// One per column.
+    pub(crate) arrays: FfiSlice<FfiArray>,
+    /// One per column.
+    pub(crate) strings: FfiSlice<FfiByteViewArray<Utf8>>,
 }
 
 impl FfiBatch {
