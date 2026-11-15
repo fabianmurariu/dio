@@ -30,6 +30,7 @@ use crate::staged::{
     CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse,
 };
 use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
+use rust_lms_derive::StagedType;
 
 // =============================================================================
 // FatSlice<T> - FFI-safe immutable slice
@@ -163,6 +164,93 @@ impl<T> FatSliceMut<T> {
 impl<T> From<&mut [T]> for FatSliceMut<T> {
     fn from(slice: &mut [T]) -> Self {
         FatSliceMut::from_slice(slice)
+    }
+}
+
+// =============================================================================
+// FfiSlice<T> - a typed (ptr, len) descriptor field
+// =============================================================================
+
+/// A borrowed `[T]` as a field of a `#[repr(C)]` descriptor: a pointer to `T`'s runtime
+/// values and their count, which a kernel reads as `SRef<Slice<T>>` through
+/// [`into_raw_slice::<T>`](crate::slice::ReprSliceOps::into_raw_slice) and
+/// [`assume_shared`](crate::slice::RawSliceOps::assume_shared).
+///
+/// Typed, unlike a `(ptr, len)` of bytes: it is [`SliceRepr`](crate::slice::SliceRepr)
+/// of its own `T` only, and `len` always counts `T`s. Building one is safe, like taking
+/// a slice's address; reading it is not, because nothing keeps the slice alive. Whoever
+/// builds the descriptor keeps the slice alive and unchanged while kernels read it.
+#[repr(C)]
+#[derive(StagedType)]
+pub struct FfiSlice<T: StagedType> {
+    #[staged(SPtr<T>)]
+    ptr: *const T::RuntimeValue,
+    #[staged(u64)]
+    len: usize,
+}
+
+impl<T: StagedType> Clone for FfiSlice<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: StagedType> Copy for FfiSlice<T> {}
+
+impl<T: StagedType> std::fmt::Debug for FfiSlice<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiSlice")
+            .field("ptr", &self.ptr)
+            .field("len", &self.len)
+            .finish()
+    }
+}
+
+const _: () = {
+    assert!(std::mem::offset_of!(FfiSlice<u64>, ptr) == 0);
+    assert!(std::mem::offset_of!(FfiSlice<u64>, len) == 8);
+};
+
+// SAFETY: `ptr` then a `u64`-sized `len` at the offsets slice codegen reads, asserted
+// above; the layout does not depend on `T`, and `ptr` points to `T`'s runtime values.
+unsafe impl<T: StagedType> crate::slice::SliceRepr<T> for FfiSlice<T> {}
+
+// SAFETY: a shared view of `T`s, as `&[T]` is: sending or sharing it is sound when
+// sharing the `T`s is.
+unsafe impl<T: StagedType> Send for FfiSlice<T> where T::RuntimeValue: Sync {}
+unsafe impl<T: StagedType> Sync for FfiSlice<T> where T::RuntimeValue: Sync {}
+
+impl<T: StagedType> FfiSlice<T> {
+    /// The descriptor of `values`, read while they are alive and unchanged.
+    pub fn new(values: &[T::RuntimeValue]) -> Self {
+        Self {
+            ptr: values.as_ptr(),
+            len: values.len(),
+        }
+    }
+
+    /// No values; its pointer is dangling, never null, so it is read as an empty slice.
+    pub fn empty() -> Self {
+        Self::new(&[])
+    }
+
+    /// How many `T`s.
+    pub fn len(&self) -> usize {
+        self.len
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+
+    /// The values, read on the host.
+    ///
+    /// # Safety
+    ///
+    /// The slice this descriptor was built from is still alive and unchanged.
+    pub unsafe fn as_slice(&self) -> &[T::RuntimeValue] {
+        // SAFETY: built from a live slice (`new`), alive by the caller's contract.
+        unsafe { slice::from_raw_parts(self.ptr, self.len) }
     }
 }
 

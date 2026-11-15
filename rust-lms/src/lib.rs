@@ -93,7 +93,7 @@ pub mod prelude {
         IfThen, IfThenElse, Not, While, if_then, if_then_else, not, while_loop,
     };
     pub use crate::ffi::{
-        ExternArgs, ExternFn, ExternRef, FatSlice, FatSliceMut, IntoExternArg, RawSlice,
+        ExternArgs, ExternFn, ExternRef, FatSlice, FatSliceMut, FfiSlice, IntoExternArg, RawSlice,
         RawSliceMut, SafeExternFn, SliceFromRawParts, StackAlloc, StackBytes, call_extern0,
         call_extern0_unchecked, call_extern1, call_extern1_unchecked, call_extern2,
         call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
