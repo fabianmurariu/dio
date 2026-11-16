@@ -23,7 +23,9 @@ use std::rc::Rc;
 
 use arrow::array::StringViewBuilder;
 use arrow::datatypes::{DataType, Field, SchemaRef};
-use arrow_lms::{ArrayBatchOps, FfiArray, FfiBatch, FfiBatchOps, PrimitiveArrayView};
+use arrow_lms::{
+    ArrowArrayOps, FfiBatch, FfiBatchOps, FfiBoolArray, FfiByteViewArray, FfiPrimArray,
+};
 use rust_lms::prelude::*;
 use rust_lms_std::SVec;
 
@@ -287,17 +289,12 @@ pub(crate) fn gen_op<I: InputsSource>(
                 && let Some(cf) = count_fast(&aggs[0], scan_schema)
             {
                 let count = ctx.var(0i64);
+                let scan_schema = scan_schema.clone();
                 for_each_batch(ctx, inputs, *table as u64, cx, move |ctx, batch, len| {
                     let inc = match cf {
                         CountFast::Star => len,
                         CountFast::Col(col) => {
-                            // SAFETY: the scan schema proves `col` exists;
-                            // this path reads only validity metadata, not values.
-                            let nulls = ctx.bind(
-                                unsafe { batch.arrays().primitive::<u64>(col) }
-                                    .validity()
-                                    .null_count(),
-                            );
+                            let nulls = gen_null_count(ctx, batch, col, scan_schema.field(col));
                             ctx.bind(sub(len, nulls))
                         }
                     };
@@ -451,14 +448,47 @@ pub(crate) fn gen_read<B: BatchSource>(
         return gen_read_str(ctx, batch, col, field, i);
     }
     let nullable = field.is_nullable();
-    let arrays = ctx.bind(batch.arrays());
     dispatch_prim!(field.data_type(), M => {
         // SAFETY: schema validation proves `col` exists with physical type `M`.
-        let view = unsafe { arrays.primitive::<M>(col) };
+        let array = ctx.bind(unsafe { batch.column::<FfiPrimArray<M>>(col) });
         // SAFETY: all callers invoke `gen_read` inside the batch row loop.
-        let value = ctx.bind(unsafe { view.value_unchecked(i) });
-        M::wrap(value, read_nullness(ctx, view, nullable, i))
+        let value = ctx.bind(unsafe { array.value_unchecked(i) });
+        let nullness = if nullable {
+            // SAFETY: `i` is bounded by this batch's row loop.
+            Nullness::Nullable(ctx.bind(unsafe { array.validity().is_valid(i) }))
+        } else {
+            Nullness::NonNull
+        };
+        M::wrap(value, nullness)
     })
+}
+
+/// Column `col`'s null count, read as the column's own type, whatever it is: only its
+/// validity, no values.
+fn gen_null_count<B: BatchSource>(ctx: &Ctx, batch: B, col: usize, field: &Field) -> Var<u64> {
+    macro_rules! null_count {
+        ($array:ty) => {{
+            // SAFETY: schema validation proves `col` exists, of the type matched below.
+            let array = unsafe { batch.column::<$array>(col) };
+            ctx.bind(array.validity().null_count())
+        }};
+    }
+    match field.data_type() {
+        DataType::Int8 => null_count!(FfiPrimArray<i8>),
+        DataType::Int16 => null_count!(FfiPrimArray<i16>),
+        DataType::Int32 => null_count!(FfiPrimArray<i32>),
+        DataType::Int64 => null_count!(FfiPrimArray<i64>),
+        DataType::UInt8 => null_count!(FfiPrimArray<u8>),
+        DataType::UInt16 => null_count!(FfiPrimArray<u16>),
+        DataType::UInt32 => null_count!(FfiPrimArray<u32>),
+        DataType::UInt64 => null_count!(FfiPrimArray<u64>),
+        DataType::Float32 => null_count!(FfiPrimArray<f32>),
+        DataType::Float64 => null_count!(FfiPrimArray<f64>),
+        DataType::Boolean => null_count!(FfiBoolArray),
+        DataType::Utf8View => null_count!(FfiByteViewArray<Utf8>),
+        DataType::BinaryView => null_count!(FfiByteViewArray<Binary>),
+        other => panic!("unsupported column type: {other}"),
+    }
 }
 
 /// Read a `Utf8View` string at row `i`: its view and its array's table. A null row's
@@ -472,7 +502,7 @@ fn gen_read_str<B: BatchSource>(
     i: Var<u64>,
 ) -> ColVal {
     // SAFETY: schema validation proves `col` is a `Utf8View` column of every batch.
-    let strings = unsafe { batch.strings(col) };
+    let strings = ctx.bind(unsafe { batch.column::<FfiByteViewArray<Utf8>>(col) });
     // SAFETY: `i` is in the batch's row loop; a null row's value is discarded below.
     let value = ctx.bind(unsafe { strings.value_unchecked(i) });
     if !field.is_nullable() {
@@ -485,24 +515,6 @@ fn gen_read_str<B: BatchSource>(
         ctx.bind(select(valid, value, empty)),
         Nullness::Nullable(valid),
     )
-}
-
-fn read_nullness<P, M>(
-    ctx: &Ctx,
-    view: PrimitiveArrayView<P, M>,
-    nullable: bool,
-    i: Var<u64>,
-) -> Nullness
-where
-    P: Staged<Out = SPtr<FfiArray>> + Clone + 'static,
-    M: StagedType + 'static,
-{
-    if nullable {
-        // SAFETY: `i` is bounded by this batch's row loop.
-        Nullness::Nullable(ctx.bind(unsafe { view.validity().is_valid(i) }))
-    } else {
-        Nullness::NonNull
-    }
 }
 
 // =============================================================================

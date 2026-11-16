@@ -18,21 +18,41 @@ use arrow::datatypes::{BinaryViewType, ByteViewType, StringViewType};
 use rust_lms::prelude::*;
 use rust_lms::types::{Leaves, ScalarType};
 
+use crate::array::FfiArray;
 use crate::validity::{FfiValidity, ValidityView};
 
 /// A byte kind with its Arrow array type: `Utf8` reads `StringViewArray`, `Binary`
 /// reads `BinaryViewArray`.
-pub trait ArrowByteKind: ByteKind {
+pub trait ArrowByteKind: ByteKind + 'static {
     type Arrow: ByteViewType + ?Sized;
+
+    #[doc(hidden)]
+    fn wrap(array: FfiByteViewArray<Self>) -> FfiArray;
+
+    #[doc(hidden)]
+    fn unwrap(array: &FfiArray) -> Option<&FfiByteViewArray<Self>>;
 }
 
-impl ArrowByteKind for Utf8 {
-    type Arrow = StringViewType;
+macro_rules! arrow_byte_kind {
+    ($($kind:ty => $arrow:ty, $variant:ident);*) => {$(
+        impl ArrowByteKind for $kind {
+            type Arrow = $arrow;
+
+            fn wrap(array: FfiByteViewArray<Self>) -> FfiArray {
+                FfiArray::$variant(array)
+            }
+
+            fn unwrap(array: &FfiArray) -> Option<&FfiByteViewArray<Self>> {
+                match array {
+                    FfiArray::$variant(array) => Some(array),
+                    _ => None,
+                }
+            }
+        }
+    )*};
 }
 
-impl ArrowByteKind for Binary {
-    type Arrow = BinaryViewType;
-}
+arrow_byte_kind!(Utf8 => StringViewType, Utf8View; Binary => BinaryViewType, BinaryView);
 
 /// The layout of a [`FfiByteViewArray<K>`], whatever its kind.
 #[repr(C)]
@@ -124,7 +144,7 @@ unsafe impl<K: ByteKind> RuntimeResult for FfiByteViewArray<K> {
 }
 
 /// Descriptors for a set of Arrow byte-view arrays of kind `K`, and the buffer table
-/// they point into. Built once, never mutated; see the [module docs](self).
+/// they point into. Built once, never mutated; see the `byte_view` module docs.
 ///
 /// Nothing is copied: the table and descriptors point into the arrays' own buffers, so
 /// they are read only while those arrays are alive (as [`FfiArray`](crate::FfiArray)'s).
@@ -185,102 +205,76 @@ impl<K: ByteKind> ByteViewDescriptors<K> {
 // Staged reads
 // =============================================================================
 
-/// View a staged `&FfiByteViewArray<K>` as a column of `ByteView<K>`.
-pub trait FfiByteViewArrayOps<K: ByteKind>:
-    Staged<Out = SRef<FfiByteViewArray<K>>> + Sized + Clone
-{
-    /// The column. Safe: the descriptor's kind was checked when it was built.
-    fn byte_views(
-        self,
-    ) -> ByteViewArrayView<impl Staged<Out = SPtr<FfiByteViewArray<K>>> + Clone, K> {
-        ByteViewArrayView {
-            array: ref_as_ptr(self),
-            _kind: PhantomData,
-        }
-    }
-}
-
-impl<K: ByteKind, A> FfiByteViewArrayOps<K> for A where
-    A: Staged<Out = SRef<FfiByteViewArray<K>>> + Sized + Clone
-{
-}
-
-/// A staged Arrow byte-view array of kind `K`: its length, validity and rows.
-#[derive(Clone, Copy)]
-pub struct ByteViewArrayView<P, K> {
-    array: P,
-    _kind: PhantomData<fn() -> K>,
-}
-
-impl<P, K> ByteViewArrayView<P, K> {
-    pub(crate) fn new(array: P) -> Self {
-        Self {
-            array,
-            _kind: PhantomData,
-        }
-    }
-}
-
-impl<P, K> ByteViewArrayView<P, K>
-where
-    P: Staged<Out = SPtr<FfiByteViewArray<K>>> + Clone + 'static,
-    K: ByteKind,
-{
-    /// The array as its kind-free layout.
-    fn raw(&self) -> impl Staged<Out = SPtr<RawByteViewArray>> + Clone + use<P, K> {
-        ptr_cast::<RawByteViewArray, FfiByteViewArray<K>, _>(self.array.clone())
+/// The staged reads behind [`ArrowArray`](crate::ArrowArray), for any kind.
+impl<K: ByteKind> FfiByteViewArray<K> {
+    /// The array at `array` as its kind-free layout.
+    fn raw<P>(array: P) -> impl Staged<Out = SPtr<RawByteViewArray>> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        ptr_cast::<RawByteViewArray, Self, _>(array)
     }
 
-    /// The views, one per row, as a **trusted** slice.
-    pub fn views(&self) -> impl Staged<Out = SRef<Slice<u128>>> + Clone + use<P, K> {
+    /// The views, one per row.
+    fn views<P>(array: P) -> impl Staged<Out = SRef<Slice<u128>>> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
         // SAFETY: a descriptor is built only from an Arrow array's views buffer (or
         // empty), which the host keeps alive for the kernel run; the read is shared.
         unsafe {
-            field_addr(self.raw(), RawByteViewArrayType::views())
+            field_addr(Self::raw(array), RawByteViewArrayType::views())
                 .into_raw_slice::<u128>()
                 .assume_shared()
         }
     }
 
-    /// The table its views' `buf_idx` index.
-    pub fn buffers(&self) -> impl Staged<Out = SPtr<ByteBuffer>> + Clone + use<P, K> {
-        // SAFETY: as `views`: a window of its `ByteViewDescriptors`' table, alive and
-        // unchanged for the kernel run.
+    pub(crate) fn staged_len<P>(array: P) -> impl Staged<Out = u64> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        Self::views(array).len()
+    }
+
+    pub(crate) fn staged_validity<P>(
+        array: P,
+    ) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone>
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        // SAFETY: part of the descriptor, alive as long as it is.
         unsafe {
-            field_addr(self.raw(), RawByteViewArrayType::buffers())
-                .into_raw_slice::<ByteBuffer>()
-                .into_ptr()
+            ValidityView::new(field_addr(
+                Self::raw(array),
+                RawByteViewArrayType::validity(),
+            ))
         }
     }
 
-    /// The row count.
-    pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P, K> {
-        self.views().len()
-    }
-
-    pub fn validity(
-        &self,
-    ) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P, K>> {
-        // SAFETY: the descriptor is alive and unchanged for the kernel run, as `views`'.
-        unsafe { ValidityView::new(field_addr(self.raw(), RawByteViewArrayType::validity())) }
-    }
-
-    /// Row `index`: its view and the array's table. A copy of the view, nothing more.
+    /// Row `index`: its view and the array's buffer table. A copy of the view, nothing
+    /// more.
     ///
     /// # Safety
     ///
-    /// At execution, `index` is less than the row count and the row is valid: Arrow
-    /// makes no promise about a null row's view.
-    pub unsafe fn value_unchecked<I>(
-        &self,
+    /// At execution, `index` is less than the row count and the row is valid.
+    pub(crate) unsafe fn staged_value<P, I>(
+        array: P,
         index: I,
-    ) -> impl Staged<Out = ByteView<K>> + Clone + use<P, K, I>
+    ) -> impl Staged<Out = ByteView<K>> + Clone
     where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
         I: IntoStaged<u64>,
         I::Staged: Clone,
     {
-        // SAFETY: the row is in bounds (the caller) and valid, so its view is one Arrow
-        // validated against this array's data buffers, which `buffers()` is.
-        unsafe { ByteView::<K>::from_parts(self.views().get_unchecked(index), self.buffers()) }
+        // SAFETY: a window of its `ByteViewDescriptors`' table, alive and unchanged for
+        // the kernel run.
+        let buffers = unsafe {
+            field_addr(Self::raw(array.clone()), RawByteViewArrayType::buffers())
+                .into_raw_slice::<ByteBuffer>()
+                .into_ptr()
+        };
+        // SAFETY: the row is in bounds and valid (the caller), so its view is one Arrow
+        // validated against this array's data buffers, which `buffers` is.
+        unsafe { ByteView::<K>::from_parts(Self::views(array).get_unchecked(index), buffers) }
     }
 }

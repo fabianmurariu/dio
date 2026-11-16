@@ -87,6 +87,15 @@ impl<W: BitmapWord> FfiBitmap<W> {
             bit_len: 0,
         }
     }
+
+    /// How many bits.
+    pub fn len(&self) -> usize {
+        self.bit_len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.bit_len == 0
+    }
 }
 
 /// An Arrow array's validity: a bitmap of valid rows and how many are null. With no
@@ -150,6 +159,12 @@ where
             bitmap,
             _word: std::marker::PhantomData,
         }
+    }
+
+    /// How many bits.
+    pub(crate) fn len(&self) -> impl Staged<Out = u64> + Clone + use<P, W> {
+        // SAFETY: `P` addresses an `FfiBitmap<W>` (its type).
+        unsafe { load_field_unchecked(self.bitmap.clone(), FfiBitmapType::bit_len::<W>()) }
     }
 
     /// Bit `index` of the run.

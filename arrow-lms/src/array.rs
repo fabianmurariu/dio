@@ -1,254 +1,688 @@
-//! Staged views over primitive Arrow arrays.
+//! Typed Arrow arrays, the [`ArrowArray`] trait over them, and [`FfiArray`], the one
+//! that holds any of them.
 //!
-//! A batch is a `Slice<FfiArray>`, read through `SRef`. Bits are read through
-//! [`crate::validity`]; everything else is a `rust-lms` slice reinterpretation.
+//! Each Arrow type a kernel reads has its own descriptor, built only from an Arrow array
+//! of that type: [`FfiPrimArray<T>`] for the primitive types, [`FfiBoolArray`] for
+//! `Boolean`, and [`FfiByteViewArray<K>`] for `Utf8View` and `BinaryView`. Generic code is generic in
+//! [`ArrowArray`], at stage 0; a kernel only ever sees one concrete layout.
+//!
+//! A batch's columns have different types, so a batch holds [`FfiArray`]s: a Rust enum
+//! of the descriptors, matched as one on the host. A kernel reads one as the array its
+//! column's type says it is ([`FfiArrayOps::downcast`]), a claim that is `unsafe` until
+//! the batch is checked against its schema (`relational/jit_stage6a.md` M3).
 
-use std::marker::PhantomData;
-
+use arrow::array::types::{
+    ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
+    UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+};
+use arrow::array::{Array, BooleanArray, PrimitiveArray};
+use arrow::datatypes::DataType;
+use arrow::datatypes::{ArrowNativeType, ByteViewType};
 use rust_lms::prelude::*;
+use rust_lms::types::{Leaves, ScalarType};
 
-use crate::ffi::{FfiArray, FfiArrayType};
-use crate::validity::{FfiValidity, ValidityView};
-
-/// A lifetime-free staged pointer to an `FfiArray` descriptor.
-pub trait ArraySource: Staged<Out = SPtr<FfiArray>> + Clone {}
-impl<T> ArraySource for T where T: Staged<Out = SPtr<FfiArray>> + Clone {}
+use crate::byte_view::{ArrowByteKind, FfiByteViewArray};
+use crate::validity::{BitmapView, FfiBitmap, FfiValidity, ValidityView};
 
 // =============================================================================
-// Batch access: a batch is just SRef<Slice<FfiArray>>
+// The trait
 // =============================================================================
 
-/// Staged read operations on any slice representation of `FfiArray`.
-pub trait ArrayBatchOps: Staged + Sized
-where
-    Self::Out: SliceType<Elem = FfiArray>,
+mod sealed {
+    pub trait Sealed {}
+}
+
+/// An Arrow array descriptor of one type: what generic code reads a column through.
+///
+/// Its reads take a staged pointer to the descriptor; call them as methods of a staged
+/// reference with [`ArrowArrayOps`].
+pub trait ArrowArray:
+    StagedType<RuntimeValue = Self> + CopyType + Into<FfiArray> + sealed::Sealed + 'static
 {
-    /// A typed view of column `index`.
+    /// What a row holds.
+    type Value: StagedType;
+
+    /// Whether an Arrow array of `data_type` is described by `Self`.
+    fn accepts(data_type: &DataType) -> bool;
+
+    /// `array` as `Self`, if that is what it holds.
+    fn downcast_ref(array: &FfiArray) -> Option<&Self>;
+
+    /// The row count.
+    fn len_of<P>(array: P) -> impl Staged<Out = u64> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static;
+
+    fn validity_of<P>(array: P) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone>
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static;
+
+    /// Row `index`'s value.
     ///
     /// # Safety
     ///
-    /// `index` must be in bounds and its Arrow physical values buffer must be
-    /// represented by `M` for every batch supplied to generated code.
-    unsafe fn primitive<M>(
-        self,
-        index: usize,
-    ) -> PrimitiveArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone, M>
+    /// At execution, `index` is less than the row count, and for a byte-view array the
+    /// row is valid: Arrow makes no promise about a null row's view.
+    unsafe fn value_of<P, I>(array: P, index: I) -> impl Staged<Out = Self::Value> + Clone
     where
-        Self: Clone,
-        M: StagedType,
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+        I: IntoStaged<u64>,
+        I::Staged: Clone;
+}
+
+/// [`ArrowArray`]'s reads, as methods of a staged reference to the array.
+#[expect(
+    clippy::len_without_is_empty,
+    reason = "a staged length is compared in the kernel; `is_empty` would only wrap it"
+)]
+pub trait ArrowArrayOps<A: ArrowArray>: Staged<Out = SRef<A>> + Clone + 'static {
+    /// The row count.
+    fn len(self) -> impl Staged<Out = u64> + Clone {
+        A::len_of(ref_as_ptr(self))
+    }
+
+    fn validity(self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone> {
+        A::validity_of(ref_as_ptr(self))
+    }
+
+    /// Row `index`'s value.
+    ///
+    /// # Safety
+    ///
+    /// As [`ArrowArray::value_of`].
+    unsafe fn value_unchecked<I>(self, index: I) -> impl Staged<Out = A::Value> + Clone
+    where
+        I: IntoStaged<u64>,
+        I::Staged: Clone,
     {
-        PrimitiveArrayView {
-            // SAFETY: forwarded from `ArrayBatchOps::primitive`'s caller.
-            array: unsafe { self.get_ptr_unchecked(index as u64) },
-            _elem: PhantomData,
+        // SAFETY: forwarded from the caller.
+        unsafe { A::value_of(ref_as_ptr(self), index) }
+    }
+}
+
+impl<A: ArrowArray, S> ArrowArrayOps<A> for S where S: Staged<Out = SRef<A>> + Clone + 'static {}
+
+// =============================================================================
+// Primitive arrays
+// =============================================================================
+
+/// A primitive type an Arrow array holds, with its Arrow type: the integers of 8 to 64
+/// bits, `f32` and `f64`.
+pub trait ArrowNative:
+    StagedType<RuntimeValue = Self> + CopyType + ArrowNativeType + sealed::Sealed + 'static
+{
+    type Arrow: ArrowPrimitiveType<Native = Self>;
+
+    #[doc(hidden)]
+    fn wrap(array: FfiPrimArray<Self>) -> FfiArray;
+
+    #[doc(hidden)]
+    fn unwrap(array: &FfiArray) -> Option<&FfiPrimArray<Self>>;
+}
+
+/// An Arrow primitive array of `T`: one `T` per row, and validity.
+#[repr(C)]
+#[derive(StagedType)]
+pub struct FfiPrimArray<T: ArrowNative> {
+    values: FfiSlice<T>,
+    validity: FfiValidity,
+}
+
+impl<T: ArrowNative> Clone for FfiPrimArray<T> {
+    fn clone(&self) -> Self {
+        *self
+    }
+}
+
+impl<T: ArrowNative> Copy for FfiPrimArray<T> {}
+
+impl<T: ArrowNative> std::fmt::Debug for FfiPrimArray<T> {
+    fn fmt(&self, f: &mut std::fmt::Formatter<'_>) -> std::fmt::Result {
+        f.debug_struct("FfiPrimArray")
+            .field("values", &self.values)
+            .field("validity", &self.validity)
+            .finish()
+    }
+}
+
+impl<T: ArrowNative> FfiPrimArray<T> {
+    /// `array`'s values and validity, from its first row.
+    pub fn new(array: &PrimitiveArray<T::Arrow>) -> Self {
+        Self {
+            values: FfiSlice::new(array.values().as_ref()),
+            validity: FfiValidity::from_nulls(array.nulls()),
         }
     }
 
-    /// A view of column `index` as Arrow `Boolean` values.
+    /// No rows.
+    pub const fn empty() -> Self {
+        Self {
+            values: FfiSlice::empty(),
+            validity: FfiValidity::all_valid(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn null_count(&self) -> u64 {
+        self.validity.null_count()
+    }
+}
+
+/// Staged reads only a primitive array has.
+pub trait FfiPrimArrayOps<T: ArrowNative>:
+    Staged<Out = SRef<FfiPrimArray<T>>> + Clone + 'static
+{
+    /// The values, one per row, as a **trusted** slice: `len`, `get_or`, `staged_iter`
+    /// and the rest of the slice surface, with no claim left to make.
+    fn values(
+        self,
+    ) -> impl Staged<Out = SRef<Slice<T>>>
+    + Clone
+    + LifetimeErased<Out = SRef<Slice<T>>, ErasedOut = SRef<Slice<T>>> {
+        // SAFETY: the descriptor was built from an Arrow array of `T`, which the host
+        // keeps alive and unchanged while the kernel reads it; the read is shared.
+        unsafe {
+            field_addr(ref_as_ptr(self), FfiPrimArrayType::values::<T>())
+                .into_raw_slice::<T>()
+                .assume_shared()
+        }
+    }
+}
+
+impl<T: ArrowNative, S> FfiPrimArrayOps<T> for S where
+    S: Staged<Out = SRef<FfiPrimArray<T>>> + Clone + 'static
+{
+}
+
+impl<T: ArrowNative> sealed::Sealed for FfiPrimArray<T> {}
+
+impl<T: ArrowNative> From<FfiPrimArray<T>> for FfiArray {
+    fn from(array: FfiPrimArray<T>) -> Self {
+        T::wrap(array)
+    }
+}
+
+impl<T: ArrowNative> ArrowArray for FfiPrimArray<T> {
+    type Value = T;
+
+    fn accepts(data_type: &DataType) -> bool {
+        *data_type == T::Arrow::DATA_TYPE
+    }
+
+    fn downcast_ref(array: &FfiArray) -> Option<&Self> {
+        T::unwrap(array)
+    }
+
+    fn len_of<P>(array: P) -> impl Staged<Out = u64> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        values::<T, P>(array).len()
+    }
+
+    fn validity_of<P>(array: P) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone>
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        // SAFETY: part of the descriptor, alive as long as it is.
+        unsafe { ValidityView::new(field_addr(array, FfiPrimArrayType::validity::<T>())) }
+    }
+
+    unsafe fn value_of<P, I>(array: P, index: I) -> impl Staged<Out = T> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+        I: IntoStaged<u64>,
+        I::Staged: Clone,
+    {
+        // SAFETY: `index` is a row (the caller).
+        unsafe { values::<T, P>(array).get_unchecked(index) }
+    }
+}
+
+/// The values of the primitive array at `array`.
+fn values<T: ArrowNative, P>(array: P) -> impl Staged<Out = SRef<Slice<T>>> + Clone
+where
+    P: Staged<Out = SPtr<FfiPrimArray<T>>> + Clone + 'static,
+{
+    // SAFETY: as `FfiPrimArrayOps::values`.
+    unsafe {
+        field_addr(array, FfiPrimArrayType::values::<T>())
+            .into_raw_slice::<T>()
+            .assume_shared()
+    }
+}
+
+// =============================================================================
+// Boolean arrays
+// =============================================================================
+
+/// An Arrow `Boolean` array: a bit per row, and validity.
+#[repr(C)]
+#[derive(Clone, Copy, Debug, StagedType)]
+pub struct FfiBoolArray {
+    values: FfiBitmap<u8>,
+    validity: FfiValidity,
+}
+
+impl FfiBoolArray {
+    /// `array`'s values and validity, from its first row, at whatever bit it starts.
+    pub fn new(array: &BooleanArray) -> Self {
+        let values = array.values();
+        Self {
+            values: FfiBitmap::new(values.inner().as_slice(), values.offset(), values.len()),
+            validity: FfiValidity::from_nulls(array.nulls()),
+        }
+    }
+
+    /// No rows.
+    pub const fn empty() -> Self {
+        Self {
+            values: FfiBitmap::empty(),
+            validity: FfiValidity::all_valid(),
+        }
+    }
+
+    pub fn len(&self) -> usize {
+        self.values.len()
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn null_count(&self) -> u64 {
+        self.validity.null_count()
+    }
+}
+
+impl sealed::Sealed for FfiBoolArray {}
+
+impl From<FfiBoolArray> for FfiArray {
+    fn from(array: FfiBoolArray) -> Self {
+        Self::Boolean(array)
+    }
+}
+
+impl ArrowArray for FfiBoolArray {
+    type Value = bool;
+
+    fn accepts(data_type: &DataType) -> bool {
+        *data_type == DataType::Boolean
+    }
+
+    fn downcast_ref(array: &FfiArray) -> Option<&Self> {
+        match array {
+            FfiArray::Boolean(array) => Some(array),
+            _ => None,
+        }
+    }
+
+    fn len_of<P>(array: P) -> impl Staged<Out = u64> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        bool_values(array).len()
+    }
+
+    fn validity_of<P>(array: P) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone>
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        // SAFETY: part of the descriptor, alive as long as it is.
+        unsafe { ValidityView::new(field_addr(array, FfiBoolArrayType::validity())) }
+    }
+
+    unsafe fn value_of<P, I>(array: P, index: I) -> impl Staged<Out = bool> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+        I: IntoStaged<u64>,
+        I::Staged: Clone,
+    {
+        // SAFETY: `index` is a row (the caller), and the bitmap has a bit per row.
+        unsafe { bool_values(array).bit(index) }
+    }
+}
+
+/// The values of the Boolean array at `array`.
+fn bool_values<P>(array: P) -> BitmapView<impl Staged<Out = SPtr<FfiBitmap<u8>>> + Clone, u8>
+where
+    P: Staged<Out = SPtr<FfiBoolArray>> + Clone + 'static,
+{
+    // SAFETY: part of the descriptor, built from a `BooleanArray`'s values, which the host
+    // keeps alive and unchanged while the kernel reads them.
+    unsafe { BitmapView::new(field_addr(array, FfiBoolArrayType::values())) }
+}
+
+// =============================================================================
+// Byte-view arrays
+// =============================================================================
+
+impl<K: ArrowByteKind> sealed::Sealed for FfiByteViewArray<K> {}
+
+impl<K: ArrowByteKind> From<FfiByteViewArray<K>> for FfiArray {
+    fn from(array: FfiByteViewArray<K>) -> Self {
+        K::wrap(array)
+    }
+}
+
+impl<K: ArrowByteKind> ArrowArray for FfiByteViewArray<K> {
+    type Value = ByteView<K>;
+
+    fn accepts(data_type: &DataType) -> bool {
+        *data_type == K::Arrow::DATA_TYPE
+    }
+
+    fn downcast_ref(array: &FfiArray) -> Option<&Self> {
+        K::unwrap(array)
+    }
+
+    fn len_of<P>(array: P) -> impl Staged<Out = u64> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        Self::staged_len(array)
+    }
+
+    fn validity_of<P>(array: P) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone>
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+    {
+        Self::staged_validity(array)
+    }
+
+    unsafe fn value_of<P, I>(array: P, index: I) -> impl Staged<Out = ByteView<K>> + Clone
+    where
+        P: Staged<Out = SPtr<Self>> + Clone + 'static,
+        I: IntoStaged<u64>,
+        I::Staged: Clone,
+    {
+        // SAFETY: forwarded from the caller.
+        unsafe { Self::staged_value(array, index) }
+    }
+}
+
+// =============================================================================
+// FfiArray: any of them
+// =============================================================================
+
+/// Any array a kernel reads: what a batch holds per column. The host matches it; a
+/// kernel reads it as the array its column's type says ([`FfiArrayOps::downcast`]).
+///
+/// `repr(C, u8)`: a tag, then the arrays overlaid as a union, so every array starts at
+/// the same offset (8 bytes in).
+#[repr(C, u8)]
+#[derive(Clone, Copy, Debug)]
+pub enum FfiArray {
+    Int8(FfiPrimArray<i8>),
+    Int16(FfiPrimArray<i16>),
+    Int32(FfiPrimArray<i32>),
+    Int64(FfiPrimArray<i64>),
+    UInt8(FfiPrimArray<u8>),
+    UInt16(FfiPrimArray<u16>),
+    UInt32(FfiPrimArray<u32>),
+    UInt64(FfiPrimArray<u64>),
+    Float32(FfiPrimArray<f32>),
+    Float64(FfiPrimArray<f64>),
+    Boolean(FfiBoolArray),
+    Utf8View(FfiByteViewArray<Utf8>),
+    BinaryView(FfiByteViewArray<Binary>),
+}
+
+macro_rules! arrow_native {
+    ($($ty:ty => $arrow:ty, $variant:ident);* $(;)?) => {$(
+        impl sealed::Sealed for $ty {}
+
+        impl ArrowNative for $ty {
+            type Arrow = $arrow;
+
+            fn wrap(array: FfiPrimArray<Self>) -> FfiArray {
+                FfiArray::$variant(array)
+            }
+
+            fn unwrap(array: &FfiArray) -> Option<&FfiPrimArray<Self>> {
+                match array {
+                    FfiArray::$variant(array) => Some(array),
+                    _ => None,
+                }
+            }
+        }
+    )*};
+}
+
+arrow_native!(
+    i8 => Int8Type, Int8;
+    i16 => Int16Type, Int16;
+    i32 => Int32Type, Int32;
+    i64 => Int64Type, Int64;
+    u8 => UInt8Type, UInt8;
+    u16 => UInt16Type, UInt16;
+    u32 => UInt32Type, UInt32;
+    u64 => UInt64Type, UInt64;
+    f32 => Float32Type, Float32;
+    f64 => Float64Type, Float64;
+);
+
+/// Calls `$f` on the array an [`FfiArray`] holds, whatever its type.
+macro_rules! each_array {
+    ($array:expr, $a:ident => $f:expr) => {
+        match $array {
+            FfiArray::Int8($a) => $f,
+            FfiArray::Int16($a) => $f,
+            FfiArray::Int32($a) => $f,
+            FfiArray::Int64($a) => $f,
+            FfiArray::UInt8($a) => $f,
+            FfiArray::UInt16($a) => $f,
+            FfiArray::UInt32($a) => $f,
+            FfiArray::UInt64($a) => $f,
+            FfiArray::Float32($a) => $f,
+            FfiArray::Float64($a) => $f,
+            FfiArray::Boolean($a) => $f,
+            FfiArray::Utf8View($a) => $f,
+            FfiArray::BinaryView($a) => $f,
+        }
+    };
+}
+
+impl FfiArray {
+    /// No rows, as an array of `data_type`; `None` if no array has that type.
+    pub fn empty(data_type: &DataType) -> Option<Self> {
+        macro_rules! empty {
+            ($($variant:ident),*) => {
+                match data_type {
+                    $(DataType::$variant => Some(Self::$variant(FfiPrimArray::empty())),)*
+                    DataType::Boolean => Some(Self::Boolean(FfiBoolArray::empty())),
+                    DataType::Utf8View => Some(Self::Utf8View(FfiByteViewArray::empty())),
+                    DataType::BinaryView => Some(Self::BinaryView(FfiByteViewArray::empty())),
+                    _ => None,
+                }
+            };
+        }
+        empty!(
+            Int8, Int16, Int32, Int64, UInt8, UInt16, UInt32, UInt64, Float32, Float64
+        )
+    }
+
+    /// The array, as `A`, if that is what it holds.
+    pub fn downcast_ref<A: ArrowArray>(&self) -> Option<&A> {
+        A::downcast_ref(self)
+    }
+
+    pub fn len(&self) -> usize {
+        each_array!(self, array => array.len())
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len() == 0
+    }
+
+    pub fn null_count(&self) -> u64 {
+        each_array!(self, array => array.null_count())
+    }
+}
+
+/// Where every array starts in an [`FfiArray`]: after the tag, at the arrays' alignment.
+pub(crate) const PAYLOAD: usize = {
+    let array = FfiArray::Boolean(FfiBoolArray::empty());
+    let start = (&raw const array).cast::<u8>();
+    match &array {
+        // SAFETY: both pointers are into `array`.
+        FfiArray::Boolean(inner) => unsafe {
+            (inner as *const FfiBoolArray)
+                .cast::<u8>()
+                .offset_from(start) as usize
+        },
+        _ => unreachable!(),
+    }
+};
+
+const _: () = {
+    // `repr(C, u8)` overlays the arrays, so every one starts at `PAYLOAD`; the largest
+    // decides the size.
+    assert!(PAYLOAD == 8);
+    assert!(std::mem::size_of::<FfiArray>() == PAYLOAD + 72);
+    assert!(std::mem::align_of::<FfiArray>() == 8);
+};
+
+// SAFETY: an 80-byte, 8-aligned value a kernel holds by its address (no leaves), as a
+// struct is; it is only read through `downcast`, at `PAYLOAD`, as the array it holds.
+unsafe impl StagedType for FfiArray {
+    type RuntimeValue = FfiArray;
+
+    fn scalar_type() -> ScalarType {
+        ScalarType::Ptr
+    }
+
+    fn size_of() -> usize {
+        std::mem::size_of::<FfiArray>()
+    }
+
+    fn align_of() -> usize {
+        std::mem::align_of::<FfiArray>()
+    }
+
+    fn is_copy_struct() -> bool {
+        true
+    }
+
+    fn leaves() -> Option<Leaves> {
+        None
+    }
+}
+
+unsafe impl CopyType for FfiArray {}
+
+/// Staged reads of a `&FfiArray`.
+pub trait FfiArrayOps: Staged<Out = SRef<FfiArray>> + Clone + 'static {
+    /// The array, read as an `A`.
     ///
     /// # Safety
     ///
-    /// `index` must be in bounds and its descriptor must come from a `BooleanArray`
-    /// for every batch supplied to generated code.
-    unsafe fn boolean(
-        self,
-        index: usize,
-    ) -> BooleanArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone>
-    where
-        Self: Clone,
-    {
-        BooleanArrayView {
-            // SAFETY: forwarded from `ArrayBatchOps::boolean`'s caller.
-            array: unsafe { self.get_ptr_unchecked(index as u64) },
-        }
+    /// At execution, the `FfiArray` holds an `A`.
+    unsafe fn downcast<A: ArrowArray>(self) -> impl Staged<Out = SRef<A>> + Clone {
+        // SAFETY: forwarded from the caller.
+        unsafe { downcast_ptr(ref_as_ptr(self)) }
+    }
+}
+
+impl<S> FfiArrayOps for S where S: Staged<Out = SRef<FfiArray>> + Clone + 'static {}
+
+/// The array at `array`, read as an `A`.
+///
+/// # Safety
+///
+/// At execution, `array` addresses a live `FfiArray` that holds an `A` and that nothing
+/// writes while the reference is used.
+pub(crate) unsafe fn downcast_ptr<A: ArrowArray, P>(array: P) -> impl Staged<Out = SRef<A>> + Clone
+where
+    P: Staged<Out = SPtr<FfiArray>> + Clone + 'static,
+{
+    const _: () = assert!(PAYLOAD.is_multiple_of(8));
+    let words = ptr_cast::<u64, FfiArray, _>(array);
+    // SAFETY: `PAYLOAD` is inside the `FfiArray`, where its array starts, and the array
+    // there is an `A` (the caller).
+    unsafe {
+        ptr_as_ref(ptr_cast::<A, u64, _>(ptr_offset(
+            words,
+            Const::<i64>::new((PAYLOAD / 8) as i64),
+        )))
+    }
+}
+
+/// Staged reads of a batch's columns, a slice of [`FfiArray`].
+pub trait ArrayBatchOps: Staged + Clone + Sized + 'static
+where
+    Self::Out: SliceType<Elem = FfiArray>,
+{
+    /// Column `index`, read as an `A`.
+    ///
+    /// # Safety
+    ///
+    /// `index` is a column of every batch the kernel reads, and holds an `A` in each.
+    unsafe fn column<A: ArrowArray>(self, index: usize) -> impl Staged<Out = SRef<A>> + Clone {
+        // SAFETY: forwarded from the caller.
+        unsafe { downcast_ptr(self.get_ptr_unchecked(index as u64)) }
     }
 }
 
 impl<B> ArrayBatchOps for B
 where
-    B: Staged + Sized,
+    B: Staged + Clone + Sized + 'static,
     B::Out: SliceType<Elem = FfiArray>,
 {
 }
 
-/// View a single `&FfiArray` as a typed column.
-pub trait FfiArrayOps<'r>: Staged<Out = SRef<FfiArray>> + Sized + Clone {
-    /// Interpret this erased descriptor's values as `M`.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor's Arrow physical values buffer must be represented by
-    /// `M` for every generated-code use.
-    unsafe fn into_primitive<M: StagedType>(
-        self,
-    ) -> PrimitiveArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone, M> {
-        PrimitiveArrayView {
-            array: ref_as_ptr(self),
-            _elem: PhantomData,
+#[cfg(test)]
+mod tests {
+    use super::*;
+    use arrow::array::Int32Array;
+    use arrow::buffer::NullBuffer;
+
+    #[test]
+    fn an_array_is_the_type_it_was_built_from() {
+        let nulls = NullBuffer::from(vec![true, false, true]);
+        let ints = FfiArray::from(FfiPrimArray::<i32>::new(&Int32Array::new(
+            vec![1, 99, 3].into(),
+            Some(nulls),
+        )));
+        assert_eq!((ints.len(), ints.null_count()), (3, 1));
+        assert!(ints.downcast_ref::<FfiPrimArray<i32>>().is_some());
+        assert!(ints.downcast_ref::<FfiPrimArray<u32>>().is_none());
+        assert!(ints.downcast_ref::<FfiBoolArray>().is_none());
+
+        let bools = FfiArray::from(FfiBoolArray::new(&BooleanArray::from(vec![true; 11])));
+        assert_eq!((bools.len(), bools.null_count()), (11, 0));
+        assert!(bools.downcast_ref::<FfiBoolArray>().is_some());
+    }
+
+    #[test]
+    fn an_empty_array_has_its_type() {
+        for data_type in [
+            DataType::Int8,
+            DataType::Float64,
+            DataType::Boolean,
+            DataType::Utf8View,
+        ] {
+            let empty = FfiArray::empty(&data_type).unwrap();
+            assert!(empty.is_empty(), "{data_type}");
         }
+        assert!(FfiArray::empty(&DataType::Utf8).is_none());
+        let empty = FfiArray::empty(&DataType::Utf8View).unwrap();
+        assert!(empty.downcast_ref::<FfiByteViewArray<Utf8>>().is_some());
     }
 
-    /// Interpret this erased descriptor as Arrow `Boolean` values.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must come from a `BooleanArray`.
-    unsafe fn into_boolean(self) -> BooleanArrayView<impl Staged<Out = SPtr<FfiArray>> + Clone> {
-        BooleanArrayView {
-            array: ref_as_ptr(self),
-        }
-    }
-}
-
-// =============================================================================
-// BooleanArrayView: bit-packed values
-// =============================================================================
-
-/// Staged view of an Arrow `Boolean` array. Its descriptor's `values` addresses the
-/// bit-packed values from their first bit, LSB first like the validity bitmap, with
-/// one element per row: the buffer's length is the row count, not its byte count.
-pub struct BooleanArrayView<P> {
-    pub(crate) array: P,
-}
-
-impl<P: Clone> Clone for BooleanArrayView<P> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-        }
-    }
-}
-
-impl<P: Copy> Copy for BooleanArrayView<P> {}
-
-impl<P: ArraySource + 'static> BooleanArrayView<P> {
-    /// The value bytes, indexed by byte; its `len` is the row count.
-    fn bytes(&self) -> impl Staged<Out = SRef<Slice<u8>>> + Clone + use<P> {
-        // SAFETY: the view's constructor established that the descriptor addresses a
-        // live bitmap of at least `len` bits for the whole kernel run; the read is
-        // shared.
-        unsafe {
-            field_addr(self.array.clone(), FfiArrayType::values())
-                .into_raw_slice::<u8>()
-                .assume_shared()
-        }
-    }
-
-    /// The row count.
-    pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P> {
-        self.bytes().len()
-    }
-
-    /// Read row `index`'s value without checking the length.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this array's length.
-    pub unsafe fn value_unchecked<I>(&self, index: I) -> impl Staged<Out = bool> + Clone + use<P, I>
-    where
-        I: IntoStaged<u64>,
-        I::Staged: Clone,
-    {
-        let bit = index.into_staged();
-        let byte_index = shr::<u64, _, _>(bit.clone(), 3u64);
-        let mask = shl::<u64, _, _>(Const::<u64>::new(1), bitand::<u64, _, _>(bit, 7u64));
-        // SAFETY: `index < len` bits, so its byte is inside the bitmap.
-        let byte = int_cast::<u64, u8, _>(unsafe { self.bytes().get_unchecked(byte_index) });
-        not(eq(bitand::<u64, _, _>(byte, mask), 0u64))
-    }
-
-    pub fn validity(&self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P>> {
-        // SAFETY: part of the descriptor, alive as long as it is (the view's constructor).
-        unsafe { ValidityView::new(field_addr(self.array.clone(), FfiArrayType::validity())) }
-    }
-}
-
-impl<'r, A> FfiArrayOps<'r> for A where A: Staged<Out = SRef<FfiArray>> + Sized + Clone {}
-
-// =============================================================================
-// PrimitiveArrayView: read methods
-// =============================================================================
-
-/// Typed staged primitive array view.
-pub struct PrimitiveArrayView<P, M> {
-    pub(crate) array: P,
-    pub(crate) _elem: PhantomData<M>,
-}
-
-impl<P: Clone, M> Clone for PrimitiveArrayView<P, M> {
-    fn clone(&self) -> Self {
-        Self {
-            array: self.array.clone(),
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<P: Copy, M> Copy for PrimitiveArrayView<P, M> {}
-
-impl<P, M> PrimitiveArrayView<P, M> {
-    /// The array's values as a **trusted** staged slice.
-    ///
-    /// This is the descriptor-construction boundary, so the provenance claim is
-    /// made here, once, rather than at every read. Callers get the ordinary
-    /// slice surface — `len`, `get_or`, `get_range`, `staged_iter`,
-    /// `subslice_unchecked` — instead of an unsafe read per element.
-    ///
-    /// Safe: the obligation is already discharged at the descriptor boundary.
-    /// Both constructors — [`ArrayBatchOps::primitive`] and
-    /// [`FfiArrayOps::into_primitive`] — are `unsafe fn` and require the Arrow
-    /// values buffer to be represented by `M` for every generated-code use.
-    /// Holding a `PrimitiveArrayView` *is* that proof.
-    pub fn values(
-        &self,
-    ) -> impl Staged<Out = SRef<Slice<M>>>
-    + Clone
-    + LifetimeErased<Out = SRef<Slice<M>>, ErasedOut = SRef<Slice<M>>>
-    + use<P, M>
-    where
-        P: ArraySource + 'static,
-        M: StagedType + 'static,
-    {
-        // SAFETY: this view's construction contract establishes that the
-        // descriptor addresses a live Arrow buffer of `M` for the whole kernel
-        // run; the read is shared.
-        unsafe {
-            field_addr(self.array.clone(), FfiArrayType::values())
-                .into_raw_slice::<M>()
-                .assume_shared()
-        }
-    }
-
-    pub fn len(&self) -> impl Staged<Out = u64> + Clone + use<P, M>
-    where
-        P: ArraySource + 'static,
-        M: StagedType + 'static,
-    {
-        self.values().len()
-    }
-
-    /// Read an element without checking the descriptor length.
-    ///
-    /// # Safety
-    ///
-    /// At execution, `index` must be less than this array's length.
-    pub unsafe fn value_unchecked<I>(&self, index: I) -> impl Staged<Out = M> + Clone + use<P, M, I>
-    where
-        P: ArraySource + 'static,
-        M: StagedType + CopyType + 'static,
-        I: IntoStaged<u64>,
-        I::Staged: Clone,
-    {
-        // SAFETY: forwarded from `PrimitiveArrayView::value_unchecked`'s caller
-        // — only the index bound is left, since `values()` is already trusted.
-        unsafe { self.values().get_unchecked(index) }
-    }
-
-    pub fn validity(&self) -> ValidityView<impl Staged<Out = SPtr<FfiValidity>> + Clone + use<P, M>>
-    where
-        P: ArraySource + 'static,
-    {
-        // SAFETY: part of the descriptor, alive as long as it is (the view's constructor).
-        unsafe { ValidityView::new(field_addr(self.array.clone(), FfiArrayType::validity())) }
+    #[test]
+    fn each_array_accepts_its_own_type() {
+        assert!(FfiPrimArray::<i64>::accepts(&DataType::Int64));
+        assert!(!FfiPrimArray::<i64>::accepts(&DataType::UInt64));
+        assert!(FfiBoolArray::accepts(&DataType::Boolean));
+        assert!(FfiByteViewArray::<Utf8>::accepts(&DataType::Utf8View));
+        assert!(!FfiByteViewArray::<Utf8>::accepts(&DataType::Utf8));
     }
 }

@@ -5,7 +5,7 @@
 use arrow::array::{Array, Int32Array};
 use arrow::buffer::NullBuffer;
 
-use arrow_lms::{ArrayBatchOps, FfiArray, prepare_dyn_arrays};
+use arrow_lms::{ArrayBatchOps, ArrowArrayOps, FfiArray, FfiPrimArray, prepare_dyn_arrays};
 use rust_lms::prelude::*;
 
 mod common;
@@ -20,7 +20,7 @@ fn validity_kernel(mut compiler: Compiler) -> Compiled<ValidityFn> {
         "validity",
         |ctx, batch: Var<SRef<Slice<FfiArray>>>, out: Var<SRefMut<Slice<u64>>>| {
             // SAFETY: every batch the test passes is one Int32 column.
-            let column = unsafe { batch.primitive::<i32>(0) };
+            let column = ctx.bind(unsafe { batch.column::<FfiPrimArray<i32>>(0) });
             let validity = column.validity();
             let len = ctx.bind(column.len());
             let mask = ctx.var(0u64);
