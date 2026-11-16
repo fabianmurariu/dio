@@ -24,7 +24,7 @@ use std::rc::Rc;
 use arrow::array::StringViewBuilder;
 use arrow::datatypes::{DataType, Field, SchemaRef};
 use arrow_lms::{
-    ArrowArrayOps, FfiBatch, FfiBatchOps, FfiBoolArray, FfiByteViewArray, FfiPrimArray,
+    ArrowArrayOps, FfiBatch, FfiBoolArray, FfiByteViewArray, FfiPrimArray, SchemaBatch,
 };
 use rust_lms::prelude::*;
 use rust_lms_std::SVec;
@@ -167,7 +167,7 @@ impl Prim for f64 {
 }
 
 /// A staged batch: one [`FfiBatch`]. The scan or join owner retains it for the
-/// enclosing loop.
+/// enclosing loop. Columns are read through a [`SchemaBatch`] of it ([`batch_ref`]).
 pub trait BatchSource: Staged<Out = SRef<FfiBatch>> + Copy + 'static {}
 impl<T> BatchSource for T where T: Staged<Out = SRef<FfiBatch>> + Copy + 'static {}
 
@@ -290,16 +290,23 @@ pub(crate) fn gen_op<I: InputsSource>(
             {
                 let count = ctx.var(0i64);
                 let scan_schema = scan_schema.clone();
-                for_each_batch(ctx, inputs, *table as u64, cx, move |ctx, batch, len| {
-                    let inc = match cf {
-                        CountFast::Star => len,
-                        CountFast::Col(col) => {
-                            let nulls = gen_null_count(ctx, batch, col, scan_schema.field(col));
-                            ctx.bind(sub(len, nulls))
-                        }
-                    };
-                    ctx.store(count, add(count, int_cast::<i64, u64, _>(inc)));
-                });
+                for_each_batch(
+                    ctx,
+                    inputs,
+                    *table as u64,
+                    scan_schema,
+                    cx,
+                    move |ctx, batch, len| {
+                        let inc = match cf {
+                            CountFast::Star => len,
+                            CountFast::Col(col) => {
+                                let nulls = gen_null_count(ctx, &batch, col);
+                                ctx.bind(sub(len, nulls))
+                            }
+                        };
+                        ctx.store(count, add(count, int_cast::<i64, u64, _>(inc)));
+                    },
+                );
                 yld(ctx, vec![ColVal::I64(count, Nullness::NonNull)]);
                 return;
             }
@@ -340,20 +347,22 @@ pub(crate) fn gen_op<I: InputsSource>(
 }
 
 /// The staged batch received by a [`for_each_batch`] body.
-type ScanBatch = Var<SRef<FfiBatch>>;
+type ScanBatch = SchemaBatch<Var<SRef<FfiBatch>>>;
 
-/// A batch from the pointer an extern returned (`scan_next`, `join_left_batch`).
+/// A batch of `schema` from the pointer an extern returned (`scan_next`,
+/// `join_left_batch`), bound once.
 ///
 /// # Safety
 ///
-/// The pointer is non-null, and its owner retains the batch, unchanged, for every
-/// generated use of the result.
-pub(crate) unsafe fn batch_ref<P>(batch: P) -> impl Staged<Out = SRef<FfiBatch>>
+/// The pointer is non-null; its owner retains the batch, unchanged, for every generated
+/// use of the result; and the batch was built against `schema` (an `FfiRecordBatch`
+/// checked against it).
+pub(crate) unsafe fn batch_ref<P>(ctx: &Ctx, batch: P, schema: SchemaRef) -> ScanBatch
 where
-    P: Staged<Out = SPtr<FfiBatch>>,
+    P: Staged<Out = SPtr<FfiBatch>> + 'static,
 {
     // SAFETY: forwarded from this function's own contract.
-    unsafe { ptr_as_ref(batch) }
+    unsafe { SchemaBatch::new(ctx.bind(ptr_as_ref(batch)), schema) }
 }
 
 /// Drive the OUTER batch loop of table `table`: pull batches from the stream
@@ -366,6 +375,7 @@ fn for_each_batch<I: InputsSource>(
     ctx: &Ctx,
     inputs: I,
     table: u64,
+    schema: SchemaRef,
     cx: &CodegenCtx,
     body: impl FnOnce(&Ctx, ScanBatch, Var<u64>) + 'static,
 ) {
@@ -388,9 +398,9 @@ fn for_each_batch<I: InputsSource>(
         not(ptr_is_null(descs)).then_some(descs)
     })
     .for_each(ctx, move |ctx, descs| {
-        // SAFETY: not null (the loop ended on null), and `Inputs` retains the current
-        // batch until the next callback.
-        let batch = ctx.bind(unsafe { batch_ref(descs) });
+        // SAFETY: not null (the loop ended on null); `Inputs` retains the current batch
+        // until the next callback, and builds it against the table's schema.
+        let batch = unsafe { batch_ref(ctx, descs, schema) };
         let len = ctx.bind(batch.num_rows());
         body(ctx, batch, len);
     });
@@ -408,13 +418,11 @@ fn gen_scan<I: InputsSource>(
     cx: &CodegenCtx,
     yld: Yld,
 ) {
-    let fields = schema.fields().clone();
-    for_each_batch(ctx, inputs, table, cx, move |ctx, batch, len| {
+    let num_columns = schema.fields().len();
+    for_each_batch(ctx, inputs, table, schema, cx, move |ctx, batch, len| {
         range(0u64, len).for_each(ctx, move |ctx, i| {
-            let row: Row = fields
-                .iter()
-                .enumerate()
-                .map(|(col, f)| gen_read(ctx, batch, col, f, i))
+            let row: Row = (0..num_columns)
+                .map(|col| gen_read(ctx, &batch, col, i))
                 .collect();
             yld(ctx, row);
         });
@@ -436,21 +444,21 @@ pub(crate) fn stop_if_null(ctx: &Ctx, ptr: Var<SMutPtr<u8>>, cx: &CodegenCtx) {
     }
 }
 
-/// Read column `col` at row `i`, attaching validity iff the field is nullable.
+/// Read column `col` at row `i`, as its schema type, attaching validity iff its field is
+/// nullable.
 pub(crate) fn gen_read<B: BatchSource>(
     ctx: &Ctx,
-    batch: B,
+    batch: &SchemaBatch<B>,
     col: usize,
-    field: &Field,
     i: Var<u64>,
 ) -> ColVal {
-    if matches!(field.data_type(), DataType::Utf8View) {
-        return gen_read_str(ctx, batch, col, field, i);
-    }
+    let field = batch.schema().field(col);
     let nullable = field.is_nullable();
+    if matches!(field.data_type(), DataType::Utf8View) {
+        return gen_read_str(ctx, batch, col, nullable, i);
+    }
     dispatch_prim!(field.data_type(), M => {
-        // SAFETY: schema validation proves `col` exists with physical type `M`.
-        let array = ctx.bind(unsafe { batch.column::<FfiPrimArray<M>>(col) });
+        let array = ctx.bind(batch.column::<FfiPrimArray<M>>(col));
         // SAFETY: all callers invoke `gen_read` inside the batch row loop.
         let value = ctx.bind(unsafe { array.value_unchecked(i) });
         let nullness = if nullable {
@@ -465,15 +473,13 @@ pub(crate) fn gen_read<B: BatchSource>(
 
 /// Column `col`'s null count, read as the column's own type, whatever it is: only its
 /// validity, no values.
-fn gen_null_count<B: BatchSource>(ctx: &Ctx, batch: B, col: usize, field: &Field) -> Var<u64> {
+fn gen_null_count<B: BatchSource>(ctx: &Ctx, batch: &SchemaBatch<B>, col: usize) -> Var<u64> {
     macro_rules! null_count {
-        ($array:ty) => {{
-            // SAFETY: schema validation proves `col` exists, of the type matched below.
-            let array = unsafe { batch.column::<$array>(col) };
-            ctx.bind(array.validity().null_count())
-        }};
+        ($array:ty) => {
+            ctx.bind(batch.column::<$array>(col).validity().null_count())
+        };
     }
-    match field.data_type() {
+    match batch.schema().field(col).data_type() {
         DataType::Int8 => null_count!(FfiPrimArray<i8>),
         DataType::Int16 => null_count!(FfiPrimArray<i16>),
         DataType::Int32 => null_count!(FfiPrimArray<i32>),
@@ -496,16 +502,15 @@ fn gen_null_count<B: BatchSource>(ctx: &Ctx, batch: B, col: usize, field: &Field
 /// about.
 fn gen_read_str<B: BatchSource>(
     ctx: &Ctx,
-    batch: B,
+    batch: &SchemaBatch<B>,
     col: usize,
-    field: &Field,
+    nullable: bool,
     i: Var<u64>,
 ) -> ColVal {
-    // SAFETY: schema validation proves `col` is a `Utf8View` column of every batch.
-    let strings = ctx.bind(unsafe { batch.column::<FfiByteViewArray<Utf8>>(col) });
+    let strings = ctx.bind(batch.column::<FfiByteViewArray<Utf8>>(col));
     // SAFETY: `i` is in the batch's row loop; a null row's value is discarded below.
     let value = ctx.bind(unsafe { strings.value_unchecked(i) });
-    if !field.is_nullable() {
+    if !nullable {
         return ColVal::Str(value, Nullness::NonNull);
     }
     // SAFETY: `i` is in the batch's row loop.

@@ -10,7 +10,7 @@ use std::marker::PhantomData;
 use arrow::array::{Array, ArrayRef, AsArray, BinaryViewArray, StringViewArray};
 use arrow::datatypes::{
     ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
-    Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    Int64Type, Schema, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
 };
 use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
@@ -96,6 +96,9 @@ pub struct PreparedFfiBatch<'data> {
 
 /// A `RecordBatch` with its descriptors: what [`PreparedFfiBatch`] is for a batch that
 /// is kept, not borrowed. Holding the batch keeps its buffers alive.
+///
+/// It is built against the schema a kernel reads it as, so its descriptors are what a
+/// [`SchemaBatch`](crate::SchemaBatch) of that schema claims.
 #[derive(Debug)]
 pub struct FfiRecordBatch {
     descriptors: Descriptors,
@@ -103,7 +106,25 @@ pub struct FfiRecordBatch {
 }
 
 impl FfiRecordBatch {
-    pub fn new(record_batch: RecordBatch) -> Result<Self, FfiError> {
+    /// `record_batch`'s descriptors, if its columns have `schema`'s data types. Field
+    /// names and nullability are not compared.
+    pub fn new(record_batch: RecordBatch, schema: &Schema) -> Result<Self, FfiError> {
+        let columns = record_batch.columns();
+        if columns.len() != schema.fields().len() {
+            return Err(FfiError::ColumnCount {
+                expected: schema.fields().len(),
+                actual: columns.len(),
+            });
+        }
+        for (index, (column, field)) in columns.iter().zip(schema.fields()).enumerate() {
+            if column.data_type() != field.data_type() {
+                return Err(FfiError::ColumnType {
+                    index,
+                    expected: field.data_type().clone(),
+                    actual: column.data_type().clone(),
+                });
+            }
+        }
         let descriptors = Descriptors::new(record_batch.columns().iter().map(|a| a.as_ref()))?;
         Ok(Self {
             descriptors,
@@ -149,6 +170,17 @@ pub enum FfiError {
         expected: usize,
         actual: usize,
     },
+    /// The batch has a different number of columns from the schema it is read as.
+    ColumnCount {
+        expected: usize,
+        actual: usize,
+    },
+    /// Column `index` is not of its schema field's type.
+    ColumnType {
+        index: usize,
+        expected: DataType,
+        actual: DataType,
+    },
 }
 
 impl fmt::Display for FfiError {
@@ -168,6 +200,14 @@ impl fmt::Display for FfiError {
             } => {
                 write!(f, "array {index} has length {actual}, expected {expected}")
             }
+            Self::ColumnCount { expected, actual } => {
+                write!(f, "the batch has {actual} columns, the schema {expected}")
+            }
+            Self::ColumnType {
+                index,
+                expected,
+                actual,
+            } => write!(f, "column {index} is {actual}, the schema's is {expected}"),
         }
     }
 }
@@ -252,6 +292,66 @@ mod tests {
         assert!(matches!(arrays[2], FfiArray::Utf8View(_)));
         assert_eq!(arrays[1].null_count(), 1);
         assert_eq!(prepared.batch().num_rows(), 3);
+    }
+
+    /// A record batch is refused unless its column types are the schema's, in order.
+    #[test]
+    fn a_record_batch_is_checked_against_its_schema() {
+        use std::sync::Arc;
+
+        use arrow::datatypes::Field;
+
+        let schema = Schema::new(vec![
+            Field::new("n", DataType::Int32, false),
+            Field::new("s", DataType::Utf8View, true),
+        ]);
+        let rb = RecordBatch::try_new(
+            Arc::new(schema.clone()),
+            vec![
+                Arc::new(Int32Array::from(vec![1, 2])),
+                Arc::new(StringViewArray::from(vec!["a", "b"])),
+            ],
+        )
+        .unwrap();
+        assert!(FfiRecordBatch::new(rb.clone(), &schema).is_ok());
+
+        // Names and nullability are not compared.
+        let renamed = Schema::new(vec![
+            Field::new("m", DataType::Int32, true),
+            Field::new("t", DataType::Utf8View, false),
+        ]);
+        assert!(FfiRecordBatch::new(rb.clone(), &renamed).is_ok());
+
+        let swapped = Schema::new(vec![
+            Field::new("s", DataType::Utf8View, true),
+            Field::new("n", DataType::Int32, false),
+        ]);
+        assert!(matches!(
+            FfiRecordBatch::new(rb.clone(), &swapped),
+            Err(FfiError::ColumnType {
+                index: 0,
+                expected: DataType::Utf8View,
+                actual: DataType::Int32,
+            })
+        ));
+
+        let widened = Schema::new(vec![
+            Field::new("n", DataType::Int64, false),
+            Field::new("s", DataType::Utf8View, true),
+        ]);
+        assert!(matches!(
+            FfiRecordBatch::new(rb.clone(), &widened),
+            Err(FfiError::ColumnType { index: 0, .. })
+        ));
+
+        let fewer = Schema::new(vec![Field::new("n", DataType::Int32, false)]);
+        assert!(matches!(
+            FfiRecordBatch::new(rb, &fewer),
+            Err(FfiError::ColumnCount {
+                expected: 1,
+                actual: 2
+            })
+        ));
     }
 
     #[test]

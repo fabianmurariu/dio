@@ -61,7 +61,7 @@ impl ScanStream {
             return Ok(None);
         };
         self.validate_schema(&rb)?;
-        let batch = FfiRecordBatch::new(rb).map_err(|error| {
+        let batch = FfiRecordBatch::new(rb, &self.expected_schema).map_err(|error| {
             DataFusionError::Execution(format!("failed to prepare input batch: {error}"))
         })?;
         Ok(Some(self.current.insert(batch).batch()))

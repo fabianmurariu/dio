@@ -8,8 +8,8 @@
 //!
 //! A batch's columns have different types, so a batch holds [`FfiArray`]s: a Rust enum
 //! of the descriptors, matched as one on the host. A kernel reads one as the array its
-//! column's type says it is ([`FfiArrayOps::downcast`]), a claim that is `unsafe` until
-//! the batch is checked against its schema (`relational/jit_stage6a.md` M3).
+//! column's type says it is ([`FfiArrayOps::downcast`]), a claim that is `unsafe`. A
+//! batch makes it once, against its schema ([`SchemaBatch`](crate::SchemaBatch)).
 
 use arrow::array::types::{
     ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,

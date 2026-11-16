@@ -13,6 +13,10 @@ pub fn for_each_backend(mut body: impl FnMut(Compiler)) {
 
 /// The backends [`for_each_backend`] runs, for tests that build several compilers.
 #[allow(dead_code, reason = "not every test file builds several compilers")]
+#[cfg_attr(
+    not(feature = "llvm"),
+    allow(unused_mut, reason = "only LLVM is pushed")
+)]
 pub fn backends() -> Vec<JitBackend> {
     let mut backends = vec![JitBackend::Cranelift];
     #[cfg(feature = "llvm")]

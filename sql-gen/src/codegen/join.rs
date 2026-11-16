@@ -11,8 +11,7 @@
 //!
 //! Phase 1: inner join, single `Int` key.
 
-use arrow::datatypes::{Field, SchemaRef};
-use arrow_lms::FfiBatchOps;
+use arrow::datatypes::SchemaRef;
 use datafusion_expr::Expr;
 use rust_lms::prelude::*;
 
@@ -68,24 +67,24 @@ pub(crate) fn gen_build_index(ctx: &Ctx, rel_schema: SchemaRef, key_col: usize, 
         .expect("build index without a baked JoinState");
     let state = handle.state;
     let rt = cx.rt;
-    let key_field: Field = rel_schema.field(key_col).clone();
 
     // SAFETY: the build driver retains `state` and does not mutate it while
     // this shared call executes.
     let count = ctx.bind(unsafe { call_extern1_unchecked(rt.join_rel_count, join_ref(state)) });
     range(0u64, count).for_each(ctx, move |ctx, b| {
-        // SAFETY: `b < count`; `state` retains all relation batches, so the batch is
-        // not null and outlives the kernel.
-        let batch = ctx.bind(unsafe {
-            batch_ref(call_extern2_unchecked(
-                rt.join_left_batch,
-                join_ref(state),
-                b,
-            ))
-        });
+        // SAFETY: `b < count`; `state` retains all relation batches, each checked
+        // against `rel_schema`, so the batch is not null, outlives the kernel and has
+        // `rel_schema`'s columns.
+        let batch = unsafe {
+            batch_ref(
+                ctx,
+                call_extern2_unchecked(rt.join_left_batch, join_ref(state), b),
+                rel_schema.clone(),
+            )
+        };
         let len = ctx.bind(batch.num_rows());
         range(0u64, len).for_each(ctx, move |ctx, row| {
-            let key_cv = gen_read(ctx, batch, key_col, &key_field, row);
+            let key_cv = gen_read(ctx, &batch, key_col, row);
             let rb_pos = ctx.bind(int_cast::<u32, u64, _>(b));
             let row_u32 = ctx.bind(int_cast::<u32, u64, _>(row));
             emit_key_insert(ctx, state, rt, key_cv, rb_pos, row_u32);
@@ -201,16 +200,17 @@ pub(crate) fn gen_join<I: InputsSource>(
                     let b = ctx.bind(int_cast::<u64, u32, _>(rb_pos));
                     let r = ctx.bind(int_cast::<u64, u32, _>(row_u32));
                     // SAFETY: locators were created from retained relation batches, so
-                    // `b` identifies a live batch.
-                    let left_batch = ctx.bind(unsafe {
-                        batch_ref(call_extern2_unchecked(
-                            rt.join_left_batch,
-                            join_ref(state),
-                            b,
-                        ))
-                    });
+                    // `b` identifies a live batch, checked against the build side's
+                    // schema, `left_schema`.
+                    let left_batch = unsafe {
+                        batch_ref(
+                            ctx,
+                            call_extern2_unchecked(rt.join_left_batch, join_ref(state), b),
+                            left_schema.clone(),
+                        )
+                    };
                     let mut row: Row = (0..ncols_left)
-                        .map(|c| gen_read(ctx, left_batch, c, left_schema.field(c), r))
+                        .map(|c| gen_read(ctx, &left_batch, c, r))
                         .collect();
                     row.extend(right_row.iter().copied());
                     yld(ctx, row);

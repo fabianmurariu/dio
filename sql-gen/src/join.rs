@@ -7,8 +7,10 @@
 use std::collections::HashMap;
 use std::ptr;
 
+use arrow::datatypes::SchemaRef;
 use arrow::record_batch::RecordBatch;
 use arrow_lms::{FfiBatch, FfiRecordBatch};
+use datafusion_common::{DataFusionError, Result};
 use rust_lms::prelude::*;
 
 /// Where a build row lives: its batch index in the relation and its row within it.
@@ -33,17 +35,28 @@ pub trait BuildRelation {
     fn batch(&self, i: usize) -> &FfiBatch;
 }
 
-/// In-memory build relation: the retained batches with their descriptors.
+/// In-memory build relation: the retained batches with their descriptors, each checked
+/// against the schema the probe reads them as.
 /// (Phase 1 fills this by cloning a bare scan's input batches.)
-#[derive(Default)]
 pub struct InMemoryRelation {
+    schema: SchemaRef,
     batches: Vec<FfiRecordBatch>,
 }
 
 impl InMemoryRelation {
-    fn push(&mut self, rb: RecordBatch) {
-        self.batches
-            .push(FfiRecordBatch::new(rb).expect("prepare build batch"));
+    fn new(schema: SchemaRef) -> Self {
+        InMemoryRelation {
+            schema,
+            batches: Vec::new(),
+        }
+    }
+
+    fn push(&mut self, rb: RecordBatch) -> Result<()> {
+        let batch = FfiRecordBatch::new(rb, &self.schema).map_err(|error| {
+            DataFusionError::Execution(format!("failed to prepare build batch: {error}"))
+        })?;
+        self.batches.push(batch);
+        Ok(())
     }
 }
 
@@ -69,26 +82,26 @@ pub struct JoinState {
 
 impl JoinState {
     /// A bare-`Scan` build: clone the input RBs into the relation (multi-batch, no
-    /// column copy). The key index starts EMPTY — the JIT index kernel fills it via
-    /// [`join_insert`] (no host per-value loop).
-    pub fn from_clone(batches: Box<dyn Iterator<Item = RecordBatch>>) -> Self {
-        let mut relation = InMemoryRelation::default();
+    /// column copy), each checked against `schema`, the build side's. The key index
+    /// starts EMPTY — the JIT index kernel fills it via [`join_insert`] (no host
+    /// per-value loop).
+    pub fn from_clone(
+        batches: Box<dyn Iterator<Item = RecordBatch>>,
+        schema: SchemaRef,
+    ) -> Result<Self> {
+        let mut state = JoinState::empty_relation(schema);
         for rb in batches {
-            relation.push(rb);
+            state.relation.push(rb)?;
         }
-        JoinState {
-            relation,
-            index: HashMap::new(),
-            empty: Vec::new(),
-        }
+        Ok(state)
     }
 
-    /// A materialized build: an empty relation whose single batch the fused build
-    /// kernel produces (and installs via [`push_batch`](Self::push_batch)) while it
-    /// simultaneously fills the index.
-    pub fn empty_relation() -> Self {
+    /// A materialized build: an empty relation of `schema`, the build side's, whose
+    /// single batch the fused build kernel produces (and installs via
+    /// [`push_batch`](Self::push_batch)) while it simultaneously fills the index.
+    pub fn empty_relation(schema: SchemaRef) -> Self {
         JoinState {
-            relation: InMemoryRelation::default(),
+            relation: InMemoryRelation::new(schema),
             index: HashMap::new(),
             empty: Vec::new(),
         }
@@ -96,8 +109,9 @@ impl JoinState {
 
     /// Install the materialized build batch after the fused kernel finishes (its
     /// locators, inserted during the run, reference row indices into this batch).
-    pub fn push_batch(&mut self, rb: RecordBatch) {
-        self.relation.push(rb);
+    /// Fails if its columns are not the relation schema's.
+    pub fn push_batch(&mut self, rb: RecordBatch) -> Result<()> {
+        self.relation.push(rb)
     }
 
     fn probe_run(&self, key: u64) -> &[Locator] {

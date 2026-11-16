@@ -175,8 +175,10 @@ fn run_operator(op: Operator, mut inputs: Inputs, backend: JitBackend) -> Result
         // bare scan → JIT index over the clone; else → ONE fused kernel that
         // materializes the surviving rows AND indexes them in a single pass.
         let mut join_state = match left.as_ref() {
-            Operator::Scan { table, .. } => JoinState::from_clone(inputs.drain_table(*table)?),
-            _ => JoinState::empty_relation(),
+            Operator::Scan { table, .. } => {
+                JoinState::from_clone(inputs.drain_table(*table)?, left_schema.clone())?
+            }
+            _ => JoinState::empty_relation(left_schema.clone()),
         };
         match left.as_ref() {
             Operator::Scan { .. } => {
@@ -283,7 +285,7 @@ fn build_join_materialized(
     inputs.take_error()?;
     // Install the materialized batch: the locators inserted during the run reference
     // row indices into it.
-    js.push_batch(out.into_record_batch(n as usize));
+    js.push_batch(out.into_record_batch(n as usize))?;
     Ok(())
 }
 
