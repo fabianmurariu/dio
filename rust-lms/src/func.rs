@@ -1461,6 +1461,7 @@ impl Compiler {
             sources: Vec::new(),
             ids: None,
             code: Vec::new(),
+            source_dir: None,
             _signature: PhantomData,
         })
     }
@@ -1475,6 +1476,10 @@ impl Compiler {
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
         // Each function's id, name and compiled code ranges, until finalising gives addresses.
         let mut code = Vec::new();
+        // Where each function's readable text is written, for a debugger to open.
+        let source_dir = debug_ir_source
+            .then(crate::cranelift::source::source_dir)
+            .flatten();
         // Create the ISA: optimisation level and other performance settings
         let mut flag_builder = settings::builder();
         // Cranelift's optimiser rebuilds pure instructions without their ids, so readable
@@ -1679,6 +1684,7 @@ impl Compiler {
                         &func_ctx.func,
                         &names,
                         &mut ids,
+                        source_dir.as_deref(),
                         print_ir_source,
                     ));
                     let ranges = crate::cranelift::source::code_ranges(&func_ctx);
@@ -1760,6 +1766,7 @@ impl Compiler {
                     &func_ctx.func,
                     &names,
                     &mut ids,
+                    source_dir.as_deref(),
                     print_ir_source,
                 ));
                 let ranges = crate::cranelift::source::code_ranges(&func_ctx);
@@ -1796,6 +1803,7 @@ impl Compiler {
             sources,
             ids,
             code,
+            source_dir,
             _signature: PhantomData,
         })
     }
@@ -1843,6 +1851,8 @@ pub struct Compiled<T: StagedType> {
     ids: Option<crate::cranelift::source::InstIds>,
     /// Each function's machine code; see [`Compiled::code_ranges`].
     code: Vec<CodeMap>,
+    /// Where the readable text was written; see [`Compiled::source_dir`].
+    source_dir: Option<std::path::PathBuf>,
     _signature: PhantomData<T>,
 }
 
@@ -1934,6 +1944,13 @@ impl<T: StagedType> Compiled<T> {
     /// Cranelift only, empty otherwise.
     pub fn code_ranges(&self) -> &[CodeMap] {
         &self.code
+    }
+
+    /// The directory each function's readable text was written to, as `<name>.ir`, for a
+    /// debugger to open: `<temp>/rust-lms-<pid>/<n>`, one per compile. Kept with the readable
+    /// text; `None` otherwise, or when the directory could not be made.
+    pub fn source_dir(&self) -> Option<&std::path::Path> {
+        self.source_dir.as_deref()
     }
 
     /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was
@@ -2241,16 +2258,20 @@ fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_codegen::ir::Fu
 }
 
 /// `func`, named `name`, with its readable text (`names`: each called function's name by
-/// its Cranelift id); with `print` ([`DEBUG_IR_SOURCE`] set), also printed to stderr,
-/// followed by where each of its instructions was generated.
+/// its Cranelift id), also written to `<dir>/<name>.ir`; with `print` ([`DEBUG_IR_SOURCE`]
+/// set), also printed to stderr, followed by where each of its instructions was generated.
 fn ir_source(
     name: &str,
     func: &cranelift_codegen::ir::Function,
     names: &HashMap<u32, String>,
     ids: &mut Option<crate::cranelift::source::InstIds>,
+    dir: Option<&std::path::Path>,
     print: bool,
 ) -> (String, String) {
     let (text, _lines) = crate::cranelift::source::render(name, func, names);
+    if let Some(dir) = dir {
+        crate::cranelift::source::write_source(dir, name, &text);
+    }
     if print {
         let origins = (ids.as_mut()).map_or_else(String::new, |ids| {
             crate::cranelift::source::origins(func, ids)
