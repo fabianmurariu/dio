@@ -148,10 +148,18 @@ fn short(file: &str) -> String {
     parts[start..].join("/")
 }
 
-/// `func`, named `name`, as readable text; `names` holds each called function's name by
-/// its Cranelift id.
-pub(crate) fn render(name: &str, func: &Function, names: &HashMap<u32, String>) -> String {
+/// `func`, named `name`, as readable text, and each instruction id's line in it (1-based;
+/// an instruction printed on several lines is on its last, where its id is); `names` holds
+/// each called function's name by its Cranelift id.
+pub(crate) fn render(
+    name: &str,
+    func: &Function,
+    names: &HashMap<u32, String>,
+) -> (String, Vec<(u32, u32)>) {
     let mut out = String::new();
+    let mut lines = Vec::new();
+    // The line `out` ends on, counted up to `counted` bytes.
+    let (mut at, mut counted) = (1, 0);
     let entry = func.layout.entry_block();
     let params = entry.map_or(&[][..], |block| func.dfg.block_params(block));
     let _ = writeln!(out, "fn {name}({}) {{", typed(func, params));
@@ -169,12 +177,15 @@ pub(crate) fn render(name: &str, func: &Function, names: &HashMap<u32, String>) 
             let id = func.srcloc(inst);
             if !id.is_default() {
                 let _ = write!(out, "  // @{}", id.bits());
+                at += out[counted..].bytes().filter(|&b| b == b'\n').count() as u32;
+                counted = out.len();
+                lines.push((id.bits(), at));
             }
             out.push('\n');
         }
     }
     out.push('}');
-    out
+    (out, lines)
 }
 
 /// The code that generated each instruction id in `func`: see [`layout`].
@@ -477,7 +488,54 @@ fn typed(func: &Function, values: &[Value]) -> String {
 
 #[cfg(test)]
 mod tests {
-    use super::layout;
+    use super::{layout, render};
+    use cranelift_codegen::ir::{AbiParam, Function, InstBuilder, SourceLoc, types::I64};
+    use cranelift_frontend::{FunctionBuilder, FunctionBuilderContext};
+    use std::collections::HashMap;
+
+    #[test]
+    fn each_id_is_on_its_line_and_a_jump_on_its_goto() {
+        // b0(v0): @1 v2 = 0; @2 goto b1 with v2 (two lines); b1(v1): @3 return v1.
+        let mut func = Function::new();
+        func.signature.params.push(AbiParam::new(I64));
+        func.signature.returns.push(AbiParam::new(I64));
+        let mut ctx = FunctionBuilderContext::new();
+        let mut b = FunctionBuilder::new(&mut func, &mut ctx);
+        let (b0, b1) = (b.create_block(), b.create_block());
+        b.append_block_params_for_function_params(b0);
+        let p = b.append_block_param(b1, I64);
+        b.switch_to_block(b0);
+        b.set_srcloc(SourceLoc::new(1));
+        let zero = b.ins().iconst(I64, 0);
+        b.set_srcloc(SourceLoc::new(2));
+        b.ins().jump(b1, &[zero.into()]);
+        b.switch_to_block(b1);
+        b.set_srcloc(SourceLoc::new(3));
+        b.ins().return_(&[p]);
+        b.seal_all_blocks();
+        let flags = cranelift_codegen::settings::Flags::new(cranelift_codegen::settings::builder());
+        b.finalize(
+            cranelift_native::builder()
+                .unwrap()
+                .finish(flags)
+                .unwrap()
+                .frontend_config(),
+        );
+        let (text, lines) = render("f", &func, &HashMap::new());
+        assert_eq!(
+            text,
+            "\
+fn f(v0: i64) {
+b0:
+    v2 = 0  // @1
+    v1 = v2
+    goto b1  // @2
+b1(v1: i64):
+    return v1  // @3
+}"
+        );
+        assert_eq!(lines, [(1, 3), (2, 5), (3, 7)]);
+    }
 
     fn at(file: &str, line: u32) -> Option<(String, u32)> {
         Some((file.to_string(), line))

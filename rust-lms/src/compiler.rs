@@ -1004,7 +1004,7 @@ fn ir_source(
     ids: &mut Option<crate::cranelift::source::InstIds>,
     print: bool,
 ) -> (String, String) {
-    let text = crate::cranelift::source::render(name, func, names);
+    let (text, _lines) = crate::cranelift::source::render(name, func, names);
     if print {
         let origins = (ids.as_mut()).map_or_else(String::new, |ids| {
             crate::cranelift::source::origins(func, ids)
