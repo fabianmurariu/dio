@@ -96,14 +96,15 @@ impl InstIds {
     }
 
     /// The first frame of `id`'s origin outside rust-lms and the standard library: the
-    /// code that asked for the instruction, as `file:line`. Caches each address.
-    pub(crate) fn caller(&mut self, id: u32) -> Option<String> {
+    /// code that asked for the instruction, as its shortened file and line. Caches each
+    /// address.
+    pub(crate) fn caller(&mut self, id: u32) -> Option<(String, u32)> {
         let stack = self.stack(id)?.to_vec();
         stack.into_iter().find_map(|ip| {
             let frames = self.places.entry(ip).or_insert_with(|| resolve(ip));
             (frames.iter())
                 .find(|(file, _)| !is_internal(file))
-                .map(|(file, line)| format!("{}:{line}", short(file)))
+                .map(|(file, line)| (short(file), *line))
         })
     }
 
@@ -176,8 +177,7 @@ pub(crate) fn render(name: &str, func: &Function, names: &HashMap<u32, String>) 
     out
 }
 
-/// For each instruction id in `func`, in order, the code that generated it:
-/// `@12 ← db4-execution/src/codegen.rs:812`, one per line.
+/// The code that generated each instruction id in `func`: see [`layout`].
 pub(crate) fn origins(func: &Function, ids: &mut InstIds) -> String {
     let in_func: std::collections::BTreeSet<u32> = (func.layout.blocks())
         .flat_map(|block| func.layout.block_insts(block))
@@ -185,10 +185,63 @@ pub(crate) fn origins(func: &Function, ids: &mut InstIds) -> String {
         .filter(|id| !id.is_default())
         .map(|id| id.bits())
         .collect();
+    let callers: Vec<_> = in_func.into_iter().map(|id| (id, ids.caller(id))).collect();
+    layout(&callers)
+}
+
+/// Each id's origin (`ids`: in increasing order, `None` when unknown), grouped by file, in
+/// order of first appearance, then by line: one line per origin, listing its ids as ranges,
+/// and the unknown ones last, after `?`. A range runs over ids that are next to each other
+/// in `ids`, so an id missing from the function does not break it.
+///
+/// ```text
+/// db4-disk-storage/src/ffi/staged/graph.rs
+///     :45  @7–8, @21–22
+///     :62  @54–55
+/// ```
+fn layout(ids: &[(u32, Option<(String, u32)>)]) -> String {
+    type Ranges = Vec<(usize, usize)>;
+    // Positions in `ids`, as ranges (first, last): per file, per line, and the unknown ones.
+    let mut files: Vec<(&str, std::collections::BTreeMap<u32, Ranges>)> = Vec::new();
+    let mut unknown = Ranges::new();
+    let extend = |ranges: &mut Ranges, at: usize| match ranges.last_mut() {
+        Some((_, last)) if *last + 1 == at => *last = at,
+        _ => ranges.push((at, at)),
+    };
+    for (at, (_, caller)) in ids.iter().enumerate() {
+        let Some((file, line)) = caller else {
+            extend(&mut unknown, at);
+            continue;
+        };
+        let lines = match files.iter().position(|(f, _)| f == file) {
+            Some(i) => &mut files[i].1,
+            None => {
+                files.push((file, Default::default()));
+                &mut files.last_mut().expect("just pushed").1
+            }
+        };
+        extend(lines.entry(*line).or_default(), at);
+    }
+    let show = |ranges: &Ranges| {
+        (ranges.iter())
+            .map(|&(first, last)| match (ids[first].0, ids[last].0) {
+                (a, b) if a == b => format!("@{a}"),
+                (a, b) => format!("@{a}–{b}"),
+            })
+            .collect::<Vec<_>>()
+            .join(", ")
+    };
     let mut out = String::new();
-    for id in in_func {
-        let caller = ids.caller(id);
-        let _ = writeln!(out, "@{id} ← {}", caller.as_deref().unwrap_or("?"));
+    for (file, lines) in &files {
+        let _ = writeln!(out, "{file}");
+        let width = (lines.keys()).map(|line| line.to_string().len()).max();
+        for (line, ranges) in lines {
+            let width = width.unwrap_or(0);
+            let _ = writeln!(out, "    :{line:<width$}  {}", show(ranges));
+        }
+    }
+    if !unknown.is_empty() {
+        let _ = writeln!(out, "?  {}", show(&unknown));
     }
     out
 }
@@ -420,4 +473,39 @@ fn typed(func: &Function, values: &[Value]) -> String {
         .map(|&v| format!("{v}: {}", func.dfg.value_type(v)))
         .collect::<Vec<_>>()
         .join(", ")
+}
+
+#[cfg(test)]
+mod tests {
+    use super::layout;
+
+    fn at(file: &str, line: u32) -> Option<(String, u32)> {
+        Some((file.to_string(), line))
+    }
+
+    #[test]
+    fn origins_group_by_file_then_line_as_ranges() {
+        // Id 5 is missing from the function, so 4 and 6 are next to each other.
+        let ids = [
+            (1, at("a.rs", 10)),
+            (2, at("a.rs", 10)),
+            (3, at("b.rs", 7)),
+            (4, at("a.rs", 10)),
+            (6, at("a.rs", 10)),
+            (7, at("a.rs", 9)),
+            (8, None),
+            (9, at("b.rs", 7)),
+        ];
+        assert_eq!(
+            layout(&ids),
+            "\
+a.rs
+    :9   @7
+    :10  @1–2, @4–6
+b.rs
+    :7  @3, @9
+?  @8
+"
+        );
+    }
 }
