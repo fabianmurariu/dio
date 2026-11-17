@@ -9,6 +9,8 @@
 //! still lives in the `compile()` driver in `func.rs` (docs/llvm.md: the `Module`/
 //! `Executable` boundary).
 
+pub(crate) mod source;
+
 use std::collections::HashMap;
 
 use cranelift_codegen::ir::{
