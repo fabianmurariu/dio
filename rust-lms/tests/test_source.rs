@@ -66,7 +66,7 @@ fn off_by_default() {
     let mut compiler = Compiler::new();
     let inc = compiler.fun1("inc", |_ctx, x: Var<i64>| x + 1i64);
     let compiled = compiler.compile(inc).unwrap();
-    if std::env::var_os("RUST_LMS_DEBUG_IR_SOURCE").is_none() {
+    if !rust_lms::compiler::debug_ir_source_on() {
         assert!(compiled.sources().is_empty());
     }
 }

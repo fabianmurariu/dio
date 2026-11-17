@@ -1,4 +1,4 @@
-//! Cranelift IR as readable C-like text (see [`crate::func::DEBUG_IR_SOURCE`]).
+//! Cranelift IR as readable C-like text (see [`crate::compiler::DEBUG_IR_SOURCE`]).
 //!
 //! One line per instruction, with Cranelift's own value and block numbers (`v5`, `b3`), as
 //! `RUST_LMS_DEBUG_IR_OPT` prints them. A jump assigns the target
