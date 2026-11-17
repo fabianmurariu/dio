@@ -9,8 +9,10 @@
 //! prints it. With ids kept ([`InstIds`]), each line ends with its instruction's id,
 //! `// @12`.
 
+use std::cell::RefCell;
 use std::collections::HashMap;
 use std::fmt::Write;
+use std::sync::Arc;
 
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
@@ -18,18 +20,131 @@ use cranelift_codegen::ir::{
     SourceLoc, Value,
 };
 
+/// A call stack, as return addresses, innermost first.
+pub(crate) type Stack = Arc<[usize]>;
+
+thread_local! {
+    /// The call stack of the statement being replayed, if it was recorded with one.
+    static ORIGIN: RefCell<Option<Stack>> = const { RefCell::new(None) };
+}
+
+/// The current call stack.
+pub(crate) fn capture() -> Stack {
+    let mut stack = Vec::new();
+    backtrace::trace(|frame| {
+        stack.push(frame.ip() as usize);
+        true
+    });
+    stack.into()
+}
+
+/// Runs `f` with `origin` as the origin of the instructions it emits: a statement replayed
+/// in `compile`, under the call stack it was recorded on.
+pub(crate) fn with_origin<R>(origin: Stack, f: impl FnOnce() -> R) -> R {
+    /// Puts the outer origin back, also when `f` panics.
+    struct Restore(Option<Stack>);
+    impl Drop for Restore {
+        fn drop(&mut self) {
+            ORIGIN.with(|current| current.replace(self.0.take()));
+        }
+    }
+    let _restore = Restore(ORIGIN.with(|current| current.replace(Some(origin))));
+    f()
+}
+
 /// Hands out instruction ids, unique across one compile, kept by Cranelift as each
-/// instruction's `SourceLoc`.
+/// instruction's `SourceLoc`, with each one's origin: the call stack its statement was
+/// recorded on ([`with_origin`]), or else the one it is emitted on.
 #[derive(Default)]
 pub(crate) struct InstIds {
-    next: u32,
+    /// Each id's call stack (id `n` at `n - 1`), as an index into `stacks`.
+    of_id: Vec<u32>,
+    /// Each distinct call stack; most instructions share a few.
+    stacks: Vec<Stack>,
+    stack_index: HashMap<Stack, u32>,
+    /// Each address's frames (several when calls were inlined), resolved on first use.
+    places: HashMap<usize, Vec<(String, u32)>>,
 }
 
 impl InstIds {
+    /// A fresh id, with its origin.
     pub(crate) fn next(&mut self) -> SourceLoc {
-        self.next += 1;
-        SourceLoc::new(self.next)
+        let stack = ORIGIN
+            .with(|current| current.borrow().clone())
+            .unwrap_or_else(capture);
+        let index = match self.stack_index.get(&stack) {
+            Some(&index) => index,
+            None => {
+                let index = self.stacks.len() as u32;
+                self.stacks.push(stack.clone());
+                self.stack_index.insert(stack, index);
+                index
+            }
+        };
+        self.of_id.push(index);
+        SourceLoc::new(self.of_id.len() as u32)
     }
+
+    /// Where `id` was generated: `file:line` per frame, innermost first (empty for an
+    /// unknown id). Resolves every frame, uncached: for looking at a few ids.
+    pub(crate) fn origin(&self, id: u32) -> Vec<String> {
+        let stack = self.stack(id).unwrap_or_default();
+        (stack.iter())
+            .flat_map(|&ip| resolve(ip))
+            .map(|(file, line)| format!("{}:{line}", short(&file)))
+            .collect()
+    }
+
+    /// The first frame of `id`'s origin outside rust-lms and the standard library: the
+    /// code that asked for the instruction, as `file:line`. Caches each address.
+    pub(crate) fn caller(&mut self, id: u32) -> Option<String> {
+        let stack = self.stack(id)?.to_vec();
+        stack.into_iter().find_map(|ip| {
+            let frames = self.places.entry(ip).or_insert_with(|| resolve(ip));
+            (frames.iter())
+                .find(|(file, _)| !is_internal(file))
+                .map(|(file, line)| format!("{}:{line}", short(file)))
+        })
+    }
+
+    fn stack(&self, id: u32) -> Option<&[usize]> {
+        let index = *self.of_id.get(id.checked_sub(1)? as usize)?;
+        Some(&self.stacks[index as usize])
+    }
+}
+
+/// `ip`'s frames as file and line: several when calls were inlined, innermost first.
+fn resolve(ip: usize) -> Vec<(String, u32)> {
+    let mut frames = Vec::new();
+    backtrace::resolve(ip as *mut std::ffi::c_void, |symbol| {
+        if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+            frames.push((file.to_string_lossy().into_owned(), line));
+        }
+    });
+    frames
+}
+
+/// Whether `file` is in rust-lms itself, the standard library (`/rustc/<hash>/…`, or
+/// `rust-src` under `lib/rustlib`) or `backtrace`.
+fn is_internal(file: &str) -> bool {
+    [
+        "/rust-lms/src/",
+        "/rustc/",
+        "/lib/rustlib/",
+        "/backtrace-0.",
+    ]
+    .iter()
+    .any(|dir| file.contains(dir))
+}
+
+/// `file` from its crate's directory on: `db4-execution/src/codegen.rs`,
+/// `rust-lms/tests/test_source.rs`.
+fn short(file: &str) -> String {
+    let parts: Vec<_> = file.split('/').collect();
+    let dir = |names: &[&str]| parts.iter().rposition(|p| names.contains(p));
+    let start = (dir(&["src"]).or_else(|| dir(&["tests", "benches", "examples"])))
+        .map_or(parts.len().saturating_sub(2), |i| i.saturating_sub(1));
+    parts[start..].join("/")
 }
 
 /// `func`, named `name`, as readable text; `names` holds each called function's name by
@@ -58,6 +173,23 @@ pub(crate) fn render(name: &str, func: &Function, names: &HashMap<u32, String>) 
         }
     }
     out.push('}');
+    out
+}
+
+/// For each instruction id in `func`, in order, the code that generated it:
+/// `@12 ← db4-execution/src/codegen.rs:812`, one per line.
+pub(crate) fn origins(func: &Function, ids: &mut InstIds) -> String {
+    let in_func: std::collections::BTreeSet<u32> = (func.layout.blocks())
+        .flat_map(|block| func.layout.block_insts(block))
+        .map(|inst| func.srcloc(inst))
+        .filter(|id| !id.is_default())
+        .map(|id| id.bits())
+        .collect();
+    let mut out = String::new();
+    for id in in_func {
+        let caller = ids.caller(id);
+        let _ = writeln!(out, "@{id} ← {}", caller.as_deref().unwrap_or("?"));
+    }
     out
 }
 

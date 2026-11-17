@@ -46,13 +46,17 @@ struct CtxInner {
     next_var_id: usize,
     /// One action list per open scope; statements are appended to the last.
     frames: Vec<Vec<CodegenAction>>,
+    /// Keep the call stack each statement is recorded on, as the origin of the
+    /// instructions it emits ([`DEBUG_IR_SOURCE`]).
+    record_origins: bool,
 }
 
 impl Ctx {
-    pub(crate) fn new(start: usize) -> Self {
+    pub(crate) fn new(start: usize, record_origins: bool) -> Self {
         Ctx(Rc::new(RefCell::new(CtxInner {
             next_var_id: start,
             frames: vec![Vec::new()],
+            record_origins,
         })))
     }
 
@@ -66,9 +70,20 @@ impl Ctx {
         self.inner().next_var_id
     }
 
-    /// Append a statement to the innermost open scope.
+    /// Append a statement to the innermost open scope. With origins recorded, the
+    /// statement replays under the call stack it is recorded on: the instructions it emits
+    /// later, in `compile`, are traced back to the code that asked for them here.
     fn push(&self, action: CodegenAction) {
-        self.inner()
+        let mut inner = self.inner();
+        let action = if inner.record_origins {
+            let origin = crate::cranelift::source::capture();
+            Box::new(move |ctx: &mut CompilationContext| {
+                crate::cranelift::source::with_origin(origin, || action(ctx))
+            })
+        } else {
+            action
+        };
+        inner
             .frames
             .last_mut()
             .expect("Ctx used after its function body was finished")
@@ -91,17 +106,23 @@ impl Ctx {
     where
         Ret: Staged + 'static,
     {
-        let actions = {
+        let (actions, record_origins) = {
             let mut inner = self.inner();
             assert_eq!(inner.frames.len(), 1, "rust-lms bug: a scope was left open");
             // Leave no frame behind, so a leaked clone panics instead of emitting.
-            inner.frames.pop().expect("the body's own frame")
+            let actions = inner.frames.pop().expect("the body's own frame");
+            (actions, inner.record_origins)
         };
+        // The returned expression is no statement: its origin is the function's definition.
+        let origin = record_origins.then(crate::cranelift::source::capture);
         Box::new(move |ctx| {
             for action in actions {
                 action(ctx);
             }
-            ret.codegen(ctx)
+            match origin {
+                Some(origin) => crate::cranelift::source::with_origin(origin, || ret.codegen(ctx)),
+                None => ret.codegen(ctx),
+            }
         })
     }
 

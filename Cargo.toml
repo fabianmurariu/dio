@@ -17,6 +17,7 @@ nom = "7.1"
 # Error handling & diagnostics
 thiserror = "1.0"
 ariadne = "0.4"
+backtrace = "0.3"
 
 # JIT compilation
 cranelift = "0.137.1"

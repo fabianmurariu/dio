@@ -31,6 +31,8 @@ pub struct Compiler {
     backend: JitBackend,
     /// Keep each function's Cranelift IR as readable text; see [`DEBUG_IR_SOURCE`].
     debug_ir_source: bool,
+    /// Whether [`DEBUG_IR_SOURCE`] was set when this compiler was made.
+    debug_ir_source_env: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -72,6 +74,7 @@ impl Compiler {
             next_var_id: 0,
             backend: JitBackend::Cranelift,
             debug_ir_source: false,
+            debug_ir_source_env: std::env::var_os(DEBUG_IR_SOURCE).is_some(),
         }
     }
 
@@ -82,16 +85,17 @@ impl Compiler {
     }
 
     /// Keep each function's Cranelift IR as readable text (builder style), as
-    /// [`DEBUG_IR_SOURCE`] does, without the environment. Cranelift only.
+    /// [`DEBUG_IR_SOURCE`] does, without the environment. Cranelift only. Set it before
+    /// defining functions: their statements record their origins as they are defined.
     pub fn with_debug_ir_source(mut self, on: bool) -> Self {
         self.debug_ir_source = on;
         self
     }
 
     /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`], read once
-    /// per compile so that it costs nothing per instruction.
+    /// in [`new`](Self::new) so that it costs nothing per function or instruction.
     fn debug_ir_source(&self) -> bool {
-        self.debug_ir_source || std::env::var_os(DEBUG_IR_SOURCE).is_some()
+        self.debug_ir_source || self.debug_ir_source_env
     }
 
     /// Register an external function and get a handle to call it.
@@ -147,7 +151,13 @@ impl Compiler {
         F: FnOnce(&Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun1(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun1(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive unary function.
@@ -172,7 +182,13 @@ impl Compiler {
         F: FnOnce(FunRef1<A, OUT>, &Ctx, Var<A>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun1_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun1_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a zero-argument function.
@@ -182,7 +198,13 @@ impl Compiler {
         F: FnOnce(&Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun0(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun0(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive zero-argument function.
@@ -192,7 +214,13 @@ impl Compiler {
         F: FnOnce(FunRef0<OUT>, &Ctx) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun0_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun0_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a binary function.
@@ -204,7 +232,13 @@ impl Compiler {
         F: FnOnce(&Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun2(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun2(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive binary function.
@@ -216,7 +250,13 @@ impl Compiler {
         F: FnOnce(FunRef2<A, B, OUT>, &Ctx, Var<A>, Var<B>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun2_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun2_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a ternary function.
@@ -229,7 +269,13 @@ impl Compiler {
         F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun3(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun3(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive ternary function.
@@ -246,7 +292,13 @@ impl Compiler {
         F: FnOnce(FunRef3<A, B, C, OUT>, &Ctx, Var<A>, Var<B>, Var<C>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun3_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun3_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a 4-parameter function.
@@ -264,7 +316,13 @@ impl Compiler {
         F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun4(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun4(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive 4-parameter function.
@@ -282,7 +340,13 @@ impl Compiler {
         F: FnOnce(FunRef4<A, B, C, D, OUT>, &Ctx, Var<A>, Var<B>, Var<C>, Var<D>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun4_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun4_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a 5-parameter function.
@@ -301,7 +365,13 @@ impl Compiler {
         F: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun5(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun5(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive 5-parameter function.
@@ -328,7 +398,13 @@ impl Compiler {
         ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun5_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun5_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a 6-parameter function.
@@ -348,7 +424,13 @@ impl Compiler {
         FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun6(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun6(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive 6-parameter function.
@@ -377,7 +459,13 @@ impl Compiler {
         ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun6_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun6_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a 7-parameter function.
@@ -398,7 +486,13 @@ impl Compiler {
         FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun7(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun7(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive 7-parameter function.
@@ -429,7 +523,13 @@ impl Compiler {
         ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun7_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun7_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define an 8-parameter function.
@@ -451,7 +551,13 @@ impl Compiler {
         FN: FnOnce(&Ctx, Var<A>, Var<B>, Var<C>, Var<D>, Var<E>, Var<FF>, Var<G>, Var<H>) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun8(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun8(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Define a recursive 8-parameter function.
@@ -484,7 +590,13 @@ impl Compiler {
         ) -> BODY,
         BODY: Staged<Out = OUT> + 'static,
     {
-        FunDef::make_fun8_rec(&mut self.next_var_id, &mut self.functions, name, body_fn)
+        FunDef::make_fun8_rec(
+            self.debug_ir_source(),
+            &mut self.next_var_id,
+            &mut self.functions,
+            name,
+            body_fn,
+        )
     }
 
     /// Compile an expression to native code.
@@ -523,12 +635,15 @@ impl Compiler {
             unsafe { std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr) },
             Vec::new(),
             Vec::new(),
+            None,
         ))
     }
 
     fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
         let mut sizes = Vec::new();
         let debug_ir_source = self.debug_ir_source();
+        // Only the environment variable prints; the builder flag just keeps the text.
+        let print_ir_source = self.debug_ir_source_env;
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
@@ -738,7 +853,13 @@ impl Compiler {
                 debug_ir(DEBUG_IR_OPT, "optimised", &func_def.name, &func_ctx.func);
                 sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
                 if debug_ir_source {
-                    sources.push(ir_source(&func_def.name, &func_ctx.func, &names));
+                    sources.push(ir_source(
+                        &func_def.name,
+                        &func_ctx.func,
+                        &names,
+                        &mut ids,
+                        print_ir_source,
+                    ));
                 }
                 module.clear_context(&mut func_ctx);
             }
@@ -813,7 +934,13 @@ impl Compiler {
             debug_ir(DEBUG_IR_OPT, "optimised", "__main__", &func_ctx.func);
             sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
             if debug_ir_source {
-                sources.push(ir_source("__main__", &func_ctx.func, &names));
+                sources.push(ir_source(
+                    "__main__",
+                    &func_ctx.func,
+                    &names,
+                    &mut ids,
+                    print_ir_source,
+                ));
             }
             module.clear_context(&mut func_ctx);
         }
@@ -834,6 +961,7 @@ impl Compiler {
             unsafe { std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr) },
             sizes,
             sources,
+            ids,
         ))
     }
 }
@@ -844,8 +972,10 @@ pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
 /// (its execution engine does not hand back the optimised IR).
 pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
 /// Prints each function's Cranelift IR as readable C-like text, each line tagged with its
-/// instruction's id. The functions are compiled unoptimised, so every instruction keeps
-/// its id. Cranelift only.
+/// instruction's id, then each id's origin: the first frame outside rust-lms of the call
+/// stack its statement (`ctx.store`, `ctx.bind`, …) was recorded on, `@12 ← codegen.rs:812`
+/// (see [`Compiled::origin`] for the whole stack). The functions are compiled unoptimised,
+/// so every instruction keeps its id. Cranelift only.
 pub const DEBUG_IR_SOURCE: &str = "RUST_LMS_DEBUG_IR_SOURCE";
 
 /// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is
@@ -856,15 +986,21 @@ pub(crate) fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_code
     }
 }
 /// `func`, named `name`, with its readable text (`names`: each called function's name by
-/// its Cranelift id); also printed to stderr when [`DEBUG_IR_SOURCE`] is set.
+/// its Cranelift id); with `print` ([`DEBUG_IR_SOURCE`] set), also printed to stderr,
+/// followed by where each of its instructions was generated.
 fn ir_source(
     name: &str,
     func: &cranelift_codegen::ir::Function,
     names: &HashMap<u32, String>,
+    ids: &mut Option<crate::cranelift::source::InstIds>,
+    print: bool,
 ) -> (String, String) {
     let text = crate::cranelift::source::render(name, func, names);
-    if std::env::var_os(DEBUG_IR_SOURCE).is_some() {
-        eprintln!("=== Function: {name} (source) ===\n{text}\n");
+    if print {
+        let origins = (ids.as_mut()).map_or_else(String::new, |ids| {
+            crate::cranelift::source::origins(func, ids)
+        });
+        eprintln!("=== Function: {name} (source) ===\n{text}\n{origins}");
     }
     (name.to_string(), text)
 }

@@ -99,6 +99,8 @@ pub struct Compiled<T: StagedType> {
     sizes: Vec<(String, usize)>,
     /// Each function's Cranelift IR as readable text; see [`Compiled::sources`].
     sources: Vec<(String, String)>,
+    /// Each instruction id's origin; see [`Compiled::origin`].
+    ids: Option<crate::cranelift::source::InstIds>,
     _signature: PhantomData<T>,
 }
 
@@ -156,12 +158,14 @@ impl<T: StagedType> Compiled<T> {
         main: unsafe extern "C" fn(*mut u8),
         sizes: Vec<(String, usize)>,
         sources: Vec<(String, String)>,
+        ids: Option<crate::cranelift::source::InstIds>,
     ) -> Self {
         Self {
             executable,
             main,
             sizes,
             sources,
+            ids,
             _signature: PhantomData,
         }
     }
@@ -177,6 +181,15 @@ impl<T: StagedType> Compiled<T> {
     /// otherwise.
     pub fn sources(&self) -> &[(String, String)] {
         &self.sources
+    }
+
+    /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was
+    /// generated: the call stack its statement was recorded on (for the returned
+    /// expression, the function's definition; for what `compile` adds itself, `compile`),
+    /// as `file:line` per frame, innermost first. Empty for an unknown id or without
+    /// readable text.
+    pub fn origin(&self, id: u32) -> Vec<String> {
+        (self.ids.as_ref()).map_or_else(Vec::new, |ids| ids.origin(id))
     }
 
     /// Execute the compiled code and return the result.

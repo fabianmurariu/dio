@@ -75,6 +75,7 @@ fn off_by_default() {
 fn calls_read_by_name() {
     let mut compiler = Compiler::new().with_debug_ir_source(true);
     let add = compiler.extern_fn::<SrcAddExtern>();
+    let defined = line!() + 1;
     let f = compiler.fun2("add", |_ctx, x: Var<i64>, y: Var<i64>| {
         call_extern2(add, x, y)
     });
@@ -98,6 +99,9 @@ b0:
     return
 }"
     );
+    // The call is the returned expression, not a statement: it traces back to `fun2`.
+    let at = format!("rust-lms/tests/test_source.rs:{defined}");
+    assert!(compiled.origin(8).contains(&at), "{:?}", compiled.origin(8));
     // `__main__` hands back the address of `add`, by name.
     assert!(source(&compiled, "__main__").contains("v1 = &add  // @11\n"));
 }
@@ -125,4 +129,29 @@ b0:
     return
 }"
     );
+}
+
+#[test]
+fn ids_trace_back_to_the_statement_that_asked_for_them() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let defined = line!();
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(count_to_n).unwrap();
+    // Recorded when the closure ran, not when `compile` emitted the instruction: `@7`
+    // (`v9 = v8 + v5`) is `sum + i`, `@10` (`v12 = v5 + v11`) is `i + 1`.
+    let from = |id: u32, line: u32| {
+        let at = format!("rust-lms/tests/test_source.rs:{}", defined + line);
+        compiled.origin(id).contains(&at)
+    };
+    assert!(from(7, 5), "{:?}", compiled.origin(7));
+    assert!(from(10, 6), "{:?}", compiled.origin(10));
+    assert!(compiled.origin(0).is_empty() && compiled.origin(1000).is_empty());
 }
