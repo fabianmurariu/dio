@@ -103,6 +103,8 @@ pub struct Compiled<T: StagedType> {
     ids: Option<crate::cranelift::source::InstIds>,
     /// Each function's machine code; see [`Compiled::code_ranges`].
     code: Vec<CodeMap>,
+    /// Where the readable text was written; see [`Compiled::source_dir`].
+    source_dir: Option<std::path::PathBuf>,
     _signature: PhantomData<T>,
 }
 
@@ -181,6 +183,7 @@ impl<T: StagedType> Compiled<T> {
         sources: Vec<(String, String)>,
         ids: Option<crate::cranelift::source::InstIds>,
         code: Vec<CodeMap>,
+        source_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             executable,
@@ -189,6 +192,7 @@ impl<T: StagedType> Compiled<T> {
             sources,
             ids,
             code,
+            source_dir,
             _signature: PhantomData,
         }
     }
@@ -213,6 +217,13 @@ impl<T: StagedType> Compiled<T> {
     /// Cranelift only, empty otherwise.
     pub fn code_ranges(&self) -> &[CodeMap] {
         &self.code
+    }
+
+    /// The directory each function's readable text was written to, as `<name>.ir`, for a
+    /// debugger to open: `<temp>/rust-lms-<pid>/<n>`, one per compile. Kept with the readable
+    /// text; `None` otherwise, or when the directory could not be made.
+    pub fn source_dir(&self) -> Option<&std::path::Path> {
+        self.source_dir.as_deref()
     }
 
     /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was

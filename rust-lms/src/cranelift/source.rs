@@ -188,6 +188,35 @@ pub(crate) fn render(
     (out, lines)
 }
 
+/// A fresh directory for one compile's readable text, `<temp>/rust-lms-<pid>/<n>`, numbered
+/// in the order compiles start, for a debugger to open. `None`, with a warning, when it cannot
+/// be made: the compile goes on without the files.
+pub(crate) fn source_dir() -> Option<std::path::PathBuf> {
+    static COMPILES: std::sync::atomic::AtomicU32 = std::sync::atomic::AtomicU32::new(0);
+    let n = COMPILES.fetch_add(1, std::sync::atomic::Ordering::Relaxed);
+    let dir = (std::env::temp_dir())
+        .join(format!("rust-lms-{}", std::process::id()))
+        .join(n.to_string());
+    match std::fs::create_dir_all(&dir) {
+        Ok(()) => Some(dir),
+        Err(e) => {
+            eprintln!("rust-lms: no readable text on disk, {}: {e}", dir.display());
+            None
+        }
+    }
+}
+
+/// Writes `text` to `<dir>/<name>.ir`, for a debugger to open; warns when it cannot.
+pub(crate) fn write_source(dir: &std::path::Path, name: &str, text: &str) {
+    let path = dir.join(format!("{name}.ir"));
+    if let Err(e) = std::fs::write(&path, text) {
+        eprintln!(
+            "rust-lms: no readable text on disk, {}: {e}",
+            path.display()
+        );
+    }
+}
+
 /// The size of `ctx`'s compiled code, and each range of it (offsets from its start) with the
 /// id of the instruction it came from: `None` for code no instruction asked for (the
 /// prologue, the driver's return).

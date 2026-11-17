@@ -69,6 +69,7 @@ fn off_by_default() {
     if !rust_lms::compiler::debug_ir_source_on() {
         assert!(compiled.sources().is_empty());
         assert!(compiled.code_ranges().is_empty());
+        assert!(compiled.source_dir().is_none());
     }
 }
 
@@ -187,4 +188,22 @@ fn machine_code_ranges_point_at_ids_in_the_text() {
     }
     // `sum + i` (`@7`, `v9 = v8 + v5`) has code of its own: a breakpoint can stop on it.
     assert!(code.ranges.iter().any(|(_, id)| *id == Some(7)), "{code:?}");
+}
+
+#[test]
+fn each_compile_writes_its_text_to_its_own_directory() {
+    let compile = || {
+        let mut compiler = Compiler::new().with_debug_ir_source(true);
+        let inc = compiler.fun1("inc", |_ctx, x: Var<i64>| x + 1i64);
+        compiler.compile(inc).unwrap()
+    };
+    let (first, second) = (compile(), compile());
+    let dir = first.source_dir().expect("a directory for the text");
+    assert_ne!(Some(dir), second.source_dir());
+    // `inc.ir` and `__main__.ir`, each the text `sources` has.
+    assert_eq!(first.sources().len(), 2);
+    for (name, text) in first.sources() {
+        let written = std::fs::read_to_string(dir.join(format!("{name}.ir"))).unwrap();
+        assert_eq!(&written, text, "{name}");
+    }
 }
