@@ -880,8 +880,6 @@ pub struct Compiler {
     backend: JitBackend,
     /// Keep each function's Cranelift IR as readable text; see [`DEBUG_IR_SOURCE`].
     debug_ir_source: bool,
-    /// Whether [`DEBUG_IR_SOURCE`] was set when this compiler was made.
-    debug_ir_source_env: bool,
 }
 
 impl Default for Compiler {
@@ -899,7 +897,6 @@ impl Compiler {
             next_var_id: 0,
             backend: JitBackend::Cranelift,
             debug_ir_source: false,
-            debug_ir_source_env: std::env::var_os(DEBUG_IR_SOURCE).is_some(),
         }
     }
 
@@ -917,10 +914,9 @@ impl Compiler {
         self
     }
 
-    /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`], read once
-    /// in [`new`](Self::new) so that it costs nothing per function or instruction.
+    /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`].
     fn debug_ir_source(&self) -> bool {
-        self.debug_ir_source || self.debug_ir_source_env
+        self.debug_ir_source || debug_ir_source_on()
     }
 
     /// Register an external function and get a handle to call it.
@@ -1471,7 +1467,7 @@ impl Compiler {
         let mut sizes = Vec::new();
         let debug_ir_source = self.debug_ir_source();
         // Only the environment variable prints; the builder flag just keeps the text.
-        let print_ir_source = self.debug_ir_source_env;
+        let print_ir_source = debug_ir_source_on();
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
@@ -2176,6 +2172,14 @@ pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
 /// (see [`Compiled::origin`] for the whole stack). The functions are compiled unoptimised,
 /// so every instruction keeps its id. Cranelift only.
 pub const DEBUG_IR_SOURCE: &str = "RUST_LMS_DEBUG_IR_SOURCE";
+
+static DEBUG_IR_SOURCE_ON: std::sync::LazyLock<bool> =
+    std::sync::LazyLock::new(|| std::env::var_os(DEBUG_IR_SOURCE).is_some());
+
+/// Whether [`DEBUG_IR_SOURCE`] is set: read once per process, on first use.
+pub fn debug_ir_source_on() -> bool {
+    *DEBUG_IR_SOURCE_ON
+}
 
 /// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is
 /// set.
