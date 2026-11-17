@@ -29,7 +29,7 @@ pub struct Compiler {
     next_var_id: usize,
     /// Code-generation backend `compile` targets.
     backend: JitBackend,
-    /// Keep each function's optimised IR as readable text; see [`DEBUG_IR_SOURCE`].
+    /// Keep each function's Cranelift IR as readable text; see [`DEBUG_IR_SOURCE`].
     debug_ir_source: bool,
 }
 
@@ -81,7 +81,7 @@ impl Compiler {
         self
     }
 
-    /// Keep each function's optimised IR as readable text (builder style), as
+    /// Keep each function's Cranelift IR as readable text (builder style), as
     /// [`DEBUG_IR_SOURCE`] does, without the environment. Cranelift only.
     pub fn with_debug_ir_source(mut self, on: bool) -> Self {
         self.debug_ir_source = on;
@@ -530,10 +530,16 @@ impl Compiler {
         let mut sizes = Vec::new();
         let debug_ir_source = self.debug_ir_source();
         let mut sources = Vec::new();
+        // Instruction ids, unique across the compile, when readable text is kept.
+        let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
+        // Cranelift's optimiser rebuilds pure instructions without their ids, so readable
+        // text is kept unoptimised: every line keeps its id, at the cost of running code
+        // that differs from the optimised build's.
+        let opt_level = if debug_ir_source { "none" } else { "speed" };
         flag_builder
-            .set("opt_level", "speed")
+            .set("opt_level", opt_level)
             .map_err(|e| CompileError::JitError(e.to_string()))?;
         // The IR verifier catches malformed CLIF — mis-ordered `seal_block` above
         // all — which is worth the ~3x compile-time cost while authoring codegen,
@@ -683,6 +689,7 @@ impl Compiler {
 
                     {
                         let mut backend = CraneliftBackend {
+                            ids: ids.as_mut(),
                             builder: &mut builder,
                             module: &mut module,
                             func_ids: &func_map,
@@ -709,6 +716,10 @@ impl Compiler {
                             &func_def.return_info,
                         );
                     }
+
+                    // The driver's own return: no instruction id.
+
+                    builder.set_srcloc(cranelift_codegen::ir::SourceLoc::default());
 
                     builder.ins().return_(&[]);
                     builder.finalize(module.isa().frontend_config());
@@ -759,6 +770,7 @@ impl Compiler {
 
                 {
                     let mut backend = CraneliftBackend {
+                        ids: ids.as_mut(),
                         builder: &mut builder,
                         module: &mut module,
                         func_ids: &func_map,
@@ -785,6 +797,10 @@ impl Compiler {
                         &return_info,
                     );
                 }
+
+                // The driver's own return: no instruction id.
+
+                builder.set_srcloc(cranelift_codegen::ir::SourceLoc::default());
 
                 builder.ins().return_(&[]);
                 builder.finalize(module.isa().frontend_config());
@@ -827,7 +843,9 @@ pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
 /// optimisation (what runs); LLVM's as the MLIR LLVM dialect, before LLVM's own passes
 /// (its execution engine does not hand back the optimised IR).
 pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
-/// Prints each function's optimised Cranelift IR as readable C-like text. Cranelift only.
+/// Prints each function's Cranelift IR as readable C-like text, each line tagged with its
+/// instruction's id. The functions are compiled unoptimised, so every instruction keeps
+/// its id. Cranelift only.
 pub const DEBUG_IR_SOURCE: &str = "RUST_LMS_DEBUG_IR_SOURCE";
 
 /// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is

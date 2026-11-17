@@ -1,4 +1,4 @@
-//! Readable text of the optimised IR (`Compiler::with_debug_ir_source`). Cranelift only.
+//! Readable text of the Cranelift IR (`Compiler::with_debug_ir_source`). Cranelift only.
 
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;
@@ -32,28 +32,30 @@ fn loop_reads_as_blocks_and_tuple_assignments() {
     let compiled = compiler.compile(count_to_n).unwrap();
     assert_eq!(compiled.as_fn().call(5), 1 + 2 + 3 + 4);
     // `v0` points at `n` and `v1` at the result (the storage-pointer ABI); `v5` is `i`
-    // and `v8` is `sum`, carried round the loop as `b1`'s parameters.
+    // and `v8` is `sum`, carried round the loop as `b1`'s parameters. Unoptimised, so
+    // every instruction keeps its id; the driver's own `return` has none.
     assert_eq!(
         source(&compiled, "count_to_n"),
         "\
 fn count_to_n(v0: i64, v1: i64) {
 b0:
-    v2: i64 = *v0
-    v3 = 0
-    v11 = 1
-    (v5, v8) = (v3, v3)
-    goto b1
+    v2: i64 = *v0  // @1
+    v3 = 0  // @2
+    v4 = 0  // @3
+    (v5, v8) = (v3, v4)
+    goto b1  // @4
 b1(v5: i64, v8: i64):
-    v7 = v5 < v2
-    if v7 goto b3 else b2
+    v7 = v5 < v2  // @5
+    if v7 goto b3 else b2  // @6
 b3:
-    v13 = 1
-    v14 = v5 + v13
-    v9 = v8 + v5
-    (v5, v8) = (v14, v9)
-    goto b1
+    v9 = v8 + v5  // @7
+    v10 = 0  // @8
+    v11 = 1  // @9
+    v12 = v5 + v11  // @10
+    (v5, v8) = (v12, v9)
+    goto b1  // @11
 b2:
-    *v1 = v8
+    *v1 = v8  // @12
     return
 }"
     );
@@ -83,21 +85,21 @@ fn calls_read_by_name() {
         "\
 fn add(v0: i64, v1: i64, v2: i64) {
 b0:
-    v3: i64 = *v0
-    v4: i64 = *v1
-    v5 = &ss0
-    *v5 = v3
-    v6 = &ss1
-    *v6 = v4
-    v7 = &ss2
-    src_add(v5, v6, v7)
-    v8: i64 = *v7
-    *v2 = v8
+    v3: i64 = *v0  // @1
+    v4: i64 = *v1  // @2
+    v5 = &ss0  // @3
+    *v5 = v3  // @4
+    v6 = &ss1  // @5
+    *v6 = v4  // @6
+    v7 = &ss2  // @7
+    src_add(v5, v6, v7)  // @8
+    v8: i64 = *v7  // @9
+    *v2 = v8  // @10
     return
 }"
     );
     // `__main__` hands back the address of `add`, by name.
-    assert!(source(&compiled, "__main__").contains("v1 = &add\n"));
+    assert!(source(&compiled, "__main__").contains("v1 = &add  // @11\n"));
 }
 
 #[test]
@@ -113,13 +115,13 @@ fn float_compare_and_select() {
         "\
 fn pick(v0: i64, v1: i64, v2: i64) {
 b0:
-    v3: f64 = *v0
-    v4: f64 = *v1
-    v5 = v3 < v4
-    v6 = 3
-    v7 = 7
-    v8 = v5 ? v6 : v7
-    *v2 = v8
+    v3: f64 = *v0  // @1
+    v4: f64 = *v1  // @2
+    v5 = v3 < v4  // @3
+    v6 = 3  // @4
+    v7 = 7  // @5
+    v8 = v5 ? v6 : v7  // @6
+    *v2 = v8  // @7
     return
 }"
     );

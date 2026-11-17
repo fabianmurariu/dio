@@ -1,12 +1,13 @@
-//! Optimised Cranelift IR as readable C-like text (see [`crate::func::DEBUG_IR_SOURCE`]).
+//! Cranelift IR as readable C-like text (see [`crate::func::DEBUG_IR_SOURCE`]).
 //!
-//! One line per instruction, with Cranelift's own value and block numbers (`v5`, `b3`), so
-//! the text reads side by side with `RUST_LMS_DEBUG_IR_OPT`. A jump assigns the target
+//! One line per instruction, with Cranelift's own value and block numbers (`v5`, `b3`), as
+//! `RUST_LMS_DEBUG_IR_OPT` prints them. A jump assigns the target
 //! block's parameters as one tuple, `(v5, v8) = (v14, v9)`, since they are assigned at
 //! once. Unsigned operators carry a `u` (`<u`, `/u`, `>>u`); other operations read as calls,
 //! `umin(v1, v2)`, with the result's type shown when it differs from the operand's
 //! (`v9: i64 = uextend(v3)`). An instruction not handled here is printed as Cranelift
-//! prints it.
+//! prints it. With ids kept ([`InstIds`]), each line ends with its instruction's id,
+//! `// @12`.
 
 use std::collections::HashMap;
 use std::fmt::Write;
@@ -14,8 +15,22 @@ use std::fmt::Write;
 use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
 use cranelift_codegen::ir::{
     Block, BlockArg, BlockCall, ExternalName, FuncRef, Function, Inst, InstructionData, Opcode,
-    Value,
+    SourceLoc, Value,
 };
+
+/// Hands out instruction ids, unique across one compile, kept by Cranelift as each
+/// instruction's `SourceLoc`.
+#[derive(Default)]
+pub(crate) struct InstIds {
+    next: u32,
+}
+
+impl InstIds {
+    pub(crate) fn next(&mut self) -> SourceLoc {
+        self.next += 1;
+        SourceLoc::new(self.next)
+    }
+}
 
 /// `func`, named `name`, as readable text; `names` holds each called function's name by
 /// its Cranelift id.
@@ -32,16 +47,14 @@ pub(crate) fn render(name: &str, func: &Function, names: &HashMap<u32, String>) 
             let _ = writeln!(out, "{}({}):", label(block), typed(func, params));
         }
         for inst in func.layout.block_insts(block) {
-            match line(func, inst, names) {
-                Some(text) => {
-                    for text in text.lines() {
-                        let _ = writeln!(out, "    {text}");
-                    }
-                }
-                None => {
-                    let _ = writeln!(out, "    {}", func.dfg.display_inst(inst));
-                }
+            let text = (line(func, inst, names))
+                .unwrap_or_else(|| func.dfg.display_inst(inst).to_string());
+            let _ = write!(out, "    {}", text.replace('\n', "\n    "));
+            let id = func.srcloc(inst);
+            if !id.is_default() {
+                let _ = write!(out, "  // @{}", id.bits());
             }
+            out.push('\n');
         }
     }
     out.push('}');
