@@ -85,12 +85,11 @@ pub struct Slice<T: StagedType> {
 ///
 /// # Why this is an open `unsafe trait`, not sealed
 ///
-/// This is deliberately implementable by downstream crates, and it must stay
-/// that way: the only implementors today are `arrow-lms`'s `FfiBuffer` /
-/// `FfiBufferMut`, and `arrow-lms` is a *separate* crate. Sealing (a private
-/// supertrait) would confine impls to `rust-lms` itself and break the intended
-/// pattern where a data-layer crate defines its own `#[repr(C)]` descriptor and
-/// witnesses its layout. `unsafe` — plus the `unsafe fn as_slice` on the read
+/// This is deliberately implementable by downstream crates. The only implementor
+/// today is rust-lms's own [`FfiSlice<T>`](crate::ffi::FfiSlice), which `arrow-lms`
+/// and db4 build their descriptors from, but a data-layer crate may still define
+/// its own `#[repr(C)]` descriptor and witness its layout. Sealing (a private
+/// supertrait) would confine impls to `rust-lms` itself. `unsafe` — plus the `unsafe fn as_slice` on the read
 /// side — is the whole safety boundary: an implementor must uphold the offset/
 /// representation contract above under `unsafe impl`, and no *safe* code can
 /// reinterpret an arbitrary `SRef<R>` as a slice (proven by the `compile_fail`

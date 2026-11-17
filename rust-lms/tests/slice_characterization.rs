@@ -262,7 +262,7 @@ fn raw_descriptor_crosses_an_internal_call() {
 
 // =============================================================================
 // Origin 4: descriptor field behind a `SliceRepr` witness
-// (the `arrow-lms` `FfiBuffer` pattern, reproduced in-tree)
+// (a downstream crate's own descriptor, as `FfiSlice` is in rust-lms)
 // =============================================================================
 
 /// A `#[repr(C)]` descriptor whose first two fields are `ptr`/`len` — the shape

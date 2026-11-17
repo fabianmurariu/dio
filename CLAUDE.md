@@ -50,10 +50,16 @@ impls (`T: Num`, `S::Out: MutSliceType`, lifetime bounds) — that's the type sy
 
 - `rust-lms/` — the library and Cranelift backend (the heart of the project).
 - `rust-lms-derive/` — `#[derive(StagedType)]` and `#[extern_fn]` proc macros.
-- `arrow-lms/` — staged Apache Arrow interop: lifetime-free `#[repr(C)]` column
-  descriptors (`FfiArray`) extracted from a `RecordBatch`, plus the host-side output
-  side (`PreparedOutput`, `StringViewBuilder` sinks). The data layer the SQL engine
-  codegens against.
+- `arrow-lms/` — staged Apache Arrow interop, read-only: lifetime-free `#[repr(C)]`
+  descriptors that kernels read Arrow arrays through without copying. One typed array
+  per Arrow type (`FfiPrimArray<T>`, `FfiBoolArray`, `FfiByteViewArray<K>`), each built
+  only from an Arrow array of that type; validity is an `FfiBitmap<u8>` plus a null
+  count (`FfiValidity`). Generic code is generic in the `ArrowArray` trait at stage 0.
+  A batch (`FfiBatch`) holds `FfiArray`s, an enum of the arrays; `FfiRecordBatch::new`
+  checks a batch against the schema on the host, and the kernel reads each column as
+  its own type through `SchemaBatch::column::<A>`, checked while staging. `Bitmap<W>`
+  reads bitmaps kernels keep for themselves (db4's sets of positions). Output is not
+  here: sql-gen writes through `OutCols`, db4 through its blocks.
 - `sql-gen/` — the SQL engine: datafusion parses SQL → we lower its `LogicalPlan`
   into a push-based `Operator` tree → `codegen.rs` emits one rust-lms kernel per
   query (`exec_jit`). Supports `Scan`/`Filter`/`Project`, scalar + `GROUP BY`
