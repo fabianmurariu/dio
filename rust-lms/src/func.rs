@@ -1460,6 +1460,7 @@ impl Compiler {
             sizes: Vec::new(),
             sources: Vec::new(),
             ids: None,
+            code: Vec::new(),
             _signature: PhantomData,
         })
     }
@@ -1472,6 +1473,8 @@ impl Compiler {
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
+        // Each function's id, name and compiled code ranges, until finalising gives addresses.
+        let mut code = Vec::new();
         // Create the ISA: optimisation level and other performance settings
         let mut flag_builder = settings::builder();
         // Cranelift's optimiser rebuilds pure instructions without their ids, so readable
@@ -1678,6 +1681,8 @@ impl Compiler {
                         &mut ids,
                         print_ir_source,
                     ));
+                    let ranges = crate::cranelift::source::code_ranges(&func_ctx);
+                    code.push((func_id, func_def.name.clone(), ranges));
                 }
                 module.clear_context(&mut func_ctx);
             }
@@ -1757,6 +1762,8 @@ impl Compiler {
                     &mut ids,
                     print_ir_source,
                 ));
+                let ranges = crate::cranelift::source::code_ranges(&func_ctx);
+                code.push((main_func_id, "__main__".to_string(), ranges));
             }
             module.clear_context(&mut func_ctx);
         }
@@ -1768,6 +1775,14 @@ impl Compiler {
 
         // Get the main function pointer
         let main_ptr = module.get_finalized_function(main_func_id);
+        let code = (code.into_iter())
+            .map(|(func_id, name, (size, ranges))| CodeMap {
+                name,
+                address: module.get_finalized_function(func_id) as usize,
+                size,
+                ranges,
+            })
+            .collect();
 
         Ok(Compiled {
             executable: Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
@@ -1780,6 +1795,7 @@ impl Compiler {
             sizes,
             sources,
             ids,
+            code,
             _signature: PhantomData,
         })
     }
@@ -1825,8 +1841,29 @@ pub struct Compiled<T: StagedType> {
     sources: Vec<(String, String)>,
     /// Each instruction id's origin; see [`Compiled::origin`].
     ids: Option<crate::cranelift::source::InstIds>,
+    /// Each function's machine code; see [`Compiled::code_ranges`].
+    code: Vec<CodeMap>,
     _signature: PhantomData<T>,
 }
+
+/// One JIT function's machine code, kept with its readable text ([`Compiled::code_ranges`]).
+#[derive(Clone, Debug)]
+pub struct CodeMap {
+    pub name: String,
+    /// Where its code starts in memory.
+    pub address: usize,
+    /// Its code's length in bytes.
+    pub size: u32,
+    /// Each range of its code (offsets from `address`), in order, with the id of the
+    /// instruction it came from: `None` for code no instruction asked for (the prologue, the
+    /// driver's return). An instruction folded into another (a constant into an add's
+    /// operand) has no range of its own.
+    pub ranges: Vec<CodeRange>,
+}
+
+/// A range of a function's code (offsets from its start), with the id of the instruction it
+/// came from, if any; see [`CodeMap::ranges`].
+pub type CodeRange = (std::ops::Range<u32>, Option<u32>);
 
 /// The backend-specific JIT resource kept alive by the shared frozen owner.
 enum Executable {
@@ -1890,6 +1927,13 @@ impl<T: StagedType> Compiled<T> {
     /// otherwise.
     pub fn sources(&self) -> &[(String, String)] {
         &self.sources
+    }
+
+    /// Each function's machine code: where it is, and which instruction id (the `// @12` in
+    /// [`sources`](Self::sources)) each range of it came from. Kept with the readable text;
+    /// Cranelift only, empty otherwise.
+    pub fn code_ranges(&self) -> &[CodeMap] {
+        &self.code
     }
 
     /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was

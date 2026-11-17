@@ -68,6 +68,7 @@ fn off_by_default() {
     let compiled = compiler.compile(inc).unwrap();
     if !rust_lms::func::debug_ir_source_on() {
         assert!(compiled.sources().is_empty());
+        assert!(compiled.code_ranges().is_empty());
     }
 }
 
@@ -154,4 +155,36 @@ fn ids_trace_back_to_the_statement_that_asked_for_them() {
     assert!(from(7, 5), "{:?}", compiled.origin(7));
     assert!(from(10, 6), "{:?}", compiled.origin(10));
     assert!(compiled.origin(0).is_empty() && compiled.origin(1000).is_empty());
+}
+
+#[test]
+fn machine_code_ranges_point_at_ids_in_the_text() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(count_to_n).unwrap();
+    assert_eq!(compiled.as_fn().call(5), 1 + 2 + 3 + 4);
+    let code = (compiled.code_ranges().iter())
+        .find(|code| code.name == "count_to_n")
+        .expect("count_to_n's code");
+    assert!(code.address != 0 && code.size > 0);
+    // In order, not overlapping, inside the function; each id one the text shows.
+    let mut end = 0;
+    for (range, id) in &code.ranges {
+        assert!(end <= range.start && range.start < range.end && range.end <= code.size);
+        end = range.end;
+        if let Some(id) = id {
+            let tag = format!("// @{id}\n");
+            assert!(source(&compiled, "count_to_n").contains(&tag), "{id}");
+        }
+    }
+    // `sum + i` (`@7`, `v9 = v8 + v5`) has code of its own: a breakpoint can stop on it.
+    assert!(code.ranges.iter().any(|(_, id)| *id == Some(7)), "{code:?}");
 }
