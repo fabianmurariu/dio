@@ -97,6 +97,8 @@ pub struct Compiled<T: StagedType> {
     main: unsafe extern "C" fn(*mut u8),
     /// Each function's optimised size; see [`Compiled::sizes`].
     sizes: Vec<(String, usize)>,
+    /// Each function's optimised IR as readable text; see [`Compiled::sources`].
+    sources: Vec<(String, String)>,
     _signature: PhantomData<T>,
 }
 
@@ -153,11 +155,13 @@ impl<T: StagedType> Compiled<T> {
         executable: Arc<FrozenExecutable>,
         main: unsafe extern "C" fn(*mut u8),
         sizes: Vec<(String, usize)>,
+        sources: Vec<(String, String)>,
     ) -> Self {
         Self {
             executable,
             main,
             sizes,
+            sources,
             _signature: PhantomData,
         }
     }
@@ -166,6 +170,13 @@ impl<T: StagedType> Compiled<T> {
     /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
     pub fn sizes(&self) -> &[(String, usize)] {
         &self.sizes
+    }
+
+    /// Each function's name and its optimised IR as readable text, when compiled with
+    /// [`Compiler::with_debug_ir_source`] or [`DEBUG_IR_SOURCE`]. Cranelift only; empty
+    /// otherwise.
+    pub fn sources(&self) -> &[(String, String)] {
+        &self.sources
     }
 
     /// Execute the compiled code and return the result.

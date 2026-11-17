@@ -29,6 +29,8 @@ pub struct Compiler {
     next_var_id: usize,
     /// Code-generation backend `compile` targets.
     backend: JitBackend,
+    /// Keep each function's optimised IR as readable text; see [`DEBUG_IR_SOURCE`].
+    debug_ir_source: bool,
 }
 
 #[derive(Clone, Copy, Debug, PartialEq, Eq)]
@@ -69,6 +71,7 @@ impl Compiler {
             extern_functions: Vec::new(),
             next_var_id: 0,
             backend: JitBackend::Cranelift,
+            debug_ir_source: false,
         }
     }
 
@@ -76,6 +79,19 @@ impl Compiler {
     pub fn with_backend(mut self, backend: JitBackend) -> Self {
         self.backend = backend;
         self
+    }
+
+    /// Keep each function's optimised IR as readable text (builder style), as
+    /// [`DEBUG_IR_SOURCE`] does, without the environment. Cranelift only.
+    pub fn with_debug_ir_source(mut self, on: bool) -> Self {
+        self.debug_ir_source = on;
+        self
+    }
+
+    /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`], read once
+    /// per compile so that it costs nothing per instruction.
+    fn debug_ir_source(&self) -> bool {
+        self.debug_ir_source || std::env::var_os(DEBUG_IR_SOURCE).is_some()
     }
 
     /// Register an external function and get a handle to call it.
@@ -506,11 +522,14 @@ impl Compiler {
             // SAFETY: MLIR emitted `__main__` with this exact storage-pointer ABI.
             unsafe { std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr) },
             Vec::new(),
+            Vec::new(),
         ))
     }
 
     fn compile_cranelift<S: Staged>(self, expr: S) -> Result<Compiled<S::Out>, CompileError> {
         let mut sizes = Vec::new();
+        let debug_ir_source = self.debug_ir_source();
+        let mut sources = Vec::new();
         // Create ISA with optimization level "speed" and other performance settings
         let mut flag_builder = settings::builder();
         flag_builder
@@ -607,6 +626,24 @@ impl Compiler {
             .declare_function("__main__", Linkage::Local, &main_sig)
             .map_err(|e| CompileError::ModuleError(e.to_string()))?;
 
+        // Each declared function's name by its Cranelift id, for calls in readable text.
+        let names: HashMap<u32, String> = if debug_ir_source {
+            let own = func_map.iter().filter_map(|(&id, func_id)| {
+                (self.functions[id].as_ref()).map(|def| (func_id.as_u32(), def.name.clone()))
+            });
+            // An extern's name without the `_<address>` that `extern_fn` adds to keep it unique.
+            let externs = extern_func_ids.iter().map(|(&id, func_id)| {
+                let name = &self.extern_functions[id].name;
+                let base = name.rsplit_once('_').map_or(&name[..], |(base, _)| base);
+                (func_id.as_u32(), base.to_string())
+            });
+            own.chain(externs)
+                .chain([(main_func_id.as_u32(), "__main__".to_string())])
+                .collect()
+        } else {
+            HashMap::new()
+        };
+
         // Second pass: define all functions
         // We need to consume self.functions since FunDef contains FnOnce
         let mut functions = self.functions;
@@ -689,6 +726,9 @@ impl Compiler {
                 // `define_function` optimises `func_ctx.func` in place.
                 debug_ir(DEBUG_IR_OPT, "optimised", &func_def.name, &func_ctx.func);
                 sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
+                if debug_ir_source {
+                    sources.push(ir_source(&func_def.name, &func_ctx.func, &names));
+                }
                 module.clear_context(&mut func_ctx);
             }
         }
@@ -756,6 +796,9 @@ impl Compiler {
                 .map_err(|e| CompileError::ModuleError(e.to_string()))?;
             debug_ir(DEBUG_IR_OPT, "optimised", "__main__", &func_ctx.func);
             sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
+            if debug_ir_source {
+                sources.push(ir_source("__main__", &func_ctx.func, &names));
+            }
             module.clear_context(&mut func_ctx);
         }
 
@@ -774,6 +817,7 @@ impl Compiler {
             // SAFETY: Cranelift emitted `__main__` with this exact storage-pointer ABI.
             unsafe { std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr) },
             sizes,
+            sources,
         ))
     }
 }
@@ -783,6 +827,8 @@ pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
 /// optimisation (what runs); LLVM's as the MLIR LLVM dialect, before LLVM's own passes
 /// (its execution engine does not hand back the optimised IR).
 pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
+/// Prints each function's optimised Cranelift IR as readable C-like text. Cranelift only.
+pub const DEBUG_IR_SOURCE: &str = "RUST_LMS_DEBUG_IR_SOURCE";
 
 /// Prints `func` to stderr, headed by `stage`, when the environment variable `var` is
 /// set.
@@ -791,6 +837,20 @@ pub(crate) fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_code
         eprintln!("=== Function: {name} ({stage}) ===\n{func}\n");
     }
 }
+/// `func`, named `name`, with its readable text (`names`: each called function's name by
+/// its Cranelift id); also printed to stderr when [`DEBUG_IR_SOURCE`] is set.
+fn ir_source(
+    name: &str,
+    func: &cranelift_codegen::ir::Function,
+    names: &HashMap<u32, String>,
+) -> (String, String) {
+    let text = crate::cranelift::source::render(name, func, names);
+    if std::env::var_os(DEBUG_IR_SOURCE).is_some() {
+        eprintln!("=== Function: {name} (source) ===\n{text}\n");
+    }
+    (name.to_string(), text)
+}
+
 /// The number of instructions in `func`.
 pub(crate) fn num_insts(func: &cranelift_codegen::ir::Function) -> usize {
     func.layout
