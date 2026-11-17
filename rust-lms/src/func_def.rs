@@ -12,6 +12,7 @@ macro_rules! impl_make_fun {
     (0, $make_fun:ident, $make_fun_rec:ident, $FunRef:ident) => {
         impl FunDef {
             pub fn $make_fun<OUT, F, Ret>(
+                record_origins: bool,
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -22,7 +23,7 @@ macro_rules! impl_make_fun {
                 F: FnOnce(&Ctx) -> Ret,
                 Ret: Staged<Out = OUT> + 'static,
             {
-                let ctx = Ctx::new(*next_var_id);
+                let ctx = Ctx::new(*next_var_id, record_origins);
                 let ret = body_fn(&ctx);
                 *next_var_id = ctx.final_id();
 
@@ -38,6 +39,7 @@ macro_rules! impl_make_fun {
             }
 
             pub fn $make_fun_rec<OUT, F, Ret>(
+                record_origins: bool,
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -52,7 +54,7 @@ macro_rules! impl_make_fun {
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let ctx = Ctx::new(*next_var_id);
+                let ctx = Ctx::new(*next_var_id, record_origins);
                 let ret = body_fn(func_ref, &ctx);
                 *next_var_id = ctx.final_id();
 
@@ -72,6 +74,7 @@ macro_rules! impl_make_fun {
     ($n:tt, $make_fun:ident, $make_fun_rec:ident, $FunRef:ident, [$($T:ident),+], [$($var:ident),+]) => {
         impl FunDef {
             pub fn $make_fun<$($T,)+ OUT, FN, Ret>(
+                record_origins: bool,
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -92,7 +95,7 @@ macro_rules! impl_make_fun {
                 )+
                 let param_var_ids = vec![$($var.id),+];
 
-                let ctx = Ctx::new(*next_var_id);
+                let ctx = Ctx::new(*next_var_id, record_origins);
                 let ret = body_fn(&ctx, $($var),+);
                 *next_var_id = ctx.final_id();
 
@@ -108,6 +111,7 @@ macro_rules! impl_make_fun {
             }
 
             pub fn $make_fun_rec<$($T,)+ OUT, FN, Ret>(
+                record_origins: bool,
                 next_var_id: &mut usize,
                 functions: &mut Vec<Option<FunDef>>,
                 name: &str,
@@ -132,7 +136,7 @@ macro_rules! impl_make_fun {
                 let func_ref = $FunRef::new(func_id);
                 functions.push(None);
 
-                let ctx = Ctx::new(*next_var_id);
+                let ctx = Ctx::new(*next_var_id, record_origins);
                 let ret = body_fn(func_ref, &ctx, $($var),+);
                 *next_var_id = ctx.final_id();
 
