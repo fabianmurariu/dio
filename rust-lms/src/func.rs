@@ -171,7 +171,9 @@ impl<T: StagedType> Compiled<T> {
     }
 
     /// Each function's name and its number of instructions after optimisation: a
-    /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
+    /// measure of code size that tests can bound. Cranelift only; empty for LLVM. With
+    /// readable text kept ([`DEBUG_IR_SOURCE`]), nothing is optimised, so the counts are
+    /// of the unoptimised code.
     pub fn sizes(&self) -> &[(String, usize)] {
         &self.sizes
     }
