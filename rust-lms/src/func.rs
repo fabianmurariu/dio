@@ -914,9 +914,10 @@ impl Compiler {
         self
     }
 
-    /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`].
+    /// Whether to keep readable text: the builder flag or [`DEBUG_IR_SOURCE`], on
+    /// Cranelift only (LLVM keeps none, so records no origins either).
     fn debug_ir_source(&self) -> bool {
-        self.debug_ir_source || debug_ir_source_on()
+        (self.debug_ir_source || debug_ir_source_on()) && self.backend == JitBackend::Cranelift
     }
 
     /// Register an external function and get a handle to call it.
@@ -1471,7 +1472,7 @@ impl Compiler {
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
-        // Create ISA with optimization level "speed" and other performance settings
+        // Create the ISA: optimisation level and other performance settings
         let mut flag_builder = settings::builder();
         // Cranelift's optimiser rebuilds pure instructions without their ids, so readable
         // text is kept unoptimised: every line keeps its id, at the cost of running code
@@ -1657,9 +1658,7 @@ impl Compiler {
                     }
 
                     // The driver's own return: no instruction id.
-
                     builder.set_srcloc(cranelift_codegen::ir::SourceLoc::default());
-
                     builder.ins().return_(&[]);
                     builder.finalize(module.isa().frontend_config());
                 }
@@ -1739,9 +1738,7 @@ impl Compiler {
                 }
 
                 // The driver's own return: no instruction id.
-
                 builder.set_srcloc(cranelift_codegen::ir::SourceLoc::default());
-
                 builder.ins().return_(&[]);
                 builder.finalize(module.isa().frontend_config());
             }
@@ -1881,7 +1878,9 @@ impl Drop for FrozenExecutable {
 
 impl<T: StagedType> Compiled<T> {
     /// Each function's name and its number of instructions after optimisation: a
-    /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
+    /// measure of code size that tests can bound. Cranelift only; empty for LLVM. With
+    /// readable text kept ([`DEBUG_IR_SOURCE`]), nothing is optimised, so the counts are
+    /// of the unoptimised code.
     pub fn sizes(&self) -> &[(String, usize)] {
         &self.sizes
     }
@@ -2167,10 +2166,18 @@ pub const DEBUG_IR: &str = "RUST_LMS_DEBUG_IR";
 /// (its execution engine does not hand back the optimised IR).
 pub const DEBUG_IR_OPT: &str = "RUST_LMS_DEBUG_IR_OPT";
 /// Prints each function's Cranelift IR as readable C-like text, each line tagged with its
-/// instruction's id, then each id's origin: the first frame outside rust-lms of the call
-/// stack its statement (`ctx.store`, `ctx.bind`, …) was recorded on, `@12 ← codegen.rs:812`
-/// (see [`Compiled::origin`] for the whole stack). The functions are compiled unoptimised,
-/// so every instruction keeps its id. Cranelift only.
+/// instruction's id, then where each id came from: the first frame outside rust-lms of the
+/// call stack its statement (`ctx.store`, `ctx.bind`, …) was recorded on, grouped by file,
+/// then by line, with the ids as ranges (see [`Compiled::origin`] for the whole stack):
+///
+/// ```text
+/// db4-execution/src/codegen.rs
+///     :810   @1–6
+///     :950   @133–138, @247
+/// ```
+///
+/// The functions are compiled unoptimised, so every instruction keeps its id. Cranelift
+/// only.
 pub const DEBUG_IR_SOURCE: &str = "RUST_LMS_DEBUG_IR_SOURCE";
 
 static DEBUG_IR_SOURCE_ON: std::sync::LazyLock<bool> =

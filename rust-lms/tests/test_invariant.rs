@@ -44,11 +44,13 @@ fn invariant_reads_are_merged_and_unused_ones_removed() {
     let (plain, plain_size) = reads(false);
     let (invariant, invariant_size) = reads(true);
     assert_eq!((plain, invariant), (42, 42));
-    // Three loads become one.
-    assert!(
-        invariant_size + 2 <= plain_size,
-        "invariant {invariant_size} vs plain {plain_size} instructions"
-    );
+    // Three loads become one; unoptimised, with readable text kept, they stay three.
+    if !rust_lms::func::debug_ir_source_on() {
+        assert!(
+            invariant_size + 2 <= plain_size,
+            "invariant {invariant_size} vs plain {plain_size} instructions"
+        );
+    }
 }
 
 /// The sum of `arr[0]` over `0..n`, the read inside the loop.
