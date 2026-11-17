@@ -4,7 +4,7 @@ use crate::{
     ffi::ExternFn,
     func,
     func::{
-        Compiled, Executable, ExternFnDef, FrozenExecutable, FunDef, FunRef0, FunRef1, FunRef2,
+        CodeMap, Compiled, Executable, ExternFnDef, FrozenExecutable, FunDef, FunRef0, FunRef1, FunRef2,
         FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8, TypeInfo,
     },
     prelude::{CompilationContext, ScalarType, Staged, StagedType, ValueId, Var},
@@ -633,6 +633,7 @@ impl Compiler {
             Vec::new(),
             Vec::new(),
             None,
+            Vec::new(),
         ))
     }
 
@@ -644,6 +645,8 @@ impl Compiler {
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
+        // Each function's id, name and compiled code ranges, until finalising gives addresses.
+        let mut code = Vec::new();
         // Create the ISA: optimisation level and other performance settings
         let mut flag_builder = settings::builder();
         // Cranelift's optimiser rebuilds pure instructions without their ids, so readable
@@ -855,6 +858,8 @@ impl Compiler {
                         &mut ids,
                         print_ir_source,
                     ));
+                    let ranges = crate::cranelift::source::code_ranges(&func_ctx);
+                    code.push((func_id, func_def.name.clone(), ranges));
                 }
                 module.clear_context(&mut func_ctx);
             }
@@ -934,6 +939,8 @@ impl Compiler {
                     &mut ids,
                     print_ir_source,
                 ));
+                let ranges = crate::cranelift::source::code_ranges(&func_ctx);
+                code.push((main_func_id, "__main__".to_string(), ranges));
             }
             module.clear_context(&mut func_ctx);
         }
@@ -945,6 +952,14 @@ impl Compiler {
 
         // Get the main function pointer
         let main_ptr = module.get_finalized_function(main_func_id);
+        let code = (code.into_iter())
+            .map(|(func_id, name, (size, ranges))| CodeMap {
+                name,
+                address: module.get_finalized_function(func_id) as usize,
+                size,
+                ranges,
+            })
+            .collect();
 
         Ok(Compiled::new(
             Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
@@ -955,6 +970,7 @@ impl Compiler {
             sizes,
             sources,
             ids,
+            code,
         ))
     }
 }

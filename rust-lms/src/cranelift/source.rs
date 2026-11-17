@@ -188,6 +188,27 @@ pub(crate) fn render(
     (out, lines)
 }
 
+/// The size of `ctx`'s compiled code, and each range of it (offsets from its start) with the
+/// id of the instruction it came from: `None` for code no instruction asked for (the
+/// prologue, the driver's return).
+pub(crate) fn code_ranges(ctx: &cranelift_codegen::Context) -> (u32, Vec<crate::func::CodeRange>) {
+    let code = ctx.compiled_code().expect("the function was compiled");
+    let base = ctx.func.params.base_srcloc();
+    let ranges = (code.buffer.get_srclocs_sorted().iter())
+        .map(|range| {
+            let loc = match range.loc {
+                loc if loc.is_rel() => loc.relocate(base),
+                loc => loc.as_abs(),
+            };
+            (
+                range.start..range.end,
+                (!loc.is_default()).then(|| loc.bits()),
+            )
+        })
+        .collect();
+    (code.code_buffer().len() as u32, ranges)
+}
+
 /// The code that generated each instruction id in `func`: see [`layout`].
 pub(crate) fn origins(func: &Function, ids: &mut InstIds) -> String {
     let in_func: std::collections::BTreeSet<u32> = (func.layout.blocks())

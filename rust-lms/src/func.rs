@@ -101,8 +101,29 @@ pub struct Compiled<T: StagedType> {
     sources: Vec<(String, String)>,
     /// Each instruction id's origin; see [`Compiled::origin`].
     ids: Option<crate::cranelift::source::InstIds>,
+    /// Each function's machine code; see [`Compiled::code_ranges`].
+    code: Vec<CodeMap>,
     _signature: PhantomData<T>,
 }
+
+/// One JIT function's machine code, kept with its readable text ([`Compiled::code_ranges`]).
+#[derive(Clone, Debug)]
+pub struct CodeMap {
+    pub name: String,
+    /// Where its code starts in memory.
+    pub address: usize,
+    /// Its code's length in bytes.
+    pub size: u32,
+    /// Each range of its code (offsets from `address`), in order, with the id of the
+    /// instruction it came from: `None` for code no instruction asked for (the prologue, the
+    /// driver's return). An instruction folded into another (a constant into an add's
+    /// operand) has no range of its own.
+    pub ranges: Vec<CodeRange>,
+}
+
+/// A range of a function's code (offsets from its start), with the id of the instruction it
+/// came from, if any; see [`CodeMap::ranges`].
+pub type CodeRange = (std::ops::Range<u32>, Option<u32>);
 
 /// The backend-specific JIT resource kept alive by the shared frozen owner.
 pub(crate) enum Executable {
@@ -159,6 +180,7 @@ impl<T: StagedType> Compiled<T> {
         sizes: Vec<(String, usize)>,
         sources: Vec<(String, String)>,
         ids: Option<crate::cranelift::source::InstIds>,
+        code: Vec<CodeMap>,
     ) -> Self {
         Self {
             executable,
@@ -166,6 +188,7 @@ impl<T: StagedType> Compiled<T> {
             sizes,
             sources,
             ids,
+            code,
             _signature: PhantomData,
         }
     }
@@ -183,6 +206,13 @@ impl<T: StagedType> Compiled<T> {
     /// otherwise.
     pub fn sources(&self) -> &[(String, String)] {
         &self.sources
+    }
+
+    /// Each function's machine code: where it is, and which instruction id (the `// @12` in
+    /// [`sources`](Self::sources)) each range of it came from. Kept with the readable text;
+    /// Cranelift only, empty otherwise.
+    pub fn code_ranges(&self) -> &[CodeMap] {
+        &self.code
     }
 
     /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was
