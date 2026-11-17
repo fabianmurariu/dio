@@ -6,6 +6,8 @@ edition.workspace = true
 [features]
 # Run the tests through the MLIR/LLVM backend as well, as rust-lms and sql-gen do.
 llvm = ["rust-lms/llvm"]
+# Host reads of descriptors, for tests that check kernels against them.
+test-utils = []
 
 [dependencies]
 rust-lms = { workspace = true }

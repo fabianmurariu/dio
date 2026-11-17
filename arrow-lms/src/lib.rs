@@ -16,7 +16,9 @@
 //!
 //! Generic code is generic in [`ArrowArray`] (`len`, `validity`, `value_unchecked`, via
 //! [`ArrowArrayOps`]). A batch holds [`FfiArray`]s, an enum of the arrays. Validity is a
-//! bitmap ([`FfiBitmap`]) and a null count ([`FfiValidity`]).
+//! bitmap ([`FfiBitmap`]) and a null count ([`FfiValidity`]). Kernels that work on a
+//! bitmap of their own, such as db4's sets of positions, read it as a [`Bitmap`]: a bit,
+//! a word, or the set bits of a union in a range.
 
 // `#[derive(StagedType)]` generates field-token modules with lowercase field
 // names, which trips the case lints.
@@ -38,4 +40,4 @@ pub use ffi::{
     FfiError, FfiRecordBatch, PreparedFfiBatch, prepare_array_refs, prepare_arrays,
     prepare_dyn_arrays, prepare_record_batch,
 };
-pub use validity::{BitmapWord, FfiBitmap, FfiValidity, ValidityView};
+pub use validity::{Bitmap, BitmapWord, FfiBitmap, FfiValidity, ValidityView};
