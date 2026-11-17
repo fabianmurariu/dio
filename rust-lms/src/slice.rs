@@ -41,7 +41,6 @@ use crate::num::{add, lt};
 use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
 use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
 use crate::staged_opt::StagedOpt;
-use crate::r#struct::{Field, FieldAddr, MutField};
 use crate::types::{
     CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
 };
@@ -83,29 +82,32 @@ pub struct Slice<T: StagedType> {
 /// and a `u64` element count at byte offset 8. The pointer must have the same
 /// representation as a pointer to `T`.
 ///
-/// # Why this is an open `unsafe trait`, not sealed
+/// # Sealed
 ///
-/// This is deliberately implementable by downstream crates. The only implementor
-/// today is rust-lms's own [`FfiSlice<T>`](crate::ffi::FfiSlice), which `arrow-lms`
-/// and db4 build their descriptors from, but a data-layer crate may still define
-/// its own `#[repr(C)]` descriptor and witness its layout. Sealing (a private
-/// supertrait) would confine impls to `rust-lms` itself. `unsafe` — plus the `unsafe fn as_slice` on the read
-/// side — is the whole safety boundary: an implementor must uphold the offset/
-/// representation contract above under `unsafe impl`, and no *safe* code can
-/// reinterpret an arbitrary `SRef<R>` as a slice (proven by the `compile_fail`
-/// doctest on `ReprSliceOps::as_slice`). Do not seal this without first moving
-/// every descriptor type into `rust-lms`.
-pub unsafe trait SliceRepr<T: StagedType>: StagedType {}
+/// Implemented only by [`FfiSlice<T>`](crate::ffi::FfiSlice), for its own `T`: the
+/// one typed `(ptr, len)` descriptor. Data-layer crates (`arrow-lms`, db4) build
+/// their descriptors from `FfiSlice` fields instead of witnessing a layout of their
+/// own, so no crate outside rust-lms makes this claim:
+///
+/// ```compile_fail
+/// use rust_lms::prelude::*;
+///
+/// #[repr(C)]
+/// #[derive(Clone, Copy, StagedType)]
+/// pub struct D { #[staged(SPtr<i64>)] ptr: *const i64, #[staged(u64)] len: usize }
+/// unsafe impl SliceRepr<i64> for D {}
+/// ```
+///
+/// `unsafe` on [`ReprSliceOps::into_raw_slice`] remains the read-side boundary: the
+/// layout is right by construction, but the buffer's liveness is the caller's claim.
+pub unsafe trait SliceRepr<T: StagedType>: StagedType + sealed::Sealed {}
 
-/// Unsafe layout witness for staged types that can also be decoded as a
-/// mutable slice descriptor for `T`.
-///
-/// # Safety
-///
-/// In addition to the requirements of [`SliceRepr`], the pointer field must
-/// have a representation that permits writes. Whether a particular descriptor
-/// is exclusively writable remains the caller's responsibility.
-pub unsafe trait MutSliceRepr<T: StagedType>: SliceRepr<T> {}
+mod sealed {
+    /// Keeps [`SliceRepr`](super::SliceRepr) to rust-lms's own descriptor.
+    pub trait Sealed {}
+
+    impl<T: crate::types::StagedType> Sealed for crate::ffi::FfiSlice<T> {}
+}
 
 /// Re-types a reference to a repr-compatible `(ptr, len)` value as a staged
 /// `Slice<T>`.
@@ -226,14 +228,9 @@ where
 ///     unsafe { data.as_slice().iter().sum() }
 /// }
 ///
-/// #[repr(C)]
-/// #[derive(Clone, Copy, StagedType)]
-/// pub struct D { #[staged(SPtr<i64>)] ptr: *const i64, #[staged(u64)] len: usize }
-/// unsafe impl SliceRepr<i64> for D {}
-///
 /// fn chain(compiler: &mut Compiler<'static>) {
 ///     let ext = compiler.extern_fn::<DocSumExtern>();
-///     let _f = compiler.fun1("h", |_c, d: Var<SRef<D>>| {
+///     let _f = compiler.fun1("h", |_c, d: Var<SRef<FfiSlice<i64>>>| {
 ///         call_extern1(ext, d.into_raw_slice::<i64>())
 ///     });
 /// }
@@ -284,76 +281,6 @@ where
     R: StagedType,
     S: Staged<Out = SRef<R>> + Sized,
 {
-}
-
-/// Extension trait for *mutable* references to a repr-compatible `(ptr, len)`.
-///
-/// The mutable twin of [`ReprSliceOps`]: given a `&mut` to an FFI descriptor
-/// whose first two fields are `ptr`/`len`, reinterpret it as a `&mut [T]`.
-pub trait ReprSliceMutOps<R>: Staged<Out = SRefMut<R>> + Sized
-where
-    R: StagedType,
-{
-    /// Read the descriptor as a **raw mutable** slice of `T`; promote with
-    /// [`RawSliceOps::assume_unique`].
-    ///
-    /// # Safety
-    ///
-    /// As [`ReprSliceOps::into_raw_slice`], and the buffer must be exclusively
-    /// writable.
-    unsafe fn into_raw_slice_mut<T>(self) -> AsMutSlice<Self, T>
-    where
-        T: StagedType,
-        R: MutSliceRepr<T>,
-    {
-        AsMutSlice {
-            repr: self,
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<R, S> ReprSliceMutOps<R> for S
-where
-    R: StagedType,
-    S: Staged<Out = SRefMut<R>> + Sized,
-{
-}
-
-/// Re-types a *mutable* reference to a repr-compatible `(ptr, len)` value as a
-/// staged `&mut [T]`. Like [`AsSlice`] it emits no code — it forwards the
-/// address and lets the slice ops load `ptr`/`len` from offsets 0/8.
-pub struct AsMutSlice<P, T> {
-    repr: P,
-    _elem: PhantomData<T>,
-}
-
-impl<P: Clone, T> Clone for AsMutSlice<P, T> {
-    fn clone(&self) -> Self {
-        Self {
-            repr: self.repr.clone(),
-            _elem: PhantomData,
-        }
-    }
-}
-
-impl<P: Copy, T> Copy for AsMutSlice<P, T> {}
-
-unsafe impl<P, R, T> Staged for AsMutSlice<P, T>
-where
-    P: Staged<Out = SRefMut<R>>,
-    R: MutSliceRepr<T>,
-    T: StagedType,
-{
-    /// **Raw**, not trusted — see [`AsSlice`]. Promote with
-    /// [`RawSliceOps::assume_unique`].
-    type Out = RawSliceMut<T>;
-
-    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
-        // Reinterpret the pointed-to {ptr,len} descriptor as a slice: load it into a fat value.
-        let base = self.repr.codegen(ctx).leaf();
-        ctx.load_fat(base)
-    }
 }
 
 // =============================================================================
@@ -1777,33 +1704,4 @@ where
     S: Staged + Sized,
     S::Out: RawSliceType,
 {
-}
-
-type MutFieldSlice<T, F, E> = AsMutSlice<FieldAddr<VarUse<SRefMut<T>>, F>, E>;
-
-impl<'borrow, T, F> MutField<'borrow, T, F>
-where
-    T: StagedType,
-    F: Field<Parent = T>,
-{
-    /// Read this `(ptr, len)` descriptor field as a **raw mutable** slice,
-    /// reborrowing the parent for one use. Promote it with
-    /// [`RawSliceOps::assume_unique`] to reach the writing ops.
-    ///
-    /// # Safety
-    ///
-    /// The descriptor must contain a pointer that is live, aligned, and
-    /// exclusively writable for its recorded element count. See
-    /// [`ReprSliceOps::into_raw_slice`] for why producing a raw slice is itself
-    /// the unsafe step.
-    pub unsafe fn as_mut_slice<E>(&mut self) -> MutFieldSlice<T, F, E>
-    where
-        E: StagedType,
-        F::Out: MutSliceRepr<E>,
-    {
-        AsMutSlice {
-            repr: self.use_once(),
-            _elem: PhantomData,
-        }
-    }
 }

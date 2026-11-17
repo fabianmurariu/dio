@@ -10,7 +10,7 @@
 //! | shared parameter `SRef<Slice<T>>`    | OK | n/a | OK | OK | OK | OK / **G6** | OK |
 //! | mutable parameter `SRefMut<Slice<T>>`| OK | OK  | OK | OK | OK | **G6**      | **G10** |
 //! | raw descriptor `RawSlice<T>`     | OK | **G6** | OK | OK | OK | OK       | **G10** |
-//! | descriptor field (`SliceRepr`)       | OK | OK  | OK | OK | OK | OK          | OK |
+//! | descriptor (`FfiSlice`, `SliceRepr`) | OK | n/a | OK | OK | OK | OK          | OK |
 //!
 //! Legend — `OK`: characterized by a test below. `n/a`: not meaningful for that
 //! origin (a raw descriptor does not iterate by design: nothing has vouched for
@@ -261,52 +261,13 @@ fn raw_descriptor_crosses_an_internal_call() {
 }
 
 // =============================================================================
-// Origin 4: descriptor field behind a `SliceRepr` witness
-// (a downstream crate's own descriptor, as `FfiSlice` is in rust-lms)
+// Origin 4: a descriptor behind the `SliceRepr` witness, `FfiSlice<T>`
 // =============================================================================
-
-/// A `#[repr(C)]` descriptor whose first two fields are `ptr`/`len` — the shape
-/// a data-layer crate witnesses with `SliceRepr`.
-#[repr(C)]
-#[derive(Clone, Copy, StagedType)]
-pub struct Desc {
-    #[staged(SPtr<i64>)]
-    ptr: *const i64,
-    #[staged(u64)]
-    len: usize,
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(Desc, ptr) == 0);
-    assert!(std::mem::offset_of!(Desc, len) == 8);
-};
-
-// SAFETY: repr(C), pointer at offset 0 and a u64 element count at offset 8.
-unsafe impl SliceRepr<i64> for Desc {}
-
-/// The mutable twin of [`Desc`], witnessing a writable buffer.
-#[repr(C)]
-#[derive(Clone, Copy, StagedType)]
-pub struct DescMut {
-    #[staged(SMutPtr<i64>)]
-    ptr: *mut i64,
-    #[staged(u64)]
-    len: usize,
-}
-
-const _: () = {
-    assert!(std::mem::offset_of!(DescMut, ptr) == 0);
-    assert!(std::mem::offset_of!(DescMut, len) == 8);
-};
-
-// SAFETY: repr(C) `(ptr, len)` as above, and the pointer permits writes.
-unsafe impl SliceRepr<i64> for DescMut {}
-unsafe impl MutSliceRepr<i64> for DescMut {}
 
 #[test]
 fn descriptor_field_read_subslice_and_iterate() {
     for_each_backend(|mut compiler| {
-        let f = compiler.fun1("d", |ctx, d: Var<SRef<Desc>>| {
+        let f = compiler.fun1("d", |ctx, d: Var<SRef<FfiSlice<i64>>>| {
             // SAFETY: the test keeps `data` alive and unmutated across the call.
             let s = ctx.bind(unsafe { d.into_raw_slice::<i64>().assume_shared() });
             let sub = ctx.bind(unsafe { s.subslice_unchecked(1u64, 4u64) });
@@ -314,32 +275,9 @@ fn descriptor_field_read_subslice_and_iterate() {
         });
         let c = compiler.compile(f).unwrap();
         let data = [1i64, 2, 3, 4, 5];
-        let desc = Desc {
-            ptr: data.as_ptr(),
-            len: data.len(),
-        };
+        let desc = FfiSlice::<i64>::new(&data);
         // sub = [2,3,4] -> 9, plus len 5 -> 14
         assert_eq!(c.call(&desc), 14);
-    });
-}
-
-#[test]
-fn descriptor_field_mutable_write() {
-    for_each_backend(|mut compiler| {
-        let f = compiler.fun1("dm", |ctx, d: Var<SRefMut<DescMut>>| {
-            // SAFETY: the test keeps `data` alive and exclusive across the call.
-            let s = unsafe { d.into_raw_slice_mut::<i64>().assume_unique() };
-            ctx.emit(unsafe { s.set_unchecked(1u64, 42i64) });
-            Const::<i64>::new(0)
-        });
-        let c = compiler.compile(f).unwrap();
-        let mut data = [1i64, 2, 3];
-        let mut desc = DescMut {
-            ptr: data.as_mut_ptr(),
-            len: data.len(),
-        };
-        c.call(&mut desc);
-        assert_eq!(data, [1i64, 42, 3]);
     });
 }
 
@@ -390,7 +328,7 @@ fn one_helper_serves_every_trusted_shared_origin() {
     for_each_backend(|mut compiler| {
         let f = compiler.fun2(
             "origins",
-            |ctx, a: Var<SRef<Slice<i64>>>, d: Var<SRef<Desc>>| {
+            |ctx, a: Var<SRef<Slice<i64>>>, d: Var<SRef<FfiSlice<i64>>>| {
                 let from_param = a.staged_iter().sum(ctx);
                 // SAFETY: the test calls this with at least 3 elements.
                 let sub = ctx.bind(unsafe { a.subslice_unchecked(1u64, 3u64) });
@@ -404,10 +342,7 @@ fn one_helper_serves_every_trusted_shared_origin() {
         let c = compiler.compile(f).unwrap();
         let data = [1i64, 2, 3, 4];
         let other = [10i64, 20];
-        let desc = Desc {
-            ptr: other.as_ptr(),
-            len: other.len(),
-        };
+        let desc = FfiSlice::<i64>::new(&other);
         // 10 (param) + 5 (sub [2,3]) + 30 (descriptor) = 45
         assert_eq!(c.call(&data, &desc), 45);
     });
