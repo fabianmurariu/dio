@@ -635,6 +635,7 @@ impl Compiler {
             None,
             Vec::new(),
             None,
+            None,
         ))
     }
 
@@ -646,7 +647,8 @@ impl Compiler {
         let mut sources = Vec::new();
         // Instruction ids, unique across the compile, when readable text is kept.
         let mut ids = debug_ir_source.then(crate::cranelift::source::InstIds::default);
-        // Each function's id, name and compiled code ranges, until finalising gives addresses.
+        // Each function's id, name, compiled code ranges and each id's text line, until
+        // finalising gives addresses.
         let mut code = Vec::new();
         // Where each function's readable text is written, for a debugger to open.
         let source_dir = debug_ir_source
@@ -856,16 +858,17 @@ impl Compiler {
                 debug_ir(DEBUG_IR_OPT, "optimised", &func_def.name, &func_ctx.func);
                 sizes.push((func_def.name.clone(), num_insts(&func_ctx.func)));
                 if debug_ir_source {
-                    sources.push(ir_source(
+                    let (name, text, lines) = ir_source(
                         &func_def.name,
                         &func_ctx.func,
                         &names,
                         &mut ids,
                         source_dir.as_deref(),
                         print_ir_source,
-                    ));
+                    );
+                    sources.push((name, text));
                     let ranges = crate::cranelift::source::code_ranges(&func_ctx);
-                    code.push((func_id, func_def.name.clone(), ranges));
+                    code.push((func_id, func_def.name.clone(), ranges, lines));
                 }
                 module.clear_context(&mut func_ctx);
             }
@@ -938,16 +941,17 @@ impl Compiler {
             debug_ir(DEBUG_IR_OPT, "optimised", "__main__", &func_ctx.func);
             sizes.push(("__main__".to_string(), num_insts(&func_ctx.func)));
             if debug_ir_source {
-                sources.push(ir_source(
+                let (name, text, lines) = ir_source(
                     "__main__",
                     &func_ctx.func,
                     &names,
                     &mut ids,
                     source_dir.as_deref(),
                     print_ir_source,
-                ));
+                );
+                sources.push((name, text));
                 let ranges = crate::cranelift::source::code_ranges(&func_ctx);
-                code.push((main_func_id, "__main__".to_string(), ranges));
+                code.push((main_func_id, "__main__".to_string(), ranges, lines));
             }
             module.clear_context(&mut func_ctx);
         }
@@ -959,14 +963,22 @@ impl Compiler {
 
         // Get the main function pointer
         let main_ptr = module.get_finalized_function(main_func_id);
-        let code = (code.into_iter())
-            .map(|(func_id, name, (size, ranges))| CodeMap {
-                name,
-                address: module.get_finalized_function(func_id) as usize,
-                size,
-                ranges,
+        let mut lines = Vec::new();
+        let code: Vec<_> = (code.into_iter())
+            .map(|(func_id, name, (size, ranges), function_lines)| {
+                lines.push(function_lines);
+                let address = module.get_finalized_function(func_id) as usize;
+                CodeMap {
+                    name,
+                    address,
+                    size,
+                    ranges,
+                }
             })
             .collect();
+        // Debug info for the code, pointing at the text on disk: without it, nowhere to point.
+        let dwarf =
+            (source_dir.as_deref()).map(|dir| crate::cranelift::dwarf::build(dir, &code, &lines));
 
         Ok(Compiled::new(
             Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
@@ -979,6 +991,7 @@ impl Compiler {
             ids,
             code,
             source_dir,
+            dwarf,
         ))
     }
 }
@@ -1019,7 +1032,7 @@ pub(crate) fn debug_ir(var: &str, stage: &str, name: &str, func: &cranelift_code
     }
 }
 /// `func`, named `name`, with its readable text (`names`: each called function's name by
-/// its Cranelift id), also written to `<dir>/<name>.ir`; with `print` ([`DEBUG_IR_SOURCE`]
+/// its Cranelift id) and each id's line in it, the text also written to `<dir>/<name>.ir`; with `print` ([`DEBUG_IR_SOURCE`]
 /// set), also printed to stderr, followed by where each of its instructions was generated.
 fn ir_source(
     name: &str,
@@ -1028,8 +1041,8 @@ fn ir_source(
     ids: &mut Option<crate::cranelift::source::InstIds>,
     dir: Option<&std::path::Path>,
     print: bool,
-) -> (String, String) {
-    let (text, _lines) = crate::cranelift::source::render(name, func, names);
+) -> (String, String, Vec<(u32, u32)>) {
+    let (text, lines) = crate::cranelift::source::render(name, func, names);
     if let Some(dir) = dir {
         crate::cranelift::source::write_source(dir, name, &text);
     }
@@ -1039,7 +1052,7 @@ fn ir_source(
         });
         eprintln!("=== Function: {name} (source) ===\n{text}\n{origins}");
     }
-    (name.to_string(), text)
+    (name.to_string(), text, lines)
 }
 
 /// The number of instructions in `func`.

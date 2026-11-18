@@ -105,6 +105,12 @@ pub struct Compiled<T: StagedType> {
     code: Vec<CodeMap>,
     /// Where the readable text was written; see [`Compiled::source_dir`].
     source_dir: Option<std::path::PathBuf>,
+    /// DWARF for the code, pointing at the text in `source_dir`.
+    #[cfg_attr(
+        not(test),
+        expect(dead_code, reason = "registered with a debugger in the next step")
+    )]
+    pub(crate) dwarf: Option<crate::cranelift::dwarf::Sections>,
     _signature: PhantomData<T>,
 }
 
@@ -184,6 +190,7 @@ impl<T: StagedType> Compiled<T> {
         ids: Option<crate::cranelift::source::InstIds>,
         code: Vec<CodeMap>,
         source_dir: Option<std::path::PathBuf>,
+        dwarf: Option<crate::cranelift::dwarf::Sections>,
     ) -> Self {
         Self {
             executable,
@@ -193,6 +200,7 @@ impl<T: StagedType> Compiled<T> {
             ids,
             code,
             source_dir,
+            dwarf,
             _signature: PhantomData,
         }
     }

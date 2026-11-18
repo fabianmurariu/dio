@@ -9,6 +9,7 @@
 //! still lives in the `compile()` driver in `func.rs` (docs/llvm.md: the `Module`/
 //! `Executable` boundary).
 
+pub(crate) mod dwarf;
 pub(crate) mod source;
 
 use source::InstIds;
