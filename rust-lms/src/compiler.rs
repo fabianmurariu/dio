@@ -635,7 +635,6 @@ impl Compiler {
             None,
             Vec::new(),
             None,
-            None,
         ))
     }
 
@@ -976,14 +975,23 @@ impl Compiler {
                 }
             })
             .collect();
-        // Debug info for the code, pointing at the text on disk: without it, nowhere to point.
-        let dwarf =
-            (source_dir.as_deref()).map(|dir| crate::cranelift::dwarf::build(dir, &code, &lines));
+        let executable = FrozenExecutable::new(
+            Executable::Cranelift(Box::new(module)),
+            // Each function's debug info, pointing at its text on disk (without it, nowhere
+            // to point), handed to a debugger until the code is freed.
+            #[cfg(not(feature = "llvm"))]
+            (source_dir.as_deref()).map_or_else(Vec::new, |dir| {
+                (code.iter().zip(&lines))
+                    .filter_map(|(function, lines)| {
+                        crate::cranelift::dwarf::image(dir, function, lines)
+                    })
+                    .map(crate::cranelift::jit_debug::register)
+                    .collect()
+            }),
+        );
 
         Ok(Compiled::new(
-            Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
-                module,
-            )))),
+            Arc::new(executable),
             // SAFETY: Cranelift emitted `__main__` with this exact storage-pointer ABI.
             unsafe { std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr) },
             sizes,
@@ -991,7 +999,6 @@ impl Compiler {
             ids,
             code,
             source_dir,
-            dwarf,
         ))
     }
 }

@@ -105,12 +105,6 @@ pub struct Compiled<T: StagedType> {
     code: Vec<CodeMap>,
     /// Where the readable text was written; see [`Compiled::source_dir`].
     source_dir: Option<std::path::PathBuf>,
-    /// DWARF for the code, pointing at the text in `source_dir`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "registered with a debugger in the next step")
-    )]
-    pub(crate) dwarf: Option<crate::cranelift::dwarf::Sections>,
     _signature: PhantomData<T>,
 }
 
@@ -146,12 +140,22 @@ pub(crate) enum Executable {
 /// while any entry point can still be called.
 pub(crate) struct FrozenExecutable {
     executable: Option<Executable>,
+    /// Its functions' debug info, as a debugger knows it; see [`Compiled::source_dir`].
+    #[cfg(not(feature = "llvm"))]
+    registered: Vec<crate::cranelift::jit_debug::Registration>,
 }
 
 impl FrozenExecutable {
-    pub(crate) fn new(executable: Executable) -> Self {
+    /// `executable`, its functions' debug info (`registered`) handed to a debugger until the
+    /// code is freed.
+    pub(crate) fn new(
+        executable: Executable,
+        #[cfg(not(feature = "llvm"))] registered: Vec<crate::cranelift::jit_debug::Registration>,
+    ) -> Self {
         Self {
             executable: Some(executable),
+            #[cfg(not(feature = "llvm"))]
+            registered,
         }
     }
 }
@@ -163,6 +167,7 @@ impl FrozenExecutable {
 // the Cranelift and LLVM/MLIR JIT destructors being valid on a thread other than the creator.
 // The parallel LLVM property test exercises concurrent execution and last-owner destruction
 // on worker threads; the full differential suite exercises the same wrapper for Cranelift.
+// The debug-info registrations change the debugger's list only under its lock.
 unsafe impl Send for FrozenExecutable {}
 // SAFETY: see the `Send` implementation. Sharing this wrapper does not share access to either
 // JIT API; it shares only ownership of finalized executable memory.
@@ -172,6 +177,9 @@ impl Drop for FrozenExecutable {
     fn drop(&mut self) {
         // `Arc` gives the last owner exclusive destruction, so no safe callable can remain.
         // Escaped pointers are still governed by `as_fn_unchecked`'s safety contract.
+        // The debugger forgets the code before it is freed.
+        #[cfg(not(feature = "llvm"))]
+        self.registered.clear();
         match self.executable.take() {
             Some(Executable::Cranelift(module)) => unsafe { (*module).free_memory() },
             #[cfg(feature = "llvm")]
@@ -190,7 +198,6 @@ impl<T: StagedType> Compiled<T> {
         ids: Option<crate::cranelift::source::InstIds>,
         code: Vec<CodeMap>,
         source_dir: Option<std::path::PathBuf>,
-        dwarf: Option<crate::cranelift::dwarf::Sections>,
     ) -> Self {
         Self {
             executable,
@@ -200,7 +207,6 @@ impl<T: StagedType> Compiled<T> {
             ids,
             code,
             source_dir,
-            dwarf,
             _signature: PhantomData,
         }
     }

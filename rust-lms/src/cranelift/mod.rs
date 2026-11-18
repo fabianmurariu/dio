@@ -9,7 +9,11 @@
 //! still lives in the `compile()` driver in `func.rs` (docs/llvm.md: the `Module`/
 //! `Executable` boundary).
 
+// Off with `llvm`: its JIT defines the GDB JIT interface's symbols too.
+#[cfg(not(feature = "llvm"))]
 pub(crate) mod dwarf;
+#[cfg(not(feature = "llvm"))]
+pub(crate) mod jit_debug;
 pub(crate) mod source;
 
 use source::InstIds;
