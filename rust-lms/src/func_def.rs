@@ -1,11 +1,14 @@
 //! FunDef construction helpers for function definitions.
 
-use crate::func::{Ctx, FunDef};
-use crate::func_impl::{
-    FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8, TypeInfo,
+use crate::{
+    ctx::Ctx,
+    func::FunDef,
+    func_impl::{
+        FunRef0, FunRef1, FunRef2, FunRef3, FunRef4, FunRef5, FunRef6, FunRef7, FunRef8, TypeInfo,
+    },
+    staged::{Staged, Var},
+    types::StagedType,
 };
-use crate::staged::{Staged, Var};
-use crate::types::StagedType;
 
 macro_rules! impl_make_fun {
     // Zero parameters

@@ -7,8 +7,10 @@
 //!
 //! Note: For sequencing, use tuples instead (see `tuple.rs`).
 
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value};
-use crate::types::{IntCmp, StagedType};
+use crate::{
+    staged::{CompilationContext, IntoStaged, Staged, Value},
+    types::{IntCmp, StagedType},
+};
 
 // =============================================================================
 // IfThenElse<COND, THEN, ELSE> - Conditional Expression

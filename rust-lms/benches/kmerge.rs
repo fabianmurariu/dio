@@ -29,14 +29,14 @@
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use itertools::Itertools;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use std::hint::black_box;
-use std::time::Duration;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{hint::black_box, time::Duration};
 
-use rust_lms::func::JitBackend;
-use rust_lms::iter::{Plan, kmerge_rows};
-use rust_lms::prelude::*;
+use rust_lms::{
+    compiler::JitBackend,
+    iter::{Plan, kmerge_rows},
+    prelude::*,
+};
 
 /// Elements per graph.
 const N: usize = 1 << 20;
@@ -256,7 +256,12 @@ fn kernel(backend: JitBackend, variant: &str, k: usize) -> NodesFn {
                         ctx.bind(x.first())
                     }),
                     "nested" => nested_into(ctx, acc, runs()),
-                    v => fold_into(ctx, acc, configure(kmerge_by(runs(), |_, x| x), v), |_, x| x),
+                    v => fold_into(
+                        ctx,
+                        acc,
+                        configure(kmerge_by(runs(), |_, x| x), v),
+                        |_, x| x,
+                    ),
                 }
             });
             acc

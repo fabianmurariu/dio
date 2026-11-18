@@ -25,13 +25,13 @@
 
 mod boxed;
 mod chain;
+mod dedup;
 mod empty;
 mod enumerate;
 mod filter;
 mod filter_map;
 mod flat_map;
 mod from_fn;
-mod dedup;
 mod kmerge;
 mod kmerge_rows;
 mod map;

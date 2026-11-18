@@ -10,6 +10,7 @@ use rust_lms::prelude::*;
 
 mod common;
 use common::backends;
+use rust_lms::compiler::JitBackend;
 
 /// Strings of every length class, several to a 32-byte block.
 fn strings(seed: usize) -> Vec<Option<String>> {

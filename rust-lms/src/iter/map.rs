@@ -2,9 +2,11 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::staged::{Staged, Var};
-use crate::types::{CopyType, StagedType};
+use crate::{
+    ctx::Ctx,
+    staged::{Staged, Var},
+    types::{CopyType, StagedType},
+};
 
 use crate::label::Label;
 

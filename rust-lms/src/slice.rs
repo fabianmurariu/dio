@@ -35,14 +35,14 @@
 //! });
 //! ```
 
-use crate::ffi::{RawSlice, RawSliceMut};
-use crate::func::Ctx;
-use crate::num::{add, lt};
-use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse};
-use crate::staged_opt::StagedOpt;
-use crate::types::{
-    CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType,
+use crate::{
+    ctx::Ctx,
+    ffi::{RawSlice, RawSliceMut},
+    num::{add, lt},
+    refer::{SMutPtr, SPtr, SRef, SRefMut},
+    staged::{CompilationContext, IntoStaged, Staged, Value, ValueId, Var, VarUse},
+    staged_opt::StagedOpt,
+    types::{CopyType, DirectValue, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType},
 };
 use std::marker::PhantomData;
 

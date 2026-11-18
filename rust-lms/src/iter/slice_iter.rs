@@ -11,12 +11,14 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::num::{add, ge};
-use crate::slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType};
-use crate::staged::{LifetimeErased, Staged, Var, VarUse};
-use crate::types::{CopyType, StagedType};
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    num::{add, ge},
+    slice::{SliceGetUnchecked, SliceLen, SliceOps, TrustedSliceType},
+    staged::{LifetimeErased, Staged, Var, VarUse},
+    types::{CopyType, StagedType},
+};
 
 use super::traits::{
     Cursor, IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator,

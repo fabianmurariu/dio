@@ -1,10 +1,12 @@
 //! Drop repeats of a sorted stream: [`DedupByKey`].
 
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::num::{Ordered, eq};
-use crate::staged::{Staged, Var};
-use crate::types::{CopyType, StagedType};
+use crate::{
+    ctx::Ctx,
+    label::{Label, zeroed},
+    num::{Ordered, eq},
+    staged::{Staged, Var},
+    types::{CopyType, StagedType},
+};
 
 use super::traits::{Cursor, StagedIterator};
 

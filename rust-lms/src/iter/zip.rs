@@ -3,12 +3,14 @@
 use crate::types::IntCmp;
 use rust_lms_derive::StagedType;
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::num::{add, ge};
-use crate::staged::{CompilationContext, Staged, Value, Var};
-use crate::r#struct::{Field, LoadField, load_field_unchecked};
-use crate::types::{CopyType, Shape, StagedType};
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    num::{add, ge},
+    staged::{CompilationContext, Staged, Value, Var},
+    r#struct::{Field, LoadField, load_field_unchecked},
+    types::{CopyType, Shape, StagedType},
+};
 
 use super::traits::{Cursor, IndexedSource, IndexedStagedIterator, StagedIterator};
 

@@ -2,8 +2,7 @@
 //! when repeated, and hoisted out of loops. Cranelift only: `Compiled::sizes` is empty
 //! for LLVM, which keeps such loads plain.
 
-use rust_lms::func::JitBackend;
-use rust_lms::prelude::*;
+use rust_lms::{compiler::JitBackend, prelude::*};
 
 /// The optimised instruction count of function `name`.
 fn size<T: StagedType>(compiled: &rust_lms::func::Compiled<T>, name: &str) -> usize {

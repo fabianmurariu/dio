@@ -1,8 +1,10 @@
 //! Filter combinator — keeps only elements matching a predicate.
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::staged::{Staged, Var};
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    staged::{Staged, Var},
+};
 
 use super::traits::{Cursor, StagedIterator};
 

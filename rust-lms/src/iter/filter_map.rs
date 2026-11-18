@@ -1,9 +1,11 @@
 //! FilterMap combinator — map-and-filter fused via a staging-time optional.
 
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::staged::Var;
-use crate::staged_opt::StagedOpt;
+use crate::{
+    ctx::Ctx,
+    label::{Label, zeroed},
+    staged::Var,
+    staged_opt::StagedOpt,
+};
 
 use super::traits::{Cursor, StagedIterator};
 

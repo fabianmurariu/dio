@@ -4,9 +4,11 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, BooleanArray, Int64Array, StringViewArray};
-use arrow::datatypes::{DataType, Field, Schema, SchemaRef};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{Array, BooleanArray, Int64Array, StringViewArray},
+    datatypes::{DataType, Field, Schema, SchemaRef},
+    record_batch::RecordBatch,
+};
 use arrow_lms::{
     ArrowArrayOps, FfiBatch, FfiBoolArray, FfiByteViewArray, FfiPrimArray, FfiRecordBatch,
     SchemaBatch,

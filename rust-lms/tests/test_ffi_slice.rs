@@ -8,8 +8,10 @@
 
 use std::mem::{align_of, size_of};
 
-use rust_lms::prelude::*;
-use rust_lms::types::{Leaves, ScalarType};
+use rust_lms::{
+    prelude::*,
+    types::{Leaves, ScalarType},
+};
 
 mod common;
 use common::for_each_backend;

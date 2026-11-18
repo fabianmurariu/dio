@@ -2,8 +2,10 @@
 //! a time through a stack-frame slot per nesting level. The chunk boundary
 //! (`CHUNK` items) is where the protocol can go wrong, so lengths straddle it.
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::cell::Cell;
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    cell::Cell,
+};
 
 use rust_lms::prelude::*;
 use rust_lms_std::{

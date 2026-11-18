@@ -6,6 +6,7 @@ use rust_lms::prelude::*;
 mod common;
 use common::for_each_backend;
 
+#[cfg(test)]
 use rust_lms_std::{HostVec, SVec, SvecGrowExtern};
 
 #[test]

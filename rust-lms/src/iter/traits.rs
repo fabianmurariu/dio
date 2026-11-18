@@ -1,14 +1,18 @@
 //! Core traits for staged iteration.
 
-use crate::control::not;
-use crate::func::Ctx;
-use crate::num::{Le, Lt, Num, Ordered, add, ge, gt, le, lt, select};
-use crate::staged::{Const, Staged, Var};
-use crate::staged_opt::StagedOpt;
-use crate::types::{CopyType, DirectValue, StagedType};
+use crate::{
+    control::not,
+    ctx::Ctx,
+    num::{Le, Lt, Num, Ordered, add, ge, gt, le, lt, select},
+    staged::{Const, Staged, Var},
+    staged_opt::StagedOpt,
+    types::{CopyType, DirectValue, StagedType},
+};
 
-use crate::label::{Label, zeroed};
-use crate::staged::IntoStaged;
+use crate::{
+    label::{Label, zeroed},
+    staged::IntoStaged,
+};
 
 use super::{
     BoxedStagedIter, Chain, Filter, FilterMap, FlatMap, IntersectBy, Map, MergeBy, Scan, Skip,

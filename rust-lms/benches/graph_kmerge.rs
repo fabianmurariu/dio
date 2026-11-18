@@ -46,16 +46,19 @@
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
 use flate2::read::GzDecoder;
 use itertools::Itertools;
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use std::hint::black_box;
-use std::io::{BufRead, BufReader};
-use std::sync::OnceLock;
-use std::time::Duration;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{
+    hint::black_box,
+    io::{BufRead, BufReader},
+    sync::OnceLock,
+    time::Duration,
+};
 
-use rust_lms::func::JitBackend;
-use rust_lms::iter::{Heap, KMergeRows, kmerge_rows};
-use rust_lms::prelude::*;
+use rust_lms::{
+    compiler::JitBackend,
+    iter::{Heap, KMergeRows, kmerge_rows},
+    prelude::*,
+};
 
 const EDGE_LIST: &str = "benches/graph500-scale18-ef16_adj.edges.gz";
 const LAYERS: &[usize] = &[1, 2, 4];

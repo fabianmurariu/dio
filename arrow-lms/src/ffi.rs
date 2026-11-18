@@ -4,20 +4,23 @@
 //! layout. Safe host construction is lifetime-bearing: a batch's descriptors come from
 //! [`PreparedFfiBatch`] (borrowed) or [`FfiRecordBatch`] (owned).
 
-use std::fmt;
-use std::marker::PhantomData;
+use std::{fmt, marker::PhantomData};
 
-use arrow::array::{Array, ArrayRef, AsArray, BinaryViewArray, StringViewArray};
-use arrow::datatypes::{
-    ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
-    Int64Type, Schema, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+use arrow::{
+    array::{Array, AsArray, BinaryViewArray, StringViewArray},
+    datatypes::{
+        ArrowPrimitiveType, DataType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+        Int64Type, Schema, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+    },
+    record_batch::RecordBatch,
 };
-use arrow::record_batch::RecordBatch;
 use rust_lms::prelude::*;
 
-use crate::array::{FfiArray, FfiBoolArray, FfiPrimArray};
-use crate::batch::FfiBatch;
-use crate::byte_view::ByteViewDescriptors;
+use crate::{
+    array::{FfiArray, FfiBoolArray, FfiPrimArray},
+    batch::FfiBatch,
+    byte_view::ByteViewDescriptors,
+};
 
 /// One batch's descriptors and what [`FfiBatch`] points to: no lifetime, so its owner
 /// keeps the arrays alive (a borrow, or the batch itself).
@@ -220,7 +223,10 @@ pub fn prepare_record_batch(rb: &RecordBatch) -> Result<PreparedFfiBatch<'_>, Ff
 }
 
 /// Prepare borrowed Arrow [`ArrayRef`] values for a compiled kernel.
-pub fn prepare_array_refs(arrays: &[ArrayRef]) -> Result<PreparedFfiBatch<'_>, FfiError> {
+#[cfg(test)]
+pub fn prepare_array_refs(
+    arrays: &[arrow::array::ArrayRef],
+) -> Result<PreparedFfiBatch<'_>, FfiError> {
     prepare_arrays(arrays.iter().map(|array| array.as_ref()))
 }
 

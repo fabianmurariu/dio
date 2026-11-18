@@ -2,8 +2,10 @@
 
 use std::marker::PhantomData;
 
-use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
-use crate::types::StagedType;
+use crate::{
+    staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var},
+    types::StagedType,
+};
 
 use super::traits::{Bits, FloatNum, Int, IntNum, Num, Ordered};
 

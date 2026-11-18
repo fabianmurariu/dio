@@ -3,10 +3,12 @@
 
 use std::sync::Arc;
 
-use arrow::array::{Array, Int16Array, Int32Array};
-use arrow::buffer::NullBuffer;
-use arrow::datatypes::{DataType, Field, Schema};
-use arrow::record_batch::RecordBatch;
+use arrow::{
+    array::{Array, Int16Array, Int32Array},
+    buffer::NullBuffer,
+    datatypes::{DataType, Field, Schema},
+    record_batch::RecordBatch,
+};
 
 use arrow_lms::{
     ArrayBatchOps, ArrowArrayOps, FfiArray, FfiPrimArray, FfiPrimArrayOps, prepare_dyn_arrays,
@@ -15,6 +17,7 @@ use arrow_lms::{
 use rust_lms::prelude::*;
 
 mod common;
+#[cfg(test)]
 use common::for_each_backend;
 
 type BatchFn<R> = FunType1<SRef<Slice<FfiArray>>, R>;

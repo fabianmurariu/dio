@@ -1,14 +1,13 @@
 //! Index-carrying iteration: [`Enumerate`].
 
-use crate::func::Ctx;
-use crate::num::add;
-use crate::staged::Var;
-use crate::types::CopyType;
+use crate::{ctx::Ctx, num::add, staged::Var, types::CopyType};
 
 use crate::label::Label;
 
-use super::traits::{Cursor, StagedIterator};
-use super::zip::{Pair, ZipItem};
+use super::{
+    traits::{Cursor, StagedIterator},
+    zip::{Pair, ZipItem},
+};
 
 /// Yields each element together with its zero-based position, as a
 /// `ZipItem<u64, _>`.

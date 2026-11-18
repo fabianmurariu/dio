@@ -3,9 +3,7 @@
 //! it. Cranelift only.
 
 use proptest::prelude::*;
-use rust_lms::func::JitBackend;
-use rust_lms::iter::kmerge_rows;
-use rust_lms::prelude::*;
+use rust_lms::{compiler::JitBackend, iter::kmerge_rows, prelude::*};
 
 type S = SRef<Slice<u64>>;
 type Out = SRefMut<Slice<u64>>;
@@ -45,7 +43,9 @@ fn compile(dedup: bool) -> Kernel {
                 ctx.store(n, n + 1u64);
             };
             if dedup {
-                merge.dedup_by_key(|_, pair| pair.first()).for_each(ctx, body);
+                merge
+                    .dedup_by_key(|_, pair| pair.first())
+                    .for_each(ctx, body);
             } else {
                 merge.for_each(ctx, body);
             }

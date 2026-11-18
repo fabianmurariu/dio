@@ -5,8 +5,10 @@
 //! - `VarRef<T>`: Typed variable references (just indices, Copy-able)
 //! - `Const<T>`: Typed constants (Copy-able)
 
-use std::collections::HashMap;
-use std::ops::{Deref, DerefMut};
+use std::{
+    collections::HashMap,
+    ops::{Deref, DerefMut},
+};
 
 // Entity types named only by the opaque handles' Cranelift conversions below. Cranelift's
 // `Value` is aliased so the neutral AST-level `Value` (defined below) owns the bare name.
@@ -367,7 +369,7 @@ pub struct CompilationContext<'c> {
     /// is being emitted; the stage-0 lifetime brand guarantees no jump outlives it.
     pub(crate) labels: HashMap<usize, BlockHandle>,
     /// How the loads emitted now may be optimised: [`LoadKind::Invariant`] inside
-    /// [`Ctx::invariant`](crate::func::Ctx::invariant).
+    /// [`Ctx::invariant`](crate::ctx::Ctx::invariant).
     pub(crate) load_kind: LoadKind,
 }
 
@@ -1138,7 +1140,7 @@ impl<'c> CompilationContext<'c> {
     }
 
     /// Load a call's result of `shape` from the slot the callee wrote it to: always a
-    /// plain load, even inside [`Ctx::invariant`](crate::func::Ctx::invariant), since the
+    /// plain load, even inside [`Ctx::invariant`](crate::ctx::Ctx::invariant), since the
     /// call writes the slot and the load must stay after it.
     pub(crate) fn load_result(&mut self, shape: Shape, base: ValueId) -> Value {
         let outer = std::mem::replace(&mut self.load_kind, LoadKind::Plain);

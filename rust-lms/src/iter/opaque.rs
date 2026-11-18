@@ -20,14 +20,16 @@
 
 use std::marker::PhantomData;
 
-use crate::ffi::{ExternFn, ExternRef, call_extern1_unchecked};
-use crate::func::{Compiler, Ctx};
-use crate::label::Label;
-use crate::num::{add, ge};
-use crate::option::{COption, COptionType, is_none, payload_unchecked};
-use crate::refer::{SMutPtr, load_mut, ptr_cast_mut};
-use crate::staged::{SigSpec, Staged, Value, ValueId, Var};
-use crate::types::{CopyType, ScalarType, StagedType};
+use crate::{
+    ctx::Ctx,
+    ffi::{ExternFn, ExternRef, call_extern1_unchecked},
+    label::Label,
+    num::{add, ge},
+    option::{COption, COptionType, is_none, payload_unchecked},
+    refer::{SMutPtr, load_mut, ptr_cast_mut},
+    staged::{SigSpec, Staged, Value, ValueId, Var},
+    types::{CopyType, ScalarType, StagedType},
+};
 
 use super::traits::{Close, Cursor, StagedIterator};
 
@@ -587,7 +589,7 @@ where
 // 2-entry vtable (`next`/`drop` fn pointers) that the producer fills — see the
 // module/`OpaqueIterSlot` docs.
 
-use crate::staged::CompilationContext;
+use crate::{compiler::Compiler, staged::CompilationContext};
 use std::mem::MaybeUninit;
 
 /// Inline storage budget (bytes) for a reused-storage iterator. Iterators that

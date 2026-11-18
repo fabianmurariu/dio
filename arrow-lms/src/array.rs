@@ -11,18 +11,25 @@
 //! column's type says it is ([`FfiArrayOps::downcast`]), a claim that is `unsafe`. A
 //! batch makes it once, against its schema ([`SchemaBatch`](crate::SchemaBatch)).
 
-use arrow::array::types::{
-    ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type, Int64Type,
-    UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+use arrow::{
+    array::{
+        Array, BooleanArray, PrimitiveArray,
+        types::{
+            ArrowPrimitiveType, Float32Type, Float64Type, Int8Type, Int16Type, Int32Type,
+            Int64Type, UInt8Type, UInt16Type, UInt32Type, UInt64Type,
+        },
+    },
+    datatypes::{ArrowNativeType, ByteViewType, DataType},
 };
-use arrow::array::{Array, BooleanArray, PrimitiveArray};
-use arrow::datatypes::DataType;
-use arrow::datatypes::{ArrowNativeType, ByteViewType};
-use rust_lms::prelude::*;
-use rust_lms::types::{Leaves, ScalarType};
+use rust_lms::{
+    prelude::*,
+    types::{Leaves, ScalarType},
+};
 
-use crate::byte_view::{ArrowByteKind, FfiByteViewArray};
-use crate::validity::{BitmapView, FfiBitmap, FfiValidity, ValidityView};
+use crate::{
+    byte_view::{ArrowByteKind, FfiByteViewArray},
+    validity::{BitmapView, FfiBitmap, FfiValidity, ValidityView},
+};
 
 // =============================================================================
 // The trait
@@ -641,8 +648,7 @@ where
 #[cfg(test)]
 mod tests {
     use super::*;
-    use arrow::array::Int32Array;
-    use arrow::buffer::NullBuffer;
+    use arrow::{array::Int32Array, buffer::NullBuffer};
 
     #[test]
     fn an_array_is_the_type_it_was_built_from() {

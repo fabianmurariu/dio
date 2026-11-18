@@ -8,10 +8,12 @@
 //!   step is a small state machine — an `active` flag says whether an inner
 //!   iterator is open, and exhausting it retries with the next outer element.
 
-use crate::control::not;
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::staged::Var;
+use crate::{
+    control::not,
+    ctx::Ctx,
+    label::{Label, zeroed},
+    staged::Var,
+};
 
 use super::traits::{Close, Cursor, IntoStagedIterator, StagedIterator};
 

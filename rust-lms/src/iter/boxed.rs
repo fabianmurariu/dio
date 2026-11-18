@@ -13,10 +13,7 @@
 //! again. The forwarding calls name the `dyn` impl: the blanket impls also cover the
 //! boxes, and a method call could pick the box's own impl and recurse.
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::staged::Var;
-use crate::types::StagedType;
+use crate::{ctx::Ctx, label::Label, staged::Var, types::StagedType};
 
 use super::traits::{Close, Cursor, IntoStagedIterator, StagedIterator};
 

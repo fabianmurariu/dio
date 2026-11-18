@@ -10,10 +10,12 @@
 //! the same runtime representation. References carry Rust validity, lifetime,
 //! and aliasing guarantees; raw pointers do not.
 
-use crate::func::Ctx;
-use crate::num::{Int, ge, gt, int_cast};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var, VarUse};
-use crate::types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use crate::{
+    ctx::Ctx,
+    num::{Int, ge, gt, int_cast},
+    staged::{CompilationContext, IntoStaged, Staged, Value, Var, VarUse},
+    types::{CopyType, IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType},
+};
 use std::marker::PhantomData;
 
 // =============================================================================

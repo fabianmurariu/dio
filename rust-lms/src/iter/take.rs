@@ -1,9 +1,11 @@
 //! Counted prefixes and suffixes: [`Take`] and [`Skip`].
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::num::{add, ge, lt, select, sub};
-use crate::staged::{Staged, Var};
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    num::{add, ge, lt, select, sub},
+    staged::{Staged, Var},
+};
 
 use super::traits::{Cursor, StagedIterator};
 

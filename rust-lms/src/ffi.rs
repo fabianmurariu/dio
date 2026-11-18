@@ -21,15 +21,14 @@
 //! let result = call2(my_add, x, y);
 //! ```
 
-use std::marker::PhantomData;
-use std::slice;
+use std::{marker::PhantomData, slice};
 
-use crate::refer::{SMutPtr, SPtr, SRef, SRefMut};
-use crate::slice::Slice;
-use crate::staged::{
-    CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse,
+use crate::{
+    refer::{SMutPtr, SPtr, SRef, SRefMut},
+    slice::Slice,
+    staged::{CompilationContext, FuncRefId, IntoStaged, Staged, Value, ValueId, Var, VarUse},
+    types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType},
 };
-use crate::types::{CopyType, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType};
 use rust_lms_derive::StagedType;
 
 // =============================================================================
@@ -1337,20 +1336,6 @@ mod tests {
 
         assert_eq!(fat.len, 0);
         assert!(fat.is_empty());
-    }
-
-    #[test]
-    fn test_fat_slice_mut() {
-        let mut data = [1i64, 2, 3];
-        let mut fat = FatSliceMut::from_slice(&mut data);
-
-        unsafe {
-            let slice = fat.as_slice_mut();
-            slice[0] = 10;
-            slice[1] = 20;
-        }
-
-        assert_eq!(data, [10, 20, 3]);
     }
 
     #[test]

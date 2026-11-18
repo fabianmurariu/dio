@@ -1,8 +1,10 @@
 //! Back-to-front iteration: [`Rev`].
 
-use crate::func::Ctx;
-use crate::num::{gt, sub};
-use crate::staged::Var;
+use crate::{
+    ctx::Ctx,
+    num::{gt, sub},
+    staged::Var,
+};
 
 use crate::label::Label;
 

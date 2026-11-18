@@ -4,7 +4,7 @@
 //! Staging). You build a *description* of a computation out of ordinary,
 //! strongly-typed Rust values — [`Staged`](staged::Staged) values like
 //! [`Var<T>`](staged::Var), `add(x, y)`, and staged iterators —
-//! [`Compiler::compile`](func::Compiler::compile) lowers it to Cranelift IR and
+//! [`Compiler::compile`](compiler::Compiler::compile) lowers it to Cranelift IR and
 //! JIT-compiles it to a native function you can call.
 //!
 //! **A value's Rust type encodes its staged type**, so the Rust compiler *is* the
@@ -53,9 +53,12 @@
 extern crate self as rust_lms;
 
 pub mod byte_view;
+pub mod compiler;
+
 pub mod control;
 /// Cranelift backend: the default code generator (`impl Backend`), behind `func::compile`.
 pub(crate) mod cranelift;
+pub mod ctx;
 pub mod ffi;
 pub mod func;
 pub(crate) mod func_def;
@@ -85,80 +88,85 @@ pub mod _internal {
 
 /// Commonly used types and traits
 pub mod prelude {
-    pub use crate::byte_view::{
-        Bin, Binary, ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, MakeByteView, RawByteView,
-        Str, Utf8, Utf8LenExtern, make_view, relocate_view, utf8_len, view_len,
-    };
-    pub use crate::control::{
-        IfThen, IfThenElse, Not, While, if_then, if_then_else, not, while_loop,
-    };
-    pub use crate::ffi::{
-        ExternArgs, ExternFn, ExternRef, FatSlice, FatSliceMut, FfiSlice, IntoExternArg, RawSlice,
-        RawSliceMut, SafeExternFn, SliceFromRawParts, StackAlloc, StackBytes, call_extern0,
-        call_extern0_unchecked, call_extern1, call_extern1_unchecked, call_extern2,
-        call_extern2_unchecked, call_extern3, call_extern3_unchecked, call_extern4,
-        call_extern4_unchecked, slice_from_raw_parts, slice_from_raw_parts_mut, stack_alloc,
-        stack_array, stack_bytes,
-    };
-    pub use crate::func::{
-        Compiled, CompiledFn, Compiler, Ctx, FunRef0, FunRef1, FunRef2, FunRef3, FunType0,
-        FunType1, FunType2, FunType3, JitBackend, call0, call1, call2, call3,
-    };
-    pub use crate::iter::{
-        Chain, Close, Cursor, DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner,
-        ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter, FilterMap,
-        FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator, KMergeBy, Map,
-        MergeBy, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter, OpaqueIterFns,
-        OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair, RangeIter,
-        RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev, Scan, SetBits,
-        Skip, SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip, ZipGetAt, ZipItem,
-        ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter, box_dyn_iter, emplace_iter, empty,
-        from_fn, kmerge_by, range, range_step, set_bits,
-    };
-    pub use crate::label::{Again, Label};
-    pub use crate::num::{
-        BitAnd, BitOp, BitOpKind, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge, Int,
-        IntCast, IntNum, IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast, bitor,
-        bitxor, count_ones, div, eq, float_promote, ge, gt, i128_hi, i128_lo, int_cast,
-        int_to_float, le, leading_zeros, lt, max, min, mul, ne, pack_i128, rem, select, shl, shr,
-        sub, swap_bytes, trailing_zeros,
-    };
-    pub use crate::opaque::Opaque;
-    pub use crate::option::{
-        COption, COptionType, OptMutRefType, OptRefType, c_none, c_some, is_mut_ref_none,
-        is_mut_ref_some, is_none, is_ref_none, is_ref_some, is_some, match_opt, match_opt_mut_ref,
-        match_opt_ref, opt_mut_ref_none, opt_mut_ref_some, opt_ref_none, opt_ref_some, unwrap_or,
-    };
-    pub use crate::pool::{ByteLiterals, BytesPool};
-    pub use crate::refer::{
-        ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
-        PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
-        StoreRef, WriteUnaligned, array_index, const_mut_ptr, const_ptr, copy_bytes, load,
-        load_mut, load_ref, load_ref_mut, ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut,
-        ptr_is_null, ptr_offset, ptr_offset_mut, read_unaligned, ref_as_const, ref_as_ptr,
-        ref_mut_as_ptr, store, store_ref, write_unaligned,
-    };
-    pub use crate::slice::{
-        AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceType, RawSliceOps,
-        RawSliceType, ReprRawSliceOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
-        SliceGetRange, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet, SliceSliceUnchecked,
-        SliceType, TrustedSliceOps, TrustedSliceType,
-    };
-    pub use crate::staged::{
-        Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LifetimeErased, Staged,
-        Value, ValueId, Var, VarUse, assign, unit,
-    };
-    pub use crate::staged_opt::{SNone, SSome, StagedOpt, ThenSome, When, s_none, s_some};
-    pub use crate::r#struct::{
-        CopyFieldAccess, DisjointField, Field, FieldAddr, FieldPath, FieldRefOf, LoadField,
-        MutField, OwnedFieldAccess, PointerLike, RefFieldAccess, SplitFieldsMut, field_addr,
-        field_mut, field_path, load_field_mut, load_field_unchecked, split_fields_mut,
-    };
-    pub use crate::types::{
-        ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, Leaves, RuntimeParam, RuntimeResult,
-        ScalarType, Shape, StagedType,
+    pub use crate::{
+        byte_view::{
+            Bin, Binary, ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, MakeByteView, RawByteView,
+            Str, Utf8, Utf8LenExtern, make_view, relocate_view, utf8_len, view_len,
+        },
+        control::{IfThen, IfThenElse, Not, While, if_then, if_then_else, not, while_loop},
+        ffi::{
+            ExternArgs, ExternFn, ExternRef, FatSlice, FatSliceMut, FfiSlice, IntoExternArg,
+            RawSlice, RawSliceMut, SafeExternFn, SliceFromRawParts, StackAlloc, StackBytes,
+            call_extern0, call_extern0_unchecked, call_extern1, call_extern1_unchecked,
+            call_extern2, call_extern2_unchecked, call_extern3, call_extern3_unchecked,
+            call_extern4, call_extern4_unchecked, slice_from_raw_parts, slice_from_raw_parts_mut,
+            stack_alloc, stack_array, stack_bytes,
+        },
+        func::{
+            Compiled, CompiledFn, FunRef0, FunRef1, FunRef2, FunRef3, FunType0, FunType1, FunType2,
+            FunType3, call0, call1, call2, call3,
+        },
+        iter::{
+            Chain, Close, Cursor, DynExactIter, DynIter, Enumerate, ExactOpaqueIterOwner,
+            ExactSizeOpaqueIter, ExactSizeOpaqueIterFns, ExactSizeOpaqueIterKind, Filter,
+            FilterMap, FlatMap, FromFn, IndexedSource, IndexedStagedIterator, IntoStagedIterator,
+            KMergeBy, Map, MergeBy, MinMax, OPAQUE_ITER_INLINE_CAP, OpaqueHandle, OpaqueIter,
+            OpaqueIterFns, OpaqueIterItem, OpaqueIterKind, OpaqueIterOwner, OpaqueIterSlot, Pair,
+            RangeIter, RangeStep, ReusedOpaqueIter, ReusedOpaqueIterFns, ReusedOpaqueIterKind, Rev,
+            Scan, SetBits, Skip, SkipWhile, SliceIter, StagedIterator, Take, TakeWhile, Zip,
+            ZipGetAt, ZipItem, ZipItemAccess, ZipItemType, ZipLen, box_dyn_exact_iter,
+            box_dyn_iter, emplace_iter, empty, from_fn, kmerge_by, range, range_step, set_bits,
+        },
+        label::{Again, Label},
+        num::{
+            BitAnd, BitOp, BitOpKind, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge,
+            Int, IntCast, IntNum, IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast,
+            bitor, bitxor, count_ones, div, eq, float_promote, ge, gt, i128_hi, i128_lo, int_cast,
+            int_to_float, le, leading_zeros, lt, max, min, mul, ne, pack_i128, rem, select, shl,
+            shr, sub, swap_bytes, trailing_zeros,
+        },
+        opaque::Opaque,
+        option::{
+            COption, COptionType, OptMutRefType, OptRefType, c_none, c_some, is_mut_ref_none,
+            is_mut_ref_some, is_none, is_ref_none, is_ref_some, is_some, match_opt,
+            match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some, opt_ref_none,
+            opt_ref_some, unwrap_or,
+        },
+        pool::{ByteLiterals, BytesPool},
+        refer::{
+            ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
+            PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
+            StoreRef, WriteUnaligned, array_index, const_mut_ptr, const_ptr, copy_bytes, load,
+            load_mut, load_ref, load_ref_mut, ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut,
+            ptr_is_null, ptr_offset, ptr_offset_mut, read_unaligned, ref_as_const, ref_as_ptr,
+            ref_mut_as_ptr, store, store_ref, write_unaligned,
+        },
+        slice::{
+            AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceType, RawSliceOps,
+            RawSliceType, ReprRawSliceOps, ReprSliceOps, Slice, SliceGetOr, SliceGetPtrUnchecked,
+            SliceGetRange, SliceLen, SliceMutOps, SliceOps, SliceRepr, SliceSet,
+            SliceSliceUnchecked, SliceType, TrustedSliceOps, TrustedSliceType,
+        },
+        staged::{
+            Assign, BoxableStaged, CompilationContext, Const, IntoStaged, LifetimeErased, Staged,
+            Value, ValueId, Var, VarUse, assign, unit,
+        },
+        staged_opt::{SNone, SSome, StagedOpt, ThenSome, When, s_none, s_some},
+        r#struct::{
+            CopyFieldAccess, DisjointField, Field, FieldAddr, FieldPath, FieldRefOf, LoadField,
+            MutField, OwnedFieldAccess, PointerLike, RefFieldAccess, SplitFieldsMut, field_addr,
+            field_mut, field_path, load_field_mut, load_field_unchecked, split_fields_mut,
+        },
+        types::{
+            ConstantType, CopyType, DirectValue, FloatCmp, IntCmp, Leaves, RuntimeParam,
+            RuntimeResult, ScalarType, Shape, StagedType,
+        },
     };
     // Re-export derive macro
+    pub use crate::{
+        compiler::{Compiler, JitBackend},
+        ctx::Ctx,
+    };
     #[cfg(feature = "derive")]
     pub use rust_lms_derive::{StagedType, extern_fn};
 }

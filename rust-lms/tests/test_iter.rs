@@ -4,6 +4,7 @@
 use rust_lms::prelude::*;
 
 mod common;
+#[cfg(test)]
 use common::for_each_backend;
 
 // =============================================================================

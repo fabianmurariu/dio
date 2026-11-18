@@ -15,13 +15,15 @@
 //! therefore never equal it (`u64::MAX` for a `Vid`, `i128::MAX` for a packed
 //! `EventTime`).
 
-use crate::ffi::stack_array;
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::num::{Ordered, add, eq, int_cast, le, lt, min, select};
-use crate::refer::{SMutPtr, load_mut, ptr_offset_mut, store};
-use crate::staged::{Const, Staged, Var};
-use crate::types::{CopyType, StagedType};
+use crate::{
+    ctx::Ctx,
+    ffi::stack_array,
+    label::{Label, zeroed},
+    num::{Ordered, add, eq, int_cast, le, lt, min, select},
+    refer::{SMutPtr, load_mut, ptr_offset_mut, store},
+    staged::{Const, Staged, Var},
+    types::{CopyType, StagedType},
+};
 
 use super::traits::{Close, Cursor, IntoStagedIterator, MinMax, StagedIterator};
 

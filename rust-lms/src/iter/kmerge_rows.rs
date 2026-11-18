@@ -21,19 +21,21 @@
 
 use std::marker::PhantomData;
 
-use crate::ffi::stack_array;
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::num::{Ordered, add, eq, ge, int_cast, le, lt, select, shl, shr, sub};
-use crate::refer::{
-    SMutPtr, SPtr, SRef, load, load_mut, ptr_cast_mut, ptr_offset, ptr_offset_mut, store,
+use crate::{
+    ctx::Ctx,
+    ffi::stack_array,
+    label::{Label, zeroed},
+    num::{Ordered, add, eq, ge, int_cast, le, lt, select, shl, shr, sub},
+    refer::{SMutPtr, SPtr, SRef, load, load_mut, ptr_cast_mut, ptr_offset, ptr_offset_mut, store},
+    slice::{Slice, SliceOps},
+    staged::{Const, Staged, Var},
+    types::{CopyType, StagedType},
 };
-use crate::slice::{Slice, SliceOps};
-use crate::staged::{Const, Staged, Var};
-use crate::types::{CopyType, StagedType};
 
-use super::traits::{Cursor, StagedIterator};
-use super::zip::{Pair, ZipItem};
+use super::{
+    traits::{Cursor, StagedIterator},
+    zip::{Pair, ZipItem},
+};
 
 /// The rows `fill` pushes, merged into one stream of `(key, value)` pairs sorted by
 /// key. Not stable: equal keys come in any order.

@@ -37,7 +37,7 @@ pub use array::{
 pub use batch::{FfiBatch, FfiBatchOps, FfiBatchType, SchemaBatch};
 pub use byte_view::{ArrowByteKind, ByteViewDescriptors, FfiByteViewArray};
 pub use ffi::{
-    FfiError, FfiRecordBatch, PreparedFfiBatch, prepare_array_refs, prepare_arrays,
-    prepare_dyn_arrays, prepare_record_batch,
+    FfiError, FfiRecordBatch, PreparedFfiBatch, prepare_arrays, prepare_dyn_arrays,
+    prepare_record_batch,
 };
 pub use validity::{Bitmap, BitmapWord, FfiBitmap, FfiValidity, ValidityView};

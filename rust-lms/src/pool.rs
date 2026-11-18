@@ -20,8 +20,10 @@
 //!
 //! [`ByteView`]: crate::byte_view::ByteView
 
-use crate::byte_view::{ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, RawByteView, make_view};
-use crate::staged::Const;
+use crate::{
+    byte_view::{ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, RawByteView, make_view},
+    staged::Const,
+};
 
 /// Default block size (64 KiB): large enough that most values share a block, small
 /// enough not to over-allocate for a few literals.

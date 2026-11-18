@@ -1,7 +1,9 @@
 #![cfg(feature = "llvm")]
 
-use std::sync::{Arc, Barrier};
-use std::thread;
+use std::{
+    sync::{Arc, Barrier},
+    thread,
+};
 
 use proptest::prelude::*;
 use rust_lms::prelude::*;

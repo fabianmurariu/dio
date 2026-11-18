@@ -1,9 +1,6 @@
 //! Chain combinator — one iterator's elements, then another's.
 
-use crate::control::not;
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::staged::Var;
+use crate::{control::not, ctx::Ctx, label::Label, staged::Var};
 
 use super::traits::{Cursor, StagedIterator};
 

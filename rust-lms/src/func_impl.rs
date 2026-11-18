@@ -5,8 +5,10 @@
 //! - `codegen_call`: Single codegen implementation for all function calls
 //! - Macro-generated `FunTypeN`, `FunRefN`, `CallN` for N = 0..8
 
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value, ValueId};
-use crate::types::{ScalarType, Shape, StagedType};
+use crate::{
+    staged::{CompilationContext, IntoStaged, Staged, Value, ValueId},
+    types::{ScalarType, Shape, StagedType},
+};
 use std::marker::PhantomData;
 
 // =============================================================================

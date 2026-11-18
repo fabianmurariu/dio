@@ -42,13 +42,10 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use std::hint::black_box;
-use std::ops::Range;
-use std::time::Duration;
+use std::{hint::black_box, ops::Range, time::Duration};
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
+use rand::{Rng, SeedableRng, rngs::StdRng};
 use rust_lms::prelude::*;
 use rust_lms_std::{ChunkStart, ChunkedIterFns, ChunkedIterKind};
 

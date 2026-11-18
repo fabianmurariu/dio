@@ -11,20 +11,24 @@
 
 use std::collections::HashMap;
 
-use cranelift_codegen::ir::{
-    AbiParam, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, SigRef,
-    Signature, StackSlotData, StackSlotKind, Value, types,
+use cranelift_codegen::{
+    ir::{
+        AbiParam, BlockArg, BlockCall, FuncRef, InstBuilder, JumpTableData, MemFlagsData, SigRef,
+        Signature, StackSlotData, StackSlotKind, Value, types,
+    },
+    isa::TargetFrontendConfig,
 };
-use cranelift_codegen::isa::TargetFrontendConfig;
 use cranelift_frontend::FunctionBuilder;
 use cranelift_jit::JITModule;
 use cranelift_module::{FuncId, Module};
 
-use crate::staged::{
-    Backend, BlockHandle, FuncRefId, LoadKind, SigRefId, SigSpec, StackSlotId, ValueId, VarHandle,
-    expect_arguments,
+use crate::{
+    staged::{
+        Backend, BlockHandle, FuncRefId, LoadKind, SigRefId, SigSpec, StackSlotId, ValueId,
+        VarHandle, expect_arguments,
+    },
+    types::{FloatCmp, IntCmp, ScalarType},
 };
-use crate::types::{FloatCmp, IntCmp, ScalarType};
 
 /// Emit an exact copy between non-overlapping, equally aligned runtime slots.
 pub(crate) fn emit_copy_nonoverlapping(

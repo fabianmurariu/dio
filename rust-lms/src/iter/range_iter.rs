@@ -6,12 +6,12 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::num::{
-    Add, Div, Lt, Mul, Num, Select, Sub, add, div, ge, int_cast, lt, mul, select, sub,
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    num::{Add, Div, Lt, Mul, Num, Select, Sub, add, div, ge, int_cast, lt, mul, select, sub},
+    staged::{Const, IntoStaged, Staged, Var},
 };
-use crate::staged::{Const, IntoStaged, Staged, Var};
 
 use super::traits::{
     Cursor, IndexedSource, IndexedStagedIterator, IntoStagedIterator, StagedIterator,

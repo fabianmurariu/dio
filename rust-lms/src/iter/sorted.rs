@@ -11,12 +11,14 @@
 //! receives items, never the cursor, so a peek is only usable *inside* an
 //! operator — and these are those operators.
 
-use crate::control::not;
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::num::select;
-use crate::staged::{Staged, Var};
-use crate::types::CopyType;
+use crate::{
+    control::not,
+    ctx::Ctx,
+    label::{Label, zeroed},
+    num::select,
+    staged::{Staged, Var},
+    types::CopyType,
+};
 
 use super::traits::{Cursor, StagedIterator};
 

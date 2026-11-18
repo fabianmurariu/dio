@@ -16,8 +16,10 @@
 //! control-flow combinators (`if_then`, `if_then_else`) and [`Bits`] rather than
 //! arithmetic.
 
-use crate::staged::{CompilationContext, Value};
-use crate::types::{ConstantType, CopyType, FloatCmp, IntCmp, StagedType};
+use crate::{
+    staged::{CompilationContext, Value},
+    types::{ConstantType, CopyType, FloatCmp, IntCmp, StagedType},
+};
 
 // =============================================================================
 // Trait hierarchy

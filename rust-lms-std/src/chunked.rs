@@ -55,12 +55,10 @@
 //!    head, reading it back, handing the slot to the externs, and reading
 //!    `buf[i]`. Each operation states the protocol step that makes it valid.
 
-use std::marker::PhantomData;
-use std::mem::MaybeUninit;
+use std::{marker::PhantomData, mem::MaybeUninit};
 
 use rust_lms::prelude::*;
-use smallbox::space::S32;
-use smallbox::{SmallBox, smallbox};
+use smallbox::{SmallBox, smallbox, space::S32};
 
 /// Items per chunk. Most adjacency lists fit in one, so they cost one call.
 pub const CHUNK: usize = 64;

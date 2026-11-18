@@ -94,17 +94,6 @@ pub extern "C" fn ext_identity_slice(data: FatSlice<i64>) -> FatSlice<i64> {
     data
 }
 
-/// Double each element in a mutable slice
-#[extern_fn]
-#[unsafe(no_mangle)]
-pub extern "C" fn ext_double_slice(mut data: FatSliceMut<i64>) {
-    unsafe {
-        for x in data.as_slice_mut() {
-            *x *= 2;
-        }
-    }
-}
-
 // =============================================================================
 // Tests
 // =============================================================================

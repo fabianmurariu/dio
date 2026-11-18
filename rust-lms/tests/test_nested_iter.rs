@@ -7,8 +7,10 @@
 
 #![allow(clippy::missing_safety_doc)]
 
-use std::alloc::{GlobalAlloc, Layout, System};
-use std::sync::atomic::{AtomicUsize, Ordering};
+use std::{
+    alloc::{GlobalAlloc, Layout, System},
+    sync::atomic::{AtomicUsize, Ordering},
+};
 
 use rust_lms::prelude::*;
 use rust_lms_derive::extern_fn;

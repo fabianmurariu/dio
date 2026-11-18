@@ -26,17 +26,19 @@ use std::marker::PhantomData;
 
 use rust_lms_derive::{StagedType, extern_fn};
 
-use crate::ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array};
-use crate::func::Ctx;
-use crate::num::{
-    bitand, bitor, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr,
-    swap_bytes,
-};
-use crate::refer::{SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store};
-use crate::staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var};
-use crate::r#struct::{Field, load_field_unchecked};
-use crate::types::{
-    ConstantType, CopyType, Leaves, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType,
+use crate::{
+    ctx::Ctx,
+    ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array},
+    num::{
+        bitand, bitor, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr,
+        swap_bytes,
+    },
+    refer::{SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store},
+    staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var},
+    r#struct::{Field, load_field_unchecked},
+    types::{
+        ConstantType, CopyType, Leaves, RuntimeParam, RuntimeResult, ScalarType, Shape, StagedType,
+    },
 };
 
 /// The longest value held in the view itself.

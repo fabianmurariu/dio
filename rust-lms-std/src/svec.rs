@@ -4,8 +4,10 @@
 //! [`svec_grow`] extern) reallocs and writes the new pointer back. See the crate
 //! docs for the why.
 
-use std::alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc};
-use std::marker::PhantomData;
+use std::{
+    alloc::{Layout, alloc, dealloc, handle_alloc_error, realloc},
+    marker::PhantomData,
+};
 
 use rust_lms::prelude::*;
 
@@ -95,15 +97,6 @@ impl<R> HostVec<R> {
             ctrl: &mut *self.raw,
             _r: PhantomData,
         }
-    }
-
-    /// The untyped control-block address for runtime-selected staged types.
-    ///
-    /// Pairing this pointer with an [`SVec`] requires
-    /// [`SVec::from_raw_unchecked`], which makes the lost type relationship
-    /// explicit at the call site.
-    pub fn as_raw_control_ptr(&mut self) -> *mut RawVec {
-        &mut *self.raw
     }
 
     /// The current element count (as the kernel last left it).

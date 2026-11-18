@@ -2,8 +2,7 @@
 //! `if_then_else`/`assign`, `while_loop`, multi-parameter functions,
 //! and owner-checked vs unchecked compiled function pointers.
 
-use rust_lms::func::*;
-use rust_lms::prelude::*;
+use rust_lms::{func::*, prelude::*};
 
 mod common;
 use common::{for_each_backend, with_backends};
@@ -353,8 +352,7 @@ fn test_while_loop_fibonacci_iterative() {
 
 #[test]
 fn test_local_variables_in_fun1() {
-    use rust_lms::refer::SRef;
-    use rust_lms::slice::Slice;
+    use rust_lms::{refer::SRef, slice::Slice};
 
     for_each_backend(|mut compiler| {
         // Function that sums elements > 5 using local variables

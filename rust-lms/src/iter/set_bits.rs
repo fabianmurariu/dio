@@ -2,14 +2,18 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::label::Label;
-use crate::num::{IntNum, bitand, eq, sub, trailing_zeros};
-use crate::staged::{Const, IntoStaged, Staged, Var};
-use crate::types::{ConstantType, StagedType};
+use crate::{
+    ctx::Ctx,
+    label::Label,
+    num::{IntNum, bitand, eq, sub, trailing_zeros},
+    staged::{Const, IntoStaged, Staged, Var},
+    types::{ConstantType, StagedType},
+};
 
-use super::range_iter::RangeStep;
-use super::traits::{Cursor, StagedIterator};
+use super::{
+    range_iter::RangeStep,
+    traits::{Cursor, StagedIterator},
+};
 
 /// Built by [`set_bits`].
 pub struct SetBits<T, W> {

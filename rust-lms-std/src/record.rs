@@ -14,8 +14,10 @@
 //! This is Umbra's `store(target + layout[slot].offset, value)`, but the offset is
 //! never handled by the caller — only a typed, layout-bound token is.
 
-use std::marker::PhantomData;
-use std::sync::atomic::{AtomicU32, Ordering};
+use std::{
+    marker::PhantomData,
+    sync::atomic::{AtomicU32, Ordering},
+};
 
 use rust_lms::prelude::*;
 
@@ -174,11 +176,7 @@ pub struct DynamicRecord {
 
 impl DynamicRecord {
     /// Load field `field` (its type is inferred from the token).
-    pub fn get<T: StagedType + CopyType + 'static>(
-        &self,
-        ctx: &Ctx,
-        field: FieldId<T>,
-    ) -> Var<T> {
+    pub fn get<T: StagedType + CopyType + 'static>(&self, ctx: &Ctx, field: FieldId<T>) -> Var<T> {
         self.check(field.layout, field.index);
         // SAFETY: `DynamicRecord`'s construction contract keeps the record
         // live, while the branded field token proves the offset and type.
@@ -186,12 +184,7 @@ impl DynamicRecord {
     }
 
     /// Store `v` into field `field`.
-    pub fn set<T: StagedType + CopyType + 'static>(
-        &self,
-        ctx: &Ctx,
-        field: FieldId<T>,
-        v: Var<T>,
-    ) {
+    pub fn set<T: StagedType + CopyType + 'static>(&self, ctx: &Ctx, field: FieldId<T>, v: Var<T>) {
         self.check(field.layout, field.index);
         // SAFETY: `DynamicRecord`'s construction contract keeps the record
         // writable, while the branded field token proves the offset and type.

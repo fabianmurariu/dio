@@ -2,8 +2,10 @@
 //! sliced arrays whose bitmaps start mid-byte, and arrays with no nulls. The bitmap
 //! itself is tested in `src/validity.rs`.
 
-use arrow::array::{Array, Int32Array};
-use arrow::buffer::NullBuffer;
+use arrow::{
+    array::{Array, Int32Array},
+    buffer::NullBuffer,
+};
 
 use arrow_lms::{ArrayBatchOps, ArrowArrayOps, FfiArray, FfiPrimArray, prepare_dyn_arrays};
 use rust_lms::prelude::*;

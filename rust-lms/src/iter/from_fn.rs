@@ -2,9 +2,7 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::staged::Var;
-use crate::staged_opt::StagedOpt;
+use crate::{ctx::Ctx, staged::Var, staged_opt::StagedOpt};
 
 use crate::label::{Label, zeroed};
 

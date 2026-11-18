@@ -2,10 +2,12 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::label::{Label, zeroed};
-use crate::staged::Var;
-use crate::types::StagedType;
+use crate::{
+    ctx::Ctx,
+    label::{Label, zeroed},
+    staged::Var,
+    types::StagedType,
+};
 
 use super::traits::{Cursor, StagedIterator};
 

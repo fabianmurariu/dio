@@ -18,9 +18,11 @@
 
 use std::marker::PhantomData;
 
-use crate::func::Ctx;
-use crate::staged::{IntoStaged, Staged, Var};
-use crate::types::StagedType;
+use crate::{
+    ctx::Ctx,
+    staged::{IntoStaged, Staged, Var},
+    types::StagedType,
+};
 
 /// A staging-time optional consumed via [`eliminate`](StagedOpt::eliminate).
 pub trait StagedOpt {

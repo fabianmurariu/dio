@@ -1,8 +1,10 @@
 //! SkipWhile combinator — drops a leading run, yields the rest.
 
-use crate::func::Ctx;
-use crate::staged::{Staged, Var};
-use crate::types::CopyType;
+use crate::{
+    ctx::Ctx,
+    staged::{Staged, Var},
+    types::CopyType,
+};
 
 use crate::label::Label;
 

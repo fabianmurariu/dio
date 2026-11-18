@@ -23,13 +23,10 @@
 //!     cargo bench --bench iter --features llvm      # + LLVM/MLIR
 
 use criterion::{BenchmarkId, Criterion, Throughput, criterion_group, criterion_main};
-use rand::rngs::StdRng;
-use rand::{Rng, SeedableRng};
-use std::hint::black_box;
-use std::time::Duration;
+use rand::{Rng, SeedableRng, rngs::StdRng};
+use std::{hint::black_box, time::Duration};
 
-use rust_lms::func::JitBackend;
-use rust_lms::prelude::*;
+use rust_lms::{compiler::JitBackend, prelude::*};
 
 const SIZES: &[usize] = &[10_000, 1_000_000];
 

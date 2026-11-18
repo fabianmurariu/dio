@@ -13,13 +13,19 @@
 
 use std::marker::PhantomData;
 
-use arrow::array::{Array, GenericByteViewArray};
-use arrow::datatypes::{BinaryViewType, ByteViewType, StringViewType};
-use rust_lms::prelude::*;
-use rust_lms::types::{Leaves, ScalarType};
+use arrow::{
+    array::{Array, GenericByteViewArray},
+    datatypes::{BinaryViewType, ByteViewType, StringViewType},
+};
+use rust_lms::{
+    prelude::*,
+    types::{Leaves, ScalarType},
+};
 
-use crate::array::FfiArray;
-use crate::validity::{FfiValidity, ValidityView};
+use crate::{
+    array::FfiArray,
+    validity::{FfiValidity, ValidityView},
+};
 
 /// A byte kind with its Arrow array type: `Utf8` reads `StringViewArray`, `Binary`
 /// reads `BinaryViewArray`.

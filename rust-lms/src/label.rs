@@ -1,6 +1,6 @@
-//! Scoped jump targets: the handles behind [`Ctx::block`](crate::func::Ctx::block),
-//! [`Ctx::join`](crate::func::Ctx::join), [`Ctx::repeat`](crate::func::Ctx::repeat) and
-//! [`Ctx::iterate`](crate::func::Ctx::iterate).
+//! Scoped jump targets: the handles behind [`Ctx::block`](crate::ctx::Ctx::block),
+//! [`Ctx::join`](crate::ctx::Ctx::join), [`Ctx::repeat`](crate::ctx::Ctx::repeat) and
+//! [`Ctx::iterate`](crate::ctx::Ctx::iterate).
 //!
 //! These are Rust's labelled `break` and `continue`, staged:
 //!
@@ -14,7 +14,7 @@
 //! | `ctx.iterate(\|ctx, done\| …)`     | `'done: loop { … }`           |
 //!
 //! `block`, `join` and `repeat` are *not* loop scopes: a
-//! [`break_loop`](crate::func::Ctx::break_loop) inside them passes straight
+//! [`break_loop`](crate::ctx::Ctx::break_loop) inside them passes straight
 //! through to the enclosing `iterate`/`while_loop`. That is what lets a
 //! combinator retry or merge locally without capturing a terminal's early exit.
 //!
@@ -37,7 +37,7 @@
 //! ```
 //!
 //! Only the label's plain id enters the `'static` codegen queue; the brand exists
-//! at stage 0 alone, as with [`Ctx::bind_lt`](crate::func::Ctx::bind_lt).
+//! at stage 0 alone, as with [`Ctx::bind_lt`](crate::ctx::Ctx::bind_lt).
 
 use std::marker::PhantomData;
 
@@ -47,7 +47,7 @@ type Brand<'s> = PhantomData<fn(&'s ()) -> &'s ()>;
 
 /// A forward jump target that receives a `T` — the parameters of a merge block,
 /// i.e. a phi. `Label<'s>` (`T = ()`) is a plain target, jumped to with
-/// [`Ctx::exit`](crate::func::Ctx::exit).
+/// [`Ctx::exit`](crate::ctx::Ctx::exit).
 pub struct Label<'s, T = ()> {
     pub(crate) id: usize,
     _brand: Brand<'s>,
@@ -71,8 +71,8 @@ impl<T> Label<'_, T> {
     }
 }
 
-/// A backward jump target: [`Ctx::again`](crate::func::Ctx::again) re-runs the
-/// body of the [`repeat`](crate::func::Ctx::repeat) that created it.
+/// A backward jump target: [`Ctx::again`](crate::ctx::Ctx::again) re-runs the
+/// body of the [`repeat`](crate::ctx::Ctx::repeat) that created it.
 pub struct Again<'s> {
     pub(crate) id: usize,
     _brand: Brand<'s>,
@@ -98,11 +98,13 @@ impl Again<'_> {
 // Zeroed: a value of any staged type, all zeros
 // =============================================================================
 
-use crate::staged::{CompilationContext, Staged, Value, ValueId, leaf_types, value_of};
-use crate::types::{ScalarType, Shape, StagedType};
+use crate::{
+    staged::{CompilationContext, Staged, Value, ValueId, leaf_types, value_of},
+    types::{ScalarType, Shape, StagedType},
+};
 
 /// A `T` of all zeros (null pointers, `0.0` floats): the start of a variable nothing
-/// reads before it is set, or the fall-through of a [`join`](crate::func::Ctx::join)
+/// reads before it is set, or the fall-through of a [`join`](crate::ctx::Ctx::join)
 /// body whose every path ends in a jump. Any staged type has one, so it needs no
 /// constant of `T`.
 pub struct Zeroed<T>(PhantomData<fn() -> T>);

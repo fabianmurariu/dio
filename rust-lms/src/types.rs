@@ -5,8 +5,10 @@
 //! - `ConstantType`: Trait for types that can be compile-time constants
 //! - Concrete type markers: `i64`, `u64`, `bool`, etc.
 
-use cranelift_codegen::ir::condcodes::{FloatCC, IntCC};
-use cranelift_codegen::ir::types;
+use cranelift_codegen::ir::{
+    condcodes::{FloatCC, IntCC},
+    types,
+};
 
 use crate::staged::{CompilationContext, Value};
 

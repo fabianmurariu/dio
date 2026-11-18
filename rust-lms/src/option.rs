@@ -21,10 +21,12 @@
 //! - null (0) = None
 //! - non-null = Some(pointer)
 
-use crate::func::Ctx;
-use crate::refer::{SRef, SRefMut};
-use crate::staged::{CompilationContext, IntoStaged, Staged, Value, Var};
-use crate::types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType};
+use crate::{
+    ctx::Ctx,
+    refer::{SRef, SRefMut},
+    staged::{CompilationContext, IntoStaged, Staged, Value, Var},
+    types::{IntCmp, RuntimeParam, RuntimeResult, ScalarType, StagedType},
+};
 use std::marker::PhantomData;
 
 // =============================================================================

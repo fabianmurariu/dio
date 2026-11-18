@@ -4,8 +4,10 @@
 //! - `Var<Point>` means `fn(Point)` - pass struct by value
 //! - `Var<SRef<Point>>` would mean `fn(&Point)` - pass by reference (not tested here)
 
-use rust_lms::prelude::*;
-use rust_lms::refer::{SRef, SRefMut};
+use rust_lms::{
+    prelude::*,
+    refer::{SRef, SRefMut},
+};
 
 mod common;
 use common::for_each_backend;
