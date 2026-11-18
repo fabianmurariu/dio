@@ -11,6 +11,8 @@ cranelift-module.workspace = true
 cranelift-native.workspace = true
 # Where each instruction of the readable IR text was generated (DEBUG_IR_SOURCE).
 backtrace.workspace = true
+# DWARF for the JIT code, so a debugger can show the readable text (DEBUG_IR_SOURCE).
+gimli.workspace = true
 rust-lms-derive = { path = "../rust-lms-derive", optional = true }
 # LLVM/MLIR backend (docs/llvm.md, Phase 1+). Optional: needs a system LLVM/MLIR 22
 # install via melior/mlir-sys, so it stays OFF by default — the pure-Rust Cranelift

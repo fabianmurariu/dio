@@ -2390,6 +2390,7 @@ dependencies = [
  "criterion",
  "either",
  "flate2",
+ "gimli 0.33.0",
  "itertools 0.14.0",
  "melior",
  "mlir-sys",
