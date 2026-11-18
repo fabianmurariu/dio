@@ -1452,7 +1452,9 @@ impl Compiler {
             move |ctx| expr.codegen(ctx),
         )?;
         Ok(Compiled {
-            executable: Arc::new(FrozenExecutable::new(Executable::Mlir(executable))),
+            executable: Arc::new(FrozenExecutable {
+                executable: Some(Executable::Mlir(executable)),
+            }),
             // SAFETY: MLIR emitted `__main__` with this exact storage-pointer ABI.
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
@@ -1462,7 +1464,6 @@ impl Compiler {
             ids: None,
             code: Vec::new(),
             source_dir: None,
-            dwarf: None,
             _signature: PhantomData,
         })
     }
@@ -1799,14 +1800,23 @@ impl Compiler {
                 }
             })
             .collect();
-        // Debug info for the code, pointing at the text on disk: without it, nowhere to point.
-        let dwarf =
-            (source_dir.as_deref()).map(|dir| crate::cranelift::dwarf::build(dir, &code, &lines));
+        let executable = FrozenExecutable {
+            executable: Some(Executable::Cranelift(Box::new(module))),
+            // Each function's debug info, pointing at its text on disk (without it, nowhere
+            // to point), handed to a debugger until the code is freed.
+            #[cfg(not(feature = "llvm"))]
+            registered: (source_dir.as_deref()).map_or_else(Vec::new, |dir| {
+                (code.iter().zip(&lines))
+                    .filter_map(|(function, lines)| {
+                        crate::cranelift::dwarf::image(dir, function, lines)
+                    })
+                    .map(crate::cranelift::jit_debug::register)
+                    .collect()
+            }),
+        };
 
         Ok(Compiled {
-            executable: Arc::new(FrozenExecutable::new(Executable::Cranelift(Box::new(
-                module,
-            )))),
+            executable: Arc::new(executable),
             // SAFETY: Cranelift emitted `__main__` with this exact storage-pointer ABI.
             main: unsafe {
                 std::mem::transmute::<*const u8, unsafe extern "C" fn(*mut u8)>(main_ptr)
@@ -1816,7 +1826,6 @@ impl Compiler {
             ids,
             code,
             source_dir,
-            dwarf,
             _signature: PhantomData,
         })
     }
@@ -1866,12 +1875,6 @@ pub struct Compiled<T: StagedType> {
     code: Vec<CodeMap>,
     /// Where the readable text was written; see [`Compiled::source_dir`].
     source_dir: Option<std::path::PathBuf>,
-    /// DWARF for the code, pointing at the text in `source_dir`.
-    #[cfg_attr(
-        not(test),
-        expect(dead_code, reason = "registered with a debugger in the next step")
-    )]
-    pub(crate) dwarf: Option<crate::cranelift::dwarf::Sections>,
     _signature: PhantomData<T>,
 }
 
@@ -1907,14 +1910,9 @@ enum Executable {
 /// while any entry point can still be called.
 struct FrozenExecutable {
     executable: Option<Executable>,
-}
-
-impl FrozenExecutable {
-    fn new(executable: Executable) -> Self {
-        Self {
-            executable: Some(executable),
-        }
-    }
+    /// Its functions' debug info, as a debugger knows it; see [`Compiled::source_dir`].
+    #[cfg(not(feature = "llvm"))]
+    registered: Vec<crate::cranelift::jit_debug::Registration>,
 }
 
 // SAFETY: publication happens only after finalization and native entry-point lookup. The
@@ -1924,6 +1922,7 @@ impl FrozenExecutable {
 // the Cranelift and LLVM/MLIR JIT destructors being valid on a thread other than the creator.
 // The parallel LLVM property test exercises concurrent execution and last-owner destruction
 // on worker threads; the full differential suite exercises the same wrapper for Cranelift.
+// The debug-info registrations change the debugger's list only under its lock.
 unsafe impl Send for FrozenExecutable {}
 // SAFETY: see the `Send` implementation. Sharing this wrapper does not share access to either
 // JIT API; it shares only ownership of finalized executable memory.
@@ -1933,6 +1932,9 @@ impl Drop for FrozenExecutable {
     fn drop(&mut self) {
         // `Arc` gives the last owner exclusive destruction, so no safe callable can remain.
         // Escaped pointers are still governed by `as_fn_unchecked`'s safety contract.
+        // The debugger forgets the code before it is freed.
+        #[cfg(not(feature = "llvm"))]
+        self.registered.clear();
         match self.executable.take() {
             Some(Executable::Cranelift(module)) => unsafe { (*module).free_memory() },
             #[cfg(feature = "llvm")]
