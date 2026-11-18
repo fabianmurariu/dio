@@ -64,6 +64,16 @@ pub(crate) struct InstIds {
     stack_index: HashMap<Stack, u32>,
     /// Each address's frames (several when calls were inlined), resolved on first use.
     places: HashMap<usize, Vec<(String, u32)>>,
+    /// Each address's frames with their function names, resolved on first use.
+    named: HashMap<usize, Vec<Frame>>,
+}
+
+/// A frame of an instruction's origin: its function, absolute file and line.
+#[derive(Clone, Debug)]
+pub(crate) struct Frame {
+    pub(crate) name: String,
+    pub(crate) file: String,
+    pub(crate) line: u32,
 }
 
 impl InstIds {
@@ -108,6 +118,23 @@ impl InstIds {
         })
     }
 
+    /// `id`'s origin as a debugger shows it (see [`debugger_frames`]). Caches each address.
+    pub(crate) fn chain(&mut self, id: u32) -> Vec<Frame> {
+        let Some(stack) = self.stack(id).map(<[usize]>::to_vec) else {
+            return Vec::new();
+        };
+        debugger_frames(
+            (stack.into_iter())
+                .flat_map(|ip| {
+                    self.named
+                        .entry(ip)
+                        .or_insert_with(|| resolve_named(ip))
+                        .clone()
+                })
+                .collect(),
+        )
+    }
+
     fn stack(&self, id: u32) -> Option<&[usize]> {
         let index = *self.of_id.get(id.checked_sub(1)? as usize)?;
         Some(&self.stacks[index as usize])
@@ -120,6 +147,38 @@ fn resolve(ip: usize) -> Vec<(String, u32)> {
     backtrace::resolve(ip as *mut std::ffi::c_void, |symbol| {
         if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
             frames.push((file.to_string_lossy().into_owned(), line));
+        }
+    });
+    frames
+}
+
+/// At most this many frames of an instruction's origin go into its debug info.
+const MAX_FRAMES: usize = 8;
+
+/// Of `frames` (an origin, innermost first), those a debugger shows as the instruction's
+/// callers: the code that asked for it, up to the outermost rust-lms frame (the definition that
+/// ran it), without rust-lms, std and `backtrace` frames; the [`MAX_FRAMES`] innermost.
+fn debugger_frames(frames: Vec<Frame>) -> Vec<Frame> {
+    let outermost = (frames.iter())
+        .rposition(|frame| frame.file.contains("/rust-lms/src/"))
+        .unwrap_or(frames.len());
+    (frames.into_iter().take(outermost))
+        .filter(|frame| !is_internal(&frame.file))
+        .take(MAX_FRAMES)
+        .collect()
+}
+
+/// `ip`'s frames with their function names (no hash): several when calls were inlined,
+/// innermost first.
+fn resolve_named(ip: usize) -> Vec<Frame> {
+    let mut frames = Vec::new();
+    backtrace::resolve(ip as *mut std::ffi::c_void, |symbol| {
+        if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
+            let name = symbol
+                .name()
+                .map_or_else(|| "?".into(), |name| format!("{name:#}"));
+            let file = file.to_string_lossy().into_owned();
+            frames.push(Frame { name, file, line });
         }
     });
     frames
@@ -589,6 +648,43 @@ b1(v1: i64):
 
     fn at(file: &str, line: u32) -> Option<(String, u32)> {
         Some((file.to_string(), line))
+    }
+
+    #[test]
+    fn a_debugger_sees_the_innermost_frames_of_the_code_that_asked() {
+        let frame = |name: &str, file: &str| super::Frame {
+            name: name.into(),
+            file: file.into(),
+            line: 1,
+        };
+        let mut frames = vec![
+            frame("push", "/w/rust-lms/src/func.rs"),
+            frame("adjacency", "/w/db4/src/graph.rs"),
+            frame("for_each", "/w/rust-lms/src/iter/flat_map.rs"),
+        ];
+        frames.extend((0..10).map(|i| frame(&format!("gen{i}"), "/w/db4/src/codegen.rs")));
+        frames.extend([
+            frame("fun6", "/w/rust-lms/src/func.rs"),
+            frame("session_compile", "/w/db4/src/session.rs"),
+            frame("main", "/rustc/abc/library/std/src/rt.rs"),
+        ]);
+        let names: Vec<_> = (super::debugger_frames(frames).into_iter())
+            .map(|frame| frame.name)
+            .collect();
+        // rust-lms frames dropped, nothing past `fun6`, the 8 innermost kept.
+        assert_eq!(
+            names,
+            [
+                "adjacency",
+                "gen0",
+                "gen1",
+                "gen2",
+                "gen3",
+                "gen4",
+                "gen5",
+                "gen6"
+            ]
+        );
     }
 
     #[test]

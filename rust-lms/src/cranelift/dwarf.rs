@@ -8,10 +8,12 @@ use std::path::Path;
 
 use gimli::constants::*;
 use gimli::write::{
-    Address, AttributeValue, Dwarf, EndianVec, Expression, LineProgram, LineString, Unit,
+    Address, AttributeValue, Dwarf, EndianVec, Expression, FileId, LineProgram, LineString, Unit,
+    UnitEntryId,
 };
 use gimli::{Encoding, Format, LineEncoding, NativeEndian, SectionId};
 
+use crate::cranelift::source::Frame;
 use crate::func::CodeMap;
 
 /// Each non-empty DWARF section, by its id.
@@ -19,7 +21,12 @@ type Sections = Vec<(SectionId, Vec<u8>)>;
 
 /// An ELF image of `function` for a debugger: a `.text` with no bytes at the function's
 /// address, its symbol, and its DWARF (see [`build`]). `None` on a target ELF has no name for.
-pub(crate) fn image(dir: &Path, function: &CodeMap, lines: &[(u32, u32)]) -> Option<Vec<u8>> {
+pub(crate) fn image(
+    dir: &Path,
+    function: &CodeMap,
+    lines: &[(u32, u32)],
+    chains: &HashMap<u32, Vec<Frame>>,
+) -> Option<Vec<u8>> {
     use object::write::{Object, Symbol, SymbolSection};
     use object::{Architecture, BinaryFormat, Endianness, SectionKind, SymbolFlags, SymbolKind};
     let architecture = match std::env::consts::ARCH {
@@ -49,7 +56,7 @@ pub(crate) fn image(dir: &Path, function: &CodeMap, lines: &[(u32, u32)]) -> Opt
         section: SymbolSection::Section(text),
         flags: SymbolFlags::None,
     });
-    for (id, data) in build(dir, function, lines) {
+    for (id, data) in build(dir, function, lines, chains) {
         let section = elf.add_section(Vec::new(), id.name().into(), SectionKind::Debug);
         elf.append_section_data(section, &data, 1);
     }
@@ -78,70 +85,25 @@ fn set_text_address(image: &mut [u8], address: u64) {
 }
 
 /// The DWARF for `function`, its text at `<dir>/<name>.ir` (`lines`: its ids and their lines in
-/// the text). Code no instruction asked for, and gaps, are at line 1, the function's header.
-fn build(dir: &Path, function: &CodeMap, lines: &[(u32, u32)]) -> Sections {
+/// the text). Two units over the same code: the first at each id's innermost Rust origin
+/// (`chains`), the rest of its origin and its `.ir` line as inlined callers; the second at the
+/// `.ir` lines, so a debugger can break on either. Code no instruction asked for, and gaps, are
+/// at line 1, the function's header.
+fn build(
+    dir: &Path,
+    function: &CodeMap,
+    lines: &[(u32, u32)],
+    chains: &HashMap<u32, Vec<Frame>>,
+) -> Sections {
     let encoding = Encoding {
         format: Format::Dwarf32,
         version: 4,
         address_size: size_of::<usize>() as u8,
     };
-    let string = |s: &str| s.as_bytes().to_vec();
-    let dir = string(&dir.to_string_lossy());
+    let dir = dir.to_string_lossy().as_bytes().to_vec();
     let mut dwarf = Dwarf::default();
-    let file = string(&format!("{}.ir", function.name));
-    let mut program = LineProgram::new(
-        encoding,
-        LineEncoding::default(),
-        LineString::String(dir.clone()),
-        None,
-        LineString::String(file.clone()),
-        None,
-    );
-    let file_id = program.add_file(
-        LineString::String(file.clone()),
-        program.default_directory(),
-        None,
-    );
-    let line_of: HashMap<u32, u32> = lines.iter().copied().collect();
-    let start = Address::Constant(function.address as u64);
-    program.begin_sequence(Some(start));
-    let row = |program: &mut LineProgram, offset: u32, line: u32| {
-        let row = program.row();
-        (row.address_offset, row.line, row.file) = (offset.into(), line.into(), file_id);
-        program.generate_row();
-    };
-    let mut end = 0;
-    for (range, id) in &function.ranges {
-        if range.start > end {
-            row(&mut program, end, 1);
-        }
-        let line = id.and_then(|id| line_of.get(&id).copied()).unwrap_or(1);
-        row(&mut program, range.start, line);
-        end = range.end;
-    }
-    program.end_sequence(function.size.into());
-
-    let unit = dwarf.units.add(Unit::new(encoding, program));
-    let unit = dwarf.units.get_mut(unit);
-    let root = unit.root();
-    let cu = unit.get_mut(root);
-    cu.set(DW_AT_producer, AttributeValue::String(string("rust-lms")));
-    cu.set(DW_AT_language, AttributeValue::Language(DW_LANG_C99));
-    cu.set(DW_AT_name, AttributeValue::String(file));
-    cu.set(DW_AT_comp_dir, AttributeValue::String(dir.clone()));
-    cu.set(DW_AT_low_pc, AttributeValue::Address(start));
-    cu.set(DW_AT_high_pc, AttributeValue::Udata(function.size.into()));
-    let subprogram = unit.add(root, DW_TAG_subprogram);
-    let subprogram = unit.get_mut(subprogram);
-    let mut frame_base = Expression::new();
-    frame_base.op(DW_OP_call_frame_cfa);
-    subprogram.set(DW_AT_name, AttributeValue::String(string(&function.name)));
-    subprogram.set(DW_AT_external, AttributeValue::Flag(true));
-    subprogram.set(DW_AT_decl_file, AttributeValue::FileIndex(Some(file_id)));
-    subprogram.set(DW_AT_decl_line, AttributeValue::Udata(1));
-    subprogram.set(DW_AT_low_pc, AttributeValue::Address(start));
-    subprogram.set(DW_AT_high_pc, AttributeValue::Udata(function.size.into()));
-    subprogram.set(DW_AT_frame_base, AttributeValue::Exprloc(frame_base));
+    add_unit(&mut dwarf, encoding, &dir, function, lines, chains);
+    add_unit(&mut dwarf, encoding, &dir, function, lines, &HashMap::new());
     let mut sections = gimli::write::Sections::new(EndianVec::new(NativeEndian));
     dwarf.write(&mut sections).expect("DWARF of in-memory code");
     let mut out = Vec::new();
@@ -154,6 +116,115 @@ fn build(dir: &Path, function: &CodeMap, lines: &[(u32, u32)]) -> Sections {
         })
         .expect("collecting sections");
     out
+}
+
+/// One unit of [`build`]: each id's code at its innermost frame in `chains`, else at its line.
+fn add_unit(
+    dwarf: &mut Dwarf,
+    encoding: Encoding,
+    dir: &[u8],
+    function: &CodeMap,
+    lines: &[(u32, u32)],
+    chains: &HashMap<u32, Vec<Frame>>,
+) {
+    let string = |s: &str| s.as_bytes().to_vec();
+    let file = string(&format!("{}.ir", function.name));
+    let mut program = LineProgram::new(
+        encoding,
+        LineEncoding::default(),
+        LineString::String(dir.to_vec()),
+        None,
+        LineString::String(file.clone()),
+        None,
+    );
+    let directory = program.default_directory();
+    let ir = program.add_file(LineString::String(file.clone()), directory, None);
+    let mut files: HashMap<&str, FileId> = HashMap::new();
+    for frame in chains.values().flatten() {
+        files.entry(&frame.file).or_insert_with(|| {
+            program.add_file(LineString::String(string(&frame.file)), directory, None)
+        });
+    }
+    let line_of: HashMap<u32, u32> = lines.iter().copied().collect();
+    let innermost = |id: Option<u32>| match id.and_then(|id| chains.get(&id)?.first()) {
+        Some(frame) => (files[frame.file.as_str()], frame.line),
+        None => (ir, id.and_then(|id| line_of.get(&id).copied()).unwrap_or(1)),
+    };
+    let start = Address::Constant(function.address as u64);
+    program.begin_sequence(Some(start));
+    let row = |program: &mut LineProgram, offset: u32, (file, line): (FileId, u32)| {
+        let row = program.row();
+        (row.address_offset, row.line, row.file) = (offset.into(), line.into(), file);
+        program.generate_row();
+    };
+    let mut end = 0;
+    for (range, id) in &function.ranges {
+        if range.start > end {
+            row(&mut program, end, (ir, 1));
+        }
+        row(&mut program, range.start, innermost(*id));
+        end = range.end;
+    }
+    program.end_sequence(function.size.into());
+
+    let unit = dwarf.units.add(Unit::new(encoding, program));
+    let unit = dwarf.units.get_mut(unit);
+    let root = unit.root();
+    let cu = unit.get_mut(root);
+    cu.set(DW_AT_producer, AttributeValue::String(string("rust-lms")));
+    cu.set(DW_AT_language, AttributeValue::Language(DW_LANG_C99));
+    cu.set(DW_AT_name, AttributeValue::String(file));
+    cu.set(DW_AT_comp_dir, AttributeValue::String(dir.to_vec()));
+    cu.set(DW_AT_low_pc, AttributeValue::Address(start));
+    cu.set(DW_AT_high_pc, AttributeValue::Udata(function.size.into()));
+    // One abstract subprogram per Rust function in the chains, for the inlined frames' names.
+    let mut abstract_of: HashMap<&str, UnitEntryId> = HashMap::new();
+    for frame in chains.values().flatten() {
+        abstract_of.entry(&frame.name).or_insert_with(|| {
+            let entry = unit.add(root, DW_TAG_subprogram);
+            let entry_ref = unit.get_mut(entry);
+            entry_ref.set(DW_AT_name, AttributeValue::String(string(&frame.name)));
+            entry_ref.set(DW_AT_inline, AttributeValue::Inline(DW_INL_inlined));
+            entry
+        });
+    }
+    let subprogram = unit.add(root, DW_TAG_subprogram);
+    let subprogram_ref = unit.get_mut(subprogram);
+    let mut frame_base = Expression::new();
+    frame_base.op(DW_OP_call_frame_cfa);
+    subprogram_ref.set(DW_AT_name, AttributeValue::String(string(&function.name)));
+    subprogram_ref.set(DW_AT_external, AttributeValue::Flag(true));
+    subprogram_ref.set(DW_AT_decl_file, AttributeValue::FileIndex(Some(ir)));
+    subprogram_ref.set(DW_AT_decl_line, AttributeValue::Udata(1));
+    subprogram_ref.set(DW_AT_low_pc, AttributeValue::Address(start));
+    subprogram_ref.set(DW_AT_high_pc, AttributeValue::Udata(function.size.into()));
+    subprogram_ref.set(DW_AT_frame_base, AttributeValue::Exprloc(frame_base));
+    // Each id's chain, outermost first, called from the id's `.ir` line, then each frame
+    // from the line of the frame outside it.
+    for (range, id) in &function.ranges {
+        let Some((id, chain)) = id.and_then(|id| Some((id, chains.get(&id)?))) else {
+            continue;
+        };
+        let line = line_of.get(&id).copied().unwrap_or(1);
+        let (mut parent, mut call) = (subprogram, (ir, line));
+        for frame in chain.iter().rev() {
+            let entry = unit.add(parent, DW_TAG_inlined_subroutine);
+            let entry_ref = unit.get_mut(entry);
+            let low = Address::Constant((function.address + range.start as usize) as u64);
+            entry_ref.set(
+                DW_AT_abstract_origin,
+                AttributeValue::UnitRef(abstract_of[frame.name.as_str()]),
+            );
+            entry_ref.set(DW_AT_low_pc, AttributeValue::Address(low));
+            entry_ref.set(
+                DW_AT_high_pc,
+                AttributeValue::Udata((range.end - range.start).into()),
+            );
+            entry_ref.set(DW_AT_call_file, AttributeValue::FileIndex(Some(call.0)));
+            entry_ref.set(DW_AT_call_line, AttributeValue::Udata(call.1.into()));
+            (parent, call) = (entry, (files[frame.file.as_str()], frame.line));
+        }
+    }
 }
 
 #[cfg(test)]
@@ -185,7 +256,9 @@ mod tests {
         images
     }
 
-    /// `address`'s file and line, from the line tables in the ELF `image`.
+    type Read<'a> = gimli::Dwarf<EndianSlice<'a, NativeEndian>>;
+
+    /// `address`'s file and line, from the first line table in the ELF `image` that has it.
     fn line_at(image: &[u8], address: u64) -> Option<(String, u64)> {
         let elf = ElfFile64::<object::Endianness>::parse(image).unwrap();
         let dwarf = gimli::Dwarf::load(|id| {
@@ -195,6 +268,12 @@ mod tests {
             Ok::<_, gimli::Error>(EndianSlice::new(data, NativeEndian))
         })
         .unwrap();
+        lines_at(&dwarf, address).into_iter().next()
+    }
+
+    /// `address`'s file and line in each unit's line table that has it, in unit order.
+    fn lines_at(dwarf: &Read, address: u64) -> Vec<(String, u64)> {
+        let mut lines = Vec::new();
         let mut units = dwarf.units();
         while let Some(header) = units.next().unwrap() {
             let unit = dwarf.unit(header).unwrap();
@@ -204,8 +283,8 @@ mod tests {
             let mut found = None;
             while let Some((header, row)) = rows.next_row().unwrap() {
                 if row.end_sequence() {
-                    if row.address() > address && found.is_some() {
-                        return found;
+                    if row.address() > address {
+                        lines.extend(found.take());
                     }
                     found = None;
                 } else if row.address() <= address {
@@ -216,7 +295,116 @@ mod tests {
                 }
             }
         }
-        None
+        lines
+    }
+
+    /// The first unit's inlined frames at `address`, outermost first: each one's function,
+    /// and the file and line it is called from.
+    fn inlined_at(dwarf: &Read, address: u64) -> Vec<(String, String, u64)> {
+        use gimli::AttributeValue;
+        let header = dwarf.units().next().unwrap().unwrap();
+        let unit = dwarf.unit(header).unwrap();
+        let program = unit.line_program.clone().unwrap();
+        let string = |value| {
+            dwarf
+                .attr_string(&unit, value)
+                .unwrap()
+                .to_string_lossy()
+                .into_owned()
+        };
+        let mut frames = Vec::new();
+        let mut entries = unit.entries();
+        while let Some(entry) = entries.next_dfs().unwrap() {
+            if entry.tag() != gimli::DW_TAG_inlined_subroutine {
+                continue;
+            }
+            let (Some(AttributeValue::Addr(low)), Some(AttributeValue::Udata(len))) = (
+                entry.attr_value(gimli::DW_AT_low_pc),
+                entry.attr_value(gimli::DW_AT_high_pc),
+            ) else {
+                panic!("an inlined frame without its code");
+            };
+            if !(low..low + len).contains(&address) {
+                continue;
+            }
+            let Some(AttributeValue::UnitRef(origin)) =
+                entry.attr_value(gimli::DW_AT_abstract_origin)
+            else {
+                panic!("an inlined frame without its function");
+            };
+            let name = unit
+                .entry(origin)
+                .unwrap()
+                .attr_value(gimli::DW_AT_name)
+                .unwrap();
+            let Some(AttributeValue::FileIndex(file)) = entry.attr_value(gimli::DW_AT_call_file)
+            else {
+                panic!("an inlined frame without its call site");
+            };
+            let file = program.header().file(file).unwrap().path_name();
+            let Some(AttributeValue::Udata(line)) = entry.attr_value(gimli::DW_AT_call_line) else {
+                panic!("an inlined frame without its call line");
+            };
+            frames.push((string(name), string(file), line));
+        }
+        frames
+    }
+
+    #[test]
+    fn rust_frames_are_inlined_into_the_ir_line_and_the_ir_has_its_own_unit() {
+        use crate::cranelift::source::Frame;
+        use crate::func::CodeMap;
+        // Id 1 asked for by `inner` (inner.rs:10), called from `outer` (outer.rs:20); id 2
+        // with no frames; the first 4 bytes asked for by nothing.
+        let function = CodeMap {
+            name: "k".into(),
+            address: 0x1000,
+            size: 16,
+            ranges: vec![(0..4, None), (4..8, Some(1)), (8..16, Some(2))],
+        };
+        let frame = |name: &str, file: &str, line| Frame {
+            name: name.into(),
+            file: file.into(),
+            line,
+        };
+        let chains = std::collections::HashMap::from([(
+            1,
+            vec![
+                frame("inner", "/src/inner.rs", 10),
+                frame("outer", "/src/outer.rs", 20),
+            ],
+        )]);
+        let sections = super::build(
+            std::path::Path::new("/tmp/k"),
+            &function,
+            &[(1, 3), (2, 4)],
+            &chains,
+        );
+        let dwarf = gimli::Dwarf::load(|id| {
+            let data = (sections.iter()).find(|(section, _)| *section == id);
+            Ok::<_, gimli::Error>(EndianSlice::new(
+                data.map_or(&[][..], |(_, d)| d),
+                NativeEndian,
+            ))
+        })
+        .unwrap();
+        let at = |file: &str, line| (file.to_string(), line);
+        // Unit 1 at the innermost Rust line, unit 2 at the `.ir` line.
+        assert_eq!(
+            lines_at(&dwarf, 0x1004),
+            [at("/src/inner.rs", 10), at("k.ir", 3)]
+        );
+        assert_eq!(
+            inlined_at(&dwarf, 0x1004),
+            [
+                ("outer".into(), "k.ir".into(), 3),
+                ("inner".into(), "/src/outer.rs".into(), 20)
+            ]
+        );
+        // No frames: at its `.ir` line in both, nothing inlined; no id: the header.
+        assert_eq!(lines_at(&dwarf, 0x1008), [at("k.ir", 4), at("k.ir", 4)]);
+        assert!(inlined_at(&dwarf, 0x1008).is_empty());
+        assert_eq!(lines_at(&dwarf, 0x1000), [at("k.ir", 1), at("k.ir", 1)]);
     }
 
     fn count_to_n() -> Compiled<crate::func::FunType1<i64, i64>> {
