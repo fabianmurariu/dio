@@ -983,7 +983,11 @@ impl Compiler {
             (source_dir.as_deref()).map_or_else(Vec::new, |dir| {
                 (code.iter().zip(&lines))
                     .filter_map(|(function, lines)| {
-                        crate::cranelift::dwarf::image(dir, function, lines)
+                        let chains = (function.ranges.iter())
+                            .filter_map(|(_, id)| *id)
+                            .filter_map(|id| Some((id, ids.as_mut()?.chain(id))))
+                            .collect();
+                        crate::cranelift::dwarf::image(dir, function, lines, &chains)
                     })
                     .map(crate::cranelift::jit_debug::register)
                     .collect()
