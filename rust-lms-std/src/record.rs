@@ -123,6 +123,22 @@ impl RecordLayout {
     }
 }
 
+impl RecordLayout {
+    /// A read-only [`RecordRef`] over a record pointer: what a reader of a record it
+    /// does not own takes.
+    ///
+    /// # Safety
+    ///
+    /// `ptr` must identify a live, initialized record allocated with this layout, unchanged
+    /// for every use of the returned handle.
+    pub unsafe fn wrap_ref(&self, ptr: Var<SPtr<u8>>) -> RecordRef {
+        RecordRef {
+            layout_id: self.id,
+            ptr,
+        }
+    }
+}
+
 impl Default for RecordLayout {
     fn default() -> Self {
         Self::new()
@@ -208,5 +224,28 @@ impl DynamicRecord {
             field_layout, self.layout_id,
             "FieldId (field #{field_index}) is from a different RecordLayout than this record",
         );
+    }
+}
+
+/// A read-only [`DynamicRecord`]: the same typed, layout-bound field reads over a
+/// `*const u8`, and no writes.
+#[derive(Clone, Copy)]
+pub struct RecordRef {
+    layout_id: u32,
+    ptr: Var<SPtr<u8>>,
+}
+
+impl RecordRef {
+    /// Load field `field` (its type is inferred from the token).
+    pub fn get<T: StagedType + CopyType + 'static>(&self, ctx: &Ctx, field: FieldId<T>) -> Var<T> {
+        assert_eq!(
+            field.layout, self.layout_id,
+            "FieldId (field #{}) is from a different RecordLayout than this record",
+            field.index
+        );
+        // SAFETY: `RecordRef`'s construction contract keeps the record live, while the
+        // branded field token proves the offset (within the record) and the type.
+        let at = unsafe { ptr_offset(self.ptr, Const::<i64>::new(field.offset as i64)) };
+        ctx.bind(unsafe { load(ptr_cast::<T, u8, _>(at)) })
     }
 }
