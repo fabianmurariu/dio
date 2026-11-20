@@ -420,6 +420,10 @@ pub trait Backend {
     fn udiv(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn srem(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn urem(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    /// The high half of the full-width product, the operands signed.
+    fn smulhi(&mut self, a: ValueId, b: ValueId) -> ValueId;
+    /// The high half of the full-width product, the operands unsigned.
+    fn umulhi(&mut self, a: ValueId, b: ValueId) -> ValueId;
     // float arithmetic
     fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId;
     fn fsub(&mut self, a: ValueId, b: ValueId) -> ValueId;
@@ -641,6 +645,8 @@ impl<'c> CompilationContext<'c> {
     checked_binary_op!(udiv, integer_binary);
     checked_binary_op!(srem, integer_binary);
     checked_binary_op!(urem, integer_binary);
+    checked_binary_op!(smulhi, integer_binary);
+    checked_binary_op!(umulhi, integer_binary);
 
     checked_binary_op!(fadd, float_binary);
     checked_binary_op!(fsub, float_binary);

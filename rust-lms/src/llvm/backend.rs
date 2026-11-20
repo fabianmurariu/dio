@@ -132,6 +132,14 @@ pub struct MlirBackend<'c> {
 }
 
 impl<'c> MlirBackend<'c> {
+    /// Bits `w..2w` of `a * b`, both already widened to 128 bits from `ty`, `w` bits wide.
+    fn high_half(&mut self, ty: ScalarType, a: ValueId, b: ValueId) -> ValueId {
+        let product = self.imul(a, b);
+        let width = self.iconst(ScalarType::I128, i64::from(ty.bit_width()));
+        let high = self.ushr(product, width);
+        self.ireduce(ty, high)
+    }
+
     /// Begin a function body whose entry block takes `param_types`. The parameters are
     /// interned as the first `ValueId`s, reachable via [`MlirBackend::param`]. Codegen
     /// starts in body block 0.
@@ -475,6 +483,24 @@ impl<'c> Backend for MlirBackend<'c> {
         let ty = a.scalar_type();
         let (a, b) = (self.get(a), self.get(b));
         self.emit_value(arith::remui(a, b, self.location), ty)
+    }
+    // The product of the operands widened to 128 bits, shifted down by their width: LLVM
+    // folds it into one high-half multiply (`umulh` / `smulh`, `mul` on x86-64).
+    fn smulhi(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let (a, b) = (
+            self.sextend(ScalarType::I128, a),
+            self.sextend(ScalarType::I128, b),
+        );
+        self.high_half(ty, a, b)
+    }
+    fn umulhi(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        let ty = a.scalar_type();
+        let (a, b) = (
+            self.uextend(ScalarType::I128, a),
+            self.uextend(ScalarType::I128, b),
+        );
+        self.high_half(ty, a, b)
     }
 
     // ---- float arithmetic ----

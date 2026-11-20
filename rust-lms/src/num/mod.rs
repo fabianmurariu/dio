@@ -14,12 +14,12 @@ mod traits;
 
 pub use ops::{
     Add, BitAnd, BitOp, BitOpKind, BitOr, BitXor, Bitcast, Div, Eq, FloatPromote, Ge, Gt, IntCast,
-    IntToFloat, Le, Lt, Mul, Ne, PackI128, Rem, Select, Shl, Shr, Sub,
+    IntToFloat, Le, Lt, Mul, MulHigh, Ne, PackI128, Rem, Select, Shl, Shr, Sub,
 };
 pub use traits::{Bits, FloatNum, Int, IntNum, Num, Ordered};
 
 pub use ops::{
     add, bitand, bitcast, bitor, bitxor, count_ones, div, eq, float_promote, ge, gt, i128_hi,
-    i128_lo, int_cast, int_to_float, le, leading_zeros, lt, max, min, mul, ne, pack_i128, rem,
-    select, shl, shr, sub, swap_bytes, trailing_zeros,
+    i128_lo, int_cast, int_to_float, le, leading_zeros, lt, max, min, mul, mul_high, ne, pack_i128,
+    rem, select, shl, shr, sub, swap_bytes, trailing_zeros,
 };

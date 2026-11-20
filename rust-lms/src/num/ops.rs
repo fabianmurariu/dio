@@ -79,6 +79,33 @@ where
     }
 }
 
+/// The high half of a multiplication: the bits above the type's width of the full
+/// product, by the type's signedness (Rust's `widening_mul`, its second half).
+#[derive(Clone)]
+pub struct MulHigh<L, R> {
+    left: L,
+    right: R,
+}
+
+unsafe impl<L, R, T> Staged for MulHigh<L, R>
+where
+    L: Staged<Out = T>,
+    R: Staged<Out = T>,
+    T: IntNum,
+{
+    type Out = T;
+
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let lv = self.left.codegen(ctx).leaf();
+        let rv = self.right.codegen(ctx).leaf();
+        Value::scalar(if T::SIGNED {
+            ctx.smulhi(lv, rv)
+        } else {
+            ctx.umulhi(lv, rv)
+        })
+    }
+}
+
 /// Division operation.
 #[derive(Clone)]
 pub struct Div<L, R> {
@@ -637,6 +664,20 @@ where
     R: IntoStaged<T>,
 {
     Mul {
+        left: left.into_staged(),
+        right: right.into_staged(),
+    }
+}
+
+/// Build the high half of a staged multiplication: `((left as 2W) * (right as 2W)) >> W`
+/// for a `W`-bit integer type, signed or unsigned as the type is.
+pub fn mul_high<T, L, R>(left: L, right: R) -> MulHigh<L::Staged, R::Staged>
+where
+    T: IntNum,
+    L: IntoStaged<T>,
+    R: IntoStaged<T>,
+{
+    MulHigh {
         left: left.into_staged(),
         right: right.into_staged(),
     }
@@ -1225,6 +1266,9 @@ impl_num_ops_for!([L, R] Mul<L, R>);
 impl_rem_op_for!([L, R] Mul<L, R>);
 impl_bit_ops_for!([L, R] Mul<L, R>);
 
+impl_num_ops_for!([L, R] MulHigh<L, R>);
+impl_rem_op_for!([L, R] MulHigh<L, R>);
+impl_bit_ops_for!([L, R] MulHigh<L, R>);
 impl_num_ops_for!([L, R] Div<L, R>);
 impl_rem_op_for!([L, R] Div<L, R>);
 impl_bit_ops_for!([L, R] Div<L, R>);

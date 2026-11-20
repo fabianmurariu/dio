@@ -181,3 +181,32 @@ fn inline_key_orders_as_the_bytes() {
         }
     });
 }
+
+/// `mul_high` of every pair of samples against the high half of Rust's widened product, at
+/// every width with arithmetic, signed and unsigned.
+#[test]
+fn mul_high_is_the_widened_products_high_half() {
+    fn check<T>(host: impl Fn(T, T) -> T)
+    where
+        T: IntNum + Truncate + Copy + std::fmt::LowerHex + PartialEq + std::fmt::Debug,
+        T: for<'call> RuntimeParam<Arg<'call> = T> + for<'call> RuntimeResult<Output<'call> = T>,
+        T: StagedType<RuntimeValue = T>,
+    {
+        for_each_backend(|mut compiler| {
+            let f = compiler.fun2("hi", |_ctx, a: Var<T>, b: Var<T>| mul_high(a, b));
+            let compiled = compiler.compile(f).expect("compile");
+            let hi = compiled.as_fn();
+            for a in samples_of::<T>() {
+                for b in samples_of::<T>() {
+                    assert_eq!(hi.call(a, b), host(a, b), "mul_high({a:#x}, {b:#x})");
+                }
+            }
+        });
+    }
+    check::<u8>(|a, b| ((a as u16 * b as u16) >> 8) as u8);
+    check::<u16>(|a, b| ((a as u32 * b as u32) >> 16) as u16);
+    check::<u32>(|a, b| ((a as u64 * b as u64) >> 32) as u32);
+    check::<i32>(|a, b| ((a as i64 * b as i64) >> 32) as i32);
+    check::<u64>(|a, b| ((a as u128 * b as u128) >> 64) as u64);
+    check::<i64>(|a, b| ((a as i128 * b as i128) >> 64) as i64);
+}

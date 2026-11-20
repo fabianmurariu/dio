@@ -10,14 +10,23 @@
 //! - [`RecordLayout`] / [`FieldId`] / [`DynamicRecord`] — a record whose *field set*
 //!   is chosen at query-compile time but whose every field *access* stays typed.
 //!   Reads/writes take a typed, layout-bound token; the raw `*mut u8` never surfaces.
+//! - [`ChainedTable`] / [`StagedTable`] / [`EntryLayout`] — a hash table that generated
+//!   code probes, inserts into and iterates itself; the host only adds chunks of entries
+//!   and doubles the directory. Keys are hashed with [`hash`]'s folded multiply.
 //! - [`ChunkedIterFns`] / [`ChunkedIter`] — Rust iterators driven from staged code a
 //!   chunk at a time through a stack-frame slot per nesting level: one extern call
 //!   per list of up to [`CHUNK`] items.
 
 pub mod chunked;
+pub mod hash;
 pub mod record;
 pub mod svec;
+pub mod table;
 
 pub use chunked::{CHUNK, ChunkStart, ChunkStartRef, ChunkedIter, ChunkedIterFns, ChunkedIterKind};
 pub use record::{DynamicRecord, FieldId, RecordLayout, RecordRef};
 pub use svec::{HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern, svec_grow};
+pub use table::{
+    CHUNK_ENTRIES, ChainedTable, ChainedTableMakeRoomExtern, EntryLayout, StagedTable, TableRef,
+    chained_table_make_room,
+};

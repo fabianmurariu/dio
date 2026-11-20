@@ -122,8 +122,8 @@ pub mod prelude {
             BitAnd, BitOp, BitOpKind, BitOr, BitXor, Bitcast, Bits, FloatNum, FloatPromote, Ge,
             Int, IntCast, IntNum, IntToFloat, Le, Ne, Num, Ordered, Shl, Shr, add, bitand, bitcast,
             bitor, bitxor, count_ones, div, eq, float_promote, ge, gt, i128_hi, i128_lo, int_cast,
-            int_to_float, le, leading_zeros, lt, max, min, mul, ne, pack_i128, rem, select, shl,
-            shr, sub, swap_bytes, trailing_zeros,
+            int_to_float, le, leading_zeros, lt, max, min, mul, mul_high, ne, pack_i128, rem,
+            select, shl, shr, sub, swap_bytes, trailing_zeros,
         },
         opaque::Opaque,
         option::{
@@ -132,7 +132,10 @@ pub mod prelude {
             match_opt_mut_ref, match_opt_ref, opt_mut_ref_none, opt_mut_ref_some, opt_ref_none,
             opt_ref_some, unwrap_or,
         },
-        pool::{ByteLiterals, BytesPool},
+        pool::{
+            ByteLiterals, BytesPool, BytesPoolNewBlockExtern, PoolRef, StagedPool,
+            bytes_pool_new_block,
+        },
         refer::{
             ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
             PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,

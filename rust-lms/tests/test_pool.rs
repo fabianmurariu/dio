@@ -44,3 +44,74 @@ fn a_kernel_reads_values_from_every_block() {
         assert_eq!(compiled.as_fn().call(&views), (hits << 32) | bytes);
     });
 }
+
+/// A kernel copies values into a pool: short ones stay their views, long ones land in its
+/// blocks after what the host appended, a full block starts the next (through the extern),
+/// and a value larger than a block gets one of its own.
+#[test]
+fn a_kernel_copies_values_into_a_pool() {
+    let mut source = BytesPool::new();
+    let values: Vec<Vec<u8>> = (0..30)
+        .map(|i| match i % 3 {
+            0 => format!("s{i}").into_bytes(),
+            1 => format!("a long value, number {i:02}").into_bytes(),
+            _ => vec![b'x' + (i % 3) as u8; 70 + i],
+        })
+        .collect();
+    let views: Vec<u128> = values.iter().map(|v| source.append(v)).collect();
+    let table = source.buffers().as_ptr();
+
+    for_each_backend(|mut compiler| {
+        let mut pool = BytesPool::with_block_size(64);
+        let host = pool.append(b"appended by the host first");
+        let new_block = compiler.extern_fn::<BytesPoolNewBlockExtern>();
+        let fun = compiler.fun3(
+            "copy_in",
+            move |ctx,
+                  rows: Var<SRef<Slice<u128>>>,
+                  mut out: Var<SRefMut<Slice<u128>>>,
+                  pool: Var<SRef<PoolRef>>| {
+                // SAFETY: the test's pool, in place and appended to by this call only.
+                let pool = unsafe { StagedPool::new(ctx, pool, new_block) };
+                let table = ctx.bind(const_ptr::<ByteBuffer>(table));
+                range(0u64, rows.len()).for_each(ctx, move |ctx, i| {
+                    // SAFETY: `i` is a row of both slices; the views are `source`'s.
+                    unsafe {
+                        let s =
+                            ctx.bind(ByteView::<Binary>::from_parts(rows.get_unchecked(i), table));
+                        let view = pool.copy_in(ctx, s);
+                        ctx.emit(out.reborrow().set_unchecked(i, view));
+                    }
+                });
+                Const::<()>::new(())
+            },
+        );
+        let compiled = compiler.compile(fun).expect("compile");
+        let mut copied = vec![0u128; views.len()];
+        let pool_ref = pool.pool_ref();
+        compiled.as_fn().call(&views, &mut copied, &pool_ref);
+        pool.settle();
+
+        // SAFETY (each read): views of `pool`, alive and not appended to while read.
+        let read = |view: u128| unsafe { pool.value(view).bytes().to_vec() };
+        assert_eq!(read(host), b"appended by the host first");
+        for (value, &view) in values.iter().zip(&copied) {
+            assert_eq!(&read(view), value);
+        }
+        let short = values.iter().zip(&copied).filter(|(v, _)| v.len() <= 12);
+        for ((_, &view), &original) in short.zip(views.iter().step_by(3)) {
+            assert_eq!(view, original, "a short value is its own view");
+        }
+        // SAFETY: the pool is settled and alive.
+        let sizes: Vec<usize> = pool
+            .buffers()
+            .iter()
+            .map(|b| unsafe { b.as_slice() }.len())
+            .collect();
+        assert!(sizes.len() > 10, "full blocks started new ones: {sizes:?}");
+        assert!(
+            sizes.iter().any(|&n| n > 64),
+            "an oversized value got its own block"
+        );
+    });
+}

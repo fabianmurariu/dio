@@ -136,6 +136,18 @@ impl<'a, 'b> Backend for CraneliftBackend<'a, 'b> {
             a.scalar_type(),
         )
     }
+    fn smulhi(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        ValueId::from_cranelift(
+            self.builder.ins().smulhi(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
+    }
+    fn umulhi(&mut self, a: ValueId, b: ValueId) -> ValueId {
+        ValueId::from_cranelift(
+            self.builder.ins().umulhi(a.cranelift(), b.cranelift()),
+            a.scalar_type(),
+        )
+    }
     // ---- float arithmetic ----
     fn fadd(&mut self, a: ValueId, b: ValueId) -> ValueId {
         ValueId::from_cranelift(
