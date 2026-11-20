@@ -6,7 +6,7 @@ use std::collections::HashMap;
 
 use rust_lms::prelude::*;
 use rust_lms_std::{
-    ChainedTable, ChainedTableMakeRoomExtern, EntryLayout, FieldId, StagedTable, TableRef,
+    ChainedTable, ChainedTableInsertExtern, EntryLayout, FieldId, StagedTable, TableRef,
     hash::{SEED, hash_word},
 };
 
@@ -33,7 +33,7 @@ impl Counts {
     fn run(&self, keys: &[u64], hash: fn(&Ctx, Var<u64>) -> Var<u64>) -> Vec<(u64, u64)> {
         let mut result = None;
         for_each_backend(|mut compiler| {
-            let make_room = compiler.extern_fn::<ChainedTableMakeRoomExtern>();
+            let insert = compiler.extern_fn::<ChainedTableInsertExtern>();
             let Counts { layout, key, count } = *self;
             let kernel = compiler.fun3(
                 "count",
@@ -42,7 +42,7 @@ impl Counts {
                       mut out: Var<SRefMut<Slice<u64>>>,
                       table: Var<SRef<TableRef>>| {
                     // SAFETY: the test's table, built from `layout`, used by this call only.
-                    let table = unsafe { StagedTable::new(ctx, &layout, table, make_room) };
+                    let table = unsafe { StagedTable::new(ctx, &layout, table, insert) };
                     keys.staged_iter().for_each(ctx, |ctx, k| {
                         let e = table.find_or_insert(
                             ctx,
@@ -137,12 +137,12 @@ fn high_hash_bits_split_chains_when_the_directory_doubles() {
 fn an_entry_held_across_growth_stays_put() {
     let Counts { layout, key, count } = Counts::new();
     for_each_backend(|mut compiler| {
-        let make_room = compiler.extern_fn::<ChainedTableMakeRoomExtern>();
+        let insert = compiler.extern_fn::<ChainedTableInsertExtern>();
         let kernel = compiler.fun2(
             "hold",
             move |ctx, n: Var<u64>, table: Var<SRef<TableRef>>| {
                 // SAFETY: the test's table, built from `layout`, used by this call only.
-                let table = unsafe { StagedTable::new(ctx, &layout, table, make_room) };
+                let table = unsafe { StagedTable::new(ctx, &layout, table, insert) };
                 let insert = |ctx: &Ctx, k: Var<u64>| {
                     table.find_or_insert(
                         ctx,
@@ -191,7 +191,7 @@ fn string_keys_live_in_a_pool() {
     let text = layout.field::<u128>();
     let count = layout.field::<u64>();
     for_each_backend(|mut compiler| {
-        let make_room = compiler.extern_fn::<ChainedTableMakeRoomExtern>();
+        let insert = compiler.extern_fn::<ChainedTableInsertExtern>();
         let new_block = compiler.extern_fn::<BytesPoolNewBlockExtern>();
         let kernel = compiler.fun4(
             "words",
@@ -203,7 +203,7 @@ fn string_keys_live_in_a_pool() {
                 // SAFETY: the test's table and pool, each used by this call only.
                 let (table, pool) = unsafe {
                     (
-                        StagedTable::new(ctx, &layout, table, make_room),
+                        StagedTable::new(ctx, &layout, table, insert),
                         StagedPool::new(ctx, pool, new_block),
                     )
                 };

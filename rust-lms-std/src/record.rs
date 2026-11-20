@@ -6,8 +6,9 @@
 //! cannot be a Rust `struct`. So we describe it with a [`RecordLayout`] built by
 //! reserving fields one at a time. Each reservation returns a **typed token**
 //! ([`FieldId<T>`]) — the *set* of fields is dynamic, but each field carries its
-//! Rust type. Reads/writes go through a [`DynamicRecord`], which hides the raw
-//! `*mut u8` entirely and takes tokens: passing the wrong type is a *compile*
+//! Rust type. A record's address is a pointer to [`Record`], never to bare bytes.
+//! Reads/writes go through a [`DynamicRecord`], which hides that pointer and takes
+//! tokens: passing the wrong type is a *compile*
 //! error, and a token from a different layout panics at stage 0 (a layout brand),
 //! so a mis-addressed field can never reach an unchecked pointer op.
 //!
@@ -20,6 +21,23 @@ use std::{
 };
 
 use rust_lms::prelude::*;
+
+/// The pointee of a record's address: the bytes of one record of some
+/// [`RecordLayout`]. A record is `SMutPtr<Record>` / `SPtr<Record>` in generated code
+/// and `*mut Record` on the host, so its address cannot be mixed up with one of any
+/// other bytes; its fields are reached only through [`DynamicRecord`] / [`RecordRef`].
+pub struct Record {
+    _bytes: [u8; 0],
+}
+
+// SAFETY: a pointee only, like `Opaque`: generated code never loads a `Record` itself.
+unsafe impl StagedType for Record {
+    type RuntimeValue = Record;
+
+    fn scalar_type() -> rust_lms::types::ScalarType {
+        rust_lms::types::ScalarType::Ptr
+    }
+}
 
 /// Round `offset` up to a multiple of `align` (a power of two).
 fn align_up(offset: usize, align: usize) -> usize {
@@ -98,12 +116,14 @@ impl RecordLayout {
     /// every use of the returned handle.
     pub unsafe fn record<B>(&self, ctx: &Ctx, base: B, index: Var<u64>) -> DynamicRecord
     where
-        B: Staged<Out = SMutPtr<u8>> + 'static,
+        B: Staged<Out = SMutPtr<Record>> + 'static,
     {
         let stride = self.stride() as i64;
         let byte_off = ctx.bind(mul(int_cast::<i64, u64, _>(index), stride));
         // SAFETY: required by this method's contract.
-        let ptr = ctx.bind(unsafe { ptr_offset_mut(base, byte_off) });
+        let ptr = ctx.bind(ptr_cast_mut::<Record, u8, _>(unsafe {
+            ptr_offset_mut(ptr_cast_mut::<u8, Record, _>(base), byte_off)
+        }));
         // SAFETY: the computed pointer inherits the contract above.
         unsafe { self.wrap(ptr) }
     }
@@ -115,7 +135,7 @@ impl RecordLayout {
     ///
     /// `ptr` must identify a live, initialized record allocated with this
     /// layout and remain writable for every use of the returned handle.
-    pub unsafe fn wrap(&self, ptr: Var<SMutPtr<u8>>) -> DynamicRecord {
+    pub unsafe fn wrap(&self, ptr: Var<SMutPtr<Record>>) -> DynamicRecord {
         DynamicRecord {
             layout_id: self.id,
             ptr,
@@ -131,7 +151,7 @@ impl RecordLayout {
     ///
     /// `ptr` must identify a live, initialized record allocated with this layout, unchanged
     /// for every use of the returned handle.
-    pub unsafe fn wrap_ref(&self, ptr: Var<SPtr<u8>>) -> RecordRef {
+    pub unsafe fn wrap_ref(&self, ptr: Var<SPtr<Record>>) -> RecordRef {
         RecordRef {
             layout_id: self.id,
             ptr,
@@ -180,14 +200,14 @@ impl<T> FieldId<T> {
     }
 }
 
-/// A typed view over one packed record's bytes — the `*mut u8` never surfaces.
+/// A typed view over one packed record — its address never surfaces.
 /// Field access takes a [`FieldId<T>`]: the type is checked at *compile* time, and
 /// the layout brand at stage 0, so you can neither read a field at the wrong type
 /// nor address a field the record doesn't have. `Copy` — a brand + a pointer `Var`.
 #[derive(Clone, Copy)]
 pub struct DynamicRecord {
     layout_id: u32,
-    ptr: Var<SMutPtr<u8>>,
+    ptr: Var<SMutPtr<Record>>,
 }
 
 impl DynamicRecord {
@@ -214,7 +234,10 @@ impl DynamicRecord {
     ) -> impl Staged<Out = SMutPtr<T>> + use<T> {
         // SAFETY: all `FieldId` offsets lie within the branded record layout.
         ptr_cast_mut::<T, u8, _>(unsafe {
-            ptr_offset_mut(self.ptr, Const::<i64>::new(offset as i64))
+            ptr_offset_mut(
+                ptr_cast_mut::<u8, Record, _>(self.ptr),
+                Const::<i64>::new(offset as i64),
+            )
         })
     }
 
@@ -228,11 +251,11 @@ impl DynamicRecord {
 }
 
 /// A read-only [`DynamicRecord`]: the same typed, layout-bound field reads over a
-/// `*const u8`, and no writes.
+/// `*const Record`, and no writes.
 #[derive(Clone, Copy)]
 pub struct RecordRef {
     layout_id: u32,
-    ptr: Var<SPtr<u8>>,
+    ptr: Var<SPtr<Record>>,
 }
 
 impl RecordRef {
@@ -245,7 +268,12 @@ impl RecordRef {
         );
         // SAFETY: `RecordRef`'s construction contract keeps the record live, while the
         // branded field token proves the offset (within the record) and the type.
-        let at = unsafe { ptr_offset(self.ptr, Const::<i64>::new(field.offset as i64)) };
+        let at = unsafe {
+            ptr_offset(
+                ptr_cast::<u8, Record, _>(self.ptr),
+                Const::<i64>::new(field.offset as i64),
+            )
+        };
         ctx.bind(unsafe { load(ptr_cast::<T, u8, _>(at)) })
     }
 }

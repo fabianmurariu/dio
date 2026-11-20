@@ -17,7 +17,12 @@ smallbox = { workspace = true }
 [dev-dependencies]
 criterion = { workspace = true }
 rand = { workspace = true }
+hashbrown = { workspace = true }
 
 [[bench]]
 name = "graph_iter"
+harness = false
+
+[[bench]]
+name = "group_count"
 harness = false
