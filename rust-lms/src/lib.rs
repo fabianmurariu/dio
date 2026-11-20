@@ -133,8 +133,8 @@ pub mod prelude {
             opt_ref_some, unwrap_or,
         },
         pool::{
-            ByteLiterals, BytesPool, BytesPoolNewBlockExtern, PoolRef, StagedPool,
-            bytes_pool_new_block,
+            ByteLiterals, BytesPool, BytesPoolNewBlockExtern, PoolReader, PoolRef, StagedPool,
+            StagedPoolReader, bytes_pool_new_block,
         },
         refer::{
             ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,

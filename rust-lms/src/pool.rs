@@ -40,7 +40,7 @@ use crate::{
     opaque::Opaque,
     refer::{SMutPtr, SPtr, SRef, copy_bytes, ptr_offset_mut, ref_as_ptr, store},
     staged::{Const, Var},
-    r#struct::{field_addr, load_field_unchecked},
+    r#struct::{CopyFieldAccess, field_addr, load_field_unchecked},
 };
 
 /// Default block size (64 KiB): large enough that most values share a block, small
@@ -209,6 +209,51 @@ impl BytesPool {
     pub unsafe fn value(&self, view: u128) -> RawByteView {
         // SAFETY: forwarded from this function's contract.
         unsafe { RawByteView::new(view, self.buffers.as_ptr()) }
+    }
+}
+
+impl BytesPool {
+    /// What a kernel takes to read this pool's values through [`StagedPoolReader`]: the
+    /// table its views index. Valid while the pool lives and nothing appends to it, so
+    /// [`settle`](Self::settle) after a kernel's appends first.
+    pub fn reader(&self) -> PoolReader {
+        PoolReader {
+            buffers: self.buffers.as_ptr(),
+        }
+    }
+}
+
+/// What a kernel takes to read a pool nothing appends to. Made by [`BytesPool::reader`].
+#[repr(C)]
+#[derive(Clone, Copy, StagedType)]
+pub struct PoolReader {
+    #[staged(SPtr<ByteBuffer>)]
+    buffers: *const ByteBuffer,
+}
+
+/// A kernel's read-only handle on a pool nothing appends to.
+#[derive(Clone, Copy)]
+pub struct StagedPoolReader {
+    buffers: Var<SPtr<ByteBuffer>>,
+}
+
+impl StagedPoolReader {
+    /// The pool `reader` reads.
+    pub fn new(ctx: &Ctx, reader: Var<PoolReader>) -> Self {
+        Self {
+            buffers: ctx.bind(reader.get(PoolReaderType::buffers())),
+        }
+    }
+
+    /// `view`, one of this pool's, as a value of kind `K`.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `view` came from this pool, the pool is alive and nothing appends to
+    /// it, and for `Utf8` the value's bytes are UTF-8.
+    pub unsafe fn value<K: ByteKind>(&self, ctx: &Ctx, view: Var<u128>) -> Var<ByteView<K>> {
+        // SAFETY: the caller's; the table is the pool's (`BytesPool::reader`).
+        ctx.bind(unsafe { ByteView::from_parts(view, self.buffers) })
     }
 }
 
