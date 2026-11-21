@@ -964,6 +964,38 @@ where
     PtrIsNull { ptr }
 }
 
+/// Whether two pointers of one type hold the same address. See [`ptr_eq`].
+#[derive(Clone, Copy)]
+pub struct PtrEq<A, B> {
+    a: A,
+    b: B,
+}
+
+unsafe impl<A, B> Staged for PtrEq<A, B>
+where
+    A: Staged,
+    A::Out: RawPointer,
+    B: Staged<Out = A::Out>,
+{
+    type Out = bool;
+    fn codegen(&self, ctx: &mut CompilationContext) -> Value {
+        let a = self.a.codegen(ctx);
+        let b = self.b.codegen(ctx);
+        Value::scalar(ctx.icmp(IntCmp::Eq, a.leaf(), b.leaf()))
+    }
+}
+
+/// Whether `a` and `b`, pointers of one type, hold the same address: an identity test,
+/// as Rust's `std::ptr::eq`. Nothing is read through either.
+pub fn ptr_eq<A, B>(a: A, b: B) -> PtrEq<A, B>
+where
+    A: Staged,
+    A::Out: RawPointer,
+    B: Staged<Out = A::Out>,
+{
+    PtrEq { a, b }
+}
+
 #[cfg(test)]
 mod tests {
     use super::*;

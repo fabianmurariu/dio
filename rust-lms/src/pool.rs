@@ -18,9 +18,12 @@
 //! **Stable addresses.** A block is allocated at its full size and never reallocated,
 //! and a value never spans two blocks (one that does not fit starts a new block; one
 //! larger than the block size gets a block of its own), so the bytes a view names stay
-//! where they are for the pool's lifetime. The *table* grows by one entry per block: its
-//! address is stable only while nothing is appended. A plan appends its literals while it
-//! is compiled, then bakes the table's address into the kernel.
+//! where they are for the pool's lifetime. The *table* grows by one entry per block, and
+//! moves when it outgrows its allocation; the table it moves from is kept, not freed, so a
+//! value read through any table the pool has had stays readable for the pool's lifetime.
+//! A kernel that appends reads the current table from the head each time
+//! ([`StagedPool::value`]); a plan appends its literals while it is compiled, then bakes
+//! the table's address into the kernel.
 //!
 //! **Lifetime contract (not expressed in the type system; it cannot cross the JIT
 //! boundary):** the pool outlives every kernel call that reads its views; a kernel that
@@ -34,11 +37,12 @@ use rust_lms_derive::{StagedType, extern_fn};
 use crate::{
     byte_view::relocate_view,
     byte_view::{ByteBuffer, ByteKind, ByteView, MAX_INLINE_LEN, RawByteView, make_view},
+    control::not,
     ctx::Ctx,
     ffi::{ExternRef, call_extern2_unchecked},
     num::{add, gt, int_cast},
     opaque::Opaque,
-    refer::{SMutPtr, SPtr, SRef, copy_bytes, ptr_offset_mut, ref_as_ptr, store},
+    refer::{SMutPtr, SPtr, SRef, copy_bytes, ptr_eq, ptr_offset_mut, ref_as_ptr, store},
     staged::{Const, Var},
     r#struct::{CopyFieldAccess, field_addr, load_field_unchecked},
 };
@@ -60,6 +64,9 @@ pub struct BytesPool {
     ///
     /// [`settle`]: Self::settle
     buffers: Vec<ByteBuffer>,
+    /// The tables `buffers` moved out of, each a prefix of it: views read through them
+    /// stay readable.
+    retired: Vec<Vec<ByteBuffer>>,
     /// The capacity of a new block (a larger value gets a block of its own size).
     block_size: usize,
     /// Where the next value goes, boxed so the address a kernel holds stays put.
@@ -110,6 +117,7 @@ impl BytesPool {
         BytesPool {
             blocks: Vec::new(),
             buffers: Vec::new(),
+            retired: Vec::new(),
             block_size: block_size.max(1),
             // No block yet: the first long value starts one.
             head: Box::new(PoolHead {
@@ -173,6 +181,13 @@ impl BytesPool {
         );
         let buf_idx = u32::try_from(self.blocks.len()).expect("fewer than 2^32 blocks");
         let mut block = Vec::with_capacity(size);
+        if self.buffers.len() == self.buffers.capacity() {
+            // Move to a larger table, keeping the old one: views may index it.
+            let mut grown = Vec::with_capacity((2 * self.buffers.len()).max(4));
+            grown.extend_from_slice(&self.buffers);
+            self.retired
+                .push(std::mem::replace(&mut self.buffers, grown));
+        }
         self.buffers.push(ByteBuffer::new(&block));
         // The box stays where it is: kernels hold its address.
         *self.head = PoolHead {
@@ -324,9 +339,10 @@ impl StagedPool {
         }
     }
 
-    /// `value`'s view in this pool: a short value's view as it is; a long value's bytes
-    /// copied to the end of the current block (a new block when they do not fit) and its
-    /// view pointed there. [`BytesPool::append`]'s steps, staged.
+    /// `value`'s view in this pool: a short value's view as it is, and so is a long value
+    /// read through this pool's current table ([`value`](Self::value)), already here; any
+    /// other long value's bytes copied to the end of the current block (a new block when
+    /// they do not fit) and its view pointed there. [`BytesPool::append`]'s steps, staged.
     pub fn copy_in<K: ByteKind>(&self, ctx: &Ctx, value: Var<ByteView<K>>) -> Var<u128> {
         let view = ctx.var(value.view());
         let n = ctx.bind(value.byte_len());
@@ -336,33 +352,40 @@ impl StagedPool {
             new_block,
         } = *self;
         // SAFETY (every head load below): a field of the live head (`new`'s contract).
-        ctx.if_then(gt(n, MAX_INLINE_LEN as u64), move |ctx| {
-            let used = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::used()) });
-            let cap = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::cap()) });
-            ctx.if_then(gt(add(used, n), cap), move |ctx| {
-                // SAFETY: `owner` is the pool of this head, alive and appended to by this
-                // kernel only (`new`'s contract); the extern rewrites the head, read again
-                // below.
-                ctx.emit(unsafe { call_extern2_unchecked(new_block, owner, n) });
+        let table = move |ctx: &Ctx| {
+            ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::buffers()) })
+        };
+        let long = ctx.bind(gt(n, MAX_INLINE_LEN as u64));
+        ctx.if_then(long, move |ctx| {
+            ctx.if_then(not(ptr_eq(value.buffers(), table(ctx))), move |ctx| {
+                let used = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::used()) });
+                let cap = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::cap()) });
+                ctx.if_then(gt(add(used, n), cap), move |ctx| {
+                    // SAFETY: `owner` is the pool of this head, alive and appended to by this
+                    // kernel only (`new`'s contract); the extern rewrites the head, read again
+                    // below.
+                    ctx.emit(unsafe { call_extern2_unchecked(new_block, owner, n) });
+                });
+                let cur = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::cur()) });
+                let used = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::used()) });
+                let buf_idx =
+                    ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::buf_idx()) });
+                // SAFETY: `used + n <= cap` after the check, so the bytes land in the block's
+                // spare capacity; the value is long (this branch), so `long_data` is its bytes,
+                // alive for the call (`ByteView`'s contract) and apart from the pool's.
+                unsafe {
+                    let dst = ctx.bind(ptr_offset_mut(cur, int_cast::<i64, u64, _>(used)));
+                    copy_bytes(ctx, dst, value.long_data(ctx), n);
+                }
+                let relocated = relocate_view(
+                    view,
+                    int_cast::<u32, u64, _>(buf_idx),
+                    int_cast::<u32, u64, _>(used),
+                );
+                ctx.store(view, relocated);
+                // SAFETY: `used` is a writable field of the live head.
+                ctx.emit(unsafe { store(field_addr(head, PoolHeadType::used()), add(used, n)) });
             });
-            let cur = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::cur()) });
-            let used = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::used()) });
-            let buf_idx = ctx.bind(unsafe { load_field_unchecked(head, PoolHeadType::buf_idx()) });
-            // SAFETY: `used + n <= cap` after the check, so the bytes land in the block's
-            // spare capacity; the value is long (this branch), so `long_data` is its bytes,
-            // alive for the call (`ByteView`'s contract) and apart from the pool's.
-            unsafe {
-                let dst = ctx.bind(ptr_offset_mut(cur, int_cast::<i64, u64, _>(used)));
-                copy_bytes(ctx, dst, value.long_data(ctx), n);
-            }
-            let relocated = relocate_view(
-                view,
-                int_cast::<u32, u64, _>(buf_idx),
-                int_cast::<u32, u64, _>(used),
-            );
-            ctx.store(view, relocated);
-            // SAFETY: `used` is a writable field of the live head.
-            ctx.emit(unsafe { store(field_addr(head, PoolHeadType::used()), add(used, n)) });
         });
         view
     }

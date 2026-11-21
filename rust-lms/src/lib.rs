@@ -138,11 +138,11 @@ pub mod prelude {
         },
         refer::{
             ArrayIndex, ConstPtr, IntoMutRef, LoadMutPtr, LoadMutRef, LoadPtr, LoadRef, PtrCast,
-            PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut, Store,
-            StoreRef, WriteUnaligned, array_index, const_mut_ptr, const_ptr, copy_bytes, load,
-            load_mut, load_ref, load_ref_mut, ptr_as_const, ptr_as_ref, ptr_cast, ptr_cast_mut,
-            ptr_is_null, ptr_offset, ptr_offset_mut, read_unaligned, ref_as_const, ref_as_ptr,
-            ref_mut_as_ptr, store, store_ref, write_unaligned,
+            PtrEq, PtrIsNull, PtrOffset, PtrOffsetMut, ReadUnaligned, SMutPtr, SPtr, SRef, SRefMut,
+            Store, StoreRef, WriteUnaligned, array_index, const_mut_ptr, const_ptr, copy_bytes,
+            load, load_mut, load_ref, load_ref_mut, ptr_as_const, ptr_as_ref, ptr_cast,
+            ptr_cast_mut, ptr_eq, ptr_is_null, ptr_offset, ptr_offset_mut, read_unaligned,
+            ref_as_const, ref_as_ptr, ref_mut_as_ptr, store, store_ref, write_unaligned,
         },
         slice::{
             AsRawSlice, AsSlice, BorrowedSlice, BorrowedSliceMut, MutSliceType, RawSliceOps,

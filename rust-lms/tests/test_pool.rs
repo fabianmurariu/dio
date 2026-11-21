@@ -120,3 +120,81 @@ fn a_kernel_copies_values_into_a_pool() {
         );
     });
 }
+
+/// A value read through the pool's current table is already in the pool: copying it in
+/// keeps its view and appends nothing. A value read before the table moved (the pool
+/// outgrew it, starting blocks) is still readable through the old one, and is copied.
+#[test]
+fn a_value_already_in_the_pool_keeps_its_view() {
+    let mut source = BytesPool::new();
+    let values: Vec<Vec<u8>> = (0..20)
+        .map(|i| format!("a value longer than a view, {i:02}").into_bytes())
+        .collect();
+    let views: Vec<u128> = values.iter().map(|v| source.append(v)).collect();
+    let table = source.buffers().as_ptr();
+
+    for_each_backend(|mut compiler| {
+        // A block per value: the table outgrows its first allocation.
+        let mut pool = BytesPool::with_block_size(32);
+        let new_block = compiler.extern_fn::<BytesPoolNewBlockExtern>();
+        let fun = compiler.fun4(
+            "copy_twice",
+            move |ctx,
+                  rows: Var<SRef<Slice<u128>>>,
+                  mut copied: Var<SRefMut<Slice<u128>>>,
+                  mut again: Var<SRefMut<Slice<u128>>>,
+                  pool: Var<SRef<PoolRef>>| {
+                // SAFETY: the test's pool, in place and appended to by this call only.
+                let pool = unsafe { StagedPool::new(ctx, pool, new_block) };
+                let table = ctx.bind(const_ptr::<ByteBuffer>(table));
+                // SAFETY (every read): rows of the slices; `source`'s views and the pool's.
+                let source = |ctx: &Ctx, i: Var<u64>| unsafe {
+                    ctx.bind(ByteView::<Binary>::from_parts(rows.get_unchecked(i), table))
+                };
+                let first = pool.copy_in(ctx, source(ctx, ctx.var(0u64)));
+                let early = unsafe { pool.value::<Binary>(ctx, first) };
+                ctx.emit(unsafe { copied.reborrow().set_unchecked(0u64, first) });
+                range(1u64, rows.len()).for_each(ctx, |ctx, i| unsafe {
+                    let view = pool.copy_in(ctx, source(ctx, i));
+                    ctx.emit(copied.reborrow().set_unchecked(i, view));
+                    let read = pool.value::<Binary>(ctx, view);
+                    ctx.emit(again.reborrow().set_unchecked(i, pool.copy_in(ctx, read)));
+                });
+                ctx.emit(unsafe {
+                    again
+                        .reborrow()
+                        .set_unchecked(0u64, pool.copy_in(ctx, early))
+                });
+                Const::<()>::new(())
+            },
+        );
+        let compiled = compiler.compile(fun).expect("compile");
+        let (mut copied, mut again) = (vec![0u128; views.len()], vec![0u128; views.len()]);
+        let pool_ref = pool.pool_ref();
+        compiled
+            .as_fn()
+            .call(&views, &mut copied, &mut again, &pool_ref);
+        pool.settle();
+
+        assert_eq!(
+            again[1..],
+            copied[1..],
+            "a value already in the pool keeps its view"
+        );
+        assert_ne!(
+            again[0], copied[0],
+            "a value read through a moved table is copied"
+        );
+        // SAFETY (each read): views of `pool`, alive and not appended to while read.
+        let read = |view: u128| unsafe { pool.value(view).bytes().to_vec() };
+        assert_eq!(read(again[0]), values[0]);
+        for (value, &view) in values.iter().zip(&copied) {
+            assert_eq!(&read(view), value);
+        }
+        assert_eq!(
+            pool.buffers().len(),
+            values.len() + 1,
+            "one block per value, and the copy"
+        );
+    });
+}
