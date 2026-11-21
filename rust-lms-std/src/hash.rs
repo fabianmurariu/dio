@@ -9,6 +9,7 @@
 //! ```ignore
 //! let h = hash_word(ctx, SEED, segment_and_pos);
 //! let h = hash_word(ctx, h, t);
+//! let h = hash_bytes(ctx, h, name);   // a string: every byte, then its length
 //! ```
 
 use rust_lms::prelude::*;
@@ -35,4 +36,17 @@ pub fn hash_word(
 ) -> Var<u64> {
     let mixed = ctx.bind(bitxor(hash, word));
     fold_mul(ctx, mixed, SPREAD)
+}
+
+/// `hash` with every byte of `value` mixed in, a word at a time
+/// ([`words`](ByteView::words)), then its length: equal bytes hash alike
+/// wherever they are stored, and a long value's hash covers all of them, not only the
+/// prefix its view holds.
+pub fn hash_bytes<K: ByteKind>(
+    ctx: &Ctx,
+    hash: impl IntoStaged<u64, Staged: 'static>,
+    value: Var<ByteView<K>>,
+) -> Var<u64> {
+    let hash = value.words(ctx).fold(ctx, hash, hash_word);
+    hash_word(ctx, hash, value.byte_len())
 }

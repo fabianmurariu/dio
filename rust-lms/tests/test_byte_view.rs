@@ -305,3 +305,48 @@ fn a_view_is_an_iterator_item() {
         assert_eq!(got, strings().into_iter().max().unwrap());
     });
 }
+
+/// The words `words` yields, on the host: a short value's 12 bytes zero padded, as
+/// two words; a long value's 8 at a time, the last its final 8 bytes.
+fn words(bytes: &[u8]) -> Vec<u64> {
+    let word = |b: &[u8]| u64::from_le_bytes(b.try_into().unwrap());
+    if bytes.len() <= 12 {
+        let mut data = [0u8; 16];
+        data[..bytes.len()].copy_from_slice(bytes);
+        return vec![word(&data[..8]), word(&data[8..])];
+    }
+    let mut out: Vec<u64> = (0..bytes.len() - 8)
+        .step_by(8)
+        .map(|i| word(&bytes[i..i + 8]))
+        .collect();
+    out.push(word(&bytes[bytes.len() - 8..]));
+    out
+}
+
+/// A fold that depends on the order of its words and on every bit of each.
+fn mix(acc: u64, word: u64) -> u64 {
+    (acc ^ word).wrapping_mul(0x9e37_79b9_7f4a_7c15).rotate_left(17)
+}
+
+/// `words` yields the words of a value, wherever its bytes are stored, in order.
+#[test]
+fn words_yields_every_word_in_order() {
+    let values: Vec<&[u8]> = strings().into_iter().chain(BYTES.iter().copied()).collect();
+    for filler in [0, 17] {
+        let (pool, views) = pool_of(&values, filler);
+        for_each_backend(|mut compiler| {
+            let fun = compiler.fun1("fold", move |ctx, s: Var<ByteView<Binary>>| {
+                s.words(ctx).fold(ctx, 7u64, |ctx, acc, word| {
+                    let mixed = ctx.bind((acc ^ word) * 0x9e37_79b9_7f4a_7c15u64);
+                    ctx.bind((mixed << 17u64) | (mixed >> 47u64))
+                })
+            });
+            let compiled = compiler.compile(fun).expect("compile");
+            let fun = compiled.as_fn();
+            for (bytes, &view) in values.iter().zip(&views) {
+                let want = words(bytes).into_iter().fold(7, mix);
+                assert_eq!(fun.call(value(&pool, view)), want, "{:?}", show(bytes));
+            }
+        });
+    }
+}

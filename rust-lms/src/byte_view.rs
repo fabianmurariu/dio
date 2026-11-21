@@ -29,6 +29,7 @@ use rust_lms_derive::{StagedType, extern_fn};
 use crate::{
     ctx::Ctx,
     ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array},
+    iter::{StagedIterator, range, range_step},
     num::{
         bitand, bitor, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr,
         swap_bytes,
@@ -368,6 +369,12 @@ fn word_be(ctx: &Ctx, ptr: Var<SPtr<u8>>, i: Var<u64>) -> Var<u64> {
     }))
 }
 
+/// The word of 8 bytes at `ptr + i`, little-endian, as a view's inline bytes are.
+fn word_le(ctx: &Ctx, ptr: Var<SPtr<u8>>, i: Var<u64>) -> Var<u64> {
+    // SAFETY: callers read words inside the value: `i + 8 <= len`.
+    ctx.bind(unsafe { read_unaligned::<u64, _>(byte_at(ptr, i)) })
+}
+
 /// The byte at `ptr + i`.
 fn byte(ctx: &Ctx, ptr: Var<SPtr<u8>>, i: Var<u64>) -> Var<u8> {
     // SAFETY: callers read bytes inside the value: `i < len`.
@@ -479,6 +486,29 @@ impl<K: ByteKind> Var<ByteView<K>> {
         let (data, len) = (self.data(ctx), ctx.bind(self.byte_len()));
         // SAFETY: `len` bytes at `data`: the value's own (`ByteView::from_parts`).
         ctx.bind(unsafe { slice_from_raw_parts::<u8, _, _>(data, len) })
+    }
+
+    /// Its bytes as little-endian 8-byte words: a short value's 12 data bytes as two
+    /// words, zero padded; a long value's 8 at a time, the last word its final 8 bytes
+    /// (overlapping the word before it when the length is not a multiple of 8). The
+    /// length is not among them; a hash adds it.
+    pub fn words(self, ctx: &Ctx) -> impl StagedIterator<Item = u64> {
+        let view = ctx.bind(self.view());
+        let inline = ctx.bind(self.is_inline());
+        let len = ctx.bind(self.byte_len());
+        let short = range(0u64, select(inline, 2u64, 0u64)).map(move |ctx, k: Var<u64>| {
+            let shift = ctx.bind(int_cast::<u128, u64, _>(k * 64u64 + 32u64));
+            ctx.bind(int_cast::<u64, u128, _>(shr(view, shift)))
+        });
+        // At most one pass, so the data pointer is loaded only for a long value, once.
+        let long = range(0u64, select(inline, 0u64, 1u64)).flat_map(move |ctx, _| {
+            // SAFETY: the value is not inline (one pass only then).
+            let data = unsafe { self.long_data(ctx) };
+            // A long value has more than 8 bytes, so every word read is inside it.
+            range_step(0u64, len, 8u64)
+                .map(move |ctx, i: Var<u64>| word_le(ctx, data, ctx.bind(min(i, len - 8u64))))
+        });
+        short.chain(long)
     }
 
     /// Whether the two hold the same bytes. Both are of one kind:
