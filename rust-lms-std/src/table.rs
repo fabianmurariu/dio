@@ -364,16 +364,6 @@ impl Spilled {
         }
     }
 
-    /// The number of records in partition `p`.
-    pub fn len(&self, p: usize) -> usize {
-        self.partitions[p].len
-    }
-
-    /// Whether no partition has a record.
-    pub fn is_empty(&self) -> bool {
-        self.partitions.iter().all(|records| records.len == 0)
-    }
-
     /// What a kernel takes to read each partition's records through [`StagedRun`], by
     /// partition. Valid while `self` lives and is not changed.
     pub fn runs(&mut self) -> Vec<SpilledRun> {
@@ -701,9 +691,7 @@ mod tests {
                 .filter(|&h| h >> 58 == p as u64)
                 .collect();
             assert_eq!(got, &want, "partition {p}");
-            assert_eq!(spilled.len(p), want.len());
         }
-        assert!(!spilled.is_empty());
     }
 
     /// After a spill the table is as new: no entry in any chain, its chunks reused, and
