@@ -27,6 +27,6 @@ pub use chunked::{CHUNK, ChunkStart, ChunkStartRef, ChunkedIter, ChunkedIterFns,
 pub use record::{DynamicRecord, FieldId, Record, RecordLayout, RecordRef};
 pub use svec::{HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern, svec_grow};
 pub use table::{
-    CHUNK_ENTRIES, ChainedTable, ChainedTableInsertExtern, EntryLayout, StagedTable, TableRef,
-    chained_table_insert,
+    CHUNK_ENTRIES, ChainedTable, ChainedTableInsertExtern, EntryLayout, PARTITIONS, Spilled,
+    SpilledRun, StagedRun, StagedTable, TableRef, chained_table_insert,
 };

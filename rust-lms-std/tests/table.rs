@@ -6,7 +6,8 @@ use std::collections::HashMap;
 
 use rust_lms::prelude::*;
 use rust_lms_std::{
-    ChainedTable, ChainedTableInsertExtern, EntryLayout, FieldId, StagedTable, TableRef,
+    ChainedTable, ChainedTableInsertExtern, EntryLayout, FieldId, PARTITIONS, SpilledRun,
+    StagedRun, StagedTable, TableRef,
     hash::{SEED, hash_word},
 };
 
@@ -88,6 +89,111 @@ impl Counts {
     }
 }
 
+impl Counts {
+    /// Counts `keys` in a table of at most `cap` entries, which spills when full and once
+    /// more at the end; then merges every partition's records in a second kernel, a
+    /// table per partition, summing the counts of a key spilled more than once. Each
+    /// key with its count, by key.
+    fn spill_and_merge(&self, keys: &[u64], cap: usize) -> Vec<(u64, u64)> {
+        let mut result = None;
+        for_each_backend(|mut compiler| {
+            let insert = compiler.extern_fn::<ChainedTableInsertExtern>();
+            let Counts { layout, key, count } = *self;
+            let count_kernel = compiler.fun2(
+                "count",
+                move |ctx, keys: Var<SRef<Slice<u64>>>, table: Var<SRef<TableRef>>| {
+                    // SAFETY: the test's table, built from `layout`, used by this call only.
+                    let table = unsafe { StagedTable::new(ctx, &layout, table, insert) };
+                    keys.staged_iter().for_each(ctx, |ctx, k| {
+                        let e = table.find_or_insert(
+                            ctx,
+                            mixed(ctx, k),
+                            |ctx, e| ctx.bind(eq(e.get(ctx, key), k)),
+                            |ctx, e| {
+                                e.set(ctx, key, k);
+                                e.set(ctx, count, ctx.var(0u64));
+                            },
+                        );
+                        e.set(ctx, count, ctx.bind(add(e.get(ctx, count), 1u64)));
+                    });
+                    table.len(ctx)
+                },
+            );
+            let count_kernel = compiler.compile(count_kernel).expect("compile");
+            let mut table = ChainedTable::with_cap(&layout, cap);
+            let len = count_kernel.as_fn().call(keys, &table.table_ref());
+            assert_eq!(len as usize, table.len());
+            assert!(table.len() <= cap, "a table holds at most its cap");
+            let mut spilled = table.into_spilled();
+            let runs = spilled.runs();
+            assert_eq!(runs.len(), PARTITIONS);
+            // The merge on every backend, whichever counted.
+            for_each_backend(|mut compiler| {
+                let insert = compiler.extern_fn::<ChainedTableInsertExtern>();
+                let merge_kernel = compiler.fun3(
+                    "merge",
+                    move |ctx,
+                          run: Var<SpilledRun>,
+                          mut out: Var<SRefMut<Slice<u64>>>,
+                          table: Var<SRef<TableRef>>| {
+                        // SAFETY: the test's table and run, both of `layout`, used by this
+                        // call only; the run's `Spilled` outlives the call.
+                        let (table, run) = unsafe {
+                            (
+                                StagedTable::new(ctx, &layout, table, insert),
+                                StagedRun::new(ctx, &layout, run),
+                            )
+                        };
+                        run.for_each(ctx, |ctx, record, hash| {
+                            let k = record.get(ctx, key);
+                            let e = table.find_or_insert(
+                                ctx,
+                                hash,
+                                |ctx, e| ctx.bind(eq(e.get(ctx, key), k)),
+                                |ctx, e| {
+                                    e.set(ctx, key, k);
+                                    e.set(ctx, count, ctx.var(0u64));
+                                },
+                            );
+                            let merged = add(e.get(ctx, count), record.get(ctx, count));
+                            e.set(ctx, count, ctx.bind(merged));
+                        });
+                        let at = ctx.var(0u64);
+                        table.for_each(ctx, |ctx, e| {
+                            // SAFETY: `out` has two slots per distinct key.
+                            unsafe {
+                                ctx.emit(out.reborrow().set_unchecked(at, e.get(ctx, key)));
+                                ctx.emit(
+                                    out.reborrow()
+                                        .set_unchecked(add(at, 1u64), e.get(ctx, count)),
+                                );
+                            }
+                            ctx.store(at, add(at, 2u64));
+                        });
+                        table.len(ctx)
+                    },
+                );
+                let merge_kernel = compiler.compile(merge_kernel).expect("compile");
+                let mut pairs = Vec::new();
+                for run in &runs {
+                    let mut table = ChainedTable::new(&layout);
+                    let mut out = vec![0u64; 2 * run.len()];
+                    let len = merge_kernel
+                        .as_fn()
+                        .call(*run, &mut out, &table.table_ref());
+                    pairs.extend(out[..2 * len as usize].chunks(2).map(|p| (p[0], p[1])));
+                }
+                pairs.sort_unstable();
+                if let Some(previous) = &result {
+                    assert_eq!(&pairs, previous, "the backends agree");
+                }
+                result = Some(pairs);
+            });
+        });
+        result.unwrap()
+    }
+}
+
 /// Rust's answer: each distinct key, in first-seen order, with its count.
 fn expected(keys: &[u64]) -> Vec<(u64, u64)> {
     let mut counts: HashMap<u64, u64> = HashMap::new();
@@ -111,6 +217,18 @@ fn mixed(ctx: &Ctx, k: Var<u64>) -> Var<u64> {
 fn counts_every_key_across_chunks_and_doublings() {
     let keys: Vec<u64> = (0..5000u64).map(|i| (i * 7919) % 700).collect();
     assert_eq!(Counts::new().run(&keys, mixed), expected(&keys));
+}
+
+/// 700 keys over 5000 rows into a table of at most 100: it spills about fifty times,
+/// each key in many of them, and every partition's merge sums its keys' counts back.
+#[test]
+fn a_capped_table_spills_and_its_partitions_merge_back() {
+    let keys: Vec<u64> = (0..5000u64).map(|i| (i * 7919) % 700).collect();
+    let mut want = expected(&keys);
+    want.sort_unstable();
+    for cap in [1, 100, 300, usize::MAX] {
+        assert_eq!(Counts::new().spill_and_merge(&keys, cap), want, "cap {cap}");
+    }
 }
 
 /// Every key has the same hash, so all are one chain: the key equality alone tells them

@@ -23,9 +23,17 @@
 //!
 //! The directory stays ⅛ to ¼ full, so chains are short and a lookup that finds its key
 //! rarely walks past another. Entries never move, so an entry the kernel holds survives
-//! every insert. Every write to the table's structure (`len`, the directory, the chunks)
-//! happens on the host; the kernel only reads [`TableHead`]. `docs/chained_table.md` has
-//! the design and the measurements behind it.
+//! every insert, except into a table with a cap (below). Every write to the table's
+//! structure (`len`, the directory, the chunks) happens on the host; the kernel only reads
+//! [`TableHead`]. `docs/chained_table.md` has the design and the measurements behind it.
+//!
+//! A table made [`with_cap`](ChainedTable::with_cap) **spills** when an insert finds it
+//! holding `cap` entries: the host copies every entry out to one of [`PARTITIONS`]
+//! in-memory partitions, by the top bits of its hash, empties the table and inserts.
+//! [`into_spilled`](ChainedTable::into_spilled) spills what is left and hands the
+//! partitions over ([`Spilled`]); a kernel reads one partition's records back through
+//! [`StagedRun`]. This is HyPer's pre-aggregation (`relational/jit_stage7_m4.md`): the
+//! same key may be spilled more than once, so whoever reads the partitions merges.
 //!
 //! Like a block, the host owns the memory ([`ChainedTable`], one per kernel call) and the
 //! kernel reads its [`TableHead`] through typed fields ([`StagedTable`]), built from the
@@ -67,6 +75,17 @@ const SLOT_MASK: u64 = CHUNK_ENTRIES as u64 - 1;
 /// sizes (`SPARSE · 256 · 2^k`) are all multiples of 256, so it only ever fills at a chunk
 /// boundary, where `insert` already calls `make_room`.
 const SPARSE: usize = 4;
+
+/// The partitions a spilling table sends its entries to: one per value of the hash's
+/// top [`PARTITION_BITS`] bits.
+pub const PARTITIONS: usize = 1 << PARTITION_BITS;
+const PARTITION_BITS: u32 = 6;
+
+/// The partition of an entry of `hash`: its top bits, independent of the low bits a
+/// directory picks a chain by.
+fn partition(hash: u64) -> usize {
+    (hash >> (u64::BITS - PARTITION_BITS)) as usize
+}
 
 /// The layout of a table's entries: the table's `next` and `hash`, then the caller's
 /// fields. One layout serves the staged side and every host table of a kernel.
@@ -132,6 +151,10 @@ pub struct ChainedTable {
     stride: usize,
     next: usize,
     hash: usize,
+    /// The most entries the table holds; an insert into a full table spills it first.
+    cap: usize,
+    /// The entries spilled so far.
+    spilled: Spilled,
     /// Boxed so the address a kernel holds stays put.
     head: Box<TableHead>,
     dir: Vec<*mut Record>,
@@ -143,8 +166,20 @@ pub struct ChainedTable {
 unsafe impl Send for ChainedTable {}
 
 impl ChainedTable {
-    /// An empty table of `layout`'s entries.
+    /// An empty table of `layout`'s entries, which grows without spilling.
     pub fn new(layout: &EntryLayout) -> Self {
+        Self::with_cap(layout, usize::MAX)
+    }
+
+    /// An empty table of `layout`'s entries that holds at most `cap`: an insert into a
+    /// full table first spills every entry, and the table starts again empty. So an
+    /// entry the kernel holds stays valid only until its next insert.
+    ///
+    /// # Panics
+    ///
+    /// If `cap` is 0.
+    pub fn with_cap(layout: &EntryLayout, cap: usize) -> Self {
+        assert!(cap > 0, "a table holds at least one entry");
         let stride = layout.record.stride();
         let chunk = Layout::from_size_align(stride * CHUNK_ENTRIES, layout.record.align())
             .expect("a chunk of entries fits in memory");
@@ -153,6 +188,8 @@ impl ChainedTable {
             stride,
             next: layout.next.offset(),
             hash: layout.hash.offset(),
+            cap,
+            spilled: Spilled::new(layout),
             head: Box::new(TableHead {
                 dir: std::ptr::null_mut(),
                 mask: 0,
@@ -184,10 +221,21 @@ impl ChainedTable {
         self.len() == 0
     }
 
-    /// A new entry of `hash`, linked at the head of its chain. Its other fields are zero.
+    /// Every entry spilled, the table's own included: the table spilled one last time.
+    pub fn into_spilled(mut self) -> Spilled {
+        self.spill();
+        std::mem::replace(&mut self.spilled, Spilled::new(&EntryLayout::new()))
+    }
+
+    /// A new entry of `hash`, linked at the head of its chain, after spilling the table
+    /// if it is full. Its other fields are zero.
     fn insert(&mut self, hash: u64) -> *mut Record {
+        if self.len() == self.cap {
+            self.spill();
+        }
         let len = self.len();
-        if len.is_multiple_of(CHUNK_ENTRIES) {
+        // A spilled table reuses its chunks: only a chunk past them is new.
+        if len.is_multiple_of(CHUNK_ENTRIES) && len / CHUNK_ENTRIES == self.chunks.len() {
             self.make_room();
         }
         let entry = self.entry(len);
@@ -217,6 +265,25 @@ impl ChainedTable {
         }
         self.chunks.push(chunk.cast());
         self.head.chunks = self.chunks.as_ptr();
+    }
+
+    /// Copies every entry to its partition, then empties the table: no entry linked, the
+    /// entries' bytes zeroed for the inserts that reuse them, the chunks and the
+    /// directory's size kept.
+    fn spill(&mut self) {
+        for k in 0..self.len() {
+            let entry = self.entry(k);
+            // SAFETY: entry `k` is below `len`: `stride` initialised bytes, its `hash`
+            // written by `insert`. Then nothing reads them until they are zeroed.
+            unsafe {
+                let hash = Self::field::<u64>(entry, self.hash).read();
+                let bytes = std::slice::from_raw_parts(entry.cast::<u8>(), self.stride);
+                self.spilled.push(partition(hash), bytes);
+                entry.cast::<u8>().write_bytes(0, self.stride);
+            }
+        }
+        self.dir.fill(std::ptr::null_mut());
+        self.head.len = 0;
     }
 
     /// A directory of `size` heads with every entry linked into it, by its stored hash.
@@ -266,6 +333,140 @@ impl Drop for ChainedTable {
             // SAFETY: allocated in `make_room` with this layout, freed once.
             unsafe { dealloc(chunk.cast(), self.chunk) };
         }
+    }
+}
+
+/// The entries spilled from a table, in [`PARTITIONS`] partitions by the top bits of
+/// their hash: each partition the records of its entries, in the table's layout, in the
+/// order they were spilled. The same key may be in a partition more than once.
+pub struct Spilled {
+    stride: usize,
+    partitions: Vec<Records>,
+}
+
+/// Records of one stride, packed: `len` of them in `words`, 16-byte aligned (the most
+/// a field asks).
+#[derive(Default)]
+struct Records {
+    words: Vec<u128>,
+    len: usize,
+}
+
+impl Spilled {
+    fn new(layout: &EntryLayout) -> Self {
+        assert!(
+            layout.record.align() <= align_of::<u128>(),
+            "a record is aligned to at most 16 bytes"
+        );
+        Self {
+            stride: layout.record.stride(),
+            partitions: (0..PARTITIONS).map(|_| Records::default()).collect(),
+        }
+    }
+
+    /// The number of records in partition `p`.
+    pub fn len(&self, p: usize) -> usize {
+        self.partitions[p].len
+    }
+
+    /// Whether no partition has a record.
+    pub fn is_empty(&self) -> bool {
+        self.partitions.iter().all(|records| records.len == 0)
+    }
+
+    /// What a kernel takes to read each partition's records through [`StagedRun`], by
+    /// partition. Valid while `self` lives and is not changed.
+    pub fn runs(&mut self) -> Vec<SpilledRun> {
+        self.partitions
+            .iter_mut()
+            .map(|records| SpilledRun {
+                records: records.words.as_mut_ptr().cast(),
+                len: records.len as u64,
+            })
+            .collect()
+    }
+
+    /// Appends `record`, `stride` bytes, to partition `p`.
+    fn push(&mut self, p: usize, record: &[u8]) {
+        let records = &mut self.partitions[p];
+        let at = records.len * self.stride;
+        let words = (at + self.stride).div_ceil(size_of::<u128>());
+        if records.words.len() < words {
+            // Doubling, so pushes take amortised constant time.
+            let grown = words.max(2 * records.words.len());
+            records.words.resize(grown, 0);
+        }
+        // SAFETY: `words` covers bytes `at..at + stride`, and `record` is `stride` bytes
+        // of another allocation.
+        unsafe {
+            let dst = records.words.as_mut_ptr().cast::<u8>().add(at);
+            std::ptr::copy_nonoverlapping(record.as_ptr(), dst, self.stride);
+        }
+        records.len += 1;
+    }
+}
+
+/// What a kernel takes to read one partition of a [`Spilled`]: its records and how many.
+/// Made by [`Spilled::runs`].
+#[repr(C)]
+#[derive(Clone, Copy, StagedType)]
+pub struct SpilledRun {
+    #[staged(SMutPtr<Record>)]
+    records: *mut Record,
+    #[staged(u64)]
+    len: u64,
+}
+
+// SAFETY: a pointer into a `Spilled`'s partition that only `StagedRun` dereferences, under
+// its contract that the `Spilled` is alive and unchanged; the run itself is plain data.
+unsafe impl Send for SpilledRun {}
+unsafe impl Sync for SpilledRun {}
+
+impl SpilledRun {
+    /// The number of records.
+    pub fn len(&self) -> usize {
+        self.len as usize
+    }
+
+    pub fn is_empty(&self) -> bool {
+        self.len == 0
+    }
+}
+
+/// A kernel's handle on a [`SpilledRun`] of `layout`'s entries.
+pub struct StagedRun<'l> {
+    layout: &'l EntryLayout,
+    records: Var<SMutPtr<Record>>,
+    len: Var<u64>,
+}
+
+impl<'l> StagedRun<'l> {
+    /// The run `run` describes.
+    ///
+    /// # Safety
+    ///
+    /// At execution, `run` is one of [`Spilled::runs`] of a [`Spilled`] of a table built
+    /// from `layout`, alive and unchanged during the call, and nothing else uses its
+    /// records.
+    pub unsafe fn new(ctx: &Ctx, layout: &'l EntryLayout, run: Var<SpilledRun>) -> Self {
+        Self {
+            layout,
+            records: ctx.bind(run.get(SpilledRunType::records())),
+            len: ctx.bind(run.get(SpilledRunType::len())),
+        }
+    }
+
+    /// Calls `f` with each record, in the order spilled, and its hash. The record's
+    /// `next` means nothing here.
+    pub fn for_each(&self, ctx: &Ctx, f: impl FnOnce(&Ctx, DynamicRecord, Var<u64>)) {
+        let layout = self.layout;
+        let records = self.records;
+        range(0u64, self.len).for_each(ctx, move |ctx, k| {
+            // SAFETY: `k < len`, so record `k` is one of the run's (`new`'s contract).
+            let record = unsafe { layout.record.record(ctx, records, k) };
+            let hash = record.get(ctx, layout.hash);
+            f(ctx, record, hash)
+        });
     }
 }
 
@@ -326,6 +527,9 @@ impl<'l> StagedTable<'l> {
     /// `same_key` reads an entry of the same hash. `init` must set every field the caller
     /// reads later (a new entry's fields are zero) and must not use this table: the new
     /// entry is already linked into its chain when `init` runs.
+    ///
+    /// In a table with a cap ([`ChainedTable::with_cap`]), the insert may spill and empty
+    /// the table first, so an entry returned earlier is valid only until this call.
     pub fn find_or_insert(
         &self,
         ctx: &Ctx,
@@ -452,6 +656,101 @@ mod tests {
                 .collect();
             assert_eq!(chain(&table, h), expected, "chain of {h:#x}");
         }
+    }
+
+    /// Each partition's hashes, as the records spilled there hold them.
+    fn partition_hashes(spilled: &mut Spilled) -> Vec<Vec<u64>> {
+        let stride = spilled.stride;
+        spilled
+            .runs()
+            .iter()
+            .map(|run| {
+                (0..run.len())
+                    .map(|k| {
+                        // SAFETY: record `k` of the run, whose hash sits where the
+                        // table's does (`EntryLayout::new`'s second field).
+                        unsafe {
+                            let at = run.records.cast::<u8>().add(k * stride);
+                            ChainedTable::field::<u64>(at.cast(), 8).read()
+                        }
+                    })
+                    .collect()
+            })
+            .collect()
+    }
+
+    /// 1000 inserts into a table of at most 300 spill three times, each time every entry
+    /// to the partition of its hash's top six bits, in insertion order; the last 100
+    /// are spilled by `into_spilled`.
+    #[test]
+    fn a_full_table_spills_every_entry_to_its_partition() {
+        let hashes: Vec<u64> = (0..1000u64)
+            .map(|i| i.wrapping_mul(0x9e37_79b9_7f4a_7c15))
+            .collect();
+        let mut table = ChainedTable::with_cap(&EntryLayout::new(), 300);
+        for &h in &hashes {
+            table.insert(h);
+        }
+        assert_eq!(table.len(), 100);
+        let mut spilled = table.into_spilled();
+        let got = partition_hashes(&mut spilled);
+        for (p, got) in got.iter().enumerate() {
+            let want: Vec<u64> = hashes
+                .iter()
+                .copied()
+                .filter(|&h| h >> 58 == p as u64)
+                .collect();
+            assert_eq!(got, &want, "partition {p}");
+            assert_eq!(spilled.len(p), want.len());
+        }
+        assert!(!spilled.is_empty());
+    }
+
+    /// After a spill the table is as new: no entry in any chain, its chunks reused, and
+    /// a new entry's fields zero, though the entry it reuses had them set.
+    #[test]
+    fn a_spilled_table_starts_again_empty() {
+        let mut layout = EntryLayout::new();
+        let payload = layout.field::<u64>();
+        let mut table = ChainedTable::with_cap(&layout, 300);
+        for h in 0..300u64 {
+            let entry = table.insert(h);
+            // SAFETY: `payload` is a `u64` field of the entry.
+            unsafe { ChainedTable::field::<u64>(entry, payload.offset()).write(!h) };
+        }
+        let (chunks, dir) = (table.chunks.len(), table.dir.len());
+        let first = table.entry(0);
+        assert_eq!(table.insert(7), first, "the first entry is reused");
+        assert_eq!(table.len(), 1);
+        assert_eq!((table.chunks.len(), table.dir.len()), (chunks, dir));
+        assert_eq!(chain(&table, 7), vec![7]);
+        for h in (0..300u64).filter(|&h| h & table.head.mask != 7 & table.head.mask) {
+            assert_eq!(chain(&table, h), vec![], "nothing left in {h}'s chain");
+        }
+        // SAFETY: as above.
+        assert_eq!(
+            unsafe { ChainedTable::field::<u64>(first, payload.offset()).read() },
+            0
+        );
+        assert_eq!(
+            table
+                .into_spilled()
+                .partitions
+                .iter()
+                .map(|r| r.len)
+                .sum::<usize>(),
+            301
+        );
+    }
+
+    /// A table without a cap never spills on its own; `into_spilled` spills it whole.
+    #[test]
+    fn a_table_without_a_cap_spills_only_at_the_end() {
+        let table = filled(0..5000u64);
+        assert_eq!(table.len(), 5000);
+        let mut spilled = table.into_spilled();
+        let got: usize = partition_hashes(&mut spilled).iter().map(Vec::len).sum();
+        assert_eq!(got, 5000);
     }
 
     /// An entry's address is the same before and after the table grows around it.
