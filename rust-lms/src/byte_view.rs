@@ -29,12 +29,14 @@ use rust_lms_derive::{StagedType, extern_fn};
 use crate::{
     ctx::Ctx,
     ffi::{ExternRef, FatSlice, RawSlice, call_extern1, slice_from_raw_parts, stack_array},
-    iter::{StagedIterator, range, range_step},
+    iter::{StagedIterator, range},
     num::{
         bitand, bitor, bitxor, count_ones, eq, ge, gt, int_cast, le, lt, min, ne, select, shl, shr,
         swap_bytes,
     },
-    refer::{SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, read_unaligned, store},
+    refer::{
+        SPtr, const_ptr, ptr_as_const, ptr_cast, ptr_offset, ptr_offset_mut, read_unaligned, store,
+    },
     staged::{CompilationContext, Const, IntoStaged, Staged, Value, Var},
     r#struct::{Field, load_field_unchecked},
     types::{
@@ -405,7 +407,9 @@ fn first_difference(
     i
 }
 
-/// Whether the bytes at `a` and `b` in `start..end` are equal.
+/// Whether the bytes at `a` and `b` in `start..end` are equal: 8 at a time while a word
+/// fits, then the last 8 (overlapping the words before) if there are that many, else one
+/// at a time. Equality needs no byte order, so words are read as they lie.
 fn bytes_eq(
     ctx: &Ctx,
     a: Var<SPtr<u8>>,
@@ -413,7 +417,28 @@ fn bytes_eq(
     start: Var<u64>,
     end: Var<u64>,
 ) -> Var<bool> {
-    ctx.bind(eq(first_difference(ctx, a, b, start, end), end))
+    ctx.join(|ctx, out| {
+        let i = ctx.var(start);
+        ctx.iterate(|ctx, done| {
+            ctx.exit_if(gt(i + 8u64, end), done);
+            let differ = ne(word_le(ctx, a, i), word_le(ctx, b, i));
+            ctx.if_then(differ, |ctx| ctx.goto(out, false));
+            ctx.store(i, i + 8u64);
+        });
+        ctx.if_then(ge(i, end), |ctx| ctx.goto(out, true));
+        ctx.if_then(ge(end - start, 8u64), |ctx| {
+            let tail = ctx.bind(end - 8u64);
+            ctx.goto(out, eq(word_le(ctx, a, tail), word_le(ctx, b, tail)));
+        });
+        ctx.iterate(|ctx, done| {
+            ctx.exit_if(ge(i, end), done);
+            ctx.if_then(ne(byte(ctx, a, i), byte(ctx, b, i)), |ctx| {
+                ctx.goto(out, false)
+            });
+            ctx.store(i, i + 1u64);
+        });
+        true
+    })
 }
 
 impl<K: ByteKind> Var<ByteView<K>> {
@@ -445,14 +470,19 @@ impl<K: ByteKind> Var<ByteView<K>> {
     }
 
     /// The address of the first byte. An inline value's bytes are copied to a stack slot
-    /// of its own, so a value from a register is addressed like one in a buffer.
+    /// of its own, so a value from a register is addressed like one in a buffer. The slot
+    /// is zeroed past the view, so a word read at byte 8 of the data is the last 4 bytes,
+    /// zero padded, as [`words`](Self::words) reads it.
     fn data(self, ctx: &Ctx) -> Var<SPtr<u8>> {
         let view = ctx.bind(self.view());
         ctx.join(|ctx, out| {
             ctx.if_then(self.is_inline(), |ctx| {
-                let slot = ctx.bind(stack_array::<u128>(1));
-                // SAFETY: the slot holds one `u128`.
+                let slot = ctx.bind(stack_array::<u128>(2));
+                // SAFETY: the slot holds two `u128`s.
                 ctx.emit(unsafe { store(slot, view) });
+                ctx.emit(unsafe {
+                    store(ptr_offset_mut(slot, Const::new(1i64)), Const::new(0u128))
+                });
                 let bytes = ptr_cast::<u8, u128, _>(ptr_as_const(slot));
                 // SAFETY: the data starts 4 bytes into the 16-byte slot.
                 ctx.goto(out, unsafe { ptr_offset(bytes, Const::new(4i64)) });
@@ -493,22 +523,17 @@ impl<K: ByteKind> Var<ByteView<K>> {
     /// (overlapping the word before it when the length is not a multiple of 8). The
     /// length is not among them; a hash adds it.
     pub fn words(self, ctx: &Ctx) -> impl StagedIterator<Item = u64> {
-        let view = ctx.bind(self.view());
         let inline = ctx.bind(self.is_inline());
         let len = ctx.bind(self.byte_len());
-        let short = range(0u64, select(inline, 2u64, 0u64)).map(move |ctx, k: Var<u64>| {
-            let shift = ctx.bind(int_cast::<u128, u64, _>(k * 64u64 + 32u64));
-            ctx.bind(int_cast::<u64, u128, _>(shr(view, shift)))
-        });
-        // At most one pass, so the data pointer is loaded only for a long value, once.
-        let long = range(0u64, select(inline, 0u64, 1u64)).flat_map(move |ctx, _| {
-            // SAFETY: the value is not inline (one pass only then).
-            let data = unsafe { self.long_data(ctx) };
-            // A long value has more than 8 bytes, so every word read is inside it.
-            range_step(0u64, len, 8u64)
-                .map(move |ctx, i: Var<u64>| word_le(ctx, data, ctx.bind(min(i, len - 8u64))))
-        });
-        short.chain(long)
+        // Both kinds read the same way, from one loop with no branch: word `k` at byte
+        // `min(8k, last)` of the data. Inline, the data is 20 zero-padded bytes on the
+        // stack, read as two words at 0 and 8. Long, a value has more than 8 bytes, so
+        // the final word, at `len - 8`, ends at its end.
+        let data = self.data(ctx);
+        let last = ctx.bind(select(inline, 8u64, len - 8u64));
+        let n = select(inline, 2u64, (len + 7u64) / 8u64);
+        range(0u64, n)
+            .map(move |ctx, k: Var<u64>| word_le(ctx, data, ctx.bind(min(k * 8u64, last))))
     }
 
     /// Whether the two hold the same bytes. Both are of one kind:
@@ -529,7 +554,8 @@ impl<K: ByteKind> Var<ByteView<K>> {
             ctx.if_then(self.is_inline(), |ctx| ctx.goto(out, eq(a, b)));
             // Both long, of one length: the bytes after the prefix.
             let len = ctx.bind(self.byte_len());
-            let (da, db) = (self.data(ctx), other.data(ctx));
+            // SAFETY: neither is inline: they have one length, and not an inline one.
+            let (da, db) = unsafe { (self.long_data(ctx), other.long_data(ctx)) };
             bytes_eq(ctx, da, db, ctx.var(4u64), len)
         })
     }

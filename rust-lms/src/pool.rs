@@ -331,11 +331,19 @@ impl StagedPool {
     /// At execution, `view` came from this pool (an `append` or a `copy_in`), and for
     /// `Utf8` its bytes are UTF-8.
     pub unsafe fn value<K: ByteKind>(&self, ctx: &Ctx, view: Var<u128>) -> Var<ByteView<K>> {
-        // SAFETY: a field of the live head (`new`'s contract); the view's block is an entry
-        // of that table (the caller).
-        unsafe {
-            let buffers = ctx.bind(load_field_unchecked(self.head, PoolHeadType::buffers()));
-            ctx.bind(ByteView::from_parts(view, buffers))
+        // SAFETY: the view's block is an entry of the table as it is now (the caller).
+        unsafe { self.reader(ctx).value(ctx, view) }
+    }
+
+    /// A reader of the values appended so far, through the pool's table as it is now:
+    /// one load of the table for many reads. A later append may move the table, and the
+    /// value it appends is not in this one; the values before it stay readable, since a
+    /// table the pool outgrows is kept.
+    pub fn reader(&self, ctx: &Ctx) -> StagedPoolReader {
+        // SAFETY: a field of the live head (`new`'s contract).
+        let buffers = unsafe { load_field_unchecked(self.head, PoolHeadType::buffers()) };
+        StagedPoolReader {
+            buffers: ctx.bind(buffers),
         }
     }
 
