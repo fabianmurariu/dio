@@ -1,0 +1,209 @@
+//! Readable text of the Cranelift IR (`Compiler::with_debug_ir_source`). Cranelift only.
+
+use rust_lms::prelude::*;
+use rust_lms_derive::extern_fn;
+
+#[extern_fn]
+#[unsafe(no_mangle)]
+pub extern "C" fn src_add(x: i64, y: i64) -> i64 {
+    x + y
+}
+
+/// The source kept for `name`.
+fn source<'a>(compiled: &'a Compiled<impl StagedType>, name: &str) -> &'a str {
+    let (_, text) = (compiled.sources().iter())
+        .find(|(n, _)| n == name)
+        .unwrap_or_else(|| panic!("no source for {name}"));
+    text
+}
+
+#[test]
+fn loop_reads_as_blocks_and_tuple_assignments() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(count_to_n).unwrap();
+    assert_eq!(compiled.as_fn().call(5), 1 + 2 + 3 + 4);
+    // `v0` points at `n` and `v1` at the result (the storage-pointer ABI); `v5` is `i`
+    // and `v8` is `sum`, carried round the loop as `b1`'s parameters. Unoptimised, so
+    // every instruction keeps its id; the driver's own `return` has none.
+    assert_eq!(
+        source(&compiled, "count_to_n"),
+        "\
+fn count_to_n(v0: i64, v1: i64) {
+b0:
+    v2: i64 = *v0  // @1
+    v3 = 0  // @2
+    v4 = 0  // @3
+    (v5, v8) = (v3, v4)
+    goto b1  // @4
+b1(v5: i64, v8: i64):
+    v7 = v5 < v2  // @5
+    if v7 goto b3 else b2  // @6
+b3:
+    v9 = v8 + v5  // @7
+    v10 = 0  // @8
+    v11 = 1  // @9
+    v12 = v5 + v11  // @10
+    (v5, v8) = (v12, v9)
+    goto b1  // @11
+b2:
+    *v1 = v8  // @12
+    return
+}"
+    );
+}
+
+#[test]
+fn off_by_default() {
+    let mut compiler = Compiler::new();
+    let inc = compiler.fun1("inc", |_ctx, x: Var<i64>| x + 1i64);
+    let compiled = compiler.compile(inc).unwrap();
+    if !rust_lms::compiler::debug_ir_source_on() {
+        assert!(compiled.sources().is_empty());
+        assert!(compiled.code_ranges().is_empty());
+        assert!(compiled.source_dir().is_none());
+    }
+}
+
+#[test]
+fn calls_read_by_name() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let add = compiler.extern_fn::<SrcAddExtern>();
+    let defined = line!() + 1;
+    let f = compiler.fun2("add", |_ctx, x: Var<i64>, y: Var<i64>| {
+        call_extern2(add, x, y)
+    });
+    let compiled = compiler.compile(f).unwrap();
+    assert_eq!(compiled.as_fn().call(2, 3), 5);
+    assert_eq!(
+        source(&compiled, "add"),
+        "\
+fn add(v0: i64, v1: i64, v2: i64) {
+b0:
+    v3: i64 = *v0  // @1
+    v4: i64 = *v1  // @2
+    v5 = &ss0  // @3
+    *v5 = v3  // @4
+    v6 = &ss1  // @5
+    *v6 = v4  // @6
+    v7 = &ss2  // @7
+    src_add(v5, v6, v7)  // @8
+    v8: i64 = *v7  // @9
+    *v2 = v8  // @10
+    return
+}"
+    );
+    // The call is the returned expression, not a statement: it traces back to `fun2`.
+    let at = format!("rust-lms/tests/test_source.rs:{defined}");
+    assert!(compiled.origin(8).contains(&at), "{:?}", compiled.origin(8));
+    // `__main__` hands back the address of `add`, by name.
+    assert!(source(&compiled, "__main__").contains("v1 = &add  // @11\n"));
+}
+
+#[test]
+fn float_compare_and_select() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let f = compiler.fun2("pick", |ctx, a: Var<f64>, b: Var<f64>| {
+        ctx.bind(select(lt(a, b), 3i64, 7i64))
+    });
+    let compiled = compiler.compile(f).unwrap();
+    assert_eq!(compiled.as_fn().call(1.0, 2.0), 3);
+    assert_eq!(
+        source(&compiled, "pick"),
+        "\
+fn pick(v0: i64, v1: i64, v2: i64) {
+b0:
+    v3: f64 = *v0  // @1
+    v4: f64 = *v1  // @2
+    v5 = v3 < v4  // @3
+    v6 = 3  // @4
+    v7 = 7  // @5
+    v8 = v5 ? v6 : v7  // @6
+    *v2 = v8  // @7
+    return
+}"
+    );
+}
+
+#[test]
+fn ids_trace_back_to_the_statement_that_asked_for_them() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let defined = line!();
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(count_to_n).unwrap();
+    // Recorded when the closure ran, not when `compile` emitted the instruction: `@7`
+    // (`v9 = v8 + v5`) is `sum + i`, `@10` (`v12 = v5 + v11`) is `i + 1`.
+    let from = |id: u32, line: u32| {
+        let at = format!("rust-lms/tests/test_source.rs:{}", defined + line);
+        compiled.origin(id).contains(&at)
+    };
+    assert!(from(7, 5), "{:?}", compiled.origin(7));
+    assert!(from(10, 6), "{:?}", compiled.origin(10));
+    assert!(compiled.origin(0).is_empty() && compiled.origin(1000).is_empty());
+}
+
+#[test]
+fn machine_code_ranges_point_at_ids_in_the_text() {
+    let mut compiler = Compiler::new().with_debug_ir_source(true);
+    let count_to_n = compiler.fun1("count_to_n", |ctx, n: Var<i64>| {
+        let i = ctx.var(0i64);
+        let sum = ctx.var(0i64);
+        ctx.while_loop(lt(i, n), move |ctx| {
+            ctx.store(sum, sum + i);
+            ctx.store(i, i + 1i64);
+        });
+        sum
+    });
+    let compiled = compiler.compile(count_to_n).unwrap();
+    assert_eq!(compiled.as_fn().call(5), 1 + 2 + 3 + 4);
+    let code = (compiled.code_ranges().iter())
+        .find(|code| code.name == "count_to_n")
+        .expect("count_to_n's code");
+    assert!(code.address != 0 && code.size > 0);
+    // In order, not overlapping, inside the function; each id one the text shows.
+    let mut end = 0;
+    for (range, id) in &code.ranges {
+        assert!(end <= range.start && range.start < range.end && range.end <= code.size);
+        end = range.end;
+        if let Some(id) = id {
+            let tag = format!("// @{id}\n");
+            assert!(source(&compiled, "count_to_n").contains(&tag), "{id}");
+        }
+    }
+    // `sum + i` (`@7`, `v9 = v8 + v5`) has code of its own: a breakpoint can stop on it.
+    assert!(code.ranges.iter().any(|(_, id)| *id == Some(7)), "{code:?}");
+}
+
+#[test]
+fn each_compile_writes_its_text_to_its_own_directory() {
+    let compile = || {
+        let mut compiler = Compiler::new().with_debug_ir_source(true);
+        let inc = compiler.fun1("inc", |_ctx, x: Var<i64>| x + 1i64);
+        compiler.compile(inc).unwrap()
+    };
+    let (first, second) = (compile(), compile());
+    let dir = first.source_dir().expect("a directory for the text");
+    assert_ne!(Some(dir), second.source_dir());
+    // `inc.ir` and `__main__.ir`, each the text `sources` has.
+    assert_eq!(first.sources().len(), 2);
+    for (name, text) in first.sources() {
+        let written = std::fs::read_to_string(dir.join(format!("{name}.ir"))).unwrap();
+        assert_eq!(&written, text, "{name}");
+    }
+}

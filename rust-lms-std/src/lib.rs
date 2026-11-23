@@ -19,5 +19,5 @@ pub mod record;
 pub mod svec;
 
 pub use chunked::{CHUNK, ChunkStart, ChunkStartRef, ChunkedIter, ChunkedIterFns, ChunkedIterKind};
-pub use record::{DynamicRecord, FieldId, RecordLayout};
+pub use record::{DynamicRecord, FieldId, RecordLayout, RecordRef};
 pub use svec::{HostVec, HostVecHandle, RawVec, RawVecType, SVec, SvecGrowExtern, svec_grow};
