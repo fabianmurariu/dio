@@ -109,6 +109,13 @@ impl EntryLayout {
     pub fn field<T: StagedType + CopyType + 'static>(&mut self) -> FieldId<T> {
         self.record.field()
     }
+
+    /// An entry in no table, in the kernel's stack frame and zeroed: scratch for the
+    /// caller's fields, to be merged into a table's entry (its `next` and `hash` are
+    /// unused). See [`RecordLayout::stack_record`].
+    pub fn stack_record(&self, ctx: &Ctx) -> DynamicRecord {
+        self.record.stack_record(ctx)
+    }
 }
 
 impl Default for EntryLayout {

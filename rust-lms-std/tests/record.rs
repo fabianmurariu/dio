@@ -5,6 +5,9 @@
 use rust_lms::prelude::*;
 use rust_lms_std::{DynamicRecord, Record, RecordLayout};
 
+mod common;
+use common::for_each_backend;
+
 #[test]
 fn layout_offsets_and_stride() {
     let mut l = RecordLayout::new();
@@ -92,5 +95,68 @@ fn cross_layout_token_panics() {
         // deliberately supplies a token from a different layout afterward.
         let rec = unsafe { b.wrap(ptr) }; // record branded `b`
         rec.get(ctx, a_field) // token from `a` → panic
+    });
+}
+
+/// A stack record starts zeroed and keeps its fields across loops: for each `b` in
+/// `0..n`, an inner loop over `0..b` gathers a count and a sum into it, which the
+/// outer loop folds into a total and resets, as a group-by gathers a binding's states.
+#[test]
+fn a_stack_record_starts_zeroed_and_gathers_across_loops() {
+    for_each_backend(|mut compiler| {
+        let mut layout = RecordLayout::new();
+        let flag = layout.field::<u32>();
+        let count = layout.field::<u64>();
+        let sum = layout.field::<i64>();
+        assert_eq!(layout.stride(), 24);
+        let kernel = compiler.fun1("gather", move |ctx, n: Var<u64>| {
+            let rec = layout.stack_record(ctx);
+            // Zeroed: these read 0 before anything is written.
+            let total = ctx.var(0u64);
+            ctx.store(
+                total,
+                add(
+                    rec.get(ctx, count),
+                    int_cast::<u64, u32, _>(rec.get(ctx, flag)),
+                ),
+            );
+            ctx.store(
+                total,
+                add(total, int_cast::<u64, i64, _>(rec.get(ctx, sum))),
+            );
+            range(0u64, n).for_each(ctx, move |ctx, b| {
+                range(0u64, b).for_each(ctx, move |ctx, j| {
+                    rec.set(ctx, count, ctx.bind(add(rec.get(ctx, count), 1u64)));
+                    rec.set(
+                        ctx,
+                        sum,
+                        ctx.bind(add(rec.get(ctx, sum), int_cast::<i64, u64, _>(j))),
+                    );
+                    rec.set(ctx, flag, ctx.bind(Const::<u32>::new(1)));
+                });
+                let gathered = add(
+                    mul(rec.get(ctx, count), 1000u64),
+                    int_cast::<u64, i64, _>(rec.get(ctx, sum)),
+                );
+                ctx.store(
+                    total,
+                    add(
+                        total,
+                        add(gathered, int_cast::<u64, u32, _>(rec.get(ctx, flag))),
+                    ),
+                );
+                rec.set(ctx, count, ctx.bind(Const::<u64>::new(0)));
+                rec.set(ctx, sum, ctx.bind(Const::<i64>::new(0)));
+                rec.set(ctx, flag, ctx.bind(Const::<u32>::new(0)));
+            });
+            total
+        });
+        let compiled = compiler.compile(kernel).expect("compile");
+        for n in [0u64, 1, 2, 7, 50] {
+            let expected: u64 = (0..n)
+                .map(|b| b * 1000 + b * b.saturating_sub(1) / 2 + u64::from(b > 0))
+                .sum();
+            assert_eq!(compiled.call(n), expected, "n = {n}");
+        }
     });
 }

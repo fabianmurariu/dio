@@ -144,6 +144,35 @@ impl RecordLayout {
 }
 
 impl RecordLayout {
+    /// A record of this layout in the kernel's stack frame, every byte zeroed here:
+    /// scratch for a value built field by field, such as a group-by's states gathered
+    /// before they are merged into the table. The slot is allocated once per call site,
+    /// for the whole call, so this is called once and the record reused; zeroing it
+    /// again is the caller's, through its fields.
+    pub fn stack_record(&self, ctx: &Ctx) -> DynamicRecord {
+        const WORD: usize = std::mem::size_of::<u128>();
+        assert!(
+            self.align() <= WORD,
+            "a stack record is aligned to {WORD} bytes"
+        );
+        let words = self.stride().div_ceil(WORD).max(1);
+        let ptr = ctx.bind(ptr_cast_mut::<Record, u128, _>(stack_array::<u128>(words)));
+        let at = ptr_cast_mut::<u128, Record, _>(ptr);
+        for i in 0..words {
+            // SAFETY: word `i` is within the slot just allocated, aligned for a u128.
+            ctx.emit(unsafe {
+                store(
+                    ptr_offset_mut(at, Const::<i64>::new(i as i64)),
+                    Const::<u128>::new(0),
+                )
+            });
+        }
+        DynamicRecord {
+            layout_id: self.id,
+            ptr,
+        }
+    }
+
     /// A read-only [`RecordRef`] over a record pointer: what a reader of a record it
     /// does not own takes.
     ///
