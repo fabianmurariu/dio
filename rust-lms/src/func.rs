@@ -97,8 +97,35 @@ pub struct Compiled<T: StagedType> {
     main: unsafe extern "C" fn(*mut u8),
     /// Each function's optimised size; see [`Compiled::sizes`].
     sizes: Vec<(String, usize)>,
+    /// Each function's Cranelift IR as readable text; see [`Compiled::sources`].
+    sources: Vec<(String, String)>,
+    /// Each instruction id's origin; see [`Compiled::origin`].
+    ids: Option<crate::cranelift::source::InstIds>,
+    /// Each function's machine code; see [`Compiled::code_ranges`].
+    code: Vec<CodeMap>,
+    /// Where the readable text was written; see [`Compiled::source_dir`].
+    source_dir: Option<std::path::PathBuf>,
     _signature: PhantomData<T>,
 }
+
+/// One JIT function's machine code, kept with its readable text ([`Compiled::code_ranges`]).
+#[derive(Clone, Debug)]
+pub struct CodeMap {
+    pub name: String,
+    /// Where its code starts in memory.
+    pub address: usize,
+    /// Its code's length in bytes.
+    pub size: u32,
+    /// Each range of its code (offsets from `address`), in order, with the id of the
+    /// instruction it came from: `None` for code no instruction asked for (the prologue, the
+    /// driver's return). An instruction folded into another (a constant into an add's
+    /// operand) has no range of its own.
+    pub ranges: Vec<CodeRange>,
+}
+
+/// A range of a function's code (offsets from its start), with the id of the instruction it
+/// came from, if any; see [`CodeMap::ranges`].
+pub type CodeRange = (std::ops::Range<u32>, Option<u32>);
 
 /// The backend-specific JIT resource kept alive by the shared frozen owner.
 pub(crate) enum Executable {
@@ -113,12 +140,22 @@ pub(crate) enum Executable {
 /// while any entry point can still be called.
 pub(crate) struct FrozenExecutable {
     executable: Option<Executable>,
+    /// Its functions' debug info, as a debugger knows it; see [`Compiled::source_dir`].
+    #[cfg(not(feature = "llvm"))]
+    registered: Vec<crate::cranelift::jit_debug::Registration>,
 }
 
 impl FrozenExecutable {
-    pub(crate) fn new(executable: Executable) -> Self {
+    /// `executable`, its functions' debug info (`registered`) handed to a debugger until the
+    /// code is freed.
+    pub(crate) fn new(
+        executable: Executable,
+        #[cfg(not(feature = "llvm"))] registered: Vec<crate::cranelift::jit_debug::Registration>,
+    ) -> Self {
         Self {
             executable: Some(executable),
+            #[cfg(not(feature = "llvm"))]
+            registered,
         }
     }
 }
@@ -130,6 +167,7 @@ impl FrozenExecutable {
 // the Cranelift and LLVM/MLIR JIT destructors being valid on a thread other than the creator.
 // The parallel LLVM property test exercises concurrent execution and last-owner destruction
 // on worker threads; the full differential suite exercises the same wrapper for Cranelift.
+// The debug-info registrations change the debugger's list only under its lock.
 unsafe impl Send for FrozenExecutable {}
 // SAFETY: see the `Send` implementation. Sharing this wrapper does not share access to either
 // JIT API; it shares only ownership of finalized executable memory.
@@ -139,6 +177,9 @@ impl Drop for FrozenExecutable {
     fn drop(&mut self) {
         // `Arc` gives the last owner exclusive destruction, so no safe callable can remain.
         // Escaped pointers are still governed by `as_fn_unchecked`'s safety contract.
+        // The debugger forgets the code before it is freed.
+        #[cfg(not(feature = "llvm"))]
+        self.registered.clear();
         match self.executable.take() {
             Some(Executable::Cranelift(module)) => unsafe { (*module).free_memory() },
             #[cfg(feature = "llvm")]
@@ -153,19 +194,59 @@ impl<T: StagedType> Compiled<T> {
         executable: Arc<FrozenExecutable>,
         main: unsafe extern "C" fn(*mut u8),
         sizes: Vec<(String, usize)>,
+        sources: Vec<(String, String)>,
+        ids: Option<crate::cranelift::source::InstIds>,
+        code: Vec<CodeMap>,
+        source_dir: Option<std::path::PathBuf>,
     ) -> Self {
         Self {
             executable,
             main,
             sizes,
+            sources,
+            ids,
+            code,
+            source_dir,
             _signature: PhantomData,
         }
     }
 
     /// Each function's name and its number of instructions after optimisation: a
-    /// measure of code size that tests can bound. Cranelift only; empty for LLVM.
+    /// measure of code size that tests can bound. Cranelift only; empty for LLVM. With
+    /// readable text kept ([`DEBUG_IR_SOURCE`]), nothing is optimised, so the counts are
+    /// of the unoptimised code.
     pub fn sizes(&self) -> &[(String, usize)] {
         &self.sizes
+    }
+
+    /// Each function's name and its Cranelift IR as readable text, when compiled with
+    /// [`Compiler::with_debug_ir_source`] or [`DEBUG_IR_SOURCE`]. Cranelift only; empty
+    /// otherwise.
+    pub fn sources(&self) -> &[(String, String)] {
+        &self.sources
+    }
+
+    /// Each function's machine code: where it is, and which instruction id (the `// @12` in
+    /// [`sources`](Self::sources)) each range of it came from. Kept with the readable text;
+    /// Cranelift only, empty otherwise.
+    pub fn code_ranges(&self) -> &[CodeMap] {
+        &self.code
+    }
+
+    /// The directory each function's readable text was written to, as `<name>.ir`, for a
+    /// debugger to open: `<temp>/rust-lms-<pid>/<n>`, one per compile. Kept with the readable
+    /// text; `None` otherwise, or when the directory could not be made.
+    pub fn source_dir(&self) -> Option<&std::path::Path> {
+        self.source_dir.as_deref()
+    }
+
+    /// Where the instruction with id `id` (the `// @12` in [`sources`](Self::sources)) was
+    /// generated: the call stack its statement was recorded on (for the returned
+    /// expression, the function's definition; for what `compile` adds itself, `compile`),
+    /// as `file:line` per frame, innermost first. Empty for an unknown id or without
+    /// readable text.
+    pub fn origin(&self, id: u32) -> Vec<String> {
+        (self.ids.as_ref()).map_or_else(Vec::new, |ids| ids.origin(id))
     }
 
     /// Execute the compiled code and return the result.
