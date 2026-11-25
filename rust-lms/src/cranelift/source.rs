@@ -146,7 +146,7 @@ fn resolve(ip: usize) -> Vec<(String, u32)> {
     let mut frames = Vec::new();
     backtrace::resolve(ip as *mut std::ffi::c_void, |symbol| {
         if let (Some(file), Some(line)) = (symbol.filename(), symbol.lineno()) {
-            frames.push((file.to_string_lossy().into_owned(), line));
+            frames.push((file.to_string_lossy().replace('\\', "/"), line));
         }
     });
     frames
@@ -177,7 +177,7 @@ fn resolve_named(ip: usize) -> Vec<Frame> {
             let name = symbol
                 .name()
                 .map_or_else(|| "?".into(), |name| format!("{name:#}"));
-            let file = file.to_string_lossy().into_owned();
+            let file = file.to_string_lossy().replace('\\', "/");
             frames.push(Frame { name, file, line });
         }
     });
